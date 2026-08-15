@@ -60,7 +60,35 @@ export async function saveSkill(skill) {
   await writeFile(skillPath(skill.skillId), JSON.stringify(payload, null, 2), 'utf8');
 }
 
-// 从 bull/skills/*.skill 加载；空则播种默认「通用分析」
+// 宽松 JSON 解析：先严格解析；失败则把字符串字面量里的裸换行/制表符转义后重试。
+// 解决手写 .skill 时 ruleContent 多行文本没写 \n 的常见错误。
+export function lenientJson(text) {
+  text = String(text || '').replace(/^﻿/, ''); // 去 BOM
+  try {
+    return JSON.parse(text);
+  } catch {
+    let out = '';
+    let inStr = false;
+    let esc = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (inStr) {
+        if (esc) { out += ch; esc = false; continue; }
+        if (ch === '\\') { out += ch; esc = true; continue; }
+        if (ch === '"') { inStr = false; out += ch; continue; }
+        if (ch === '\n') { out += '\\n'; continue; }
+        if (ch === '\r') { out += '\\r'; continue; }
+        if (ch === '\t') { out += '\\t'; continue; }
+        out += ch; continue;
+      }
+      if (ch === '"') inStr = true;
+      out += ch;
+    }
+    return JSON.parse(out);
+  }
+}
+
+// 从 skills_library/*.skill 加载；空则播种默认「通用分析」
 export async function loadSkills() {
   await mkdir(SKILLS_DIR, { recursive: true });
   const skills = [];
@@ -70,9 +98,9 @@ export async function loadSkills() {
   } catch { /* 目录不可读则忽略 */ }
   for (const f of files) {
     try {
-      const raw = JSON.parse(await readFile(join(SKILLS_DIR, f), 'utf8'));
+      const raw = lenientJson(await readFile(join(SKILLS_DIR, f), 'utf8'));
       skills.push(normalizeSkill(raw));
-    } catch { /* 跳过损坏文件 */ }
+    } catch (e) { console.warn(`[bull] 跳过损坏的 skill 文件 ${f}: ${e.message}`); }
   }
   store.skills = skills;
   if (store.skills.length === 0) {

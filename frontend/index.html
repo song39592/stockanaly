@@ -1309,7 +1309,7 @@ document.getElementById('outList').addEventListener('click', (e) => {
  *  个股 AI 调研
  * ===================================================================== */
 
-const BACKEND_URL = 'http://127.0.0.1:8000';   // 后端服务地址（见 backend/README.md）
+const BACKEND_URL = 'http://127.0.0.1:8000';   // 后端服务地址（见 backend_fastapi/README.md）
 
 let aiCurrentCode = null;   // 当前调研的股票代码
 
@@ -1365,7 +1365,7 @@ function renderAiLoading() {
 function renderAiError(msg) {
   const tip = msg
     ? String(msg)
-    : `后端服务未连接（${BACKEND_URL}）。请先启动 FastAPI 后端，见 backend/README.md。`;
+    : `后端服务未连接（${BACKEND_URL}）。请先启动 FastAPI 后端，见 backend_fastapi/README.md。`;
   document.getElementById('aiBody').innerHTML = `
     <div class="ai-state err">
       <div style="font-size:32px;">⚠️</div>
@@ -1764,7 +1764,7 @@ document.getElementById('btnTheme').addEventListener('click', () => {
  *  红色小牛（bull）问答助手 —— 对接 dsh 服务
  * ===================================================================== */
 
-const DSH_URL = 'http://127.0.0.1:3080';   // dsh 服务地址（见 bull/README）
+const DSH_URL = 'http://127.0.0.1:3080';   // dsh 服务地址（见 agent_dsh/README.md）
 let bullSessionId = null;                  // 当前 dsh 会话
 let bullSkills = [];                       // 缓存 skill 列表
 let bullActiveSkillId = null;              // 当前会话绑定的 skillId
@@ -1895,7 +1895,7 @@ function bullSend() {
       else bullAppendMsg('bot', '⚠️ ' + ((j && j.error) || '后端返回异常'), null, true);
     } catch (e) {
       loading.remove();
-      bullAppendMsg('bot', '⚠️ 无法连接 dsh 服务（' + DSH_URL + '）。请先启动 dsh 与 FastAPI 后端，见 bull/README。', null, true);
+      bullAppendMsg('bot', '⚠️ 无法连接 dsh 服务（' + DSH_URL + '）。请先启动 dsh 与 FastAPI 后端，见 agent_dsh/README.md。', null, true);
     }
   })();
 }

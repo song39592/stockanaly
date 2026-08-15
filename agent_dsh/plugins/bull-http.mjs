@@ -6,7 +6,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import {
   store, listSkills, getSkill, bindSkill, ruleContentFor,
-  addSkill, updateSkill, deleteSkill,
+  addSkill, updateSkill, deleteSkill, lenientJson,
 } from './bull-store.mjs';
 
 export const name = 'bull-http';
@@ -41,7 +41,7 @@ function readBody(req) {
 }
 
 function safeJson(text) {
-  try { return JSON.parse(text); } catch { return null; }
+  try { return lenientJson(text); } catch { return null; }
 }
 
 // 从 assistant/message 事件里抽取最终文本（复刻 dsh-headless 的 summarize 逻辑）
@@ -188,7 +188,7 @@ export function apply(ctx) {
         const raw = await readBody(req);
         const parsed = safeJson(raw);
         const list = Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);
-        if (!list.length) return json(res, 400, { ok: false, error: '未解析到有效 .skill 内容' });
+        if (!list.length) return json(res, 400, { ok: false, error: '未解析到有效 .skill 内容（文件应为 JSON 格式；ruleContent 若为多行文本，换行需写成 \\n，或用前端 Skill 管理面板编辑保存）' });
         const added = [];
         for (const item of list) added.push(await addSkill(item));
         return json(res, 200, { ok: true, skills: added });
