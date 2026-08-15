@@ -1,0 +1,40 @@
+# ==================== 隐私 / 密钥（禁止提交）====================
+# 真实密钥只放 .env，绝不提交；只提交 .env.example 模板
+.env
+.env.*
+!.env.example
+
+# ==================== Python ====================
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# ==================== Node ====================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ==================== OS 生成文件 ====================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==================== 日志 / 缓存 / 临时 ====================
+logs/
+*.log
+*.tmp
+*.temp
+*.cache
+uvicorn.log
+
+# ==================== 编辑器 / 本地工具配置 ====================
+.vscode/
+.idea/
+.claude/

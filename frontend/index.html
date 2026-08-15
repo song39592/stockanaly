@@ -1,0 +1,2031 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>股票池追踪系统</title>
+<style>
+  /* ============ 设计令牌（专业金融深色主题） ============ */
+  :root {
+    color-scheme: dark;
+    /* 页面与卡片 */
+    --bg:            #0b0b0f;   /* 页面底色 */
+    --bg-elev:       #14141a;   /* 头部/浮层 */
+    --card:          #17171d;   /* 卡片表面 */
+    --card-border:   rgba(255,255,255,0.08);
+    --card-border-strong: rgba(255,255,255,0.14);
+    /* 文本 */
+    --text:          #f0f0ef;   /* 主文本 */
+    --text-2:        #b8b7b0;   /* 次要文本 */
+    --text-3:        #8b8a85;   /* 弱化文本/轴 */
+    --gridline:      #232329;   /* 分割线 */
+    /* 品牌/交互 */
+    --accent:        #3987e5;   /* 主色（蓝） */
+    --accent-strong: #5a9ef0;
+    /* 语义色（金融惯例：红=强势/新增，橙=中性偏强，灰=弱/出池） */
+    --red:           #f0534f;   /* 强势 / 新增入池 */
+    --orange:        #f0a03c;   /* 3-6 天 */
+    --gray-tag:      #7d7c78;   /* 1-2 天 / 出池 */
+    --green:         #3fb950;   /* 备用（涨） */
+    /* 图表分类色板（顺序固定，来自已校验默认色板，深色档） */
+    --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500;
+    --s5:#d55181; --s6:#008300; --s7:#9085e9; --s8:#e66767;
+    --other-gray: #5a5a58;
+    /* 组件表面（按钮/输入/行悬停等） */
+    --control: var(--control);
+    --control-hover: var(--control-hover);
+    --surface-2: var(--surface-2);   /* 列表项 / 行悬停 */
+    --surface-3: var(--surface-3);   /* 分组行 */
+    --toast-bg: var(--toast-bg);
+    --danger-bg: var(--danger-bg);
+    --danger-border: var(--danger-border);
+    --radius: 12px;
+    --radius-sm: 8px;
+  }
+
+  /* ============ 浅色主题（通过 html[data-theme="light"] 切换） ============ */
+  html[data-theme="light"] {
+    color-scheme: light;
+    --bg:            #f9f9f7;
+    --bg-elev:       #ffffff;
+    --card:          #fcfcfb;
+    --card-border:   rgba(11,11,11,0.10);
+    --card-border-strong: rgba(11,11,11,0.18);
+    --text:          #0b0b0b;
+    --text-2:        #52514e;
+    --text-3:        #898781;
+    --gridline:      #e1e0d9;
+    --accent:        #2a78d6;
+    --accent-strong: #1c5cab;
+    --red:           #d0393b;
+    --orange:        #b45309;
+    --gray-tag:      #6b7280;
+    --green:         #1e7e34;
+    --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100;
+    --s5:#e87ba4; --s6:#008300; --s7:#4a3aa7; --s8:#e34948;
+    --other-gray:    #b8b5ad;
+    --control:       #ffffff;
+    --control-hover: #efefec;
+    --surface-2:     #f1f0ed;
+    --surface-3:     #eceae6;
+    --toast-bg:      #ffffff;
+    --danger-bg:     #fbeaea;
+    --danger-border: #e6b3b3;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ============ 布局 ============ */
+  .container { max-width: 1440px; margin: 0 auto; padding: 0 24px 48px; }
+
+  /* 顶栏 */
+  header {
+    position: sticky; top: 0; z-index: 50;
+    background: var(--bg-elev);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--card-border);
+  }
+  .header-inner {
+    max-width: 1440px; margin: 0 auto; padding: 12px 24px;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; margin-right: auto; }
+  .brand .logo {
+    width: 34px; height: 34px; border-radius: 9px;
+    background: linear-gradient(135deg, var(--accent), #1b6fd0);
+    display: grid; place-items: center; font-size: 18px; font-weight: 700; color: #fff;
+  }
+  .brand h1 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: .3px; }
+  .brand .sub { font-size: 12px; color: var(--text-3); }
+
+  .btn {
+    appearance: none; border: 1px solid var(--card-border-strong);
+    background: var(--control); color: var(--text);
+    padding: 8px 14px; border-radius: var(--radius-sm);
+    font-size: 13px; cursor: pointer; font-family: inherit;
+    display: inline-flex; align-items: center; gap: 7px;
+    transition: background .15s, border-color .15s, transform .05s;
+    white-space: nowrap;
+  }
+  .btn:hover { background: var(--control-hover); border-color: var(--card-border-strong); }
+  .btn:active { transform: translateY(1px); }
+  .btn.primary {
+    background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600;
+  }
+  .btn.primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); }
+  .btn.danger { color: var(--red); }
+  .btn.danger:hover { background: var(--danger-bg); border-color: var(--danger-border); }
+  .btn .ico { font-size: 15px; line-height: 1; }
+
+  /* 概览卡片 */
+  .cards {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 14px; margin: 20px 0;
+  }
+  .stat {
+    background: var(--card); border: 1px solid var(--card-border);
+    border-radius: var(--radius); padding: 18px 20px; position: relative; overflow: hidden;
+  }
+  .stat::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: var(--accent); opacity: .85;
+  }
+  .stat.c-new::before  { background: var(--red); }
+  .stat.c-out::before  { background: var(--gray-tag); }
+  .stat.c-days::before { background: var(--s2); }
+  .stat .label { font-size: 12px; color: var(--text-3); margin-bottom: 6px; }
+  .stat .value { font-size: 30px; font-weight: 700; letter-spacing: -.5px; line-height: 1.1; }
+  .stat .sub { font-size: 12px; color: var(--text-3); margin-top: 6px; }
+  .stat .value.red { color: var(--red); }
+  .stat .value.gray { color: var(--gray-tag); }
+
+  /* 控制条（日期选择器） */
+  .controls {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    background: var(--card); border: 1px solid var(--card-border);
+    border-radius: var(--radius); padding: 12px 16px; margin-bottom: 14px;
+  }
+  .controls .lbl { color: var(--text-3); font-size: 13px; }
+  select, input[type="date"], input[type="text"], input[type="password"] {
+    background: var(--control); color: var(--text); border: 1px solid var(--card-border-strong);
+    border-radius: var(--radius-sm); padding: 8px 12px; font-size: 13px; font-family: inherit;
+    outline: none;
+  }
+  select:focus, input:focus { border-color: var(--accent); }
+  .controls .hint { color: var(--text-3); font-size: 12px; margin-left: auto; }
+
+  /* 变动分析 */
+  .changes {
+    display: grid; grid-template-columns: 1fr auto 1fr; gap: 14px; margin-bottom: 14px;
+  }
+  .chg-panel {
+    background: var(--card); border: 1px solid var(--card-border);
+    border-radius: var(--radius); padding: 16px; min-height: 120px;
+  }
+  .chg-panel h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .chg-panel .count { font-size: 12px; color: var(--text-3); margin-bottom: 10px; }
+  .chg-panel h3 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .dot.red  { background: var(--red); }
+  .dot.gray { background: var(--gray-tag); }
+  .dot.keep { background: var(--accent); }
+  .chg-list { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+  .chg-item {
+    display: flex; align-items: center; gap: 9px; padding: 7px 10px;
+    background: var(--surface-2); border: 1px solid var(--card-border); border-radius: 8px; font-size: 13px;
+    cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  .chg-item:hover { border-color: var(--card-border-strong); background: var(--surface-3); }
+  .chg-item .code { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; color: var(--text-2); }
+  .chg-item .ind { margin-left: auto; color: var(--text-3); font-size: 12px; }
+  .chg-mid { display: grid; place-items: center; text-align: center; padding: 0 6px; }
+  .chg-mid .keep-num { font-size: 42px; font-weight: 700; color: var(--accent-strong); line-height: 1; }
+  .chg-mid .keep-lbl { color: var(--text-3); font-size: 12px; margin-top: 8px; }
+  .empty-note { color: var(--text-3); font-size: 13px; padding: 24px 0; text-align: center; }
+
+  /* 卡片通用 */
+  .card {
+    background: var(--card); border: 1px solid var(--card-border);
+    border-radius: var(--radius); padding: 18px 20px; margin-bottom: 14px;
+  }
+  .card h2 { margin: 0 0 4px; font-size: 15px; font-weight: 650; display: flex; align-items: center; gap: 8px; }
+  .card .card-sub { color: var(--text-3); font-size: 12px; margin-bottom: 12px; }
+
+  /* 表格 */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--gridline); }
+  th {
+    color: var(--text-3); font-weight: 600; font-size: 12px; position: sticky; top: 0;
+    background: var(--card); user-select: none; cursor: pointer; white-space: nowrap;
+  }
+  th:hover { color: var(--text); }
+  th .arrow { font-size: 10px; margin-left: 3px; }
+  td { color: var(--text); }
+  td.code { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; color: var(--text-2); }
+  td.name { font-weight: 550; }
+  td.industry { color: var(--text-2); }
+  td.price { text-align: right; font-variant-numeric: tabular-nums; }
+  td.chg-up { text-align: right; font-variant-numeric: tabular-nums; color: var(--red); }
+  td.chg-down { text-align: right; font-variant-numeric: tabular-nums; color: var(--green); }
+  td.chg-flat { text-align: right; font-variant-numeric: tabular-nums; color: var(--gray-tag); }
+  td.num-muted { text-align: right; color: var(--text-3); }
+  th[data-sort="price"], th[data-sort="change"] { text-align: right; }
+  tbody tr:hover { background: var(--surface-2); }
+
+  /* 行业分组行 */
+  .group-row td {
+    background: var(--surface-3); font-weight: 650; color: var(--text);
+    border-bottom: 1px solid var(--card-border-strong); font-size: 13px;
+  }
+  .group-row .g-count { color: var(--text-3); font-weight: 500; margin-left: 6px; font-size: 12px; }
+
+  /* 连续在榜天数标签 */
+  .tag {
+    display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 999px;
+    font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums;
+  }
+  .tag.hot { color: var(--red); background: rgba(240,83,79,.16); border: 1px solid rgba(240,83,79,.35); }
+  .tag.mid { color: var(--orange); background: rgba(240,160,60,.14); border: 1px solid rgba(240,160,60,.32); }
+  .tag.low { color: var(--gray-tag); background: rgba(125,124,120,.14); border: 1px solid rgba(125,124,120,.30); }
+
+  /* 排行榜 */
+  .rank-num {
+    display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 7px;
+    font-size: 12px; font-weight: 700; background: var(--control); color: var(--text-2);
+  }
+  .rank-num.top { background: rgba(240,83,79,.18); color: var(--red); }
+
+  /* 图表网格 */
+  .charts-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px;
+  }
+  .chart { width: 100%; height: 300px; }
+
+  /* 空状态 */
+  .empty-state { text-align: center; padding: 80px 20px; color: var(--text-3); }
+  .empty-state .big { font-size: 46px; margin-bottom: 14px; }
+  .empty-state p { margin: 6px 0; }
+
+  /* 弹窗 */
+  .modal-mask {
+    position: fixed; inset: 0; background: rgba(0,0,0,.62); z-index: 100;
+    display: none; align-items: flex-start; justify-content: center; padding: 48px 16px;
+    overflow-y: auto;
+  }
+  .modal-mask.show { display: flex; }
+  .modal {
+    background: var(--bg-elev); border: 1px solid var(--card-border-strong);
+    border-radius: 14px; width: 100%; max-width: 640px; padding: 22px 24px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.5);
+    animation: pop .18s ease;
+  }
+  .modal.wide { max-width: 760px; }
+  @keyframes pop { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+  .modal h2 { margin: 0 0 6px; font-size: 17px; }
+  .modal .m-sub { color: var(--text-3); font-size: 13px; margin-bottom: 16px; }
+  .modal .m-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+  .warn-banner {
+    background: rgba(240,160,60,.12); border: 1px solid rgba(240,160,60,.35);
+    color: var(--orange); border-radius: 8px; padding: 10px 13px; font-size: 13px; margin: 12px 0;
+  }
+  .preview-table { max-height: 300px; overflow-y: auto; }
+  .form-row { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+
+  /* 数据管理列表 */
+  .mgmt-item {
+    display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+    border: 1px solid var(--card-border); border-radius: 8px; margin-bottom: 8px;
+  }
+  .mgmt-item .date { font-family: ui-monospace, Consolas, monospace; }
+  .mgmt-item .cnt { color: var(--text-3); font-size: 12px; }
+  .mgmt-item .spacer { flex: 1; }
+  .mgmt-list { max-height: 340px; overflow-y: auto; }
+
+  /* Toast */
+  #toast-wrap { position: fixed; top: 18px; left: 50%; transform: translateX(-50%); z-index: 200; display: flex; flex-direction: column; gap: 8px; align-items: center; }
+  .toast {
+    background: var(--toast-bg); border: 1px solid var(--card-border-strong); color: var(--text);
+    padding: 10px 18px; border-radius: 9px; font-size: 13px; box-shadow: 0 8px 24px rgba(0,0,0,.4);
+    display: flex; align-items: center; gap: 8px; animation: slidein .2s ease;
+  }
+  .toast.ok  { border-color: rgba(63,185,80,.5); }
+  .toast.err { border-color: rgba(240,83,79,.5); }
+  .toast .ico { font-size: 15px; }
+  @keyframes slidein { from { transform: translateY(-12px); opacity: 0; } to { transform: none; opacity: 1; } }
+  .toast.hide { opacity: 0; transition: opacity .3s; }
+
+  /* Loading 遮罩 */
+  #loading {
+    position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 150;
+    display: none; place-items: center;
+  }
+  #loading.show { display: grid; }
+  .spinner {
+    width: 40px; height: 40px; border: 3px solid var(--gridline);
+    border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loading .lt { color: var(--text-2); margin-top: 14px; font-size: 13px; text-align: center; }
+  #loading > div { text-align: center; }
+
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: #33333d; border-radius: 5px; }
+  ::-webkit-scrollbar-thumb:hover { background: #44444f; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  /* 可点击的表格行 */
+  tr.clickable { cursor: pointer; }
+
+  /* 个股详情统计 */
+  .detail-stats { display: flex; flex-wrap: wrap; gap: 12px; margin: 4px 0 16px; }
+  .ds {
+    background: var(--surface-2); border: 1px solid var(--card-border);
+    border-radius: 8px; padding: 12px 18px; min-width: 128px;
+  }
+  .ds-v { font-size: 20px; font-weight: 700; line-height: 1.1; }
+  .ds-l { font-size: 12px; color: var(--text-3); margin-top: 4px; }
+
+  /* AI 调研弹窗 */
+  .ai-modal { max-width: 920px; }
+  .ai-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+  .ai-head > div:first-child { flex: 1; min-width: 0; }
+  .ai-head h2 { margin: 0 0 4px; font-size: 18px; }
+  .ai-head .m-sub { margin-bottom: 0; }
+  .ai-body {
+    max-height: 62vh; overflow-y: auto; padding: 2px 2px 8px;
+    color: var(--text); font-size: 14px; line-height: 1.75;
+  }
+  .ai-body h1, .ai-body h2, .ai-body h3, .ai-body h4 { margin: 16px 0 8px; color: var(--text); font-weight: 650; line-height: 1.4; }
+  .ai-body h1 { font-size: 17px; } .ai-body h2 { font-size: 16px; } .ai-body h3 { font-size: 15px; } .ai-body h4 { font-size: 14px; }
+  .ai-body p { margin: 8px 0; }
+  .ai-body ul, .ai-body ol { margin: 8px 0; padding-left: 22px; }
+  .ai-body li { margin: 4px 0; }
+  .ai-body code { background: var(--surface-2); padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  .ai-body pre { background: var(--surface-2); padding: 12px 14px; border-radius: 8px; overflow-x: auto; }
+  .ai-body pre code { background: none; padding: 0; }
+  .ai-body blockquote { border-left: 3px solid var(--accent); margin: 8px 0; padding: 2px 14px; color: var(--text-2); }
+  .ai-body table { border-collapse: collapse; margin: 10px 0; }
+  .ai-body th, .ai-body td { border: 1px solid var(--card-border-strong); padding: 6px 10px; }
+  .ai-body hr { border: none; border-top: 1px solid var(--gridline); margin: 16px 0; }
+  .ai-body a { color: var(--accent-strong); }
+
+  .ai-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 56px 20px; text-align: center; color: var(--text-2); }
+  .ai-state .spinner { width: 34px; height: 34px; }
+  .ai-state.err { color: var(--text-2); }
+  .ai-state .err-tip { color: var(--text-3); font-size: 13px; max-width: 480px; }
+  .ai-state .err-url { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--text-3); word-break: break-all; max-width: 100%; background: var(--surface-2); padding: 6px 10px; border-radius: 6px; }
+  .ai-cache-badge { font-size: 11px; color: var(--text-3); background: var(--surface-2); border: 1px solid var(--card-border); border-radius: 999px; padding: 2px 10px; margin-top: 12px; display: inline-block; }
+
+  .ai-disclaimer {
+    margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--gridline);
+    font-size: 12px; color: var(--text-3); text-align: center;
+  }
+
+  /* AI 设置表单 */
+  .form-col { display: flex; flex-direction: column; gap: 6px; }
+  .form-col label { font-size: 13px; color: var(--text-2); margin-top: 10px; }
+  .form-col input { width: 100%; }
+  .settings-note { font-size: 12px; color: var(--text-3); line-height: 1.7; margin: 8px 0 4px; }
+
+  @media (max-width: 720px) {
+    .changes { grid-template-columns: 1fr; }
+    .chg-mid { order: -1; }
+    .container { padding: 0 14px 32px; }
+    .header-inner { padding: 10px 14px; }
+  }
+
+  /* ============ 红色小牛问答助手 ============ */
+  #bullBtn {
+    position: fixed; right: 22px; bottom: 22px; z-index: 90;
+    width: 56px; height: 56px; border-radius: 50%;
+    background: linear-gradient(135deg, #f0534f, #d0393b);
+    color: #fff; border: none; cursor: pointer;
+    display: grid; place-items: center; font-size: 26px;
+    box-shadow: 0 8px 24px rgba(240,83,79,.42);
+    transition: transform .15s, box-shadow .15s;
+  }
+  #bullBtn:hover { transform: translateY(-2px) scale(1.04); box-shadow: 0 12px 28px rgba(240,83,79,.52); }
+  #bullBtn:active { transform: scale(.96); }
+  #bullBtn .badge { position: absolute; top: -3px; right: -3px; width: 16px; height: 16px; border-radius: 50%; background: var(--accent); font-size: 10px; display: none; }
+
+  #bullPanel {
+    position: fixed; right: 22px; bottom: 90px; z-index: 95;
+    width: 380px; max-width: calc(100vw - 32px); height: 560px; max-height: calc(100vh - 120px);
+    background: var(--bg-elev); border: 1px solid var(--card-border-strong);
+    border-radius: 14px; box-shadow: 0 20px 60px rgba(0,0,0,.5);
+    display: none; flex-direction: column; overflow: hidden;
+  }
+  #bullPanel.show { display: flex; }
+  .bull-head {
+    display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+    border-bottom: 1px solid var(--card-border); background: var(--card);
+  }
+  .bull-head .t { font-weight: 650; font-size: 14px; white-space: nowrap; }
+  .bull-head select { flex: 1; min-width: 0; }
+  .bull-head .btn { padding: 4px 8px; font-size: 12px; }
+  .bull-body { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .bull-msg { max-width: 88%; padding: 9px 12px; border-radius: 10px; font-size: 13px; line-height: 1.65; word-break: break-word; }
+  .bull-msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 3px; }
+  .bull-msg.bot { align-self: flex-start; background: var(--surface-2); color: var(--text); border: 1px solid var(--card-border); border-bottom-left-radius: 3px; }
+  .bull-msg.bot.err { border-color: var(--danger-border); background: var(--danger-bg); }
+  .bull-msg .md h1,.bull-msg .md h2,.bull-msg .md h3,.bull-msg .md h4 { margin: 10px 0 5px; font-size: 14px; font-weight: 650; }
+  .bull-msg .md p { margin: 6px 0; }
+  .bull-msg .md ul,.bull-msg .md ol { margin: 6px 0; padding-left: 18px; }
+  .bull-msg .md li { margin: 3px 0; }
+  .bull-msg .md code { background: var(--surface-3); padding: 1px 5px; border-radius: 4px; font-size: 12px; font-family: ui-monospace, Consolas, monospace; }
+  .bull-msg .md pre { background: var(--surface-3); padding: 8px 10px; border-radius: 6px; overflow-x: auto; }
+  .bull-msg .md blockquote { border-left: 3px solid var(--accent); margin: 6px 0; padding: 2px 10px; color: var(--text-2); }
+  .bull-msg .trace { display: block; margin-top: 6px; font-size: 11px; color: var(--text-3); font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
+  .bull-empty { color: var(--text-3); text-align: center; padding: 34px 8px; font-size: 13px; line-height: 1.8; }
+  .bull-input { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--card-border); background: var(--card); }
+  .bull-input textarea { flex: 1; resize: none; height: 42px; min-height: 42px; max-height: 120px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div class="brand">
+      <div class="logo">📈</div>
+      <div>
+        <h1>股票池追踪系统</h1>
+        <div class="sub">强势股票池 · 每日变动 · 连续在榜分析</div>
+      </div>
+    </div>
+    <button class="btn primary" id="btnImport"><span class="ico">⬆</span> 导入今日股票池</button>
+    <button class="btn" id="btnExport"><span class="ico">⇩</span> 导出备份</button>
+    <button class="btn" id="btnRestore"><span class="ico">⇧</span> 恢复数据</button>
+    <button class="btn" id="btnManage"><span class="ico">⚙</span> 数据管理</button>
+    <button class="btn" id="btnHelp"><span class="ico">?</span> 使用说明</button>
+    <button class="btn" id="btnTheme"><span class="ico" id="themeIco">🌙</span><span id="themeLbl">浅色</span></button>
+    <input id="stockSearch" list="stockList" placeholder="查个股：代码/名称" style="min-width:170px;" />
+    <datalist id="stockList"></datalist>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- 区域 1：概览卡片 -->
+  <section class="cards" id="cards">
+    <div class="stat">
+      <div class="label">股票池总数</div>
+      <div class="value" id="vTotal">—</div>
+      <div class="sub" id="sTotal">暂无数据</div>
+    </div>
+    <div class="stat c-new">
+      <div class="label">新增入池</div>
+      <div class="value red" id="vNew">—</div>
+      <div class="sub" id="sNew">较上一数据日</div>
+    </div>
+    <div class="stat c-out">
+      <div class="label">出池</div>
+      <div class="value gray" id="vOut">—</div>
+      <div class="sub" id="sOut">较上一数据日</div>
+    </div>
+    <div class="stat c-days">
+      <div class="label">覆盖历史天数</div>
+      <div class="value" id="vDays">—</div>
+      <div class="sub" id="sDays">—</div>
+    </div>
+  </section>
+
+  <!-- 区域 2：日期选择器 -->
+  <section class="controls" id="controls" style="display:none;">
+    <span class="lbl">📅 查看日期</span>
+    <select id="dateSelect"></select>
+    <button class="btn" id="btnLatest">回到最新</button>
+    <span class="hint" id="ctrlHint"></span>
+  </section>
+
+  <!-- 区域 3：变动分析 -->
+  <section class="changes" id="changes" style="display:none;">
+    <div class="chg-panel">
+      <h3><span class="dot red"></span>新增入池</h3>
+      <div class="count" id="newCount"></div>
+      <div class="chg-list" id="newList"></div>
+    </div>
+    <div class="chg-mid">
+      <div>
+        <div class="keep-num" id="keepNum">—</div>
+        <div class="keep-lbl">持续在池</div>
+      </div>
+    </div>
+    <div class="chg-panel">
+      <h3><span class="dot gray"></span>出池</h3>
+      <div class="count" id="outCount"></div>
+      <div class="chg-list" id="outList"></div>
+    </div>
+  </section>
+
+  <!-- 区域 4：当前股票池表格 -->
+  <section class="card" id="tableCard" style="display:none;">
+    <h2>📋 当前股票池</h2>
+    <div class="card-sub" id="tableSub"></div>
+    <div class="table-wrap">
+      <table id="stockTable">
+        <thead>
+          <tr>
+            <th data-sort="code">股票代码<span class="arrow"></span></th>
+            <th data-sort="name">股票名称<span class="arrow"></span></th>
+            <th data-sort="change">涨幅<span class="arrow"></span></th>
+            <th data-sort="price">现价<span class="arrow"></span></th>
+            <th data-sort="industry">细分行业<span class="arrow"></span></th>
+            <th data-sort="days">连续在榜天数<span class="arrow"></span></th>
+          </tr>
+        </thead>
+        <tbody id="stockTbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 区域 5：连续在榜排行榜 -->
+  <section class="card" id="rankCard" style="display:none;">
+    <h2>🏆 连续在榜排行榜 TOP 20</h2>
+    <div class="card-sub">按最近一天连续在榜天数降序</div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>排名</th><th>股票代码</th><th>股票名称</th><th>细分行业</th><th>连续在榜天数</th><th>首次入池日期</th>
+          </tr>
+        </thead>
+        <tbody id="rankTbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 区域 6：可视化图表 -->
+  <section class="charts-grid" id="chartsGrid" style="display:none;">
+    <div class="card" style="margin-bottom:0;">
+      <h2>🥧 行业分布</h2>
+      <div class="card-sub" id="pieSub">当前股票池各细分行业数量占比</div>
+      <div class="chart" id="pieChart"></div>
+    </div>
+    <div class="card" style="margin-bottom:0;">
+      <h2>📈 规模趋势</h2>
+      <div class="card-sub">最近 30 个数据日股票池总量</div>
+      <div class="chart" id="lineChart"></div>
+    </div>
+    <div class="card" style="margin-bottom:0;">
+      <h2>📊 入池 / 出池</h2>
+      <div class="card-sub">最近 30 个数据日每日新增与出池数量</div>
+      <div class="chart" id="barChart"></div>
+    </div>
+  </section>
+
+  <!-- 空状态 -->
+  <section class="empty-state" id="emptyState">
+    <div class="big">📊</div>
+    <p style="font-size:18px;color:var(--text-2);">还没有任何数据</p>
+    <p>点击右上角「导入今日股票池」，选择你的 Excel 文件开始使用</p>
+    <br>
+    <button class="btn primary" onclick="document.getElementById('fileInput').click()">⬆ 导入今日股票池</button>
+  </section>
+
+</div>
+
+<!-- 隐藏的文件输入 -->
+<input type="file" id="fileInput" accept=".xlsx,.xls,.csv,.txt" style="display:none" />
+<input type="file" id="jsonInput" accept=".json,application/json" style="display:none" />
+
+<!-- Loading 遮罩 -->
+<div id="loading"><div><div class="spinner"></div><div class="lt">正在解析文件…</div></div></div>
+
+<!-- 预览弹窗 -->
+<div class="modal-mask" id="previewModal">
+  <div class="modal wide">
+    <h2>导入预览</h2>
+    <div class="m-sub" id="previewSub"></div>
+    <div class="warn-banner" id="previewWarn" style="display:none;"></div>
+    <div class="form-row">
+      <label for="importDate">数据日期：</label>
+      <input type="date" id="importDate" />
+      <span style="color:var(--text-3);font-size:12px;">（默认今天，可改为历史日期以补录）</span>
+    </div>
+    <div class="preview-table">
+      <table>
+        <thead><tr><th>股票代码</th><th>股票名称</th><th>细分行业</th></tr></thead>
+        <tbody id="previewTbody"></tbody>
+      </table>
+    </div>
+    <div class="m-actions">
+      <button class="btn" id="btnCancelImport">取消</button>
+      <button class="btn primary" id="btnConfirmImport">确认导入</button>
+    </div>
+  </div>
+</div>
+
+<!-- 数据管理弹窗 -->
+<div class="modal-mask" id="manageModal">
+  <div class="modal">
+    <h2>数据管理</h2>
+    <div class="m-sub">共 <span id="mgmtDays">0</span> 个数据日 · 可按天删除</div>
+    <div class="mgmt-list" id="mgmtList"></div>
+    <div class="m-actions" style="justify-content:space-between;">
+      <button class="btn danger" id="btnClearAll">🗑 清空全部数据</button>
+      <div style="display:flex;gap:10px;">
+        <button class="btn" id="btnManageClose">关闭</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 确认弹窗 -->
+<div class="modal-mask" id="confirmModal">
+  <div class="modal" style="max-width:440px;">
+    <h2 id="confirmTitle">确认</h2>
+    <div class="m-sub" id="confirmMsg"></div>
+    <div class="m-actions">
+      <button class="btn" id="btnConfirmCancel">取消</button>
+      <button class="btn danger" id="btnConfirmOk">确认</button>
+    </div>
+  </div>
+</div>
+
+<!-- 使用说明弹窗 -->
+<div class="modal-mask" id="helpModal">
+  <div class="modal" style="max-width:640px;">
+    <h2>使用说明</h2>
+    <div class="m-sub" style="margin-bottom:8px;">纯本地工具，数据只保存在你的浏览器 localStorage 中，不上传任何服务器。</div>
+    <div style="color:var(--text-2);font-size:13px;line-height:1.9;">
+      <p style="margin:0 0 10px;"><b style="color:var(--text);">1. 导入数据</b>：点击「导入今日股票池」，选择 .xlsx / .xls 文件（也支持通达信等软件导出的 GBK 文本表格）。解析后预览确认，即以当天日期保存。</p>
+      <p style="margin:0 0 10px;"><b style="color:var(--text);">2. 查看历史</b>：顶部日期选择器切换到任意有数据的一天，概览卡片、变动分析、表格和图表都会联动。</p>
+      <p style="margin:0 0 10px;"><b style="color:var(--text);">3. 连续在榜天数</b>：从选中日期往前数，只要连续出现就累加，中断则重新计算。<span style="color:var(--red);">≥7 天红色</span>、<span style="color:var(--orange);">3–6 天橙色</span>、<span style="color:var(--gray-tag);">1–2 天灰色</span>。</p>
+      <p style="margin:0 0 10px;"><b style="color:var(--text);">4. 表格排序</b>：点击表头切换排序；点击「细分行业」按行业分组（组内按连续天数降序）。</p>
+      <p style="margin:0 0 10px;"><b style="color:var(--text);">5. 数据备份</b>：「导出备份」下载 JSON 文件；「恢复数据」从 JSON 导入；「数据管理」可按天删除或清空。</p>
+      <p style="margin:0 0 10px;"><b style="color:var(--text);">6. 字段识别</b>：自动识别表头中的「代码 / 名称 / 细分行业 / 地区」列；行业为空归为「未分类」；股票代码自动补零到 6 位、自动去重。</p>
+      <p style="margin:0;"><b style="color:var(--text);">7. 个股 AI 调研</b>：点击表格/排行榜中的股票，弹窗展示调研报告（主营业务 / 近期公告 / 多空观点）。此功能依赖本地 FastAPI 后端：首次使用请在 <span style="font-family:ui-monospace,Consolas,monospace;">backend/.env</span> 填好 LLM 密钥，之后每次只需双击项目根目录的 <span style="font-family:ui-monospace,Consolas,monospace;">启动系统.bat</span> 即可自动启动后端并打开本页（无需手动运行命令）。</p>
+    </div>
+    <div class="m-actions">
+      <button class="btn primary" id="btnHelpClose">知道了</button>
+    </div>
+  </div>
+</div>
+
+<!-- 个股详情弹窗 -->
+<div class="modal-mask" id="detailModal">
+  <div class="modal wide">
+    <h2 id="dTitle">个股详情</h2>
+    <div class="m-sub" id="dSub"></div>
+    <div class="detail-stats" id="dStats"></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>入池日期</th><th>出池日期</th><th>在榜天数</th><th>状态</th></tr></thead>
+        <tbody id="dTimeline"></tbody>
+      </table>
+    </div>
+    <div class="m-actions">
+      <button class="btn primary" id="btnDetailClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 个股 AI 调研弹窗 -->
+<div class="modal-mask" id="aiModal">
+  <div class="modal ai-modal">
+    <div class="ai-head">
+      <div>
+        <h2 id="aiTitle">个股 AI 调研</h2>
+        <div class="m-sub" id="aiSub"></div>
+      </div>
+      <div style="display:flex;gap:8px;flex-shrink:0;">
+        <button class="btn" id="btnAiTimeline">📅 进出池时间轴</button>
+        <button class="btn" id="btnAiClose">✕ 关闭</button>
+      </div>
+    </div>
+    <div class="ai-body" id="aiBody"></div>
+    <div class="ai-disclaimer">⚠️ 以上 AI 生成内容仅供信息参考，不构成任何投资建议。</div>
+  </div>
+</div>
+
+<!-- 红色小牛悬浮按钮 -->
+<button id="bullBtn" title="红色小牛问答助手">🐂</button>
+
+<!-- 红色小牛聊天面板 -->
+<div id="bullPanel">
+  <div class="bull-head">
+    <span class="t">🐂 红色小牛</span>
+    <select id="bullSkillSelect" title="切换 Skill 角色"></select>
+    <button class="btn" id="btnBullSkill" title="管理 Skill 规则库">⚙</button>
+    <button class="btn" id="btnBullMini" title="最小化">—</button>
+    <button class="btn" id="btnBullClose" title="关闭">✕</button>
+  </div>
+  <div class="bull-body" id="bullBody"></div>
+  <div class="bull-input">
+    <textarea id="bullInput" placeholder="问红色小牛…（Enter 发送 / Shift+Enter 换行）"></textarea>
+    <button class="btn primary" id="btnBullSend">发送</button>
+  </div>
+</div>
+
+<!-- Skill 管理弹窗 -->
+<div class="modal-mask" id="bullSkillModal">
+  <div class="modal wide">
+    <h2>Skill 管理</h2>
+    <div class="m-sub">红色小牛角色规则库，存于 dsh 服务端 bull/skills/*.skill（可导入导出）</div>
+    <div class="form-row">
+      <button class="btn primary" id="btnSkillNew">＋ 新建</button>
+      <button class="btn" id="btnSkillImport">⬆ 导入 .skill</button>
+      <input type="file" id="skillFileInput" accept=".skill,.json,application/json" style="display:none" />
+    </div>
+    <div class="mgmt-list" id="skillList"></div>
+    <div id="skillEditor" style="display:none;">
+      <div class="form-col">
+        <label>角色名称</label>
+        <input type="text" id="skillName" />
+        <label>描述</label>
+        <input type="text" id="skillDesc" />
+        <label>规则知识库（ruleContent）</label>
+        <textarea id="skillRules" rows="14" style="width:100%; font-family:ui-monospace,Consolas,monospace; font-size:12px; resize:vertical;"></textarea>
+      </div>
+      <div class="m-actions">
+        <button class="btn danger" id="btnSkillDelete">删除</button>
+        <div style="display:flex;gap:10px;margin-left:auto;">
+          <button class="btn" id="btnSkillCancel">取消</button>
+          <button class="btn primary" id="btnSkillSave">保存</button>
+        </div>
+      </div>
+    </div>
+    <div class="m-actions">
+      <button class="btn" id="btnSkillClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast 容器 -->
+<div id="toast-wrap"></div>
+
+<!-- ============ 依赖库（CDN） ============ -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+
+<script>
+/* =====================================================================
+ * 股票池追踪系统 —— 纯前端单页应用
+ * 依赖：SheetJS（Excel 解析）+ ECharts（图表），数据存 localStorage
+ * ===================================================================== */
+
+'use strict';
+
+/* ---------------- 常量与存储 ---------------- */
+const STORAGE_KEY = 'stockPool.data.v1';   // 所有历史数据统一存一个 key
+
+/** 读取全部数据：{ "YYYY-MM-DD": [ {code,name,industry,region} ] } */
+function loadAll() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === 'object') ? parsed : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+/** 保存全部数据，捕获 localStorage 溢出 */
+function saveAll(data) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    return true;
+  } catch (e) {
+    toast('存储空间不足，请先「导出备份」再清理旧数据', 'err');
+    return false;
+  }
+}
+
+let data = loadAll();                 // 全局数据对象
+let selectedDate = null;              // 当前选中日期
+let sortState = { type: 'group', dir: 1 };  // 表格排序状态
+
+/* ---------------- 工具函数 ---------------- */
+
+/** 今天日期 YYYY-MM-DD（本地时区） */
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** 所有有数据的日期，升序 */
+function getDatesSorted() { return Object.keys(data).sort(); }
+
+/** 某个日期在完整数据集中的上一个数据日（升序中紧邻的前一个），没有则 null */
+function prevDateOf(date) {
+  const dates = getDatesSorted();
+  const i = dates.indexOf(date);
+  return i > 0 ? dates[i - 1] : null;
+}
+
+/** HTML 转义 */
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/** 代码补零到 6 位 */
+function pad6(code) { return String(code).padStart(6, '0'); }
+
+/** 千分位 */
+function fmt(n) { return Number(n).toLocaleString('zh-CN'); }
+
+/** 连续在榜天数标签样式 */
+function dayTagClass(n) { return n >= 7 ? 'tag hot' : n >= 3 ? 'tag mid' : 'tag low'; }
+
+/* ---------------- 连续在榜天数 ---------------- */
+
+/** 构建 code -> Set(日期) 索引 */
+function buildCodeDateSets() {
+  const map = {};
+  for (const d in data) {
+    for (const s of data[d]) {
+      (map[s.code] ||= new Set()).add(d);
+    }
+  }
+  return map;
+}
+
+/**
+ * 计算某只股票在 targetDate 的连续在榜天数：
+ * 从 targetDate 往前数，只要该日期在池内就 +1，中断即停。
+ */
+function streakAt(codeSets, code, targetDate, datesAsc) {
+  const set = codeSets[code];
+  if (!set || !set.has(targetDate)) return 0;
+  const idx = datesAsc.indexOf(targetDate);
+  let n = 0;
+  for (let i = idx; i >= 0; i--) {
+    if (set.has(datesAsc[i])) n++; else break;
+  }
+  return n;
+}
+
+/** 股票首次入池日期（全历史最早出现），没有则 '—' */
+function firstEntryDate(codeSets, code) {
+  const set = codeSets[code];
+  if (!set || set.size === 0) return null;
+  return Array.from(set).sort()[0];
+}
+
+/* ---------------- 变动分析 ---------------- */
+
+/** 计算 date 相对 prevDate 的变动（返回股票对象数组） */
+function getChanges(date, prevDate) {
+  if (!prevDate) return { added: [], removed: [], keptCount: 0, hasCompare: false };
+  const curMap = {}, prevMap = {};
+  data[date].forEach(s => curMap[s.code] = s);
+  data[prevDate].forEach(s => prevMap[s.code] = s);
+  const added = [], removed = [];
+  let kept = 0;
+  for (const c in curMap) { if (prevMap[c]) kept++; else added.push(curMap[c]); }
+  for (const c in prevMap) { if (!curMap[c]) removed.push(prevMap[c]); }
+  return { added, removed, keptCount: kept, hasCompare: true };
+}
+
+/* =====================================================================
+ *  Excel / 文本文件解析
+ * ===================================================================== */
+
+/**
+ * 将文件解析为股票数组。
+ * 支持两类文件：
+ *  1. 真正的 .xlsx / .xls（Zip / OLE2 魔数）→ 交给 SheetJS
+ *  2. 通达信等导出的 GBK 文本表格（实为 Tab/逗号分隔文本，扩展名常误为 .xls）→ TextDecoder('gbk')
+ */
+async function parseFile(file) {
+  const buf = await file.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let rows = [];  // 二维数组，每个单元格为字符串/数字
+
+  const isZip = bytes[0] === 0x50 && bytes[1] === 0x4B;            // xlsx（zip）
+  const isOle = bytes[0] === 0xD0 && bytes[1] === 0xCF && bytes[2] === 0x11 && bytes[3] === 0xE0; // xls（OLE2）
+
+  if (isZip || isOle) {
+    if (typeof XLSX === 'undefined') throw new Error('SheetJS 库未加载，请检查网络后刷新');
+    const wb = XLSX.read(buf, { type: 'array' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    if (!ws) throw new Error('文件中没有工作表');
+    rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  } else {
+    // 文本文件：优先按 GBK 解码（中文股票软件常见导出编码），失败退回 UTF-8
+    let text;
+    try { text = new TextDecoder('gbk').decode(bytes); }
+    catch (e) { text = new TextDecoder('utf-8').decode(bytes); }
+    rows = parseDelimitedText(text);
+  }
+
+  const map = findHeader(rows);
+  if (!map) {
+    throw new Error('未能识别表头。请确认文件包含「代码」「名称」等列，且首行或前几行为表头。');
+  }
+  const stocks = extractStocks(rows, map);
+  if (stocks.length === 0) throw new Error('没有解析到任何股票，请检查文件内容。');
+  return stocks;
+}
+
+/** 把 GBK 文本按制表符/逗号拆成二维数组，跳过空行与 # 注释行 */
+function parseDelimitedText(text) {
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1); // 去 BOM
+  const delim = text.indexOf('\t') >= 0 ? '\t' : ',';
+  const rows = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;          // 跳过空行与脚注（如“#数据来源:通达信”）
+    rows.push(line.split(delim).map(s => String(s).trim()));
+  }
+  return rows;
+}
+
+/** 在前 20 行中寻找表头，返回列号映射 */
+function findHeader(rows) {
+  for (let i = 0; i < Math.min(rows.length, 20); i++) {
+    const r = rows[i];
+    if (!r || !r.length) continue;
+    const joined = r.join('|');
+    if (joined.includes('代码') && joined.includes('名称')) {
+      let codeCol = -1, nameCol = -1, indCol = -1, regCol = -1, chgCol = -1, priceCol = -1;
+      r.forEach((c, idx) => {
+        const t = String(c);
+        if (codeCol < 0 && t.includes('代码')) codeCol = idx;
+        if (nameCol < 0 && t.includes('名称')) nameCol = idx;
+        if (indCol < 0 && t.includes('细分行业')) indCol = idx;
+        if (regCol < 0 && t.includes('地区')) regCol = idx;
+        if (chgCol < 0 && t.includes('涨幅')) chgCol = idx;
+        if (priceCol < 0 && t.includes('现价')) priceCol = idx;
+      });
+      // 细分行业未命中时，退而求其次匹配“行业”
+      if (indCol < 0) r.forEach((c, idx) => { const t = String(c); if (indCol < 0 && t.includes('行业')) indCol = idx; });
+      if (codeCol >= 0 && nameCol >= 0) {
+        return { headerRow: i, codeCol, nameCol, indCol, regCol, chgCol, priceCol };
+      }
+    }
+  }
+  return null;
+}
+
+/** 从表头之后的数据行提取股票，去重、清洗 */
+function extractStocks(rows, map) {
+  const stocks = [];
+  const seen = new Set();
+  for (let i = map.headerRow + 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || r.join('').trim() === '') continue;
+    const code = normalizeCode(r[map.codeCol]);
+    if (!code) continue;
+    const name = String(r[map.nameCol] || '').trim();
+    if (!name) continue;
+    const industry = String(map.indCol >= 0 ? (r[map.indCol] || '') : '').trim() || '未分类';
+    const region = String(map.regCol >= 0 ? (r[map.regCol] || '') : '').trim();
+    const change = toNum(map.chgCol >= 0 ? r[map.chgCol] : '');
+    const price = toNum(map.priceCol >= 0 ? r[map.priceCol] : '');
+    if (seen.has(code)) continue;   // 同一天重复行自动去重
+    seen.add(code);
+    stocks.push({ code: pad6(code), name, industry, region, change, price });
+  }
+  return stocks;
+}
+
+/** 代码清洗：去掉 ="..." 包裹与非数字字符，补零到 6 位 */
+function normalizeCode(raw) {
+  if (raw === null || raw === undefined) return '';
+  let s = String(raw).trim();
+  s = s.replace(/^="?/, '').replace(/"$/, '');   // 处理 ="000593" 这种 Excel 文本公式
+  s = s.replace(/[^0-9]/g, '');                   // 只保留数字
+  return s ? s.padStart(6, '0') : '';
+}
+
+/** 提取数值（涨幅/现价等），无法解析返回 null */
+function toNum(raw) {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).replace(/[^\d.\-]/g, '');
+  if (s === '' || s === '-' || s === '.') return null;
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+/* =====================================================================
+ *  Toast / Loading / 弹窗
+ * ===================================================================== */
+
+function toast(msg, type) {
+  const wrap = document.getElementById('toast-wrap');
+  const el = document.createElement('div');
+  el.className = 'toast ' + (type || '');
+  el.innerHTML = `<span class="ico">${type === 'err' ? '⚠️' : '✅'}</span>${esc(msg)}`;
+  wrap.appendChild(el);
+  setTimeout(() => { el.classList.add('hide'); setTimeout(() => el.remove(), 320); }, 2600);
+}
+
+function showLoading(show, text) {
+  const el = document.getElementById('loading');
+  el.classList.toggle('show', show);
+  if (text) el.querySelector('.lt').textContent = text;
+}
+
+function openModal(id) { document.getElementById(id).classList.add('show'); }
+function closeModal(id) { document.getElementById(id).classList.remove('show'); }
+
+/** 通用确认弹窗 */
+function confirmDialog(title, msg, onOk) {
+  document.getElementById('confirmTitle').textContent = title;
+  document.getElementById('confirmMsg').textContent = msg;
+  const ok = document.getElementById('btnConfirmOk');
+  const cancel = document.getElementById('btnConfirmCancel');
+  const mask = document.getElementById('confirmModal');
+  openModal('confirmModal');
+  ok.onclick = () => { closeModal('confirmModal'); onOk(); };
+  cancel.onclick = () => closeModal('confirmModal');
+  mask.onclick = (e) => { if (e.target === mask) closeModal('confirmModal'); };
+}
+
+/* =====================================================================
+ *  导入流程
+ * ===================================================================== */
+
+let pendingStocks = [];   // 预览暂存
+
+document.getElementById('btnImport').addEventListener('click', () => {
+  document.getElementById('fileInput').click();
+});
+document.getElementById('fileInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';   // 允许重复选择同一文件
+  if (!file) return;
+  showLoading(true, '正在解析文件…');
+  try {
+    const stocks = await parseFile(file);
+    pendingStocks = stocks;
+    showPreview(stocks);
+  } catch (err) {
+    toast(err.message || '解析失败，请检查文件格式', 'err');
+  } finally {
+    showLoading(false);
+  }
+});
+
+/** 显示预览弹窗 */
+function showPreview(stocks) {
+  const date = todayStr();
+  document.getElementById('importDate').value = date;
+  const sub = document.getElementById('previewSub');
+  sub.textContent = `从「${stocks.length}」只股票中解析成功，请确认后导入。`;
+
+  // 若目标日期已存在数据 → 提示覆盖
+  const warn = document.getElementById('previewWarn');
+  if (data[date] && data[date].length) {
+    warn.style.display = 'block';
+    warn.innerHTML = `⚠️ 今天（${date}）已导入过 ${data[date].length} 只股票，继续导入将<b>覆盖</b>原有数据。`;
+  } else {
+    warn.style.display = 'none';
+  }
+
+  const tbody = document.getElementById('previewTbody');
+  const show = stocks.slice(0, 60);
+  tbody.innerHTML = show.map(s =>
+    `<tr><td class="code">${esc(s.code)}</td><td class="name">${esc(s.name)}</td><td class="industry">${esc(s.industry)}</td></tr>`
+  ).join('') + (stocks.length > show.length
+    ? `<tr><td colspan="3" style="color:var(--text-3);">… 其余 ${stocks.length - show.length} 只略</td></tr>` : '');
+
+  openModal('previewModal');
+}
+
+document.getElementById('btnCancelImport').addEventListener('click', () => closeModal('previewModal'));
+document.getElementById('btnConfirmImport').addEventListener('click', () => {
+  const dateInput = document.getElementById('importDate').value;
+  const date = dateInput || todayStr();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { toast('日期格式无效', 'err'); return; }
+
+  const existed = !!data[date];
+  data[date] = pendingStocks;
+  if (!saveAll(data)) return;    // 保存失败则中止
+  selectedDate = date;
+  closeModal('previewModal');
+  render();
+  toast(existed ? `已覆盖 ${date} 的数据（${pendingStocks.length} 只）` : `已导入 ${date}（${pendingStocks.length} 只）`);
+});
+
+/* =====================================================================
+ *  数据管理（导出 / 恢复 / 删除 / 清空）
+ * ===================================================================== */
+
+document.getElementById('btnExport').addEventListener('click', () => {
+  const dates = getDatesSorted();
+  if (!dates.length) { toast('暂无数据可导出', 'err'); return; }
+  const payload = { app: 'stock-pool-tracker', version: 1, exportedAt: todayStr(), data };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `股票池备份_${todayStr()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('已导出备份文件');
+});
+
+document.getElementById('btnRestore').addEventListener('click', () => {
+  document.getElementById('jsonInput').click();
+});
+document.getElementById('jsonInput').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const obj = JSON.parse(reader.result);
+      const restored = obj && obj.data ? obj.data : obj;   // 兼容直接导出对象或带壳对象
+      if (!restored || typeof restored !== 'object' || Array.isArray(restored)) throw new Error('bad');
+      const dates = Object.keys(restored).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d));
+      if (!dates.length) throw new Error('bad');
+      confirmDialog('恢复数据', `将从备份恢复 ${dates.length} 个数据日。当前已有 ${getDatesSorted().length} 个数据日，将被备份数据【整体替换】。`, () => {
+        data = restored;
+        if (!saveAll(data)) return;
+        selectedDate = dates[dates.length - 1];
+        render();
+        toast(`已恢复 ${dates.length} 个数据日`);
+      });
+    } catch (err) {
+      toast('备份文件格式不正确，无法恢复', 'err');
+    }
+  };
+  reader.readAsText(file);
+});
+
+/** 打开数据管理弹窗 */
+document.getElementById('btnManage').addEventListener('click', () => {
+  renderManageModal();
+  openModal('manageModal');
+});
+document.getElementById('btnManageClose').addEventListener('click', () => closeModal('manageModal'));
+
+function renderManageModal() {
+  const dates = getDatesSorted().slice().reverse();
+  document.getElementById('mgmtDays').textContent = dates.length;
+  const list = document.getElementById('mgmtList');
+  if (!dates.length) {
+    list.innerHTML = '<div class="empty-note">暂无数据</div>';
+    return;
+  }
+  list.innerHTML = dates.map(d => `
+    <div class="mgmt-item">
+      <span class="date">${esc(d)}</span>
+      <span class="cnt">${data[d].length} 只</span>
+      <span class="spacer"></span>
+      <button class="btn" data-del="${esc(d)}">删除</button>
+    </div>`).join('');
+  list.querySelectorAll('[data-del]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const d = btn.getAttribute('data-del');
+      confirmDialog('删除数据', `确定删除 ${d} 这一天的数据（${data[d].length} 只）吗？此操作不可撤销。`, () => {
+        delete data[d];
+        saveAll(data);
+        if (selectedDate === d) selectedDate = getDatesSorted().slice(-1)[0] || null;
+        renderManageModal();
+        render();
+        toast(`已删除 ${d}`);
+      });
+    });
+  });
+}
+
+document.getElementById('btnClearAll').addEventListener('click', () => {
+  confirmDialog('清空全部数据', '确定清空所有历史股票池数据吗？建议先「导出备份」。此操作不可撤销。', () => {
+    data = {};
+    selectedDate = null;
+    localStorage.removeItem(STORAGE_KEY);
+    render();
+    closeModal('manageModal');
+    toast('已清空全部数据');
+  });
+});
+
+/* =====================================================================
+ *  使用说明
+ * ===================================================================== */
+
+document.getElementById('btnHelp').addEventListener('click', () => openModal('helpModal'));
+document.getElementById('btnHelpClose').addEventListener('click', () => closeModal('helpModal'));
+document.querySelectorAll('.modal-mask').forEach(m => {
+  m.addEventListener('click', (e) => { if (e.target === m) m.classList.remove('show'); });
+});
+
+/* =====================================================================
+ *  个股时间轴 / 详情
+ * ===================================================================== */
+
+/** 全历史中按代码找股票（优先最近一天的信息） */
+function findStock(code) {
+  const dates = getDatesSorted();
+  for (let i = dates.length - 1; i >= 0; i--) {
+    const s = data[dates[i]].find(x => x.code === code);
+    if (s) return s;
+  }
+  return null;
+}
+
+/** 计算某只股票的进出池时间片段（按数据日，返回在榜连续片段数组） */
+function getStockTimeline(code) {
+  const dates = getDatesSorted();
+  const spans = [];
+  let si = null;
+  for (let i = 0; i < dates.length; i++) {
+    const inPool = data[dates[i]].some(s => s.code === code);
+    if (inPool && si === null) si = i;
+    if (!inPool && si !== null) { spans.push({ start: dates[si], end: dates[i - 1], days: i - si, open: false }); si = null; }
+  }
+  if (si !== null) spans.push({ start: dates[si], end: dates[dates.length - 1], days: dates.length - si, open: true });
+  return spans;
+}
+
+/** 打开个股详情弹窗 */
+function openStockDetail(code) {
+  const stock = findStock(code);
+  if (!stock) { toast('未找到该股票', 'err'); return; }
+  const spans = getStockTimeline(code);
+
+  document.getElementById('dTitle').textContent = `${stock.name}（${code}）`;
+  document.getElementById('dSub').textContent =
+    `细分行业：${stock.industry}${stock.region ? ' · 地区：' + stock.region : ''}`;
+
+  const totalDays = spans.reduce((s, sp) => s + sp.days, 0);
+  const curStreak = spans.length && spans[spans.length - 1].open ? spans[spans.length - 1].days : 0;
+  const first = spans.length ? spans[0].start : '—';
+
+  document.getElementById('dStats').innerHTML = `
+    <div class="ds"><div class="ds-v">${curStreak ? curStreak + ' 天' : '已出池'}</div><div class="ds-l">当前连续在榜</div></div>
+    <div class="ds"><div class="ds-v">${totalDays} 天</div><div class="ds-l">累计上榜（数据日）</div></div>
+    <div class="ds"><div class="ds-v">${spans.length}</div><div class="ds-l">入池次数</div></div>
+    <div class="ds"><div class="ds-v">${first}</div><div class="ds-l">首次入池日期</div></div>`;
+
+  document.getElementById('dTimeline').innerHTML = spans.length
+    ? spans.slice().reverse().map(sp => `
+      <tr>
+        <td class="code">${esc(sp.start)}</td>
+        <td class="code">${sp.open ? '至今' : esc(sp.end)}</td>
+        <td><span class="${dayTagClass(sp.days)}">${sp.days} 天</span></td>
+        <td>${sp.open ? '<span class="tag hot">在榜</span>' : '<span class="tag low">已出池</span>'}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="4" class="empty-note">无记录</td></tr>';
+
+  openModal('detailModal');
+}
+
+/** 重建搜索候选（code -> 股票，去重） */
+function buildStockList() {
+  const map = new Map();
+  const dates = getDatesSorted();
+  for (let i = dates.length - 1; i >= 0; i--) for (const s of data[dates[i]]) if (!map.has(s.code)) map.set(s.code, s);
+  document.getElementById('stockList').innerHTML = Array.from(map.values())
+    .map(s => `<option value="${esc(s.code)} ${esc(s.name)}">${esc(s.name)}</option>`).join('');
+}
+
+document.getElementById('btnDetailClose').addEventListener('click', () => closeModal('detailModal'));
+
+// 顶栏搜索：回车 → 打开个股详情
+document.getElementById('stockSearch').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const q = e.target.value.trim();
+  if (!q) return;
+  const m = q.match(/(\d{6})/);
+  let code = m ? m[1] : null;
+  if (!code) {  // 按名称匹配
+    const dates = getDatesSorted();
+    outer: for (let i = dates.length - 1; i >= 0; i--) for (const s of data[dates[i]]) {
+      if (s.name === q || s.name.includes(q)) { code = s.code; break outer; }
+    }
+  }
+  if (code && findStock(code)) { e.target.value = ''; openAiResearch(code); }
+  else toast('未找到该股票', 'err');
+});
+
+// 表格 / 排行行点击 → 打开 AI 调研
+document.getElementById('stockTbody').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-code]');
+  if (tr) openAiResearch(tr.getAttribute('data-code'));
+});
+document.getElementById('rankTbody').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-code]');
+  if (tr) openAiResearch(tr.getAttribute('data-code'));
+});
+// 变动分析：新增入池 / 出池 列表点击 → 打开 AI 调研
+document.getElementById('newList').addEventListener('click', (e) => {
+  const el = e.target.closest('.chg-item[data-code]');
+  if (el) openAiResearch(el.getAttribute('data-code'));
+});
+document.getElementById('outList').addEventListener('click', (e) => {
+  const el = e.target.closest('.chg-item[data-code]');
+  if (el) openAiResearch(el.getAttribute('data-code'));
+});
+
+/* =====================================================================
+ *  个股 AI 调研
+ * ===================================================================== */
+
+const BACKEND_URL = 'http://127.0.0.1:8000';   // 后端服务地址（见 backend/README.md）
+
+let aiCurrentCode = null;   // 当前调研的股票代码
+
+if (typeof marked !== 'undefined') { marked.setOptions({ breaks: true, gfm: true }); }
+
+/** 简单清洗模型返回的 HTML，防止脚本/事件注入 */
+function sanitizeHtml(html) {
+  return String(html)
+    .replace(/<(script|style|iframe|object|embed)[^>]*>[\s\S]*?<\/\1>/gi, '')
+    .replace(/\son\w+="[^"]*"/gi, '')
+    .replace(/\son\w+='[^']*'/gi, '')
+    .replace(/javascript:/gi, '');
+}
+
+/** 点击股票 → 调后端，渲染返回的 markdown */
+async function openAiResearch(code) {
+  const stock = findStock(code);
+  if (!stock) { toast('未找到该股票', 'err'); return; }
+  aiCurrentCode = code;
+  document.getElementById('aiTitle').textContent = `${stock.name}（${code}）`;
+  document.getElementById('aiSub').textContent = `细分行业：${stock.industry}${stock.region ? ' · 地区：' + stock.region : ''}`;
+  openModal('aiModal');
+  renderAiLoading();
+
+  let j;
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/stock/research`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, name: stock.name })
+    });
+    j = await res.json();
+  } catch (e) {
+    renderAiError(null);   // 网络错误 → 后端未连接
+    return;
+  }
+
+  if (j && j.ok && j.markdown) {
+    renderAiContent(j.markdown, j.cached);
+  } else {
+    renderAiError((j && j.error) || '后端返回异常');
+  }
+}
+
+function renderAiLoading() {
+  document.getElementById('aiBody').innerHTML = `
+    <div class="ai-state">
+      <div class="spinner"></div>
+      <div>正在调研 ${esc(document.getElementById('aiTitle').textContent)}，请稍候…</div>
+    </div>`;
+}
+
+function renderAiError(msg) {
+  const tip = msg
+    ? String(msg)
+    : `后端服务未连接（${BACKEND_URL}）。请先启动 FastAPI 后端，见 backend/README.md。`;
+  document.getElementById('aiBody').innerHTML = `
+    <div class="ai-state err">
+      <div style="font-size:32px;">⚠️</div>
+      <div>${esc(tip)}</div>
+      <div class="err-url">后端接口：${esc(BACKEND_URL)}/api/stock/research</div>
+      <div class="err-tip">可点击下方「重试」再次查询。</div>
+      <button class="btn primary" id="btnAiRetry">重试</button>
+    </div>`;
+  document.getElementById('btnAiRetry').addEventListener('click', () => {
+    if (aiCurrentCode) openAiResearch(aiCurrentCode);
+  });
+}
+
+function renderAiContent(md, cached) {
+  if (typeof marked === 'undefined') {
+    document.getElementById('aiBody').innerHTML = `<div class="ai-state err">markdown 渲染库未加载，请检查网络后刷新重试。</div>`;
+    return;
+  }
+  const html = sanitizeHtml(marked.parse(md || ''));
+  const badge = cached ? `<span class="ai-cache-badge">⚡ 服务端缓存</span>` : '';
+  document.getElementById('aiBody').innerHTML = html + badge;
+}
+
+document.getElementById('btnAiClose').addEventListener('click', () => closeModal('aiModal'));
+document.getElementById('btnAiTimeline').addEventListener('click', () => {
+  if (aiCurrentCode) { closeModal('aiModal'); openStockDetail(aiCurrentCode); }
+});
+
+/* =====================================================================
+ *  渲染
+ * ===================================================================== */
+
+function render() {
+  const dates = getDatesSorted();
+  const hasData = dates.length > 0;
+
+  buildStockList();   // 刷新搜索候选
+
+  // 空状态切换
+  document.getElementById('emptyState').style.display = hasData ? 'none' : '';
+  ['controls', 'changes', 'tableCard', 'rankCard', 'chartsGrid'].forEach(id =>
+    document.getElementById(id).style.display = hasData ? '' : 'none');
+
+  if (!hasData) return;
+
+  // 保证选中日期有效，默认最新
+  if (!dates.includes(selectedDate)) selectedDate = dates[dates.length - 1];
+
+  renderDateSelector(dates);
+  renderCards(dates);
+  renderChanges(dates);
+  renderTable();
+  renderRanking();
+  renderCharts();
+}
+
+function renderDateSelector(dates) {
+  const sel = document.getElementById('dateSelect');
+  const rev = dates.slice().reverse();
+  sel.innerHTML = rev.map(d =>
+    `<option value="${d}" ${d === selectedDate ? 'selected' : ''}>${d}（${data[d].length} 只）</option>`
+  ).join('');
+  document.getElementById('ctrlHint').textContent =
+    `共 ${dates.length} 天 · ${dates[0]} 至 ${dates[dates.length - 1]}`;
+}
+
+function renderCards(dates) {
+  const d = selectedDate;
+  const prev = prevDateOf(d);
+  document.getElementById('vTotal').textContent = fmt(data[d].length);
+  document.getElementById('sTotal').textContent = d;
+
+  const chg = getChanges(d, prev);
+  if (chg.hasCompare) {
+    document.getElementById('vNew').textContent = '+' + fmt(chg.added.length);
+    document.getElementById('vOut').textContent = '-' + fmt(chg.removed.length);
+    document.getElementById('sNew').textContent = '较 ' + prev;
+    document.getElementById('sOut').textContent = '较 ' + prev;
+  } else {
+    document.getElementById('vNew').textContent = '—';
+    document.getElementById('vOut').textContent = '—';
+    document.getElementById('sNew').textContent = '暂无对比数据';
+    document.getElementById('sOut').textContent = '暂无对比数据';
+  }
+  document.getElementById('vDays').textContent = fmt(dates.length);
+  document.getElementById('sDays').textContent = `${dates[0]} ~ ${dates[dates.length - 1]}`;
+}
+
+function renderChanges(dates) {
+  const d = selectedDate;
+  const prev = prevDateOf(d);
+  const chg = getChanges(d, prev);
+
+  if (!chg.hasCompare) {
+    document.getElementById('newCount').textContent = '';
+    document.getElementById('outCount').textContent = '';
+    document.getElementById('newList').innerHTML = '<div class="empty-note">暂无对比数据（这是最早的一天）</div>';
+    document.getElementById('outList').innerHTML = '<div class="empty-note">暂无对比数据（这是最早的一天）</div>';
+    document.getElementById('keepNum').textContent = '—';
+    return;
+  }
+
+  document.getElementById('newCount').textContent = `${chg.added.length} 只`;
+  document.getElementById('outCount').textContent = `${chg.removed.length} 只`;
+  document.getElementById('keepNum').textContent = fmt(chg.keptCount);
+
+  const item = (s, dot) => `
+    <div class="chg-item" data-code="${esc(s.code)}" title="点击进行 AI 调研">
+      <span class="dot ${dot}"></span>
+      <span class="code">${esc(s.code)}</span>
+      <span>${esc(s.name)}</span>
+      <span class="ind">${esc(s.industry)}</span>
+    </div>`;
+
+  document.getElementById('newList').innerHTML = chg.added.length
+    ? chg.added.map(s => item(s, 'red')).join('')
+    : '<div class="empty-note">今日无新增</div>';
+  document.getElementById('outList').innerHTML = chg.removed.length
+    ? chg.removed.map(s => item(s, 'gray')).join('')
+    : '<div class="empty-note">今日无出池</div>';
+}
+
+function renderTable() {
+  const dates = getDatesSorted();
+  const codeSets = buildCodeDateSets();
+  const rows = data[selectedDate].map(s => ({
+    ...s,
+    days: streakAt(codeSets, s.code, selectedDate, dates)
+  }));
+
+  const tbody = document.getElementById('stockTbody');
+  document.getElementById('tableSub').textContent =
+    `${selectedDate} · 共 ${rows.length} 只 · 点击表头排序`;
+
+  // 排序
+  let html = '';
+  if (sortState.type === 'group') {
+    // 按行业分组，行业按数量降序；组内按连续天数降序
+    const groups = {};
+    rows.forEach(r => { (groups[r.industry] ||= []).push(r); });
+    const names = Object.keys(groups).sort((a, b) => groups[b].length - groups[a].length || a.localeCompare(b, 'zh'));
+    for (const g of names) {
+      const list = groups[g].slice().sort((a, b) => b.days - a.days || a.code.localeCompare(b.code));
+      html += `<tr class="group-row"><td colspan="6">${esc(g)}<span class="g-count">${list.length} 只</span></td></tr>`;
+      html += list.map(rowHtml).join('');
+    }
+  } else {
+    const dir = sortState.dir;
+    const sorted = rows.slice().sort((a, b) => {
+      let r;
+      if (sortState.type === 'days') r = a.days - b.days;
+      else if (sortState.type === 'change') r = (a.change ?? -Infinity) - (b.change ?? -Infinity);
+      else if (sortState.type === 'price') r = (a.price ?? -Infinity) - (b.price ?? -Infinity);
+      else if (sortState.type === 'code') r = a.code.localeCompare(b.code);
+      else r = a.name.localeCompare(b.name, 'zh');
+      return r * dir;
+    });
+    html = sorted.map(rowHtml).join('');
+  }
+  tbody.innerHTML = html;
+
+  function rowHtml(r) {
+    // 涨幅：红涨绿跌灰平（A 股惯例）
+    let chgCell;
+    if (r.change == null) {
+      chgCell = '<td class="num-muted">—</td>';
+    } else {
+      const cls = r.change > 0 ? 'chg-up' : r.change < 0 ? 'chg-down' : 'chg-flat';
+      const sign = r.change > 0 ? '+' : '';
+      chgCell = `<td class="${cls}">${sign}${r.change.toFixed(2)}%</td>`;
+    }
+    const priceCell = r.price == null
+      ? '<td class="num-muted">—</td>'
+      : `<td class="price">${r.price.toFixed(2)}</td>`;
+
+    return `<tr class="clickable" data-code="${esc(r.code)}">
+      <td class="code">${esc(r.code)}</td>
+      <td class="name">${esc(r.name)}</td>
+      ${chgCell}
+      ${priceCell}
+      <td class="industry">${esc(r.industry)}</td>
+      <td><span class="${dayTagClass(r.days)}">${r.days} 天</span></td>
+    </tr>`;
+  }
+
+  // 更新表头箭头
+  document.querySelectorAll('#stockTable th').forEach(th => {
+    const key = th.getAttribute('data-sort');
+    const arrow = th.querySelector('.arrow');
+    if (sortState.type === 'group' && key === 'industry') arrow.textContent = '▾';
+    else if (sortState.type === key) arrow.textContent = sortState.dir === 1 ? '▲' : '▼';
+    else arrow.textContent = '';
+  });
+}
+
+function renderRanking() {
+  const dates = getDatesSorted();
+  const latest = dates[dates.length - 1];
+  const codeSets = buildCodeDateSets();
+
+  // 对最新一天在池内的股票，计算当前连续在榜天数
+  const ranked = data[latest].map(s => ({
+    ...s,
+    days: streakAt(codeSets, s.code, latest, dates),
+    first: firstEntryDate(codeSets, s.code)
+  })).sort((a, b) => b.days - a.days || a.first.localeCompare(b.first) || a.code.localeCompare(b.code));
+
+  const top = ranked.slice(0, 20);
+  document.getElementById('rankTbody').innerHTML = top.map((s, i) => `
+    <tr class="clickable" data-code="${esc(s.code)}">
+      <td><span class="rank-num ${i < 3 ? 'top' : ''}">${i + 1}</span></td>
+      <td class="code">${esc(s.code)}</td>
+      <td class="name">${esc(s.name)}</td>
+      <td class="industry">${esc(s.industry)}</td>
+      <td><span class="${dayTagClass(s.days)}">${s.days} 天</span></td>
+      <td style="color:var(--text-2);">${esc(s.first)}</td>
+    </tr>`).join('');
+}
+
+/* =====================================================================
+ *  图表（ECharts）
+ * ===================================================================== */
+
+const charts = {};
+function getChart(id) {
+  if (!charts[id]) charts[id] = echarts.init(document.getElementById(id));
+  return charts[id];
+}
+
+// 读取 CSS 变量（主题感知），供 ECharts 使用
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+function hexToRgba(hex, a) {
+  const h = hex.replace('#', '');
+  const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+function renderCharts() {
+  const dates = getDatesSorted();
+  const last30 = dates.slice(-30);
+
+  // 主题感知颜色
+  const axisColor = cssVar('--text-3');
+  const splitColor = cssVar('--gridline');
+  const text2 = cssVar('--text-2');
+  const card = cssVar('--card');
+  const tooltip = {
+    backgroundColor: cssVar('--bg-elev'),
+    borderColor: cssVar('--card-border-strong'),
+    textStyle: { color: cssVar('--text'), fontSize: 12 },
+    padding: [8, 12]
+  };
+
+  // --- 行业分布饼图 ---
+  const pool = data[selectedDate];
+  const indCount = {};
+  pool.forEach(s => { indCount[s.industry] = (indCount[s.industry] || 0) + 1; });
+  const sortedInd = Object.keys(indCount).sort((a, b) => indCount[b] - indCount[a]);
+  const topN = sortedInd.slice(0, 7);
+  const restCount = sortedInd.slice(7).reduce((sum, k) => sum + indCount[k], 0);
+  const pieData = topN.map(k => ({ name: k, value: indCount[k] }));
+  if (restCount > 0) pieData.push({ name: '其他', value: restCount });
+
+  const PIE_COLORS = ['--s1', '--s2', '--s3', '--s4', '--s5', '--s6', '--s7', '--s8'].map(cssVar);
+  if (restCount > 0) PIE_COLORS.push(cssVar('--other-gray'));
+  document.getElementById('pieSub').textContent = `当前（${selectedDate}）共 ${pool.length} 只 · ${sortedInd.length} 个行业`;
+  getChart('pieChart').setOption({
+    color: PIE_COLORS,
+    tooltip: { ...tooltip, trigger: 'item', formatter: '{b}: {c} 只（{d}%）' },
+    legend: {
+      type: 'scroll', orient: 'vertical', right: 4, top: 'middle',
+      textStyle: { color: text2, fontSize: 11 },
+      pageTextStyle: { color: axisColor }, pageIconColor: cssVar('--accent'), pageIconInactiveColor: cssVar('--gridline'),
+      formatter: (n) => { const item = pieData.find(d => d.name === n); return item ? `${n}  ${item.value}` : n; }
+    },
+    series: [{
+      type: 'pie', radius: ['42%', '70%'], center: ['38%', '52%'],
+      avoidLabelOverlap: true, minAngle: 4,
+      itemStyle: { borderColor: card, borderWidth: 2, borderRadius: 4 },
+      label: { show: false },
+      labelLine: { show: false },
+      emphasis: {
+        itemStyle: { shadowBlur: 12, shadowColor: 'rgba(0,0,0,.4)' },
+        label: { show: true, fontSize: 12, fontWeight: 600, color: cssVar('--text'), formatter: '{b}\n{c} 只' }
+      },
+      data: pieData
+    }]
+  });
+
+  // --- 规模趋势折线图 ---
+  const counts = last30.map(d => data[d].length);
+  const blue = cssVar('--s1');
+  getChart('lineChart').setOption({
+    grid: { left: 44, right: 16, top: 24, bottom: 28 },
+    tooltip: { ...tooltip, trigger: 'axis', formatter: p => {
+      const it = p[0]; return `${it.axisValue}<br/>股票池总量：<b>${it.value}</b> 只`;
+    }},
+    xAxis: {
+      type: 'category', data: last30, boundaryGap: false,
+      axisLine: { lineStyle: { color: splitColor } }, axisTick: { show: false },
+      axisLabel: { color: axisColor, fontSize: 10, interval: 'auto', formatter: v => v.slice(5) }
+    },
+    yAxis: {
+      type: 'value', minInterval: 1,
+      axisLabel: { color: axisColor, fontSize: 11 },
+      splitLine: { lineStyle: { color: splitColor } }
+    },
+    series: [{
+      name: '股票池总量', type: 'line', data: counts,
+      smooth: 0.25, symbol: 'circle', symbolSize: 6,
+      lineStyle: { width: 2, color: blue },
+      itemStyle: { color: blue, borderColor: card, borderWidth: 2 },
+      areaStyle: { color: hexToRgba(blue, 0.10) }
+    }]
+  });
+
+  // --- 每日入池/出池柱状图 ---
+  const added = [], removed = [];
+  last30.forEach(d => {
+    const p = prevDateOf(d);
+    const chg = getChanges(d, p);
+    added.push(chg.hasCompare ? chg.added.length : 0);
+    removed.push(chg.hasCompare ? chg.removed.length : 0);
+  });
+  getChart('barChart').setOption({
+    grid: { left: 40, right: 16, top: 40, bottom: 28 },
+    tooltip: { ...tooltip, trigger: 'axis', axisPointer: { type: 'shadow' } },
+    legend: { data: ['新增入池', '出池'], top: 0, right: 0, textStyle: { color: text2, fontSize: 11 }, itemWidth: 12, itemHeight: 9 },
+    xAxis: {
+      type: 'category', data: last30,
+      axisLine: { lineStyle: { color: splitColor } }, axisTick: { show: false },
+      axisLabel: { color: axisColor, fontSize: 10, interval: 'auto', formatter: v => v.slice(5) }
+    },
+    yAxis: {
+      type: 'value', minInterval: 1,
+      axisLabel: { color: axisColor, fontSize: 11 },
+      splitLine: { lineStyle: { color: splitColor } }
+    },
+    series: [
+      { name: '新增入池', type: 'bar', data: added, barMaxWidth: 18,
+        itemStyle: { color: cssVar('--red'), borderRadius: [4, 4, 0, 0] } },
+      { name: '出池', type: 'bar', data: removed, barMaxWidth: 18,
+        itemStyle: { color: cssVar('--gray-tag'), borderRadius: [4, 4, 0, 0] } }
+    ]
+  });
+}
+
+/* ---------------- 事件绑定：日期选择 & 排序 ---------------- */
+
+document.getElementById('dateSelect').addEventListener('change', (e) => {
+  selectedDate = e.target.value;
+  render();
+});
+document.getElementById('btnLatest').addEventListener('click', () => {
+  selectedDate = getDatesSorted().slice(-1)[0] || null;
+  render();
+});
+
+// 表头排序
+document.querySelectorAll('#stockTable th').forEach(th => {
+  th.addEventListener('click', () => {
+    const key = th.getAttribute('data-sort');
+    if (key === 'industry') {
+      sortState = { type: 'group', dir: 1 };
+    } else if (sortState.type === key) {
+      sortState.dir = -sortState.dir;
+    } else {
+      sortState = { type: key, dir: (key === 'days' || key === 'change' || key === 'price') ? -1 : 1 };
+    }
+    render();
+  });
+});
+
+// 窗口缩放自适应图表
+window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
+
+// 弹窗遮罩点击关闭已在上方绑定
+
+/* ---------------- 主题切换 ---------------- */
+let theme = localStorage.getItem('stockPool.theme') || 'dark';
+function applyTheme() {
+  document.documentElement.setAttribute('data-theme', theme);
+  document.getElementById('themeIco').textContent = theme === 'light' ? '☀️' : '🌙';
+  document.getElementById('themeLbl').textContent = theme === 'light' ? '深色' : '浅色';
+}
+document.getElementById('btnTheme').addEventListener('click', () => {
+  theme = theme === 'light' ? 'dark' : 'light';
+  localStorage.setItem('stockPool.theme', theme);
+  applyTheme();
+  if (getDatesSorted().length) renderCharts();   // 图表按新主题重绘
+});
+
+/* =====================================================================
+ *  红色小牛（bull）问答助手 —— 对接 dsh 服务
+ * ===================================================================== */
+
+const DSH_URL = 'http://127.0.0.1:3080';   // dsh 服务地址（见 bull/README）
+let bullSessionId = null;                  // 当前 dsh 会话
+let bullSkills = [];                       // 缓存 skill 列表
+let bullActiveSkillId = null;              // 当前会话绑定的 skillId
+
+/** 从页面内存股票池数据现算快照（PartA，不写死） */
+function buildBullSnapshot() {
+  const dates = getDatesSorted();
+  if (!dates.length) return null;
+  const d = selectedDate && dates.includes(selectedDate) ? selectedDate : dates[dates.length - 1];
+  const codeSets = buildCodeDateSets();
+
+  const today = data[d].map(s => ({
+    code: s.code, name: s.name, industry: s.industry,
+    change: s.change, price: s.price,
+    days: streakAt(codeSets, s.code, d, dates),
+  }));
+
+  const N = 7;
+  const recent = dates.slice(-N);
+  const recent_in = {}, recent_out = {};
+  for (const dd of recent) {
+    const prev = prevDateOf(dd);
+    const chg = getChanges(dd, prev);
+    if (chg.added.length) recent_in[dd] = chg.added.map(s => ({ code: s.code, name: s.name }));
+    if (chg.removed.length) recent_out[dd] = chg.removed.map(s => ({ code: s.code, name: s.name }));
+  }
+
+  const indCount = {};
+  data[d].forEach(s => { indCount[s.industry] = (indCount[s.industry] || 0) + 1; });
+  const sector_stats = Object.entries(indCount)
+    .map(([industry, count]) => ({ industry, count }))
+    .sort((a, b) => b.count - a.count);
+
+  const rank = data[d].map(s => ({
+    code: s.code, name: s.name, industry: s.industry,
+    days: streakAt(codeSets, s.code, d, dates),
+    first: firstEntryDate(codeSets, s.code),
+  })).sort((a, b) => b.days - a.days || a.first.localeCompare(b.first) || a.code.localeCompare(b.code)).slice(0, 20);
+
+  return {
+    meta: { dataRange: `${dates[0]} ~ ${dates[dates.length - 1]}`, totalDays: dates.length, currentDate: d, poolSize: today.length },
+    today_pool: today,
+    recent_in, recent_out,
+    sector_stats,
+    continuous_rank: rank,
+  };
+}
+
+/** 在聊天区追加一条消息；返回消息元素 */
+function bullAppendMsg(role, text, traceId, isErr) {
+  const body = document.getElementById('bullBody');
+  const el = document.createElement('div');
+  el.className = 'bull-msg ' + (role === 'user' ? 'user' : 'bot' + (isErr ? ' err' : ''));
+  if (role === 'bot' && !isErr) {
+    const html = sanitizeHtml(marked.parse(text || ''));
+    el.innerHTML = `<div class="md">${html}</div>` + (traceId ? `<span class="trace">traceId: ${esc(traceId)}</span>` : '');
+  } else {
+    el.textContent = text;
+  }
+  body.appendChild(el);
+  body.scrollTop = body.scrollHeight;
+  return el;
+}
+
+/** 创建 dsh 会话（幂等） */
+async function bullEnsureSession() {
+  if (bullSessionId) return bullSessionId;
+  const res = await fetch(`${DSH_URL}/api/bull/session/create`, { method: 'POST' });
+  const j = await res.json();
+  if (!j || !j.ok) throw new Error((j && j.error) || '创建会话失败');
+  bullSessionId = j.sessionId;
+  // 会话创建后绑定当前选中 skill
+  if (bullActiveSkillId) {
+    try { await bullBindSkill(bullActiveSkillId); } catch {}
+  }
+  return bullSessionId;
+}
+
+/** 切换会话绑定的 Skill */
+async function bullBindSkill(skillId) {
+  bullActiveSkillId = skillId;
+  if (!bullSessionId) return;
+  await fetch(`${DSH_URL}/api/bull/session/${bullSessionId}/bind-skill`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ skillId }),
+  });
+}
+
+/** 拉取 skill 列表并刷新下拉框 */
+async function bullRefreshSkills() {
+  try {
+    const res = await fetch(`${DSH_URL}/api/bull/skill/list`);
+    const j = await res.json();
+    bullSkills = (j && j.skills) || [];
+  } catch { bullSkills = []; }
+  if (!bullActiveSkillId && bullSkills.length) bullActiveSkillId = bullSkills[0].skillId;
+  const sel = document.getElementById('bullSkillSelect');
+  sel.innerHTML = bullSkills.map(s => `<option value="${esc(s.skillId)}">${esc(s.skillName)}</option>`).join('');
+  if (bullActiveSkillId) sel.value = bullActiveSkillId;
+  if (bullSkills.length) renderSkillList();
+}
+
+/** 发送一条提问 */
+function bullSend() {
+  const input = document.getElementById('bullInput');
+  const q = input.value.trim();
+  if (!q) return;
+  input.value = '';
+  bullAppendMsg('user', q);
+  const loading = bullAppendMsg('bot', '🐂 正在思考…', null, false);
+  (async () => {
+    try {
+      const sid = await bullEnsureSession();
+      const snap = buildBullSnapshot();
+      if (snap) {
+        await fetch(`${DSH_URL}/api/bull/session/${sid}/snapshot`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(snap),
+        });
+      }
+      const res = await fetch(`${DSH_URL}/api/bull/session/${sid}/chat`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: q }),
+      });
+      const j = await res.json();
+      loading.remove();
+      if (j && j.ok) bullAppendMsg('bot', j.answer, j.traceId, false);
+      else bullAppendMsg('bot', '⚠️ ' + ((j && j.error) || '后端返回异常'), null, true);
+    } catch (e) {
+      loading.remove();
+      bullAppendMsg('bot', '⚠️ 无法连接 dsh 服务（' + DSH_URL + '）。请先启动 dsh 与 FastAPI 后端，见 bull/README。', null, true);
+    }
+  })();
+}
+
+/* ---------- Skill 管理 ---------- */
+
+function renderSkillList() {
+  const list = document.getElementById('skillList');
+  if (!bullSkills.length) { list.innerHTML = '<div class="empty-note">暂无 Skill</div>'; return; }
+  list.innerHTML = bullSkills.map(s => `
+    <div class="mgmt-item">
+      <div style="flex:1;min-width:0;">
+        <div style="font-weight:600;">${esc(s.skillName)}</div>
+        <div class="cnt">${esc(s.skillId)}${s.description ? ' · ' + esc(s.description) : ''}</div>
+      </div>
+      <button class="btn" data-edit="${esc(s.skillId)}">编辑</button>
+      <button class="btn" data-export="${esc(s.skillId)}">导出</button>
+    </div>`).join('');
+  list.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => openSkillEditor(b.getAttribute('data-edit'))));
+  list.querySelectorAll('[data-export]').forEach(b => b.addEventListener('click', () => exportSkill(b.getAttribute('data-export'))));
+}
+
+function openSkillEditor(skillId) {
+  const s = bullSkills.find(x => x.skillId === skillId) || null;
+  document.getElementById('skillName').value = s ? s.skillName : '';
+  document.getElementById('skillDesc').value = s ? s.description : '';
+  document.getElementById('skillRules').value = s ? s.ruleContent || '' : '';
+  document.getElementById('skillEditor').style.display = '';
+  document.getElementById('skillEditor').dataset.skillId = s ? s.skillId : '';
+  document.getElementById('btnSkillDelete').style.display = s ? '' : 'none';
+}
+
+function closeSkillEditor() {
+  document.getElementById('skillEditor').style.display = 'none';
+}
+
+async function saveSkillEditor() {
+  const skillId = document.getElementById('skillEditor').dataset.skillId || '';
+  const payload = {
+    skillId,
+    skillName: document.getElementById('skillName').value.trim(),
+    description: document.getElementById('skillDesc').value.trim(),
+    ruleContent: document.getElementById('skillRules').value,
+  };
+  if (!payload.skillName) { toast('角色名称不能为空', 'err'); return; }
+  try {
+    const url = `${DSH_URL}/api/bull/skill/${skillId ? 'update' : 'create'}`;
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const j = await res.json();
+    if (j && j.ok) {
+      closeSkillEditor();
+      await bullRefreshSkills();
+      toast(skillId ? '已保存 Skill' : '已新建 Skill');
+    } else toast((j && j.error) || '保存失败', 'err');
+  } catch { toast('无法连接 dsh 服务', 'err'); }
+}
+
+async function deleteSkillEditor() {
+  const skillId = document.getElementById('skillEditor').dataset.skillId;
+  if (!skillId) return;
+  confirmDialog('删除 Skill', `确定删除该 Skill（${skillId}）吗？`, async () => {
+    try {
+      await fetch(`${DSH_URL}/api/bull/skill/delete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ skillId }) });
+      closeSkillEditor();
+      if (bullActiveSkillId === skillId) bullActiveSkillId = null;
+      await bullRefreshSkills();
+      toast('已删除');
+    } catch { toast('无法连接 dsh 服务', 'err'); }
+  });
+}
+
+function exportSkill(skillId) {
+  window.open(`${DSH_URL}/api/bull/skill/export?skillId=${encodeURIComponent(skillId)}`, '_blank');
+}
+
+async function importSkill(file) {
+  try {
+    const res = await fetch(`${DSH_URL}/api/bull/skill/import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: await file.text() });
+    const j = await res.json();
+    if (j && j.ok) { await bullRefreshSkills(); toast(`已导入 ${j.skills.length} 个 Skill`); }
+    else toast((j && j.error) || '导入失败', 'err');
+  } catch { toast('无法连接 dsh 服务', 'err'); }
+}
+
+/* ---------- 事件绑定 ---------- */
+document.getElementById('bullBtn').addEventListener('click', () => {
+  const p = document.getElementById('bullPanel');
+  p.classList.toggle('show');
+  if (p.classList.contains('show')) {
+    if (!document.getElementById('bullBody').childElementCount) {
+      document.getElementById('bullBody').innerHTML = '<div class="bull-empty">🐂 我是红色小牛。<br>可以问我：今日哪些股票新增入池、哪个板块最强、某只股票的近期调研等。</div>';
+    }
+    bullRefreshSkills();
+  }
+});
+document.getElementById('btnBullClose').addEventListener('click', () => document.getElementById('bullPanel').classList.remove('show'));
+document.getElementById('btnBullMini').addEventListener('click', () => {
+  const p = document.getElementById('bullPanel');
+  p.classList.toggle('mini');
+  document.getElementById('btnBullMini').textContent = p.classList.contains('mini') ? '□' : '—';
+});
+document.getElementById('btnBullSend').addEventListener('click', bullSend);
+document.getElementById('bullInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); bullSend(); }
+});
+document.getElementById('bullSkillSelect').addEventListener('change', (e) => {
+  bullActiveSkillId = e.target.value;
+  bullBindSkill(e.target.value).catch(() => {});
+  toast('已切换 Skill：' + (bullSkills.find(s => s.skillId === e.target.value) || {}).skillName);
+});
+
+document.getElementById('btnBullSkill').addEventListener('click', () => { bullRefreshSkills(); openModal('bullSkillModal'); });
+document.getElementById('btnSkillClose').addEventListener('click', () => closeModal('bullSkillModal'));
+document.getElementById('btnSkillNew').addEventListener('click', () => openSkillEditor(null));
+document.getElementById('btnSkillSave').addEventListener('click', saveSkillEditor);
+document.getElementById('btnSkillCancel').addEventListener('click', closeSkillEditor);
+document.getElementById('btnSkillDelete').addEventListener('click', deleteSkillEditor);
+document.getElementById('btnSkillImport').addEventListener('click', () => document.getElementById('skillFileInput').click());
+document.getElementById('skillFileInput').addEventListener('change', (e) => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (f) importSkill(f);
+});
+
+/* =====================================================================
+ *  初始化
+ * ===================================================================== */
+applyTheme();
+render();
+// 首次渲染后重算图表尺寸，避免初始布局未完成导致图表 0 尺寸
+requestAnimationFrame(() => Object.values(charts).forEach(c => c.resize()));
+</script>
+</body>
+</html>
