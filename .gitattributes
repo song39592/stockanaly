@@ -1,0 +1,4 @@
+# 强制 Windows 批处理脚本使用 CRLF 行尾。
+# cmd.exe 无法可靠解析 LF-only 的 .bat（会错位、乱码、报「不是内部或外部命令」）。
+# 该仓库在 Windows 上开发，.bat 必须始终以 CRLF 检出。
+*.bat text eol=crlf
