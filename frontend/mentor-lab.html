@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>大佬策略实验室</title>
+<style>
+:root{color-scheme:dark;--bg:#0b0b0f;--card:#17171d;--surface:#212129;--line:rgba(255,255,255,.1);--text:#f0f0ef;--sub:#aaa9a4;--muted:#777671;--blue:#3987e5;--red:#ef5350;--green:#3fb950;--orange:#e99a35}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 system-ui,"Microsoft YaHei",sans-serif}.wrap{max-width:1400px;margin:auto;padding:22px}.top{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:18px}.top h1{font-size:21px;margin:0 auto 0 0}.top .sub{color:var(--muted);font-size:12px;width:100%}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}.card{grid-column:span 6;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:17px}.card.full{grid-column:1/-1}.card.third{grid-column:span 4}h2{font-size:15px;margin:0 0 5px}.desc{color:var(--muted);font-size:12px;margin-bottom:12px}.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin:8px 0}.col{display:flex;flex-direction:column;gap:7px}input,select,textarea{background:var(--surface);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:9px 11px;font:inherit}input,select{min-width:180px}textarea{width:100%;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:12px}.btn{border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:8px;padding:8px 12px;cursor:pointer}.btn:hover{border-color:#ffffff44}.btn.primary{background:var(--blue);border-color:var(--blue);font-weight:650}.btn.good{color:var(--green)}.btn.bad{color:var(--red)}.btn:disabled{opacity:.5;cursor:not-allowed}.list{display:flex;flex-direction:column;gap:8px;max-height:420px;overflow:auto}.item{background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:11px}.item-head{display:flex;gap:8px;align-items:center}.item-head b{margin-right:auto}.meta{color:var(--muted);font-size:11px;margin-top:4px}.tag{display:inline-block;border-radius:999px;padding:2px 7px;font-size:11px;background:#ffffff12}.pending_review,.candidate{color:var(--orange)}.approved,.active{color:var(--green)}.rejected,.archived{color:var(--muted)}.notice{padding:9px 11px;border-radius:8px;background:#3987e51c;color:#9fc9ff;margin:9px 0}.error{background:#ef53501c;color:#ffaaa8}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.kpi{background:var(--surface);padding:10px;border-radius:8px}.kpi b{font-size:18px;display:block}.empty{color:var(--muted);padding:18px;text-align:center}.modal{position:fixed;inset:0;background:#000a;display:none;place-items:center;padding:20px;z-index:20}.modal.show{display:grid}.dialog{width:min(900px,96vw);max-height:90vh;overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px}@media(max-width:900px){.card,.card.third{grid-column:1/-1}.kpis{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><h1>🧠 大佬策略实验室</h1><span id="service" class="tag">检查服务…</span><button class="btn" onclick="location.href='index.html'">返回股票池</button><div class="sub">资料原文 → AI提炼 → 人工审核 → 每日观点 → 候选Skill → 回测 → 人工晋级。所有步骤保留版本和时间。</div></div>
+  <div id="notice"></div>
+  <div class="grid">
+    <section class="card full">
+      <h2>1. 选择研究对象</h2><div class="desc">每位老师/投资者建立独立知识库，不混用观点。</div>
+      <div class="row"><select id="mentorSelect"></select><input id="mentorName" placeholder="新建：名称"><input id="mentorDesc" placeholder="简介（可选）"><button id="createMentor" class="btn primary">新建</button></div>
+    </section>
+    <section class="card">
+      <h2>2. 导入教学资料</h2><div class="desc">支持 PDF、TXT、Markdown；PDF按页保留证据。扫描PDF需要先OCR。</div>
+      <div class="row"><input id="materialFile" type="file" accept=".pdf,.txt,.md,.markdown"><button id="uploadMaterial" class="btn primary">上传</button></div>
+      <div id="materials" class="list"></div>
+    </section>
+    <section class="card">
+      <h2>3. 每日观点</h2><div class="desc">观点按时点追加保存，必须人工审核；历史记录不会被新观点覆盖。</div>
+      <div class="row"><input id="viewDate" type="date"><input id="dataAsOf" type="datetime-local"></div>
+      <textarea id="dailyText" rows="9" placeholder="粘贴今天的市场观点、关注方向、操作纪律、失效条件……"></textarea>
+      <div class="row"><button id="analyzeDaily" class="btn primary">AI提炼并保存</button><input id="dailyFile" type="file" accept=".pdf,.txt,.md,.markdown"><button id="uploadDaily" class="btn">从PDF/文本提炼当天观点</button></div>
+      <div id="dailyViews" class="list"></div>
+    </section>
+    <section class="card full">
+      <h2>4. Skill版本与人工晋级</h2><div class="desc">只有审核通过的资料和观点参与生成。候选版本先回测，确认后再晋级和发布到红色小牛。</div>
+      <div class="row"><input id="changeReason" style="flex:1" placeholder="本次版本生成/修改原因"><button id="generateSkill" class="btn primary">生成候选 Skill</button></div>
+      <div id="skills" class="list"></div>
+    </section>
+    <section class="card full">
+      <h2>5. 回测与评估记录</h2><div class="desc">第一版沿用股票池信号回测：等权信号、1/3/5/10数据日；缺失价格不填补。后续再升级账户级成交模拟。</div>
+      <div id="evaluations" class="list"></div>
+    </section>
+  </div>
+</div>
+
+<div id="reviewModal" class="modal"><div class="dialog"><h2 id="reviewTitle">人工审核</h2><div class="desc">请修改任何提炼错误后再批准。批准内容才会进入下一版Skill。</div><textarea id="reviewJson" rows="28"></textarea><div class="row"><input id="reviewNote" placeholder="审核备注"><button id="approveReview" class="btn good">批准</button><button id="rejectReview" class="btn bad">拒绝</button><button id="closeReview" class="btn">关闭</button></div></div></div>
+<div id="jsonModal" class="modal"><div class="dialog"><h2 id="jsonTitle">内容</h2><textarea id="jsonContent" rows="32" readonly></textarea><div class="row"><button id="closeJson" class="btn">关闭</button></div></div></div>
+
+<script src="analysis-engine.js"></script>
+<script>
+'use strict';
+const API_PORT=new URLSearchParams(location.search).get('api_port')||'8000';
+const API=`http://127.0.0.1:${API_PORT}`,DSH='http://127.0.0.1:3080',POOL_KEY='stockPool.data.v1';
+let mentors=[],mentorId='',state={materials:[],daily_views:[],skill_versions:[],evaluations:[]},reviewTarget=null;
+const $=id=>document.getElementById(id), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function msg(text,error=false){$('notice').innerHTML=`<div class="notice ${error?'error':''}">${esc(text)}</div>`;setTimeout(()=>{$('notice').innerHTML=''},5000)}
+async function api(path,options={}){const r=await fetch(API+path,options);let j={};try{j=await r.json()}catch{}if(!r.ok||j.ok===false)throw new Error(j.detail||j.error||`HTTP ${r.status}`);return j}
+function post(path,body){return api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})}
+function fmt(o){return JSON.stringify(o,null,2)}
+function status(s){return `<span class="tag ${esc(s)}">${esc(s||'—')}</span>`}
+async function init(){const t=new Date();$('viewDate').value=t.toISOString().slice(0,10);$('dataAsOf').value=new Date(t-t.getTimezoneOffset()*60000).toISOString().slice(0,16);try{const h=await api('/health');if(!h.mentor_lab)throw new Error('检测到旧版后端，请关闭旧后端后重新运行“启动系统.bat”');$('service').textContent=h.llm_ready?'服务正常':'LLM未配置';await loadMentors()}catch(e){$('service').textContent='后端未连接';msg('请从“启动系统.bat”打开系统：'+e.message,true)}}
+async function loadMentors(){mentors=(await api('/api/mentor/list')).mentors;$('mentorSelect').innerHTML=mentors.length?mentors.map(x=>`<option value="${esc(x.id)}">${esc(x.name)}</option>`).join(''):'<option value="">请先新建</option>';if(!mentorId&&mentors.length)mentorId=mentors[0].id;$('mentorSelect').value=mentorId;if(mentorId)await loadState()}
+async function loadState(){state=await api('/api/mentor/state?mentor_id='+encodeURIComponent(mentorId));render()}
+$('createMentor').onclick=async()=>{try{const j=await post('/api/mentor/create',{name:$('mentorName').value.trim(),description:$('mentorDesc').value.trim()});mentorId=j.mentor.id;$('mentorName').value='';await loadMentors();msg('研究对象已创建')}catch(e){msg(e.message,true)}};
+$('mentorSelect').onchange=async e=>{mentorId=e.target.value;if(mentorId)await loadState()};
+$('uploadMaterial').onclick=async()=>{const f=$('materialFile').files[0];if(!mentorId||!f)return msg('请先选择研究对象和文件',true);const fd=new FormData();fd.append('mentor_id',mentorId);fd.append('file',f);try{await api('/api/mentor/material/upload',{method:'POST',body:fd});$('materialFile').value='';await loadState();msg('资料已上传，请点击AI提炼')}catch(e){msg(e.message,true)}};
+async function analyzeMaterial(id,button){button.disabled=true;button.textContent='提炼中…';try{const j=await post('/api/mentor/material/analyze',{material_id:id});await loadState();openReview('extraction',j.extraction.id,j.extraction.structured_json,'资料提炼人工审核');msg('AI提炼完成，请人工审核')}catch(e){msg(e.message,true)}finally{button.disabled=false;button.textContent='AI提炼'}}
+async function openExtraction(id){try{const j=await api('/api/mentor/extraction/'+id);openReview('extraction',id,j.extraction.structured_json,'资料提炼人工审核')}catch(e){msg(e.message,true)}}
+function openReview(type,id,data,title){reviewTarget={type,id};$('reviewTitle').textContent=title;$('reviewJson').value=fmt(data);$('reviewNote').value='';$('reviewModal').classList.add('show')}
+function reviewDailyById(id){const x=state.daily_views.find(v=>v.id===id);if(x)openReview('daily',id,x.structured_json,'每日观点人工审核')}
+function showSkill(version){const x=state.skill_versions.find(v=>v.version===version);if(x)showJson(`Skill v${version}`,x.skill_json)}
+function editSkill(version){const x=state.skill_versions.find(v=>v.version===version);if(x)openReview('skill',version,x.skill_json,`候选 Skill v${version} 人工校验`)}
+function showEvaluation(id){const x=state.evaluations.find(v=>v.id===id);if(x)showJson('回测详情',x.result_json)}
+$('closeReview').onclick=()=> $('reviewModal').classList.remove('show');
+async function submitReview(decision){let structured;try{structured=JSON.parse($('reviewJson').value)}catch{return msg('审核内容必须是有效JSON',true)}try{if(reviewTarget.type==='extraction')await post('/api/mentor/extraction/review',{extraction_id:reviewTarget.id,structured,status:decision,note:$('reviewNote').value});else if(reviewTarget.type==='daily')await post('/api/mentor/daily-view/review',{view_id:reviewTarget.id,structured,status:decision});else await post('/api/mentor/skill/review',{mentor_id:mentorId,version:reviewTarget.id,skill:structured,note:$('reviewNote').value||'人工校验候选规则'});$('reviewModal').classList.remove('show');await loadState();msg(reviewTarget.type==='skill'?'候选规则已保存':decision==='approved'?'已审核通过':'已拒绝')}catch(e){msg(e.message,true)}}
+$('approveReview').onclick=()=>submitReview('approved');$('rejectReview').onclick=()=>submitReview('rejected');
+$('analyzeDaily').onclick=async()=>{if(!mentorId||!$('dailyText').value.trim())return msg('请填写每日观点',true);try{const j=await post('/api/mentor/daily-view/analyze',{mentor_id:mentorId,view_date:$('viewDate').value,data_as_of:$('dataAsOf').value,raw_text:$('dailyText').value.trim()});$('dailyText').value='';await loadState();openReview('daily',j.daily_view.id,j.daily_view.structured_json,'每日观点人工审核');msg('观点已提炼，请人工审核')}catch(e){msg(e.message,true)}};
+$('uploadDaily').onclick=async()=>{const f=$('dailyFile').files[0];if(!mentorId||!f)return msg('请选择PDF或文本观点文件',true);const fd=new FormData();fd.append('mentor_id',mentorId);fd.append('view_date',$('viewDate').value);fd.append('data_as_of',$('dataAsOf').value);fd.append('file',f);const b=$('uploadDaily');b.disabled=true;b.textContent='提炼中…';try{const j=await api('/api/mentor/daily-view/upload',{method:'POST',body:fd});$('dailyFile').value='';await loadState();openReview('daily',j.daily_view.id,j.daily_view.structured_json,'每日观点人工审核');msg('文件观点已提炼，请人工审核')}catch(e){msg(e.message,true)}finally{b.disabled=false;b.textContent='从PDF/文本提炼当天观点'}};
+$('generateSkill').onclick=async()=>{if(!mentorId)return;const b=$('generateSkill');b.disabled=true;b.textContent='生成中…';try{await post('/api/mentor/skill/generate',{mentor_id:mentorId,change_reason:$('changeReason').value.trim()||'根据已审核资料和每日观点生成'});await loadState();msg('候选Skill已生成，请查看并回测')}catch(e){msg(e.message,true)}finally{b.disabled=false;b.textContent='生成候选 Skill'}};
+async function promote(version){try{await post('/api/mentor/skill/promote',{mentor_id:mentorId,version});await loadState();msg(`v${version} 已晋级为正式版本`)}catch(e){msg(e.message,true)}}
+async function publishSkill(version){const item=state.skill_versions.find(x=>x.version===version);if(!item||item.status!=='active')return msg('只有人工晋级后的正式版本可以发布',true);try{const r=await fetch(DSH+'/api/bull/skill/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(item.skill_json)});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);msg('已发布到红色小牛 Skill 列表')}catch(e){msg('发布失败，请确认dsh已启动：'+e.message,true)}}
+async function runBacktest(version){let pool={};try{pool=JSON.parse(localStorage.getItem(POOL_KEY)||'{}')}catch{}if(!Object.keys(pool).length)return msg('当前浏览器没有股票池历史数据',true);const item=state.skill_versions.find(x=>x.version===version);const p=item.skill_json.parameters||{};const result=StockAnalysis.backtest(pool,p);result.skillVersion=version;result.dataRange=Object.keys(pool).sort();try{await post('/api/mentor/evaluation',{mentor_id:mentorId,skill_version:version,result});await loadState();showJson(`v${version} 回测结果`,result);msg('回测完成并已保存')}catch(e){msg(e.message,true)}}
+async function reviewEvaluation(id,decision){const note=prompt(decision==='approved'?'批准这份回测的备注：':'拒绝这份回测的原因：','')??'';try{await post('/api/mentor/evaluation/review',{evaluation_id:id,decision,note});await loadState();msg(decision==='approved'?'回测已人工批准，可以晋级候选版本':'回测已拒绝')}catch(e){msg(e.message,true)}}
+function showJson(title,data){$('jsonTitle').textContent=title;$('jsonContent').value=fmt(data);$('jsonModal').classList.add('show')}$('closeJson').onclick=()=> $('jsonModal').classList.remove('show');
+function render(){
+ $('materials').innerHTML=state.materials.length?state.materials.map(x=>`<div class="item"><div class="item-head"><b>${esc(x.file_name)}</b>${status(x.parse_status)}${status(x.extraction_status||'未提炼')}</div><div class="meta">${esc(x.parse_notes)} · ${esc(x.created_at)}</div><div class="row">${x.parse_status==='ok'?`<button class="btn primary" onclick="analyzeMaterial('${x.id}',this)">AI提炼</button>`:''}${x.extraction_id?`<button class="btn" onclick="openExtraction('${x.extraction_id}')">审核/查看</button>`:''}</div></div>`).join(''):'<div class="empty">暂无资料</div>';
+ $('dailyViews').innerHTML=state.daily_views.length?state.daily_views.map(x=>`<div class="item"><div class="item-head"><b>${esc(x.view_date)}</b>${status(x.status)}</div><div class="meta">数据截止：${esc(x.data_as_of)}</div><div class="row"><button class="btn" onclick="reviewDailyById('${x.id}')">审核/查看</button></div></div>`).join(''):'<div class="empty">暂无每日观点</div>';
+ $('skills').innerHTML=state.skill_versions.length?state.skill_versions.map(x=>`<div class="item"><div class="item-head"><b>${esc(x.skill_json.skillName||'未命名')} · v${x.version}</b>${status(x.status)}</div><div class="meta">${esc(x.change_reason)} · ${esc(x.created_at)}</div><div class="row"><button class="btn" onclick="showSkill(${x.version})">查看规则</button>${x.status==='candidate'?`<button class="btn" onclick="editSkill(${x.version})">编辑候选</button>`:''}<button class="btn" onclick="runBacktest(${x.version})">运行回测</button>${x.status==='candidate'?`<button class="btn good" onclick="promote(${x.version})">人工晋级</button>`:''}${x.status==='active'?`<button class="btn primary" onclick="publishSkill(${x.version})">发布到红色小牛</button>`:''}</div></div>`).join(''):'<div class="empty">审核资料后生成第一个候选版本</div>';
+ $('evaluations').innerHTML=state.evaluations.length?state.evaluations.map(x=>{const h=x.result_json.horizons||{};return `<div class="item"><div class="item-head"><b>Skill v${x.skill_version} · ${x.result_json.signalCount||0} 个信号</b>${status(x.reviewer_decision)}</div><div class="kpis">${Object.entries(h).map(([k,v])=>`<div class="kpi"><b>${v.averageReturnPct==null?'—':v.averageReturnPct+'%'}</b>${k}数据日 · ${v.sampleCount}样本</div>`).join('')}</div><div class="row"><button class="btn" onclick="showEvaluation('${x.id}')">查看完整结果</button>${x.reviewer_decision==='pending'?`<button class="btn good" onclick="reviewEvaluation('${x.id}','approved')">批准回测</button><button class="btn bad" onclick="reviewEvaluation('${x.id}','rejected')">拒绝</button>`:''}</div></div>`}).join(''):'<div class="empty">暂无回测记录</div>';
+}
+init();
+</script>
+</body></html>

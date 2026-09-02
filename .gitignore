@@ -32,6 +32,10 @@ logs/
 *.tmp
 *.temp
 *.cache
+*.pid
+cordis.runtime.yml
+backend_fastapi/data/*.db*
+agent_dsh/skills_library/mentor-*.skill
 uvicorn.log
 
 # ==================== 编辑器 / 本地工具配置 ====================

@@ -21,13 +21,13 @@
 
 ## 三、启动
 
-推荐一键启动：双击项目根目录的 `启动系统.bat`，它会自动启动后端（最小化窗口）并打开 `stock-pool.html`，
+推荐一键启动：双击项目根目录的 `启动系统.bat`，它会自动启动后端（最小化窗口）并打开 `frontend/index.html`，
 且后端已在运行时不会重复启动。
 
 手动启动（调试用）：
 
 ```bash
-cd D:/ai/backend
+cd D:/ai/backend_fastapi
 venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -36,7 +36,7 @@ venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 GET  /health              → {"ok":true,"llm_ready":true/false}
 POST /api/stock/research  → 请求体 {"code":"300209","name":"行云科技"}
-                            返回 {"ok":true,"markdown":"...","cached":false}
+                            返回 markdown + evidence + coverage + data_as_of
 ```
 
 测试：
@@ -56,9 +56,24 @@ curl -X POST "http://127.0.0.1:8000/api/stock/research" \
    - 机构调研纪要（从公告「调研活动」抓正文问答）
    - 东财财经新闻近 30 天（去重）
    - 请求间强制 sleep，防反爬
-3. 拼 prompt（含原始资料 + 四板块结构 + 禁预测/禁荐股）→ 调 LLM → 追加固定风险声明 → 返回 markdown。
+3. 拼 prompt（证据按不可信输入隔离 + 四板块结构 + 禁预测/禁荐股）→ 调 LLM → 追加固定风险声明。
+4. 返回 markdown 以及可审计证据清单：证据 ID、来源链接、发布时间、采集时间、事件标签和覆盖状态。
 
-## 六、说明
+首次使用或虚拟环境失效时运行 `setup_backend.bat`；启动脚本使用当前目录，不依赖固定盘符。
+
+## 六、大佬策略实验室
+
+从股票池页面顶部进入“大佬策略实验室”。它支持导入 PDF、TXT、Markdown 教学资料，按页保留 PDF 证据位置，并按以下流程管理策略知识：
+
+1. AI 提炼资料或每日观点；
+2. 人工批准、驳回或直接修订结构化内容；
+3. 仅使用已批准内容生成候选 Skill；
+4. 用股票池历史数据回测，并人工审批评估结果；
+5. 审批通过后晋级为活动版本，再发布到红色小牛。
+
+扫描版 PDF 如果没有文字层会标记为需要 OCR，不会伪造提炼结果。当前迭代方式是“知识库 + 规则版本 + 人工反馈”的可审计闭环，不会直接修改大模型权重。
+
+## 七、说明
 
 - 数据源均为公开接口，反爬/改版可能导致个别来源失败，已做优雅降级，不会导致整体报错。
 - 「东方财富股吧高赞帖子」为可选原型逆向，尚未接入（akshare 1.18 已移除股吧函数），后续可单独扩展。

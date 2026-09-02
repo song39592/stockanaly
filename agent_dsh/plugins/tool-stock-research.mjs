@@ -31,8 +31,13 @@ export function apply(ctx) {
           signal: controller.signal,
         });
         const j = await res.json();
-        if (j && j.ok && j.markdown) return j.markdown;
-        return `个股调研接口返回失败：${(j && j.error) || ('HTTP ' + res.status)}`;
+        if (j && j.ok && j.markdown) {
+          const sources = (j.evidence || []).map(x =>
+            `- [${x.id}] ${x.published_at || '日期未提供'}｜${x.title}｜${x.source || '来源未提供'}｜${x.source_url || '链接未提供'}`
+          ).join('\n');
+          return `${j.markdown}\n\n## 可核验证据清单\n${sources || '当前未采集到证据'}\n\n数据截止：${j.data_as_of || '未提供'}；覆盖状态：${JSON.stringify(j.coverage || {})}`;
+        }
+        return `个股调研接口返回失败：${(j && (j.error || j.detail)) || ('HTTP ' + res.status)}`;
       } catch (e) {
         return `个股调研接口调用失败（请确认 FastAPI 后端已在 ${FASTAPI} 运行）：${e.message}`;
       } finally {
