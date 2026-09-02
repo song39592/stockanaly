@@ -1,16 +1,16 @@
 # 红色小牛（bull）自定义插件与配置
-# 使用：cd D:\ai\bull && npx dsh web --patch cordis.patch.yml
+# 启动脚本会将 __PLUGIN_BASE__ 替换为当前项目的绝对 file URL。
 
 # 挂载 4 个自定义插件（Windows 下必须用 file:// URL，否则 ESM loader 会误判盘符为协议）
 - insert:
     - id: bull-role-skills
-      name: 'file:///D:/ai/agent_dsh/plugins/role-skills.mjs'
+      name: '__PLUGIN_BASE__/role-skills.mjs'
     - id: bull-tool-research
-      name: 'file:///D:/ai/agent_dsh/plugins/tool-stock-research.mjs'
+      name: '__PLUGIN_BASE__/tool-stock-research.mjs'
     - id: bull-tool-snapshot
-      name: 'file:///D:/ai/agent_dsh/plugins/tool-stockpool-snapshot.mjs'
+      name: '__PLUGIN_BASE__/tool-stockpool-snapshot.mjs'
     - id: bull-http
-      name: 'file:///D:/ai/agent_dsh/plugins/bull-http.mjs'
+      name: '__PLUGIN_BASE__/bull-http.mjs'
 
 # 覆盖系统 persona 为「红色小牛」基础提示（Skill 规则由 bull-role 段动态注入）
 - id: system-prompt
@@ -21,6 +21,7 @@
       1. 分析事实来源只能来自 getStockPoolSnapshot 返回的股票池业务数据，以及 fetchStockResearch 拿到的个股调研材料。
       2. 严格遵循当前加载 Skill 里面定义的交易规则、选股标准、思考逻辑、输出风格。
       3. 需要统计板块热度、强势入池板块、出池最多板块、筛选关注个股时，优先调用工具获取数据，禁止编造数据。
+      快照中的 strategy_analysis 与 backtest_summary 是程序计算结果；引用时必须保留数据截止日、样本数与缺失数据说明，不得由模型重新计算或篡改数值。
       4. 如果工具返回数据不足，直接告知用户，禁止虚构股票、板块。
       5. 严禁预测股价、严禁承诺收益。每次回答末尾强制输出免责声明：> AI分析仅供参考，不构成投资建议。
       6. 使用 markdown 输出。

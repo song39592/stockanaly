@@ -9,6 +9,7 @@
 import re
 import time
 import datetime
+from urllib.parse import quote
 
 import requests
 import akshare as ak
@@ -36,6 +37,20 @@ IMPORTANT_KEYWORDS = [
     "风险警示", "立案", "重组", "定增", "回购", "诉讼", "担保", "半年报", "年报", "季报",
     "投资者关系", "调研",
 ]
+
+POSITIVE_EVENT_KEYWORDS = ["中标", "重大合同", "增持", "回购", "业绩预增", "扭亏"]
+NEGATIVE_EVENT_KEYWORDS = ["减持", "立案", "风险警示", "诉讼", "质押", "冻结", "业绩预亏"]
+
+
+def event_signal(title: str) -> str:
+    """基于标题的确定性事件标签；只用于分类，不等同于股价方向预测。"""
+    positive = any(k in (title or "") for k in POSITIVE_EVENT_KEYWORDS)
+    negative = any(k in (title or "") for k in NEGATIVE_EVENT_KEYWORDS)
+    if positive and not negative:
+        return "positive_event"
+    if negative and not positive:
+        return "risk_event"
+    return "neutral_or_mixed"
 
 
 def _today():
@@ -88,6 +103,22 @@ def get_basic_info(code: str):
         return None
 
 
+def get_basic_info_evidence(code: str):
+    """公司基础信息证据。返回统一证据对象，便于报告引用与审计。"""
+    text = get_basic_info(code)
+    if not text:
+        return None
+    return {
+        "id": "BASIC-1",
+        "kind": "company_profile",
+        "title": f"{code} 公司基础信息",
+        "published_at": None,
+        "source": "东方财富/akshare",
+        "source_url": f"https://quote.eastmoney.com/{code}.html",
+        "content": text,
+    }
+
+
 # ---------------------------------------------------------------- 2. 巨潮公告
 
 def get_announcements(code: str, days: int = 60):
@@ -113,8 +144,10 @@ def get_announcements(code: str, days: int = 60):
             "date": str(row.get("公告日期", ""))[:10],
             "art_code": _extract_art_code(url),
             "importance": _importance(title, row.get("公告类型", "")),
+            "source": "巨潮资讯/东方财富",
+            "source_url": url,
         })
-    items.sort(key=lambda x: (-x["importance"], x["date"]), reverse=False)
+    items.sort(key=lambda x: (x["importance"], x["date"]), reverse=True)
     return items, None
 
 
@@ -162,8 +195,14 @@ def get_news(code: str, days: int = 30):
             "content": _clip(content, 400),
             "date": date,
             "source": str(row.get("文章来源", "")).strip(),
+            "source_url": str(row.get("新闻链接", row.get("新闻网址", ""))).strip(),
         })
     return items, None
+
+
+def evidence_search_url(code: str, title: str) -> str:
+    """当上游未提供文章链接时，给出可核对的站内搜索入口。"""
+    return f"https://so.eastmoney.com/web/s?keyword={quote((code + ' ' + title).strip())}"
 
 
 # ---------------------------------------------------------------- 4. 机构调研纪要

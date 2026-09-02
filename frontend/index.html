@@ -32,13 +32,13 @@
     --s5:#d55181; --s6:#008300; --s7:#9085e9; --s8:#e66767;
     --other-gray: #5a5a58;
     /* 组件表面（按钮/输入/行悬停等） */
-    --control: var(--control);
-    --control-hover: var(--control-hover);
-    --surface-2: var(--surface-2);   /* 列表项 / 行悬停 */
-    --surface-3: var(--surface-3);   /* 分组行 */
-    --toast-bg: var(--toast-bg);
-    --danger-bg: var(--danger-bg);
-    --danger-border: var(--danger-border);
+    --control: #202027;
+    --control-hover: #292931;
+    --surface-2: #1e1e25;   /* 列表项 / 行悬停 */
+    --surface-3: #26262e;   /* 分组行 */
+    --toast-bg: #202027;
+    --danger-bg: #2b191b;
+    --danger-border: #653035;
     --radius: 12px;
     --radius-sm: 8px;
   }
@@ -199,6 +199,12 @@
   }
   .card h2 { margin: 0 0 4px; font-size: 15px; font-weight: 650; display: flex; align-items: center; gap: 8px; }
   .card .card-sub { color: var(--text-3); font-size: 12px; margin-bottom: 12px; }
+  .analysis-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin:12px 0; }
+  .analysis-kpi { background:var(--surface-2); border:1px solid var(--card-border); border-radius:9px; padding:12px; }
+  .analysis-kpi .v { font-size:20px; font-weight:700; }
+  .analysis-kpi .l { color:var(--text-3); font-size:11px; }
+  .quality-warning { color:var(--orange); font-size:12px; margin:8px 0; }
+  @media (max-width: 760px) { .analysis-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 
   /* 表格 */
   .table-wrap { overflow-x: auto; }
@@ -446,6 +452,7 @@
     <button class="btn" id="btnExport"><span class="ico">⇩</span> 导出备份</button>
     <button class="btn" id="btnRestore"><span class="ico">⇧</span> 恢复数据</button>
     <button class="btn" id="btnManage"><span class="ico">⚙</span> 数据管理</button>
+    <button class="btn" id="btnMentorLab"><span class="ico">🧠</span> 大佬策略实验室</button>
     <button class="btn" id="btnHelp"><span class="ico">?</span> 使用说明</button>
     <button class="btn" id="btnTheme"><span class="ico" id="themeIco">🌙</span><span id="themeLbl">浅色</span></button>
     <input id="stockSearch" list="stockList" placeholder="查个股：代码/名称" style="min-width:170px;" />
@@ -476,6 +483,27 @@
       <div class="label">覆盖历史天数</div>
       <div class="value" id="vDays">—</div>
       <div class="sub" id="sDays">—</div>
+    </div>
+  </section>
+
+  <!-- 策略分析与无未来函数复盘 -->
+  <section class="card" id="analysisCard" style="display:none;">
+    <h2>🧭 策略评分与历史复盘</h2>
+    <div class="card-sub" id="analysisSub">评分只使用选中数据日及以前的信息；收益复盘使用后续已导入价格。</div>
+    <div class="analysis-grid" id="analysisKpis"></div>
+    <div class="quality-warning" id="analysisWarnings"></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>代码</th><th>名称</th><th>行业</th><th>评分</th><th>状态</th><th>核心证据</th></tr></thead>
+        <tbody id="analysisTbody"></tbody>
+      </table>
+    </div>
+    <div class="card-sub" style="margin-top:16px;">历史信号后续收益（样本只统计未来数据日仍有有效价格的股票）</div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>周期</th><th>有效样本</th><th>平均收益</th><th>胜率</th><th>最好</th><th>最差</th></tr></thead>
+        <tbody id="backtestTbody"></tbody>
+      </table>
     </div>
   </section>
 
@@ -724,6 +752,12 @@
         <input type="text" id="skillName" />
         <label>描述</label>
         <input type="text" id="skillDesc" />
+        <label>策略类型</label>
+        <input type="text" id="skillStrategyType" placeholder="general / swing / event / risk" />
+        <label>参数 JSON</label>
+        <textarea id="skillParameters" rows="4" style="width:100%;font-family:ui-monospace,Consolas,monospace;"></textarea>
+        <label>风险规则 JSON</label>
+        <textarea id="skillRiskRules" rows="4" style="width:100%;font-family:ui-monospace,Consolas,monospace;"></textarea>
         <label>规则知识库（ruleContent）</label>
         <textarea id="skillRules" rows="14" style="width:100%; font-family:ui-monospace,Consolas,monospace; font-size:12px; resize:vertical;"></textarea>
       </div>
@@ -748,6 +782,8 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+<script src="analysis-engine.js"></script>
 
 <script>
 /* =====================================================================
@@ -759,6 +795,7 @@
 
 /* ---------------- 常量与存储 ---------------- */
 const STORAGE_KEY = 'stockPool.data.v1';   // 所有历史数据统一存一个 key
+const ANALYSIS_STORAGE_KEY = 'stockPool.analysis.v1';
 
 /** 读取全部数据：{ "YYYY-MM-DD": [ {code,name,industry,region} ] } */
 function loadAll() {
@@ -784,6 +821,10 @@ function saveAll(data) {
 }
 
 let data = loadAll();                 // 全局数据对象
+let analysisHistory = (() => {
+  try { return JSON.parse(localStorage.getItem(ANALYSIS_STORAGE_KEY) || '{}') || {}; }
+  catch { return {}; }
+})();
 let selectedDate = null;              // 当前选中日期
 let sortState = { type: 'group', dir: 1 };  // 表格排序状态
 
@@ -1099,7 +1140,7 @@ document.getElementById('btnConfirmImport').addEventListener('click', () => {
 document.getElementById('btnExport').addEventListener('click', () => {
   const dates = getDatesSorted();
   if (!dates.length) { toast('暂无数据可导出', 'err'); return; }
-  const payload = { app: 'stock-pool-tracker', version: 1, exportedAt: todayStr(), data };
+  const payload = { app: 'stock-pool-tracker', version: 2, exportedAt: todayStr(), data, analysisHistory };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -1127,7 +1168,9 @@ document.getElementById('jsonInput').addEventListener('change', (e) => {
       if (!dates.length) throw new Error('bad');
       confirmDialog('恢复数据', `将从备份恢复 ${dates.length} 个数据日。当前已有 ${getDatesSorted().length} 个数据日，将被备份数据【整体替换】。`, () => {
         data = restored;
+        analysisHistory = obj && obj.analysisHistory && typeof obj.analysisHistory === 'object' ? obj.analysisHistory : {};
         if (!saveAll(data)) return;
+        localStorage.setItem(ANALYSIS_STORAGE_KEY, JSON.stringify(analysisHistory));
         selectedDate = dates[dates.length - 1];
         render();
         toast(`已恢复 ${dates.length} 个数据日`);
@@ -1166,6 +1209,8 @@ function renderManageModal() {
       const d = btn.getAttribute('data-del');
       confirmDialog('删除数据', `确定删除 ${d} 这一天的数据（${data[d].length} 只）吗？此操作不可撤销。`, () => {
         delete data[d];
+        delete analysisHistory[d];
+        localStorage.setItem(ANALYSIS_STORAGE_KEY, JSON.stringify(analysisHistory));
         saveAll(data);
         if (selectedDate === d) selectedDate = getDatesSorted().slice(-1)[0] || null;
         renderManageModal();
@@ -1181,6 +1226,8 @@ document.getElementById('btnClearAll').addEventListener('click', () => {
     data = {};
     selectedDate = null;
     localStorage.removeItem(STORAGE_KEY);
+    analysisHistory = {};
+    localStorage.removeItem(ANALYSIS_STORAGE_KEY);
     render();
     closeModal('manageModal');
     toast('已清空全部数据');
@@ -1192,6 +1239,7 @@ document.getElementById('btnClearAll').addEventListener('click', () => {
  * ===================================================================== */
 
 document.getElementById('btnHelp').addEventListener('click', () => openModal('helpModal'));
+document.getElementById('btnMentorLab').addEventListener('click', () => window.open('mentor-lab.html', '_blank'));
 document.getElementById('btnHelpClose').addEventListener('click', () => closeModal('helpModal'));
 document.querySelectorAll('.modal-mask').forEach(m => {
   m.addEventListener('click', (e) => { if (e.target === m) m.classList.remove('show'); });
@@ -1295,6 +1343,10 @@ document.getElementById('rankTbody').addEventListener('click', (e) => {
   const tr = e.target.closest('tr[data-code]');
   if (tr) openAiResearch(tr.getAttribute('data-code'));
 });
+document.getElementById('analysisTbody').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-code]');
+  if (tr) openAiResearch(tr.getAttribute('data-code'));
+});
 // 变动分析：新增入池 / 出池 列表点击 → 打开 AI 调研
 document.getElementById('newList').addEventListener('click', (e) => {
   const el = e.target.closest('.chg-item[data-code]');
@@ -1317,6 +1369,13 @@ if (typeof marked !== 'undefined') { marked.setOptions({ breaks: true, gfm: true
 
 /** 简单清洗模型返回的 HTML，防止脚本/事件注入 */
 function sanitizeHtml(html) {
+  if (typeof DOMPurify !== 'undefined') {
+    return DOMPurify.sanitize(String(html), {
+      USE_PROFILES: { html: true },
+      FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'form'],
+      FORBID_ATTR: ['style'],
+    });
+  }
   return String(html)
     .replace(/<(script|style|iframe|object|embed)[^>]*>[\s\S]*?<\/\1>/gi, '')
     .replace(/\son\w+="[^"]*"/gi, '')
@@ -1342,13 +1401,14 @@ async function openAiResearch(code) {
       body: JSON.stringify({ code, name: stock.name })
     });
     j = await res.json();
+    if (!res.ok) throw new Error(j.detail || j.error || `HTTP ${res.status}`);
   } catch (e) {
-    renderAiError(null);   // 网络错误 → 后端未连接
+    renderAiError(e.message && !/fetch/i.test(e.message) ? e.message : null);
     return;
   }
 
   if (j && j.ok && j.markdown) {
-    renderAiContent(j.markdown, j.cached);
+    renderAiContent(j.markdown, j.cached, j.evidence || [], j.coverage || {}, j.data_as_of);
   } else {
     renderAiError((j && j.error) || '后端返回异常');
   }
@@ -1379,14 +1439,29 @@ function renderAiError(msg) {
   });
 }
 
-function renderAiContent(md, cached) {
+function safeHttpUrl(value) {
+  try {
+    const u = new URL(String(value || ''));
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : '';
+  } catch { return ''; }
+}
+
+function renderAiContent(md, cached, evidence, coverage, dataAsOf) {
   if (typeof marked === 'undefined') {
     document.getElementById('aiBody').innerHTML = `<div class="ai-state err">markdown 渲染库未加载，请检查网络后刷新重试。</div>`;
     return;
   }
   const html = sanitizeHtml(marked.parse(md || ''));
   const badge = cached ? `<span class="ai-cache-badge">⚡ 服务端缓存</span>` : '';
-  document.getElementById('aiBody').innerHTML = html + badge;
+  const sources = evidence.length ? evidence.map(item => {
+    const url = safeHttpUrl(item.source_url);
+    const title = `[${item.id}] ${item.published_at || '日期未提供'} · ${item.title}`;
+    return `<li>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(title)}</a>` : esc(title)}<br><small>${esc(item.source || '来源未提供')} · ${esc(item.event_signal || 'neutral_or_mixed')}</small></li>`;
+  }).join('') : '<li>当前未采集到可核验证据</li>';
+  const audit = `<details style="margin-top:18px;"><summary>可核验证据与数据覆盖（${evidence.length} 条）</summary>
+    <div style="color:var(--text-3);font-size:12px;margin:8px 0;">数据截止：${esc(dataAsOf || '未提供')} · 覆盖状态：${esc(JSON.stringify(coverage))}</div>
+    <ol>${sources}</ol></details>`;
+  document.getElementById('aiBody').innerHTML = html + audit + badge;
 }
 
 document.getElementById('btnAiClose').addEventListener('click', () => closeModal('aiModal'));
@@ -1406,7 +1481,7 @@ function render() {
 
   // 空状态切换
   document.getElementById('emptyState').style.display = hasData ? 'none' : '';
-  ['controls', 'changes', 'tableCard', 'rankCard', 'chartsGrid'].forEach(id =>
+  ['controls', 'changes', 'tableCard', 'rankCard', 'chartsGrid', 'analysisCard'].forEach(id =>
     document.getElementById(id).style.display = hasData ? '' : 'none');
 
   if (!hasData) return;
@@ -1419,7 +1494,44 @@ function render() {
   renderChanges(dates);
   renderTable();
   renderRanking();
+  renderStrategyAnalysis();
   renderCharts();
+}
+
+function pct(value) { return value == null ? '—' : `${Number(value).toFixed(2)}%`; }
+
+function renderStrategyAnalysis() {
+  if (typeof StockAnalysis === 'undefined') return;
+  const result = StockAnalysis.analyze(data, selectedDate);
+  if (!result.ok) return;
+  const test = StockAnalysis.backtest(data);
+  analysisHistory[selectedDate] = {
+    engineVersion: result.version,
+    savedAt: new Date().toISOString(),
+    dataAsOf: selectedDate,
+    result,
+  };
+  try { localStorage.setItem(ANALYSIS_STORAGE_KEY, JSON.stringify(analysisHistory)); } catch {}
+
+  const regimeName = { risk_on: '偏进攻', neutral: '中性', risk_off: '偏防守' }[result.market.regime];
+  document.getElementById('analysisSub').textContent =
+    `${result.dataAsOf} · 市场状态 ${regimeName} · 评分引擎 v${result.version} · 不使用未来数据生成信号`;
+  document.getElementById('analysisKpis').innerHTML = [
+    [result.market.score, '市场温度（0–100）'],
+    [regimeName, '市场状态'],
+    [`${result.market.added}/${result.market.removed}`, '新增 / 出池'],
+    [pct(result.dataQuality.priceCoveragePct), '价格字段覆盖率'],
+  ].map(([v, l]) => `<div class="analysis-kpi"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('');
+  document.getElementById('analysisWarnings').textContent = result.dataQuality.warnings.join('；');
+  document.getElementById('analysisTbody').innerHTML = result.candidates.map(c => `
+    <tr class="clickable" data-code="${esc(c.code)}">
+      <td class="code">${esc(c.code)}</td><td class="name">${esc(c.name)}</td><td class="industry">${esc(c.industry)}</td>
+      <td>${c.score}</td><td><span class="${c.score >= 70 ? 'tag hot' : c.score >= 50 ? 'tag mid' : 'tag low'}">${esc(c.signal)}</span></td>
+      <td style="color:var(--text-2);">${esc(c.bullEvidence.slice(0, 2).join('；'))}</td>
+    </tr>`).join('');
+  document.getElementById('backtestTbody').innerHTML = Object.entries(test.horizons).map(([h, x]) => `
+    <tr><td>${h} 个数据日</td><td>${x.sampleCount}/${test.signalCount}</td><td>${pct(x.averageReturnPct)}</td>
+    <td>${pct(x.winRatePct)}</td><td>${pct(x.bestPct)}</td><td>${pct(x.worstPct)}</td></tr>`).join('');
 }
 
 function renderDateSelector(dates) {
@@ -1803,6 +1915,8 @@ function buildBullSnapshot() {
     days: streakAt(codeSets, s.code, d, dates),
     first: firstEntryDate(codeSets, s.code),
   })).sort((a, b) => b.days - a.days || a.first.localeCompare(b.first) || a.code.localeCompare(b.code)).slice(0, 20);
+  const strategy = typeof StockAnalysis !== 'undefined' ? StockAnalysis.analyze(data, d) : null;
+  const backtest = typeof StockAnalysis !== 'undefined' ? StockAnalysis.backtest(data) : null;
 
   return {
     meta: { dataRange: `${dates[0]} ~ ${dates[dates.length - 1]}`, totalDays: dates.length, currentDate: d, poolSize: today.length },
@@ -1810,6 +1924,8 @@ function buildBullSnapshot() {
     recent_in, recent_out,
     sector_stats,
     continuous_rank: rank,
+    strategy_analysis: strategy && strategy.ok ? strategy : null,
+    backtest_summary: backtest ? { methodology: backtest.methodology, signalCount: backtest.signalCount, horizons: backtest.horizons } : null,
   };
 }
 
@@ -1918,10 +2034,21 @@ function renderSkillList() {
   list.querySelectorAll('[data-export]').forEach(b => b.addEventListener('click', () => exportSkill(b.getAttribute('data-export'))));
 }
 
-function openSkillEditor(skillId) {
-  const s = bullSkills.find(x => x.skillId === skillId) || null;
+async function openSkillEditor(skillId) {
+  let s = null;
+  if (skillId) {
+    try {
+      const res = await fetch(`${DSH_URL}/api/bull/skill/detail?skillId=${encodeURIComponent(skillId)}`);
+      const j = await res.json();
+      if (!res.ok || !j.ok) throw new Error(j.error || '读取 Skill 失败');
+      s = j.skill;
+    } catch (e) { toast(e.message || '读取 Skill 失败', 'err'); return; }
+  }
   document.getElementById('skillName').value = s ? s.skillName : '';
   document.getElementById('skillDesc').value = s ? s.description : '';
+  document.getElementById('skillStrategyType').value = s ? s.strategyType || 'general' : 'general';
+  document.getElementById('skillParameters').value = JSON.stringify(s ? s.parameters || {} : {}, null, 2);
+  document.getElementById('skillRiskRules').value = JSON.stringify(s ? s.riskRules || {} : {}, null, 2);
   document.getElementById('skillRules').value = s ? s.ruleContent || '' : '';
   document.getElementById('skillEditor').style.display = '';
   document.getElementById('skillEditor').dataset.skillId = s ? s.skillId : '';
@@ -1934,18 +2061,28 @@ function closeSkillEditor() {
 
 async function saveSkillEditor() {
   const skillId = document.getElementById('skillEditor').dataset.skillId || '';
+  let parameters, riskRules;
+  try {
+    parameters = JSON.parse(document.getElementById('skillParameters').value || '{}');
+    riskRules = JSON.parse(document.getElementById('skillRiskRules').value || '{}');
+  } catch { toast('参数和风险规则必须是有效 JSON', 'err'); return; }
   const payload = {
+    version: 2,
     skillId,
     skillName: document.getElementById('skillName').value.trim(),
     description: document.getElementById('skillDesc').value.trim(),
+    strategyType: document.getElementById('skillStrategyType').value.trim() || 'general',
+    parameters,
+    riskRules,
     ruleContent: document.getElementById('skillRules').value,
   };
   if (!payload.skillName) { toast('角色名称不能为空', 'err'); return; }
+  if (!payload.ruleContent.trim()) { toast('规则正文不能为空', 'err'); return; }
   try {
     const url = `${DSH_URL}/api/bull/skill/${skillId ? 'update' : 'create'}`;
     const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     const j = await res.json();
-    if (j && j.ok) {
+    if (res.ok && j && j.ok) {
       closeSkillEditor();
       await bullRefreshSkills();
       toast(skillId ? '已保存 Skill' : '已新建 Skill');

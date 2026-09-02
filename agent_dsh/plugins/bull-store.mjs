@@ -1,7 +1,7 @@
 // 红色小牛（bull）共享内存状态 + Skill 规则库读写。
 // 这是一个普通 ES 模块（非插件），供多个插件共享进程内状态，避免跨插件服务定义的复杂度。
 // 原型定位：内存态随 dsh 进程重启即失；Skill 文件落盘到 bull/skills/*.skill 持久化。
-import { readdir, readFile, writeFile, mkdir, unlink } from 'node:fs/promises';
+import { readdir, readFile, writeFile, mkdir, unlink, rename } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -17,6 +17,7 @@ export const store = {
   skills: [],           // [{ skillId, skillName, description, ruleContent }]
   bindings: new Map(),  // sessionId -> skillId
 };
+let loadPromise = null;
 
 // 内置默认「通用分析」规则
 export const DEFAULT_RULES = `你是「通用分析」——一个客观的股票池分析助手。
@@ -36,11 +37,25 @@ export function normalizeSkill(raw) {
   const id = String(r.skillId || r.id || '').trim()
     || `skill-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   return {
+    type: 'stock-pool-skill',
+    version: Number.isInteger(Number(r.version)) ? Number(r.version) : 2,
     skillId: id,
     skillName: String(r.skillName || r.name || '').trim() || '未命名',
     description: String(r.description || '').trim(),
+    strategyType: String(r.strategyType || 'general').trim(),
+    parameters: r.parameters && typeof r.parameters === 'object' && !Array.isArray(r.parameters) ? r.parameters : {},
+    riskRules: r.riskRules && typeof r.riskRules === 'object' && !Array.isArray(r.riskRules) ? r.riskRules : {},
     ruleContent: String(r.ruleContent || r.rules || '').trim(),
   };
+}
+
+export function validateSkill(skill) {
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(skill.skillId)) return 'skillId 只能包含字母、数字、下划线和连字符，最长 64 位';
+  if (!skill.skillName || skill.skillName.length > 80) return 'skillName 不能为空且最长 80 字符';
+  if (skill.description.length > 500) return 'description 最长 500 字符';
+  if (!skill.ruleContent || skill.ruleContent.length > 100000) return 'ruleContent 不能为空且最长 100000 字符';
+  if (JSON.stringify(skill.parameters).length > 100000 || JSON.stringify(skill.riskRules).length > 100000) return '策略参数或风险规则过大';
+  return null;
 }
 
 function skillPath(skillId) {
@@ -49,15 +64,11 @@ function skillPath(skillId) {
 
 export async function saveSkill(skill) {
   await mkdir(SKILLS_DIR, { recursive: true });
-  const payload = {
-    type: 'stock-pool-skill',
-    version: 1,
-    skillId: skill.skillId,
-    skillName: skill.skillName,
-    description: skill.description,
-    ruleContent: skill.ruleContent,
-  };
-  await writeFile(skillPath(skill.skillId), JSON.stringify(payload, null, 2), 'utf8');
+  const payload = normalizeSkill(skill);
+  const target = skillPath(skill.skillId);
+  const temp = `${target}.${process.pid}.tmp`;
+  await writeFile(temp, JSON.stringify(payload, null, 2), 'utf8');
+  await rename(temp, target);
 }
 
 // 宽松 JSON 解析：先严格解析；失败则把字符串字面量里的裸换行/制表符转义后重试。
@@ -110,8 +121,19 @@ export async function loadSkills() {
   }
 }
 
+export function ensureSkillsLoaded() {
+  if (!loadPromise) loadPromise = loadSkills().catch(err => {
+    loadPromise = null;
+    throw err;
+  });
+  return loadPromise;
+}
+
 export function listSkills() {
-  return store.skills.map(s => ({ skillId: s.skillId, skillName: s.skillName, description: s.description }));
+  return store.skills.map(s => ({
+    skillId: s.skillId, skillName: s.skillName, description: s.description,
+    version: s.version, strategyType: s.strategyType,
+  }));
 }
 
 export function getSkill(skillId) {
@@ -131,8 +153,15 @@ export function ruleContentFor(sessionId) {
 
 export async function addSkill(raw) {
   const s = normalizeSkill(raw);
-  store.skills.push(s);
+  const validationError = validateSkill(s);
+  if (validationError) throw new Error(validationError);
+  if (store.skills.some(x => x.skillId === s.skillId)) {
+    const err = new Error(`skillId 已存在：${s.skillId}`);
+    err.code = 'SKILL_EXISTS';
+    throw err;
+  }
   await saveSkill(s);
+  store.skills.push(s);
   return s;
 }
 
@@ -140,13 +169,21 @@ export async function updateSkill(skillId, raw) {
   const i = store.skills.findIndex(s => s.skillId === skillId);
   if (i < 0) return null;
   const s = normalizeSkill({ ...raw, skillId });
-  store.skills[i] = s;
+  const validationError = validateSkill(s);
+  if (validationError) throw new Error(validationError);
   await saveSkill(s);
+  store.skills[i] = s;
   return s;
 }
 
 export async function deleteSkill(skillId) {
+  if (store.skills.length <= 1 && store.skills.some(s => s.skillId === skillId)) {
+    throw new Error('至少保留一个 Skill');
+  }
   const i = store.skills.findIndex(s => s.skillId === skillId);
   if (i >= 0) store.skills.splice(i, 1);
+  for (const [sessionId, boundId] of store.bindings) {
+    if (boundId === skillId) store.bindings.delete(sessionId);
+  }
   try { await unlink(skillPath(skillId)); } catch { /* 文件不存在则忽略 */ }
 }

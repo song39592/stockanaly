@@ -6,7 +6,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import {
   store, listSkills, getSkill, bindSkill, ruleContentFor,
-  addSkill, updateSkill, deleteSkill, lenientJson,
+  addSkill, updateSkill, deleteSkill, lenientJson, ensureSkillsLoaded, normalizeSkill, validateSkill,
 } from './bull-store.mjs';
 
 export const name = 'bull-http';
@@ -73,6 +73,7 @@ export function apply(ctx) {
   }
 
   async function createAgent(sessionId) {
+    await ensureSkillsLoaded();
     const selection = agentDefaultModel.currentSelection();
     const { agent } = await agents.create({
       sessionId: SessionId(sessionId),
@@ -163,16 +164,26 @@ export function apply(ctx) {
         return json(res, 200, { ok: true, skills: listSkills() });
       }
 
+      if (action === 'detail' && req.method === 'GET') {
+        const s = getSkill(url.searchParams.get('skillId'));
+        if (!s) return json(res, 404, { ok: false, error: 'skill 不存在' });
+        return json(res, 200, { ok: true, skill: s });
+      }
+
       if (action === 'create' && req.method === 'POST') {
         const body = safeJson(await readBody(req));
-        const s = await addSkill(body);
+        let s;
+        try { s = await addSkill(body); }
+        catch (e) { return json(res, e.code === 'SKILL_EXISTS' ? 409 : 400, { ok: false, error: e.message }); }
         return json(res, 200, { ok: true, skill: s });
       }
 
       if (action === 'update' && req.method === 'POST') {
         const body = safeJson(await readBody(req));
         const id = String((body && body.skillId) || '').trim();
-        const s = await updateSkill(id, body);
+        let s;
+        try { s = await updateSkill(id, body); }
+        catch (e) { return json(res, 400, { ok: false, error: e.message }); }
         if (!s) return json(res, 404, { ok: false, error: 'skill 不存在' });
         return json(res, 200, { ok: true, skill: s });
       }
@@ -180,7 +191,8 @@ export function apply(ctx) {
       if (action === 'delete' && req.method === 'POST') {
         const body = safeJson(await readBody(req));
         const id = String((body && body.skillId) || '').trim();
-        await deleteSkill(id);
+        try { await deleteSkill(id); }
+        catch (e) { return json(res, 400, { ok: false, error: e.message }); }
         return json(res, 200, { ok: true });
       }
 
@@ -189,8 +201,18 @@ export function apply(ctx) {
         const parsed = safeJson(raw);
         const list = Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);
         if (!list.length) return json(res, 400, { ok: false, error: '未解析到有效 .skill 内容（文件应为 JSON 格式；ruleContent 若为多行文本，换行需写成 \\n，或用前端 Skill 管理面板编辑保存）' });
+        const normalized = list.map(normalizeSkill);
+        const ids = normalized.map(s => s.skillId);
+        if (new Set(ids).size !== ids.length) return json(res, 409, { ok: false, error: '导入文件内存在重复 skillId' });
+        if (normalized.some(s => getSkill(s.skillId))) return json(res, 409, { ok: false, error: '导入内容包含已存在的 skillId，请先修改 ID' });
+        const invalid = normalized.map(validateSkill).find(Boolean);
+        if (invalid) return json(res, 400, { ok: false, error: invalid });
         const added = [];
-        for (const item of list) added.push(await addSkill(item));
+        try {
+          for (const item of normalized) added.push(await addSkill(item));
+        } catch (e) {
+          return json(res, e.code === 'SKILL_EXISTS' ? 409 : 400, { ok: false, error: e.message });
+        }
         return json(res, 200, { ok: true, skills: added });
       }
 
@@ -198,7 +220,7 @@ export function apply(ctx) {
         const skillId = url.searchParams.get('skillId');
         const s = getSkill(skillId);
         if (!s) return json(res, 404, { ok: false, error: 'skill 不存在' });
-        const payload = JSON.stringify({ type: 'stock-pool-skill', version: 1, ...s }, null, 2);
+        const payload = JSON.stringify(s, null, 2);
         const fname = `${String(s.skillId).replace(/[^a-zA-Z0-9_-]/g, '_')}.skill`;
         res.writeHead(200, {
           'Content-Type': 'application/octet-stream',

@@ -48,10 +48,13 @@ frontend 用 marked 渲染
 
 ## 五、Skill 规则（多角色）
 
-- 位置：`agent_dsh/skills_library/*.skill`（JSON 文件，格式见 `examples/demo-short.skill`）。
+Skill v2 增加 `strategyType`、`parameters` 和 `riskRules`。编辑器通过详情接口读取完整正文；重复 ID 返回 409，导入会在写盘前整体校验，并且至少保留一个 Skill。启动时自动生成当前目录对应的 `cordis.runtime.yml`，项目可移动目录。
+
+- 位置：`agent_dsh/skills_library/*.skill`（JSON 文件，自带 `general.skill` 即最简格式范例）。
 - 在聊天窗顶部下拉切换 Skill（绑定到当前会话，切换后下一轮生效）。
 - 聊天窗「⚙」打开 Skill 管理：新建 / 编辑 / 删除 / 导入 .skill / 导出 .skill，全部通过 dsh `/api/bull/skill/*` 接口。
-- 内置默认「通用分析」；示例「短线猎手」见 `agent_dsh/skills_library/short-trader-01.skill`。
+- 内置三套角色：默认「通用分析」（`general.skill`）、「短线猎手」（`short-trader-01.skill`）、
+  「巴菲特价值投资」（`bft.skill`）。
 - Skill 文件在 dsh 重启时自动加载；运行中也可在 UI 里导入。
 
 ## 六、自定义插件（位于 `agent_dsh/plugins/`）
