@@ -37,6 +37,12 @@ venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
 GET  /health              → {"ok":true,"llm_ready":true/false}
 POST /api/stock/research  → 请求体 {"code":"300209","name":"行云科技"}
                             返回 markdown + evidence + coverage + data_as_of
+GET  /api/market/global   → 外围环境（美股 / 亚太 / 港股 / 大宗商品 / 费城半导体）
+GET  /api/market/capital  → 大盘资金（主力净流向 / 特大单 / 两市成交 / 涨跌家数）
+GET  /api/market/sectors  → 板块β（行业与概念资金流 Top10、申万一级行业）
+GET  /api/market/limit-up → 连板梯队（连板结构 + 晋级率，date 可选）
+GET  /api/market/big-loss → 大面股（炸板池 + 跌停池，date 可选）
+                            以上盘面接口均支持 ?force=1 跳过进程内缓存
 ```
 
 测试：
@@ -77,3 +83,15 @@ curl -X POST "http://127.0.0.1:8000/api/stock/research" \
 
 - 数据源均为公开接口，反爬/改版可能导致个别来源失败，已做优雅降级，不会导致整体报错。
 - 「东方财富股吧高赞帖子」为可选原型逆向，尚未接入（akshare 1.18 已移除股吧函数），后续可单独扩展。
+
+## 八、盘面及板块分析（`market_service.py`）
+
+前端「盘面及板块分析」页（`frontend/market-sector.html`）由 `GET /api/market/*` 五个接口驱动：
+外围环境、大盘资金、板块β、连板梯队、大面股。
+
+- 数据源：新浪行情（外围指数 / 大宗商品）、新浪指数（两市成交额）、乐咕乐股（涨跌家数）、
+  同花顺（行业 / 概念 / 个股资金流、大单追踪）、申万（一级行业实时行情）、东方财富（大盘资金流、涨停 / 炸板 / 跌停池）。
+- 降级策略：任一来源失败只写入响应的 `errors` 字段，其余模块照常返回；
+  大盘资金在东财接口不可用时自动切换为同花顺汇总口径，并在 `main_flow.source` 中说明。
+- 缓存：进程内 60–120 秒，`?force=1` 强制刷新；`limit-up` / `big-loss` 的 `date` 参数可指定 `YYYYMMDD`，
+  留空时自动回溯到最近一个有涨停数据的交易日。
