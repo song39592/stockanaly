@@ -14,6 +14,10 @@
 - **红色小牛问答 Agent**：右下角悬浮 🐂 聊天窗，基于 dsh（deepseek-harness）运行，
   读取页面股票池快照、按当前 Skill 角色规则回答，可链式调用个股调研工具；
   支持多套 Skill 角色（通用分析 / 短线猎手 / 巴菲特价值投资），完整 Agent 轨迹可在 dsh webui 回看调试。
+- **盘面及板块分析**（`frontend/market-sector.html`，从股票池页顶部「📊 盘面及板块分析」按钮进入）：
+  ① 外围环境（美股 / 亚太韩日 / 港股 / 大宗商品 / 费城半导体）、② 大盘资金（主力净流向 / 特大单方向 / 两市成交 / 涨跌家数）、
+  ③ 板块β（行业与概念资金流 Top10 + 申万一级行业涨跌）、④ 连板梯队（连板结构 + 晋级率）、⑤ 大面股（炸板 / 跌停）；
+  顶部可选择交易日，④⑤ 按所选交易日回溯（①②③ 为实时行情）；对应后端 `GET /api/market/*`，多源公开接口 + 单源失败自动降级 + 进程内缓存。
 
 ## 系统架构
 
@@ -23,6 +27,7 @@ frontend/index.html（原生 HTML/JS 单页，浏览器本地 localStorage 存�
    ├──────────────► backend_fastapi（FastAPI，:8000）
    │                  GET  /health
    │                  POST /api/stock/research  → 采集 + LLM → markdown
+   │                  GET  /api/market/*        → 盘面及板块（外围/资金/板块β/连板/大面）
    │
    └──────────────► agent_dsh（dsh 服务，Node，:3080，webui 同端口）
                       自定义 Tool：getStockPoolSnapshot（读快照）
@@ -48,7 +53,7 @@ frontend/index.html（原生 HTML/JS 单页，浏览器本地 localStorage 存�
 ```
 stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
 ├── 启动系统.bat                  # 一键启动：后端 + dsh + 打开前端
-├── frontend/index.html           # 前端页面（唯一文件）
+├── frontend/                     # index.html（股票池）/ market-sector.html（盘面及板块分析）/ mentor-lab.html（大佬策略实验室）
 ├── backend_fastapi/              # FastAPI 后端（main.py / collectors.py / config.py）
 │   ├── start_backend.bat         # 单独启动后端
 │   └── .env.example              # 密钥模板（复制为 .env）
@@ -83,7 +88,7 @@ stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
 
 | 服务 | 端口 | 主要接口 |
 |---|---|---|
-| backend_fastapi | 8000 | `GET /health`；`POST /api/stock/research`（`{"code","name"}` → markdown） |
+| backend_fastapi | 8000 | `GET /health`；`POST /api/stock/research`（`{"code","name"}` → markdown）；`GET /api/market/*`（盘面及板块五类数据） |
 | agent_dsh（dsh webui + REST） | 3080 | `GET /`（webui）；`/api/bull/session/*`、`/api/bull/skill/*`（会话/快照/对话/Skill CRUD） |
 
 ## 内置 Skill 角色

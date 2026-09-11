@@ -452,6 +452,7 @@
     <button class="btn" id="btnExport"><span class="ico">⇩</span> 导出备份</button>
     <button class="btn" id="btnRestore"><span class="ico">⇧</span> 恢复数据</button>
     <button class="btn" id="btnManage"><span class="ico">⚙</span> 数据管理</button>
+    <button class="btn" id="btnMarketSector"><span class="ico">📊</span> 盘面及板块分析</button>
     <button class="btn" id="btnMentorLab"><span class="ico">🧠</span> 大佬策略实验室</button>
     <button class="btn" id="btnHelp"><span class="ico">?</span> 使用说明</button>
     <button class="btn" id="btnTheme"><span class="ico" id="themeIco">🌙</span><span id="themeLbl">浅色</span></button>
@@ -1239,6 +1240,7 @@ document.getElementById('btnClearAll').addEventListener('click', () => {
  * ===================================================================== */
 
 document.getElementById('btnHelp').addEventListener('click', () => openModal('helpModal'));
+document.getElementById('btnMarketSector').addEventListener('click', () => window.open('market-sector.html', '_blank'));
 document.getElementById('btnMentorLab').addEventListener('click', () => window.open('mentor-lab.html', '_blank'));
 document.getElementById('btnHelpClose').addEventListener('click', () => closeModal('helpModal'));
 document.querySelectorAll('.modal-mask').forEach(m => {
