@@ -3,6 +3,16 @@
 .env
 .env.*
 !.env.example
+# 其他常见密钥文件：证书 / 私钥 / 凭据
+*.key
+*.pem
+*.p12
+*.pfx
+secrets.*
+credentials.*
+*apikey*
+*api_key*
+!.env.example
 
 # ==================== Python ====================
 __pycache__/

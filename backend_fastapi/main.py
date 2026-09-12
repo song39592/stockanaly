@@ -321,8 +321,8 @@ async def mentor_material_upload(mentor_id: str = Form(...), file: UploadFile = 
 
 @app.post("/api/mentor/material/analyze")
 def mentor_material_analyze(req: MaterialAnalyzeRequest):
-    if not config.llm_ready():
-        raise HTTPException(status_code=503, detail="服务端未配置 LLM")
+    if not config.llm_ready() or config.llm_config_problem():
+        raise HTTPException(status_code=503, detail=config.llm_config_problem() or "服务端未配置 LLM")
     material = mentor_store.get_material(req.material_id)
     if not material:
         raise HTTPException(status_code=404, detail="资料不存在")
@@ -370,8 +370,8 @@ def mentor_extraction_review(req: ExtractionReviewRequest):
 
 @app.post("/api/mentor/daily-view/analyze")
 def mentor_daily_view_analyze(req: DailyViewAnalyzeRequest):
-    if not config.llm_ready():
-        raise HTTPException(status_code=503, detail="服务端未配置 LLM")
+    if not config.llm_ready() or config.llm_config_problem():
+        raise HTTPException(status_code=503, detail=config.llm_config_problem() or "服务端未配置 LLM")
     try:
         raw = call_llm(DAILY_VIEW_PROMPT.format(date=req.view_date, as_of=req.data_as_of, text=req.raw_text))
         structured = mentor_store.parse_json_output(raw)
@@ -388,8 +388,8 @@ async def mentor_daily_view_upload(
     mentor_id: str = Form(...), view_date: str = Form(...), data_as_of: str = Form(...),
     file: UploadFile = File(...),
 ):
-    if not config.llm_ready():
-        raise HTTPException(status_code=503, detail="服务端未配置 LLM")
+    if not config.llm_ready() or config.llm_config_problem():
+        raise HTTPException(status_code=503, detail=config.llm_config_problem() or "服务端未配置 LLM")
     try:
         content = await file.read(mentor_store.MAX_FILE_BYTES + 1)
         parsed = mentor_store.parse_material(file.filename or "unnamed", content)
@@ -418,8 +418,8 @@ def mentor_daily_view_review(req: DailyViewReviewRequest):
 
 @app.post("/api/mentor/skill/generate")
 def mentor_skill_generate(req: MentorSkillRequest):
-    if not config.llm_ready():
-        raise HTTPException(status_code=503, detail="服务端未配置 LLM")
+    if not config.llm_ready() or config.llm_config_problem():
+        raise HTTPException(status_code=503, detail=config.llm_config_problem() or "服务端未配置 LLM")
     knowledge = mentor_store.approved_knowledge(req.mentor_id)
     views = mentor_store.approved_views(req.mentor_id)
     if not knowledge and not views:
@@ -482,13 +482,16 @@ def mentor_evaluation_review(req: EvaluationReviewRequest):
 
 @app.get("/health")
 def health():
+    """健康检查：llm_ready 表示 LLM 真正可用（占位符 / 缺项都算未就绪），llm_problem 给出原因。"""
+    problem = config.llm_config_problem()
     return {
         "ok": True,
         "service": "stock-research",
         "api_version": 3,
         "mentor_lab": True,
         "market_board": True,
-        "llm_ready": config.llm_ready(),
+        "llm_ready": problem is None,
+        "llm_problem": problem,
     }
 
 
@@ -539,8 +542,8 @@ def market_big_loss(date: str = "", force: bool = False):
 def research_endpoint(req: ResearchRequest):
     code = (req.code or "").strip()
     name = (req.name or "").strip()
-    if not config.llm_ready():
-        raise HTTPException(status_code=503, detail="服务端未配置 LLM")
+    if not config.llm_ready() or config.llm_config_problem():
+        raise HTTPException(status_code=503, detail=config.llm_config_problem() or "服务端未配置 LLM")
 
     # 缓存
     with _cache_lock:
