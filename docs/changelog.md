@@ -54,6 +54,10 @@
   后端各 LLM 接口在密钥缺失时返回 503 + 明确文案（此前是难以定位的 `latin-1` 编码错误）。
 - **`.gitignore` 补充密钥类文件**：新增 `*.key` / `*.pem` / `*.p12` / `*.pfx` / `secrets.*` / `credentials.*` /
   `*apikey*` / `*api_key*`；`.env`、`.env.*` 保持忽略，`.env.example` 模板仍可提交。
+- **LLM 报错附带上游原始说明**：`_llm_error_detail()` 解析上游 `error.message` 并追加在 401 / 402 / 429 提示之后，
+  可直接判断是哪家平台、什么原因（例如把腾讯云 TokenHub 的 Key 配到混元域名时，会明确提示走错平台并给出控制台地址）。
+- **文档补充多平台配置对照**：README 新增 DeepSeek 官方 / 腾讯云 TokenHub（广州 · 新加坡）/ 腾讯混元的
+  `LLM_BASE_URL` 与 `LLM_MODEL` 对照表，并注明 BASE_URL、KEY、MODEL 必须来自同一平台，TokenHub 还区分地域。
 
 ## [v0.2.0] - 2026-09-02
 

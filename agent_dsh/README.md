@@ -27,6 +27,8 @@ frontend 用 marked 渲染
 - Node.js 22+
 - 已执行 `cd D:\ai\agent_dsh && npm install`（安装 `@deepseek-ai/dsh`，走 npmmirror 镜像）
 - `D:\ai\agent_dsh\.env` 已填 `DEEPSEEK_API_KEY`（凭据，勿提交；模板见 `.env.example`；baseURL 默认 `https://api.deepseek.com`）
+  > 这是**红色小牛专用**的密钥。FastAPI 后端（个股 AI 调研 / 盘面分析 / 策略实验室）读的是另一套：
+  > `backend_fastapi/.env` 中的 `LLM_API_KEY`，两处需分别配置，互不影响。
 
 ## 三、启动
 
