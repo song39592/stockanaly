@@ -84,6 +84,44 @@ stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
 
 > 启动脚本与 `cordis.patch.yml` 中硬编码了 `D:\ai` 绝对路径，若移动项目目录需同步修改这些文件。
 
+## 🔑 API Key 配置位置
+
+项目有**两套互相独立**的 LLM 配置，改一处不影响另一处（这是最常踩的坑）：
+
+| 用途 | 配置文件（相对项目根目录） | 键名 | 模板 |
+|---|---|---|---|
+| 个股 AI 调研 · 盘面及板块分析 · 大佬策略实验室（FastAPI 后端 :8000） | `backend_fastapi/.env` | `LLM_API_KEY`（另需 `LLM_BASE_URL`、`LLM_MODEL`） | `backend_fastapi/.env.example` |
+| 红色小牛问答 Agent（dsh 服务 :3080） | `agent_dsh/.env` | `DEEPSEEK_API_KEY` | `agent_dsh/.env.example` |
+
+本机绝对路径：
+
+```
+C:\Users\Admin\Desktop\stockanaly-main\backend_fastapi\.env   →  LLM_API_KEY
+C:\Users\Admin\Desktop\stockanaly-main\agent_dsh\.env         →  DEEPSEEK_API_KEY
+```
+
+要点：
+
+- 后端只要**兼容 OpenAI 协议**的平台都能接入：改 `LLM_BASE_URL` + `LLM_API_KEY` + `LLM_MODEL` 三项即可。
+  **三项必须来自同一平台**，混用会返回 401（典型坑：Key 取自腾讯云 TokenHub，地址却填成混元老平台）。
+- 两边填的 Key 可以不同；**只填一边时只有对应功能可用**（「个股调研报错、红色小牛正常」通常就是后端这处没填）。
+- `.env` 已被 `.gitignore` 忽略；**`.env.example` 会被提交，只能放占位符，切勿写入真实密钥**。
+- 修改 `.env` 后必须**重启对应服务**才生效（后端：关掉后端窗口后重新运行 `启动系统.bat`）。
+- 自查：`http://127.0.0.1:8000/health` 的 `llm_ready` 为 `true` 且 `llm_problem` 为空；
+  调用报错时错误信息会附带上游原始说明，便于判断是哪家平台的 Key 有问题。
+- 常用平台配置对照：
+
+  | 平台 | `LLM_BASE_URL` | `LLM_MODEL` 示例 |
+  |---|---|---|
+  | DeepSeek 官方 | `https://api.deepseek.com/v1` | `deepseek-chat` |
+  | 腾讯云 TokenHub（广州） | `https://tokenhub.tencentmaas.com/v1` | `deepseek-v4-flash` / `deepseek-v4-pro` / `hy3` / `glm-5.3` / `kimi-k3` |
+  | 腾讯云 TokenHub（新加坡） | `https://tokenhub-intl.tencentmaas.com/v1` | 同上（需为对应地域开通） |
+  | 腾讯混元（老平台） | `https://api.hunyuan.cloud.tencent.com/v1` | `hunyuan-turbos-latest` |
+
+  > TokenHub 与混元是两个平台，**Key 不可通用**；TokenHub 还分地域，广州 Key 调新加坡域名会 401。
+  > 红色小牛（dsh）走 provider 机制，默认固定 DeepSeek 官方，不支持任意 OpenAI 兼容地址。
+- Key 申请：DeepSeek https://platform.deepseek.com/api_keys ｜ 腾讯云 TokenHub https://console.cloud.tencent.com/tokenhub/apikey
+
 ## 端口与接口速览
 
 | 服务 | 端口 | 主要接口 |

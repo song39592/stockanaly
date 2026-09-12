@@ -10,6 +10,10 @@
 
 ## 二、配置密钥
 
+> 注意：这里（`backend_fastapi/.env`）是**后端专用**的一套配置，键名 `LLM_API_KEY`。
+> 「红色小牛」用的是另一套（`agent_dsh/.env` 的 `DEEPSEEK_API_KEY`），两者互不影响——
+> 只填了 dsh 那套时，本后端会因读到占位符而调用失败（`GET /health` 的 `llm_problem` 会说明原因）。
+
 1. 复制 `.env.example` 为 `.env`；
 2. 填写真实值（密钥只存本机，不要提交）：
    ```
