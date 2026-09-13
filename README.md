@@ -17,7 +17,20 @@
 - **盘面及板块分析**（`frontend/market-sector.html`，从股票池页顶部「📊 盘面及板块分析」按钮进入）：
   ① 外围环境（美股 / 亚太韩日 / 港股 / 大宗商品 / 费城半导体）、② 大盘资金（主力净流向 / 特大单方向 / 两市成交 / 涨跌家数）、
   ③ 板块β（行业与概念资金流 Top10 + 申万一级行业涨跌）、④ 连板梯队（连板结构 + 晋级率）、⑤ 大面股（炸板 / 跌停）；
-  顶部可选择交易日，④⑤ 按所选交易日回溯（①②③ 为实时行情）；对应后端 `GET /api/market/*`，多源公开接口 + 单源失败自动降级 + 进程内缓存。
+  顶部可选择交易日：①③ 支持历史交易日（部分口径有历史源）、④⑤ 按所选交易日回溯、② 暂无历史源恒为实时快照；
+  对应后端 `GET /api/market/*`，多源公开接口 + 单源失败自动降级 + 进程内缓存。
+- **股票估值计算**（`frontend/valuation.html`，从股票池页顶部「📈 股票估值计算」按钮进入）：
+  输入 6 位代码即自动抓取股价 / 总股本 / 期初净利润（TTM 归母优先，缺失时退回年报扣非 / 年报归母），
+  输入后即时显示股票名称与股价用于确认（`GET /api/stock/quote`）；
+  用两段法（前 5 年净利润贴现 + 永续增长，贴现率 10%）给出乐观 / 中性 / 悲观三档每股价值、
+  股价/价值（低估程度）、预测 N 年价与收益率，并逐步展示计算过程；对应 `POST /api/stock/valuation`。
+  机构预测第 N 年净利润为可选：提供时三档为乐观 ×1.5 / 中性 ×1 / 悲观固定 5%，未提供则兜底 25% / 10% / 5%。
+- **SCR 选股（筹码体系）**（`frontend/chip-scr.html`，从股票池页「筹码体系 · SCR 选股」进入）：
+  导入行情软件导出的多期「临时条件股YYYYMMDD.xls」（文件名日期自动解析、可在页面手改），
+  跨期合并做周级三档分类：磨主峰（连续 N 期全勤 ∩ 流通市值 100–800 亿 ∩ PE>0）/ 向下破位离榜 / 启动型离榜；
+  阈值可调，点「🔄 刷新计算」手动触发；计算需**最近 5 周**数据（按周归组，周中执行时最新一期为上一周，
+  缺失任一期的数据会直接报错并列出缺口，不做静默跳过）；对应 `POST /api/chip/scr/analyze` 等接口，
+  原始文件与计算结果分别存放于 `backend_fastapi/chip_data/raw` 与 `chip_data/processed`。
 
 ## 系统架构
 
@@ -53,8 +66,14 @@ frontend/index.html（原生 HTML/JS 单页，浏览器本地 localStorage 存�
 ```
 stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
 ├── 启动系统.bat                  # 一键启动：后端 + dsh + 打开前端
-├── frontend/                     # index.html（股票池）/ market-sector.html（盘面及板块分析）/ mentor-lab.html（大佬策略实验室）
-├── backend_fastapi/              # FastAPI 后端（main.py / collectors.py / config.py）
+├── frontend/                     # index.html（股票池）/ market-sector.html（盘面及板块分析）/ mentor-lab.html（大佬策略实验室）/ valuation.html（股票估值计算）/ chip-scr.html（SCR 选股）
+├── backend_fastapi/              # FastAPI 后端（业务模块化：*_routes.py 管 HTTP、*_service.py 管逻辑）
+│   ├── main.py                   # 应用入口：容错挂载各模块路由 + /health（单模块故障不影响其他模块）
+│   ├── chip_routes.py            # 筹码体系 · SCR 选股接口
+│   ├── market_routes.py          # 盘面及板块分析接口
+│   ├── mentor_routes.py          # 大佬策略实验室接口
+│   ├── stock_routes.py           # 个股调研与股票估值接口
+│   ├── llm_client.py             # LLM 调用与错误翻译（各模块共用）
 │   ├── start_backend.bat         # 单独启动后端
 │   └── .env.example              # 密钥模板（复制为 .env）
 ├── agent_dsh/                    # dsh Agent（plugins/ + skills_library/）
@@ -126,7 +145,7 @@ C:\Users\Admin\Desktop\stockanaly-main\agent_dsh\.env         →  DEEPSEEK_API_
 
 | 服务 | 端口 | 主要接口 |
 |---|---|---|
-| backend_fastapi | 8000 | `GET /health`；`POST /api/stock/research`（`{"code","name"}` → markdown）；`GET /api/market/*`（盘面及板块五类数据） |
+| backend_fastapi | 8000 | `GET /health`；`POST /api/stock/research`（`{"code","name"}` → markdown）；`POST /api/stock/valuation`（估值计算）；`GET /api/market/*`（盘面及板块五类数据） |
 | agent_dsh（dsh webui + REST） | 3080 | `GET /`（webui）；`/api/bull/session/*`、`/api/bull/skill/*`（会话/快照/对话/Skill CRUD） |
 
 ## 内置 Skill 角色

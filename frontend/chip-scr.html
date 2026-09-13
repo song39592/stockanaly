@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SCR 选股 · 筹码体系</title>
+<style>
+:root{color-scheme:dark;--bg:#0b0b0f;--card:#17171d;--surface:#212129;--line:rgba(255,255,255,.1);--text:#f0f0ef;--sub:#aaa9a4;--muted:#777671;--blue:#3987e5;--red:#ef5350;--green:#3fb950;--orange:#e99a35}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 system-ui,"Microsoft YaHei",sans-serif}
+.wrap{max-width:1180px;margin:auto;padding:22px}
+.top{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+.top h1{font-size:21px;margin:0 auto 0 0}
+.top .sub{color:var(--muted);font-size:12px;width:100%}
+.btn{border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:8px;padding:8px 12px;cursor:pointer;font:inherit}
+.btn:hover{border-color:#ffffff44}
+.btn.primary{background:var(--blue);border-color:var(--blue);color:#fff}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.mini{padding:3px 9px;font-size:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 17px;margin-bottom:14px}
+.card-h{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+.card-h h2{font-size:15px;margin:0 auto 0 0}
+.card-b{min-height:40px}
+.tag{display:inline-block;border-radius:999px;padding:2px 9px;font-size:11px;background:#ffffff12;color:var(--sub)}
+.tag.ok{color:var(--green)}.tag.warn{color:var(--orange)}.tag.bad{color:var(--red)}
+.empty{color:var(--muted);padding:16px;text-align:center;font-size:13px}
+.hint-line{color:var(--muted);font-size:12px;margin-bottom:10px;line-height:1.8}
+code{background:#ffffff10;padding:1px 5px;border-radius:4px;font-family:ui-monospace,Consolas,monospace;font-size:12px}
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{text-align:left;color:var(--muted);font-weight:500;padding:7px 9px;border-bottom:1px solid var(--line);white-space:nowrap}
+.tbl td{padding:6px 9px;border-bottom:1px dashed rgba(255,255,255,.06);white-space:nowrap}
+.tbl .num{font-family:ui-monospace,Consolas,monospace;text-align:right}
+.tbl tr:hover td{background:#ffffff06}
+input[type=date],input[type=number]{border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:6px;padding:4px 7px;font:inherit;font-size:12px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:4px}
+.kpi{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:11px 12px}
+.kpi .k-l{font-size:12px;color:var(--muted)}
+.kpi .k-v{font-size:19px;font-family:ui-monospace,Consolas,monospace;margin-top:3px}
+.kpi .k-s{font-size:11px;color:var(--muted);margin-top:2px}
+.tier{margin-top:16px}
+.tier-h{display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;cursor:pointer;user-select:none}
+.tier-h:hover h3{color:var(--blue)}
+.tier-h h3{font-size:14px;margin:0;transition:color .15s}
+.tier-h .desc{color:var(--muted);font-size:12px}
+.tier-h .caret{color:var(--muted);font-size:11px;display:inline-block;transition:transform .15s}
+.tier.collapsed .tier-h .caret{transform:rotate(-90deg)}
+.tbl th.sortable{cursor:pointer;user-select:none}
+.tbl th.sortable:hover{color:var(--text)}
+.tbl th .arrow{opacity:.35;font-size:10px;margin-left:4px}
+.tbl th.active{color:var(--text)}
+.tbl th.active .arrow{opacity:1;color:var(--blue)}
+.params{display:none;margin-bottom:14px;padding-bottom:14px;border-bottom:1px dashed var(--line);grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px 14px}
+.params.show{display:grid}
+.params label{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--sub)}
+.params .param-tip{grid-column:1/-1;font-size:12px;color:var(--muted);line-height:1.8}
+.risk-line{margin:0 0 9px;padding:8px 12px;border-radius:8px;background:#e99a3517;color:#e7c08a;font-size:12px;line-height:1.8}
+.risk-line b{color:#f0b866}
+.err{margin-top:12px;padding:8px 11px;border-radius:8px;background:#ef535017;color:#f0a5a3;font-size:12px}
+.note{margin-top:12px;padding:8px 11px;border-radius:8px;background:#e99a3517;color:#e7c08a;font-size:12px;line-height:1.8}
+.up{color:var(--red)}.down{color:var(--green)}
+/* 使用说明悬浮窗 */
+.modal-mask{display:none;position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:100;padding:26px 18px;overflow:auto}
+.modal-mask.show{display:flex;align-items:flex-start;justify-content:center}
+.modal{background:var(--card);border:1px solid var(--line);border-radius:14px;width:100%;max-width:800px;margin:auto;box-shadow:0 18px 48px rgba(0,0,0,.45)}
+.modal-h{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--line)}
+.modal-h h2{font-size:16px;margin:0 auto 0 0}
+.modal-b{padding:16px 20px;font-size:13.5px;line-height:1.9;color:var(--sub)}
+.modal-b h3{font-size:14px;margin:18px 0 7px;color:var(--text)}
+.modal-b h3:first-child{margin-top:0}
+.modal-b ul{margin:6px 0;padding-left:20px}
+.modal-b li{margin:4px 0}
+.modal-b b{color:var(--text)}
+.modal-b .hi{color:#e7c08a}
+.modal-b .lead{color:var(--text)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>🎯 SCR 选股</h1>
+    <button class="btn" id="btnHelp">? 使用说明</button>
+    <button class="btn" onclick="location.href='index.html'">← 返回股票池</button>
+    <div class="sub">筹码体系 · 多期 SCR 数据合并做周级三档分类（磨主峰 / 向下破位离榜 / 启动型离榜）｜原始文件与计算结果分别存放于 <code>chip_data/raw</code> 与 <code>chip_data/processed</code></div>
+  </header>
+
+  <!-- ① 导入数据 -->
+  <section class="card">
+    <div class="card-h">
+      <h2>① 导入数据</h2>
+      <span class="tag" id="stFiles">—</span>
+      <button class="btn primary" id="btnPick">选择文件导入</button>
+      <input type="file" id="fileInput" multiple accept=".xls,.xlsx,.csv,.txt" hidden>
+    </div>
+    <div class="card-b">
+      <div class="hint-line">
+        文件名中的 8 位日期会自动解析为默认日期（如 <code>临时条件股20260912.xls</code> → 2026-09-12），
+        解析结果可在下方表格中手动修改；支持一次选择多个文件。<br>
+        计算需要<b>最近 5 周</b>的数据（按周归组，一周内多份只取其一）：<b>周中执行时最新一期为上一周</b>，
+        周末执行时为本周；缺少任意一期会直接报错并列出缺口，窗口之外的更早文件不参与计算。
+      </div>
+      <div id="fileList"><div class="empty">加载中…</div></div>
+    </div>
+  </section>
+
+  <!-- ② 分析结果 -->
+  <section class="card">
+    <div class="card-h">
+      <h2>② 分析结果</h2>
+      <span class="tag" id="stResult">未计算</span>
+      <button class="btn" id="btnParams">展开阈值</button>
+      <button class="btn primary" id="btnRefresh">🔄 刷新计算</button>
+    </div>
+    <div class="card-b">
+      <div class="params" id="params">
+        <label>连续全勤期数<input id="pFullWeeks" type="number" min="2" max="20" value="5"></label>
+        <label>最少在榜期数（低于则过滤）<input id="pMinWeeks" type="number" min="1" max="20" value="2"></label>
+        <label>流通市值下限（亿）<input id="pMinMarket" type="number" step="10" value="100"></label>
+        <label>流通市值上限（亿）<input id="pMaxMarket" type="number" step="10" value="800"></label>
+        <label>第三档启动阈值（%）<input id="pThreshold" type="number" step="1" value="10"></label>
+        <div class="param-tip">三档均按上面的流通市值区间过滤（PE &gt; 0 仅第一档要求）；修改后点「🔄 刷新计算」生效。</div>
+      </div>
+      <div id="bodyResult"><div class="empty">导入数据后点击右上角「🔄 刷新计算」生成三档分类结果</div></div>
+      <div class="note" id="methodNote"></div>
+    </div>
+  </section>
+</div>
+
+<!-- 使用说明悬浮窗 -->
+<div class="modal-mask" id="helpModal">
+  <div class="modal">
+    <div class="modal-h">
+      <h2>使用说明 · SCR 选股（筹码体系）</h2>
+      <button class="btn mini" id="helpClose">关闭</button>
+    </div>
+    <div class="modal-b">
+      <h3>一、数据来源</h3>
+      <ul>
+        <li>通达信 → 用指标 <b>SCR</b> 做条件选股（<b>SCR 后 100</b>）→ 导出「<b>临时条件股YYYYMMDD.xls</b>」→ 按周导入本系统。</li>
+        <li>每周一份、需覆盖<b>最近 5 周</b>：周中（周一~周五）执行时最新一期为<b>上一周</b>，周末执行为本周；缺少任一期会直接报错并列出缺口。</li>
+        <li>导出文件多为 GBK 文本表格（扩展名虽是 .xls），本系统已兼容 GBK 文本 / Excel / CSV 三种格式。</li>
+      </ul>
+
+      <h3>二、选股逻辑</h3>
+      <p class="lead">SCR 后 100 表示<b>筹码集中度极低</b>：换手低迷、流动性匮乏、股价窄幅小幅波动。
+        该形态通常说明筹码已高度集中在少数账户手中，<b>高控盘</b>特征明显，多处于<b>吸筹磨底期</b>——
+        主力在低位缓慢收集筹码、尚未拉动股价。</p>
+
+      <h3>三、需人工排除的情形（形态相似，性质相反）</h3>
+      <ul>
+        <li><b class="hi">高位平台出货</b>：股价已在相对高位横盘派发，同样表现为低波动，但方向与吸筹相反。</li>
+        <li><b class="hi">大规模回购</b>：回购注销或库存股导致筹码数据失真，并非主力主动吸筹。</li>
+        <li><b class="hi">指数配置</b>：因指数成分股调整而被动持有，缺少主动控盘意图。</li>
+      </ul>
+
+      <h3>四、三档含义</h3>
+      <ul>
+        <li><b>第一档 · 磨主峰</b>：最新一期在榜 ∩ 连续 N 期全勤 ∩ 流通市值区间内 ∩ PE &gt; 0。<br>
+          持续留在低集中度池中，最贴合「吸筹磨底」特征。</li>
+        <li><b>第二档 · 向下破位离榜</b>：曾入选但最新一期已离榜，区间涨幅未达启动阈值。<br>
+          该形态存在<b>两个相反的演化方向，本系统公式目前无法识别</b>：<br>
+          · <b>向上</b>——筹码最高峰锁定、价格企稳，为<b>启动前的深度洗盘</b>；第一预期为回拉主峰价，
+          若后续继续强势突破，则大概率进入<b>主升</b>；<br>
+          · <b>向下</b>——下方筹码持续堆积、支撑失守，则为<b>真正的破位下行</b>。<br>
+          <b class="hi">⚠️ 风险提示：下方筹码堆积时千万不能过早介入。</b>
+          须等价格企稳、回拉主峰价确认后再评估；形态相似但方向相反，务必结合筹码结构与量能人工判断。</li>
+        <li><b>第三档 · 启动型离榜</b>：离榜且区间涨幅达到阈值（默认 30 日涨幅 ≥ 10%）。<br>
+          疑似吸筹完成并启动，可跟踪后续回踩机会。</li>
+      </ul>
+
+      <h3>五、使用建议</h3>
+      <ul>
+        <li>本页输出的是<b>形态候选池</b>，不等于买入信号，请结合基本面、行业景气与大盘环境二次判断。</li>
+        <li>阈值（连续全勤期数 / 最少在榜期数 / 流通市值区间 / 启动阈值）可在「展开阈值」中调整，改完点「刷新计算」生效。</li>
+        <li>三档表格支持<b>点档位标题折叠</b>、<b>点表头排序</b>，便于按市值 / PE / 涨幅快速筛查。</li>
+        <li>本页结果由公开数据与固定规则推演，仅供研究参考，不构成任何投资建议。</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const API = 'http://127.0.0.1:8000';
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = (v, d = 2) => (v == null || v === '' ? '—' : Number(v).toFixed(d));
+const fmtPct = v => (v == null ? '—' : (v > 0 ? '+' : '') + Number(v).toFixed(2) + '%');
+
+let files = [];
+let lastData = null;                    // 最近一次成功计算的结果（排序 / 折叠时复用）
+const tierState = {                     // 每档的折叠与排序状态
+  tier1: { collapsed: false, sortKey: '', sortDir: -1 },
+  tier2: { collapsed: false, sortKey: '', sortDir: -1 },
+  tier3: { collapsed: false, sortKey: '', sortDir: -1 },
+};
+
+// 表格列定义：数值列首次点击按降序，文本列首次按升序
+const TIER_COLUMNS = [
+  { key: '', label: '#', cls: 'num', sortable: false },
+  { key: 'code', label: '代码', sortable: true, type: 'str' },
+  { key: 'name', label: '名称', sortable: true, type: 'str' },
+  { key: 'industry', label: '细分行业', sortable: true, type: 'str' },
+  { key: 'market', label: '流通市值(亿)', cls: 'num', sortable: true, type: 'num' },
+  { key: 'pe', label: 'PE(动)', cls: 'num', sortable: true, type: 'num' },
+  { key: 'price', label: '现价', cls: 'num', sortable: true, type: 'num' },
+  { key: 'chg30', label: '30日涨幅', cls: 'num', sortable: true, type: 'num' },
+  { key: 'weeks_on', label: '在榜期数', cls: 'num', sortable: true, type: 'num' },
+  { key: 'last_week', label: '最后在榜', sortable: true, type: 'str' },
+];
+
+function setStatus(el, text, kind) {
+  el.textContent = text;
+  el.className = 'tag' + (kind ? ' ' + kind : '');
+}
+
+async function api(path, options) {
+  const res = await fetch(API + path, options);
+  let j = {};
+  try { j = await res.json(); } catch (e) { /* 后端无响应体 */ }
+  if (!res.ok || j.ok === false) throw new Error(j.detail || j.error || ('HTTP ' + res.status));
+  return j;
+}
+
+/* ---------------- 文件列表 ---------------- */
+function renderFiles() {
+  if (!files.length) {
+    $('fileList').innerHTML = '<div class="empty">尚未导入数据，请点击右上角「选择文件导入」</div>';
+    setStatus($('stFiles'), '0 个文件');
+    return;
+  }
+  const rows = files.map(f => `<tr>
+      <td>${esc(f.file)}</td>
+      <td><input type="date" value="${esc(f.date)}" data-date="${esc(f.file)}"></td>
+      <td>${f.manual ? '<span class="tag warn">已手动修改</span>' : '<span class="tag">文件名解析</span>'}</td>
+      <td class="num">${fmt(f.size / 1024, 1)} KB</td>
+      <td class="num">${esc(f.mtime || '')}</td>
+      <td><button class="btn mini" data-del="${esc(f.file)}">删除</button></td>
+    </tr>`).join('');
+  $('fileList').innerHTML = `
+    <table class="tbl">
+      <thead><tr><th>文件名</th><th>所属日期（可修改）</th><th>日期来源</th><th class="num">大小</th><th class="num">导入时间</th><th>操作</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  const dated = files.filter(f => f.date).length;
+  setStatus($('stFiles'), `${files.length} 个文件 · ${dated} 个已定日期`, dated === files.length ? 'ok' : 'warn');
+}
+
+async function loadFiles() {
+  try {
+    const j = await api('/api/chip/scr/files');
+    files = j.files || [];
+    renderFiles();
+  } catch (err) {
+    $('fileList').innerHTML = `<div class="err"><b>无法连接后端（${API}）</b>：${esc(err.message)}</div>`;
+    setStatus($('stFiles'), '加载失败', 'bad');
+  }
+}
+
+/* ---------------- 导入 ---------------- */
+$('btnPick').addEventListener('click', () => $('fileInput').click());
+
+$('fileInput').addEventListener('change', async (e) => {
+  const picked = Array.from(e.target.files || []);
+  if (!picked.length) return;
+  let failed = [];
+  for (let i = 0; i < picked.length; i++) {
+    setStatus($('stFiles'), `导入中 ${i + 1}/${picked.length}…`);
+    const fd = new FormData();
+    fd.append('file', picked[i]);
+    try {
+      const j = await api('/api/chip/scr/upload', { method: 'POST', body: fd });
+      files = j.files || files;
+      renderFiles();
+    } catch (err) {
+      failed.push(picked[i].name + '（' + err.message + '）');
+    }
+  }
+  $('fileInput').value = '';
+  renderFiles();
+  if (failed.length) {
+    $('fileList').insertAdjacentHTML('afterbegin',
+      `<div class="err"><b>以下文件导入失败：</b>${failed.map(esc).join('；')}</div>`);
+  }
+});
+
+/* ---------------- 列表交互：改日期 / 删除 ---------------- */
+$('fileList').addEventListener('change', async (e) => {
+  const input = e.target.closest('input[data-date]');
+  if (!input) return;
+  try {
+    const j = await api('/api/chip/scr/date', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: input.dataset.date, date: input.value }),
+    });
+    files = j.files || files;
+    renderFiles();
+  } catch (err) {
+    alert('日期修改失败：' + err.message);
+    loadFiles();
+  }
+});
+
+$('fileList').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-del]');
+  if (!btn) return;
+  if (!confirm(`确定删除「${btn.dataset.del}」？删除后需重新导入。`)) return;
+  try {
+    const j = await api('/api/chip/scr/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: btn.dataset.del }),
+    });
+    files = j.files || [];
+    renderFiles();
+  } catch (err) {
+    alert('删除失败：' + err.message);
+  }
+});
+
+/* ---------------- 刷新计算 ---------------- */
+function readParams() {
+  const num = id => {
+    const v = $(id).value.trim();
+    return v === '' ? null : Number(v);
+  };
+  return {
+    full_weeks: num('pFullWeeks'),
+    min_weeks_on: num('pMinWeeks'),
+    min_market: num('pMinMarket'),
+    max_market: num('pMaxMarket'),
+    launch_threshold: num('pThreshold'),
+  };
+}
+
+/* 按当前列状态排序（数值列缺值排最后） */
+function sortItems(items, state) {
+  if (!state.sortKey) return items;
+  const column = TIER_COLUMNS.find(c => c.key === state.sortKey);
+  if (!column) return items;
+  const dir = state.sortDir;
+  return [...items].sort((a, b) => {
+    if (column.type === 'num') {
+      const na = a[column.key] == null ? -Infinity : Number(a[column.key]);
+      const nb = b[column.key] == null ? -Infinity : Number(b[column.key]);
+      return (na - nb) * dir;
+    }
+    return String(a[column.key] ?? '').localeCompare(String(b[column.key] ?? ''), 'zh') * dir;
+  });
+}
+
+function tierTable(key, tier) {
+  if (!tier.items.length) {
+    return '<div class="empty">该档位当前无标的</div>';
+  }
+  const state = tierState[key];
+  const items = sortItems(tier.items, state);
+
+  const head = TIER_COLUMNS.map(col => {
+    if (!col.sortable) return `<th class="${col.cls || ''}">${col.label}</th>`;
+    const active = state.sortKey === col.key;
+    const arrow = active ? (state.sortDir > 0 ? '▲' : '▼') : '↕';
+    return `<th class="${col.cls || ''} sortable${active ? ' active' : ''}" `
+      + `data-sort="${col.key}" data-tier="${key}" title="点击排序">${col.label}<span class="arrow">${arrow}</span></th>`;
+  }).join('');
+
+  const rows = items.map((it, i) => `<tr>
+      <td class="num">${i + 1}</td>
+      <td>${esc(it.code)}</td>
+      <td>${esc(it.name)}</td>
+      <td>${esc(it.industry || '—')}</td>
+      <td class="num">${fmt(it.market, 1)}</td>
+      <td class="num">${it.pe == null ? '—' : fmt(it.pe, 2)}</td>
+      <td class="num">${it.price == null ? '—' : fmt(it.price, 2)}</td>
+      <td class="num ${it.chg30 > 0 ? 'up' : it.chg30 < 0 ? 'down' : ''}">${fmtPct(it.chg30)}</td>
+      <td class="num">${it.weeks_on}</td>
+      <td>${esc(it.last_week || '—')}</td>
+    </tr>`).join('');
+
+  return `<table class="tbl">
+      <thead><tr>${head}</tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+/* 只重渲染三档区域，避免折叠 / 排序时丢失页面滚动位置 */
+function renderTierBlocks() {
+  const box = $('tierBlocks');
+  if (!box) return;                     // 结果区被错误提示替换时无此容器
+  const tiers = (lastData && lastData.tiers) || {};
+  box.innerHTML = ['tier1', 'tier2', 'tier3'].map(key => {
+    const tier = tiers[key];
+    if (!tier) return '';
+    const state = tierState[key];
+    return `<div class="tier${state.collapsed ? ' collapsed' : ''}">
+        <div class="tier-h" data-toggle="${key}" title="点击${state.collapsed ? '展开' : '折叠'}">
+          <span class="caret">▾</span>
+          <h3>${esc(tier.name)}</h3>
+          <span class="tag${tier.count ? ' ok' : ''}">${tier.count} 只</span>
+          <span class="desc">${esc(tier.desc)}</span>
+          ${state.collapsed ? '<span class="desc">（已折叠，点击展开）</span>' : ''}
+        </div>
+        ${state.collapsed ? '' : (tier.risk ? `<div class="risk-line"><b>⚠️ 风险提示：</b>${esc(tier.risk)}</div>` : '') + tierTable(key, tier)}
+      </div>`;
+  }).join('');
+}
+
+function renderResult(j) {
+  const tiers = j.tiers || {};
+  const periods = j.periods || [];
+  const kpis = `
+    <div class="kpis">
+      <div class="kpi"><div class="k-l">数据期数</div><div class="k-v">${periods.length}</div><div class="k-s">${periods.map(p => p.date.slice(5)).join(' / ')}</div></div>
+      <div class="kpi"><div class="k-l">最新一期</div><div class="k-v">${esc(j.latest)}</div><div class="k-s">${periods.length ? periods[periods.length - 1].count + ' 只' : '—'}</div></div>
+      <div class="kpi"><div class="k-l">去重标的总数</div><div class="k-v">${j.total}</div><div class="k-s">跨期合并后</div></div>
+      <div class="kpi"><div class="k-l">第一档 · 磨主峰</div><div class="k-v">${tiers.tier1 ? tiers.tier1.count : 0}</div><div class="k-s">全勤 ∩ 市值 ∩ PE</div></div>
+      <div class="kpi"><div class="k-l">第二档 · 破位离榜</div><div class="k-v">${tiers.tier2 ? tiers.tier2.count : 0}</div><div class="k-s">已离榜</div></div>
+      <div class="kpi"><div class="k-l">第三档 · 启动离榜</div><div class="k-v">${tiers.tier3 ? tiers.tier3.count : 0}</div><div class="k-s">离榜且达阈值</div></div>
+    </div>`;
+
+  lastData = j;
+  // 新一轮计算后重置各档的排序（保留折叠状态，便于只看关注的档位）
+  ['tier1', 'tier2', 'tier3'].forEach(key => { tierState[key].sortKey = ''; });
+  const blocks = '<div id="tierBlocks"></div>';
+
+  const saved = j.saved || {};
+  const savedLine = saved.json
+    ? `计算结果已保存：<code>${esc(saved.json)}</code>${saved.csv ? ' · <code>' + esc(saved.csv) + '</code>' : ''}`
+    : '';
+
+  $('bodyResult').innerHTML = kpis + blocks + (j.errors && j.errors.length
+    ? `<div class="err"><b>提示：</b>${j.errors.map(esc).join('；')}</div>` : '');
+  renderTierBlocks();
+
+  const win = j.window || {};
+  $('methodNote').innerHTML = [
+    `数据窗口：最近 ${j.params.full_weeks} 周，最新一期应为 ${esc(win.latest_expected || '—')} 所在周`
+      + `${win.extra && win.extra.length ? `（窗口外 ${win.extra.length} 份更早文件未参与计算）` : ''}；`,
+    `口径：第一档 = 最新一期在榜 ∩ 连续 ${j.params.full_weeks} 期全勤 ∩ 流通市值 ${j.params.min_market}~${j.params.max_market} 亿 ∩ PE(动) &gt; 0；`,
+    `第二档 = 出现过但最新一期已离榜且区间涨幅未达阈值；第三档 = 离榜且 ${j.params.launch_field} ≥ ${j.params.launch_threshold}%（参考脚本用 5 日涨跌，导出数据无该字段，此处以 30日涨幅替代）；`,
+    `前置门槛：在榜期数 ≥ ${j.params.min_weeks_on} 期（低于视为噪音直接过滤）；`
+      + `流通市值须在 ${j.params.min_market}~${j.params.max_market} 亿区间（PE &gt; 0 仅第一档要求，离榜池不排除亏损股）；`,
+    `本轮共过滤 ${j.params.filtered_out || 0} 只：在榜期数不足 ${j.params.filtered_weeks || 0} 只、`
+      + `市值不符 ${j.params.filtered_market || 0} 只（参考脚本未对离榜标的做市值过滤）；`
+      + `另有 ${j.params.unclassified || 0} 只仍在新一期在榜但未满 ${j.params.full_weeks} 期全勤，暂不入档。`,
+    savedLine,
+  ].filter(Boolean).join('<br>');
+}
+
+/* 数据不完整等校验失败：列出应有窗口，标出缺失的期 */
+function renderBlocked(j) {
+  const win = j.window || {};
+  const missing = new Set(j.missing_weeks || []);
+  const expected = win.expected || [];
+  const rows = expected.map(day => {
+    const end = new Date(new Date(day + 'T00:00:00').getTime() + 6 * 86400000)
+      .toISOString().slice(0, 10);
+    const miss = missing.has(day);
+    return `<tr>
+        <td>${esc(day)} ~ ${esc(end)}</td>
+        <td>${miss ? '<span class="tag bad">缺失</span>' : '<span class="tag ok">已导入</span>'}</td>
+        <td>${esc(j.params ? j.params.launch_field : '')}</td>
+      </tr>`;
+  }).join('');
+
+  $('bodyResult').innerHTML = `
+    <div class="err"><b>无法计算：${esc(j.error || '数据不完整')}</b></div>
+    ${expected.length ? `<div class="tier">
+      <div class="tier-h"><h3>最近 ${win.need} 周应有数据窗口</h3>
+        <span class="desc">周中执行时最新一期为上一周（${esc(win.latest_expected || '')} 所在周）</span></div>
+      <table class="tbl">
+        <thead><tr><th>周区间（周一 ~ 周日）</th><th>状态</th><th>说明</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>` : ''}`;
+  $('methodNote').innerHTML = '';
+}
+
+async function analyze() {
+  const btn = $('btnRefresh');
+  btn.disabled = true;
+  btn.textContent = '⏳ 计算中…';
+  setStatus($('stResult'), '计算中…');
+  try {
+    const res = await fetch(API + '/api/chip/scr/analyze', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(readParams()),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(j.detail || ('HTTP ' + res.status));
+    files = j.files || files;
+    renderFiles();
+    if (!j.ok) {                       // 业务校验失败（如最近 5 周数据不全）
+      renderBlocked(j);
+      setStatus($('stResult'), '数据不完整', 'bad');
+      return;
+    }
+    renderResult(j);
+    setStatus($('stResult'), '更新于 ' + j.as_of.slice(11), 'ok');
+  } catch (err) {
+    $('bodyResult').innerHTML = `<div class="empty">点击「🔄 刷新计算」生成结果</div>`;
+    $('methodNote').innerHTML = `<div class="err"><b>${esc(err.message)}</b></div>`;
+    setStatus($('stResult'), '失败', 'bad');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔄 刷新计算';
+  }
+}
+
+/* 三档区域：点表头排序、点标题折叠 */
+$('bodyResult').addEventListener('click', (e) => {
+  const th = e.target.closest('th[data-sort]');
+  if (th) {
+    const state = tierState[th.dataset.tier];
+    const column = TIER_COLUMNS.find(c => c.key === th.dataset.sort);
+    if (state.sortKey === th.dataset.sort) {
+      state.sortDir = -state.sortDir;                              // 同列再点：反序
+    } else {
+      state.sortKey = th.dataset.sort;
+      state.sortDir = column && column.type === 'num' ? -1 : 1;    // 数值降序 / 文本升序
+    }
+    renderTierBlocks();
+    return;
+  }
+  const header = e.target.closest('.tier-h[data-toggle]');
+  if (header) {
+    const key = header.dataset.toggle;
+    tierState[key].collapsed = !tierState[key].collapsed;
+    renderTierBlocks();
+  }
+});
+
+$('btnRefresh').addEventListener('click', analyze);
+$('btnParams').addEventListener('click', () => {
+  const show = $('params').classList.toggle('show');
+  $('btnParams').textContent = show ? '收起阈值' : '展开阈值';
+});
+
+/* 使用说明悬浮窗：点按钮开启，点关闭 / 遮罩 / Esc 关闭 */
+function toggleHelp(show) {
+  $('helpModal').classList.toggle('show', show);
+}
+$('btnHelp').addEventListener('click', () => toggleHelp(true));
+$('helpClose').addEventListener('click', () => toggleHelp(false));
+$('helpModal').addEventListener('click', (e) => { if (e.target === $('helpModal')) toggleHelp(false); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') toggleHelp(false); });
+
+loadFiles();
+</script>
+</body>
+</html>

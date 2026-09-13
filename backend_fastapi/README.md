@@ -47,6 +47,11 @@ GET  /api/market/sectors  → 板块β（行业与概念资金流 Top10、申万
 GET  /api/market/limit-up → 连板梯队（连板结构 + 晋级率，date 可选）
 GET  /api/market/big-loss → 大面股（炸板池 + 跌停池，date 可选）
                             以上盘面接口均支持 ?force=1 跳过进程内缓存
+POST /api/stock/valuation → 股票估值（简化 DCF：前 5 年 + 永续，乐观/中性/悲观三情景）
+                            请求体 {"code":"600519","net_profit_forecast":1200}；只传 code 会自动抓取
+                            股价（新浪）、总股本（腾讯）、期初净利润（东财，TTM 归母 → 年报扣非 → 年报归母）
+                            net_profit_forecast 为可选，不传则三档按兜底 25% / 10% / 5% 计算
+GET  /api/stock/quote     → 按代码查名称与当前股价（供输入代码后即时确认，不拉财务数据）
 ```
 
 测试：
