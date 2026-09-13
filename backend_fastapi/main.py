@@ -19,6 +19,7 @@ import config
 import market_service
 import mentor_store
 import valuation_service
+from chip_routes import router as chip_router
 from collectors import (
     get_basic_info_evidence, get_announcements, fetch_notice_content, get_news,
     evidence_search_url, event_signal, _clip, SLEEP_NOTICE,
@@ -35,6 +36,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 筹码体系（SCR 选股）的接口独立成模块，见 chip_routes.py
+app.include_router(chip_router)
 
 CACHE_TTL = 12 * 3600          # 单只股票缓存 12 小时
 _cache = {}                     # code -> {"ts": float, "markdown": str}
@@ -535,6 +539,9 @@ def stock_quote(code: str):
         return valuation_service.quote_only(code)
     except Exception as e:                    # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"名称查询失败：{e}")
+
+
+# 筹码体系（SCR 选股）的接口见 chip_routes.py，通过 app.include_router(chip_router) 挂载
 
 
 # --------------------------------------------------------------------------- #

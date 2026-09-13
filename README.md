@@ -25,6 +25,12 @@
   用两段法（前 5 年净利润贴现 + 永续增长，贴现率 10%）给出乐观 / 中性 / 悲观三档每股价值、
   股价/价值（低估程度）、预测 N 年价与收益率，并逐步展示计算过程；对应 `POST /api/stock/valuation`。
   机构预测第 N 年净利润为可选：提供时三档为乐观 ×1.5 / 中性 ×1 / 悲观固定 5%，未提供则兜底 25% / 10% / 5%。
+- **SCR 选股（筹码体系）**（`frontend/chip-scr.html`，从股票池页「筹码体系 · SCR 选股」进入）：
+  导入行情软件导出的多期「临时条件股YYYYMMDD.xls」（文件名日期自动解析、可在页面手改），
+  跨期合并做周级三档分类：磨主峰（连续 N 期全勤 ∩ 流通市值 100–800 亿 ∩ PE>0）/ 向下破位离榜 / 启动型离榜；
+  阈值可调，点「🔄 刷新计算」手动触发；计算需**最近 5 周**数据（按周归组，周中执行时最新一期为上一周，
+  缺失任一期的数据会直接报错并列出缺口，不做静默跳过）；对应 `POST /api/chip/scr/analyze` 等接口，
+  原始文件与计算结果分别存放于 `backend_fastapi/chip_data/raw` 与 `chip_data/processed`。
 
 ## 系统架构
 
@@ -60,7 +66,7 @@ frontend/index.html（原生 HTML/JS 单页，浏览器本地 localStorage 存�
 ```
 stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
 ├── 启动系统.bat                  # 一键启动：后端 + dsh + 打开前端
-├── frontend/                     # index.html（股票池）/ market-sector.html（盘面及板块分析）/ mentor-lab.html（大佬策略实验室）/ valuation.html（股票估值计算）/ chip-scr.html（SCR 选股 · 占位）
+├── frontend/                     # index.html（股票池）/ market-sector.html（盘面及板块分析）/ mentor-lab.html（大佬策略实验室）/ valuation.html（股票估值计算）/ chip-scr.html（SCR 选股）
 ├── backend_fastapi/              # FastAPI 后端（main.py / collectors.py / config.py）
 │   ├── start_backend.bat         # 单独启动后端
 │   └── .env.example              # 密钥模板（复制为 .env）
