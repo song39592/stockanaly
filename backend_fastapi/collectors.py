@@ -14,6 +14,8 @@ from urllib.parse import quote
 import requests
 import akshare as ak
 
+from market_service import _ak   # 统一走带硬超时的 akshare 调用，避免数据源无响应时挂死
+
 UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
@@ -91,7 +93,9 @@ def _importance(title: str, typ: str) -> int:
 def get_basic_info(code: str):
     """个股简介 / 行业。失败返回 None，不中断。"""
     try:
-        df = ak.stock_individual_info_em(symbol=code)
+        df = _ak(ak.stock_individual_info_em, symbol=code)
+        if df is None or getattr(df, "empty", True):
+            return None
         d = dict(zip(df["item"], df["value"]))
         parts = []
         for k, label in [("股票简称", "简称"), ("行业", "行业"), ("主营业务", "主营"),
@@ -126,9 +130,10 @@ def get_announcements(code: str, days: int = 60):
     begin = _days_ago(days)
     end = _today().strftime("%Y%m%d")
     try:
-        df = ak.stock_individual_notice_report(
-            security=code, begin_date=begin, end_date=end
-        )
+        df = _ak(ak.stock_individual_notice_report,
+                 security=code, begin_date=begin, end_date=end)
+        if df is None or getattr(df, "empty", True):
+            return [], "公告抓取失败或超时（数据源无响应）"
     except Exception as e:
         return [], f"公告抓取失败：{e}"
 
@@ -170,7 +175,9 @@ def fetch_notice_content(art_code: str):
 def get_news(code: str, days: int = 30):
     """近 30 天财经新闻（东财个股新闻，含全文）。"""
     try:
-        df = ak.stock_news_em(symbol=code)
+        df = _ak(ak.stock_news_em, symbol=code)
+        if df is None or getattr(df, "empty", True):
+            return [], "新闻抓取失败或超时（数据源无响应）"
     except Exception as e:
         return [], f"新闻抓取失败：{e}"
 

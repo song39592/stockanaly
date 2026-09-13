@@ -53,7 +53,7 @@ const API=`http://127.0.0.1:${API_PORT}`,DSH='http://127.0.0.1:3080',POOL_KEY='s
 let mentors=[],mentorId='',state={materials:[],daily_views:[],skill_versions:[],evaluations:[]},reviewTarget=null;
 const $=id=>document.getElementById(id), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function msg(text,error=false){$('notice').innerHTML=`<div class="notice ${error?'error':''}">${esc(text)}</div>`;setTimeout(()=>{$('notice').innerHTML=''},5000)}
-async function api(path,options={}){const r=await fetch(API+path,options);let j={};try{j=await r.json()}catch{}if(!r.ok||j.ok===false)throw new Error(j.detail||j.error||`HTTP ${r.status}`);return j}
+async function api(path,options={}){const ctrl=new AbortController();const timer=setTimeout(()=>ctrl.abort(),180000);let r;try{r=await fetch(API+path,{...options,signal:ctrl.signal})}catch(e){throw new Error(e&&e.name==='AbortError'?'请求超时（180 秒），数据源可能无响应':'无法连接后端（'+API+'）：'+e.message)}finally{clearTimeout(timer)}let j={};try{j=await r.json()}catch{}if(!r.ok||j.ok===false)throw new Error(j.detail||j.error||`HTTP ${r.status}`);return j}
 function post(path,body){return api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})}
 function fmt(o){return JSON.stringify(o,null,2)}
 function status(s){return `<span class="tag ${esc(s)}">${esc(s||'—')}</span>`}

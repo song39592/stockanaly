@@ -454,6 +454,7 @@
     <button class="btn" id="btnManage"><span class="ico">⚙</span> 数据管理</button>
     <button class="btn" id="btnMarketSector"><span class="ico">📊</span> 盘面及板块分析</button>
     <button class="btn" id="btnMentorLab"><span class="ico">🧠</span> 大佬策略实验室</button>
+    <button class="btn" id="btnValuation"><span class="ico">📈</span> 股票估值计算</button>
     <button class="btn" id="btnHelp"><span class="ico">?</span> 使用说明</button>
     <button class="btn" id="btnTheme"><span class="ico" id="themeIco">🌙</span><span id="themeLbl">浅色</span></button>
     <input id="stockSearch" list="stockList" placeholder="查个股：代码/名称" style="min-width:170px;" />
@@ -1242,6 +1243,7 @@ document.getElementById('btnClearAll').addEventListener('click', () => {
 document.getElementById('btnHelp').addEventListener('click', () => openModal('helpModal'));
 document.getElementById('btnMarketSector').addEventListener('click', () => window.open('market-sector.html', '_blank'));
 document.getElementById('btnMentorLab').addEventListener('click', () => window.open('mentor-lab.html', '_blank'));
+document.getElementById('btnValuation').addEventListener('click', () => window.open('valuation.html', '_blank'));
 document.getElementById('btnHelpClose').addEventListener('click', () => closeModal('helpModal'));
 document.querySelectorAll('.modal-mask').forEach(m => {
   m.addEventListener('click', (e) => { if (e.target === m) m.classList.remove('show'); });
@@ -1743,8 +1745,13 @@ function renderRanking() {
  * ===================================================================== */
 
 const charts = {};
+// 容器不存在时返回空壳，避免 echarts.init(null) 抛 getBoundingClientRect 错误
+const CHART_STUB = { setOption() {}, resize() {}, dispose() {}, getDom() { return null; } };
 function getChart(id) {
-  if (!charts[id]) charts[id] = echarts.init(document.getElementById(id));
+  const el = document.getElementById(id);
+  if (!el) return CHART_STUB;
+  if (charts[id] && charts[id].getDom() !== el) { charts[id].dispose(); charts[id] = null; }
+  if (!charts[id]) charts[id] = echarts.init(el);
   return charts[id];
 }
 
@@ -1918,6 +1925,20 @@ document.getElementById('btnTheme').addEventListener('click', () => {
  * ===================================================================== */
 
 const DSH_URL = 'http://127.0.0.1:3080';   // dsh 服务地址（见 agent_dsh/README.md）
+
+/** 带超时的 dsh 请求：dsh 未启动时快速失败，不长时间挂起 */
+async function dshFetch(path, options = {}, timeoutMs = 30000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(`${DSH_URL}${path}`, { ...options, signal: ctrl.signal });
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw new Error(`dsh 无响应（超过 ${timeoutMs / 1000} 秒）`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 let bullSessionId = null;                  // 当前 dsh 会话
 let bullSkills = [];                       // 缓存 skill 列表
 let bullActiveSkillId = null;              // 当前会话绑定的 skillId
@@ -1989,7 +2010,7 @@ function bullAppendMsg(role, text, traceId, isErr) {
 /** 创建 dsh 会话（幂等） */
 async function bullEnsureSession() {
   if (bullSessionId) return bullSessionId;
-  const res = await fetch(`${DSH_URL}/api/bull/session/create`, { method: 'POST' });
+  const res = await dshFetch('/api/bull/session/create', { method: 'POST' }, 15000);
   const j = await res.json();
   if (!j || !j.ok) throw new Error((j && j.error) || '创建会话失败');
   bullSessionId = j.sessionId;
@@ -2004,16 +2025,16 @@ async function bullEnsureSession() {
 async function bullBindSkill(skillId) {
   bullActiveSkillId = skillId;
   if (!bullSessionId) return;
-  await fetch(`${DSH_URL}/api/bull/session/${bullSessionId}/bind-skill`, {
+  await dshFetch(`/api/bull/session/${bullSessionId}/bind-skill`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ skillId }),
-  });
+  }, 15000);
 }
 
 /** 拉取 skill 列表并刷新下拉框 */
 async function bullRefreshSkills() {
   try {
-    const res = await fetch(`${DSH_URL}/api/bull/skill/list`);
+    const res = await dshFetch('/api/bull/skill/list', {}, 15000);
     const j = await res.json();
     bullSkills = (j && j.skills) || [];
   } catch { bullSkills = []; }
@@ -2037,15 +2058,15 @@ function bullSend() {
       const sid = await bullEnsureSession();
       const snap = buildBullSnapshot();
       if (snap) {
-        await fetch(`${DSH_URL}/api/bull/session/${sid}/snapshot`, {
+        await dshFetch(`/api/bull/session/${sid}/snapshot`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(snap),
-        });
+        }, 20000);
       }
-      const res = await fetch(`${DSH_URL}/api/bull/session/${sid}/chat`, {
+      const res = await dshFetch(`/api/bull/session/${sid}/chat`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: q }),
-      });
+      }, 180000);   // Agent 可能多轮调用工具，给足时间但不无限等待
       const j = await res.json();
       loading.remove();
       if (j && j.ok) bullAppendMsg('bot', j.answer, j.traceId, false);
@@ -2079,7 +2100,7 @@ async function openSkillEditor(skillId) {
   let s = null;
   if (skillId) {
     try {
-      const res = await fetch(`${DSH_URL}/api/bull/skill/detail?skillId=${encodeURIComponent(skillId)}`);
+      const res = await dshFetch(`/api/bull/skill/detail?skillId=${encodeURIComponent(skillId)}`, {}, 15000);
       const j = await res.json();
       if (!res.ok || !j.ok) throw new Error(j.error || '读取 Skill 失败');
       s = j.skill;
@@ -2120,8 +2141,8 @@ async function saveSkillEditor() {
   if (!payload.skillName) { toast('角色名称不能为空', 'err'); return; }
   if (!payload.ruleContent.trim()) { toast('规则正文不能为空', 'err'); return; }
   try {
-    const url = `${DSH_URL}/api/bull/skill/${skillId ? 'update' : 'create'}`;
-    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const res = await dshFetch(`/api/bull/skill/${skillId ? 'update' : 'create'}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, 20000);
     const j = await res.json();
     if (res.ok && j && j.ok) {
       closeSkillEditor();
@@ -2136,7 +2157,7 @@ async function deleteSkillEditor() {
   if (!skillId) return;
   confirmDialog('删除 Skill', `确定删除该 Skill（${skillId}）吗？`, async () => {
     try {
-      await fetch(`${DSH_URL}/api/bull/skill/delete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ skillId }) });
+      await dshFetch('/api/bull/skill/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ skillId }) }, 15000);
       closeSkillEditor();
       if (bullActiveSkillId === skillId) bullActiveSkillId = null;
       await bullRefreshSkills();
@@ -2151,7 +2172,7 @@ function exportSkill(skillId) {
 
 async function importSkill(file) {
   try {
-    const res = await fetch(`${DSH_URL}/api/bull/skill/import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: await file.text() });
+    const res = await dshFetch('/api/bull/skill/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: await file.text() }, 30000);
     const j = await res.json();
     if (j && j.ok) { await bullRefreshSkills(); toast(`已导入 ${j.skills.length} 个 Skill`); }
     else toast((j && j.error) || '导入失败', 'err');

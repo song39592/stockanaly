@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 import config
 import market_service
 import mentor_store
+import valuation_service
 from collectors import (
     get_basic_info_evidence, get_announcements, fetch_notice_content, get_news,
     evidence_search_url, event_signal, _clip, SLEEP_NOTICE,
@@ -76,6 +77,29 @@ class ResearchRequest(BaseModel):
     @classmethod
     def normalize_name(cls, value: str) -> str:
         return value.strip()
+
+
+class ValuationRequest(BaseModel):
+    """估值入参：只填 code 时自动抓取行情与财务数据；缺失项可由前端补填后重算。"""
+    code: str = Field(min_length=6, max_length=6)
+    name: str = Field(default="", max_length=40)
+    price: float | None = Field(default=None, description="当前股价（元），留空自动获取")
+    shares: float | None = Field(default=None, description="总股本（亿股），留空自动获取")
+    net_profit_base: float | None = Field(default=None, description="期初扣非净利润（亿元）")
+    net_profit_forecast: float | None = Field(default=None, description="机构预测第 N 年净利润（亿元）")
+    forecast_years: int = Field(default=3, ge=1, le=10)
+    discount_rate: float = Field(default=0.10, gt=0, le=0.5)
+    perpetual_growth: float = Field(default=0.0, ge=0, le=0.2)
+    predict_years: int = Field(default=1, ge=1, le=10)
+    auto_fetch: bool = True
+
+    @field_validator("code")
+    @classmethod
+    def validate_code(cls, value: str) -> str:
+        value = value.strip()
+        if not re.fullmatch(r"\d{6}", value):
+            raise ValueError("股票代码必须是 6 位数字")
+        return value
 
 
 class MentorCreateRequest(BaseModel):
@@ -493,6 +517,24 @@ def health():
         "llm_ready": problem is None,
         "llm_problem": problem,
     }
+
+
+@app.post("/api/stock/valuation")
+def stock_valuation(req: ValuationRequest):
+    """股票估值：两段法净利润贴现（前 5 年 + 永续增长），输出乐观/中性/悲观三情景与计算过程。"""
+    try:
+        return valuation_service.valuate(req.model_dump())
+    except Exception as e:                    # noqa: BLE001 - 统一转成可读错误，避免 500 空响应
+        raise HTTPException(status_code=500, detail=f"估值计算失败：{e}")
+
+
+@app.get("/api/stock/quote")
+def stock_quote(code: str):
+    """按代码查股票名称与当前股价（轻量，供输入代码后即时确认，不拉财务数据）。"""
+    try:
+        return valuation_service.quote_only(code)
+    except Exception as e:                    # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"名称查询失败：{e}")
 
 
 # --------------------------------------------------------------------------- #
