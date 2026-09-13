@@ -60,7 +60,7 @@ frontend/index.html（原生 HTML/JS 单页，浏览器本地 localStorage 存�
 ```
 stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
 ├── 启动系统.bat                  # 一键启动：后端 + dsh + 打开前端
-├── frontend/                     # index.html（股票池）/ market-sector.html（盘面及板块分析）/ mentor-lab.html（大佬策略实验室）/ valuation.html（股票估值计算）
+├── frontend/                     # index.html（股票池）/ market-sector.html（盘面及板块分析）/ mentor-lab.html（大佬策略实验室）/ valuation.html（股票估值计算）/ chip-scr.html（SCR 选股 · 占位）
 ├── backend_fastapi/              # FastAPI 后端（main.py / collectors.py / config.py）
 │   ├── start_backend.bat         # 单独启动后端
 │   └── .env.example              # 密钥模板（复制为 .env）
