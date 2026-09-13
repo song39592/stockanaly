@@ -59,6 +59,21 @@
 - **修复 akshare 并发调用崩溃**：`py_mini_racer`（新浪、同花顺系接口依赖）并发初始化会触发
   `FATAL: partition_address_space` 直接杀掉后端进程；现按模块自动识别这类接口并串行化执行，其余接口保持并行。
 
+### 重构
+
+- **业务接口全模块化 + 容错挂载**：
+  - 盘面及板块分析 → `market_routes.py`（5 个接口）；大佬策略实验室 → `mentor_routes.py`（15 个接口）；
+    个股调研与股票估值 → `stock_routes.py`（3 个接口）；LLM 调用抽为公共模块 `llm_client.py`。
+    main.py 从约 600 行精简到约 100 行，只剩「应用创建 + 容错挂载 + /health」。
+  - 统一分层：`*_routes.py` 只管 HTTP（路由、参数校验、缓存清理），`*_service.py` / `*_store.py`
+    管数据采集与计算，`llm_client.py` 管模型调用；后续新增接口不必再改 main.py。
+  - **容错挂载**：改用 `importlib` 逐个导入并捕获异常——**单个模块导入失败（依赖缺失、语法错误等）
+    只让该模块的接口不可用，不影响主页与其他模块**；失败原因写入 `/health` 的 `route_errors`，
+    `modules` 列出各模块可用性，`mentor_lab` / `market_board` 保留以兼容前端（mentor-lab.html）版本检测。
+  - 已实测：临时移除 `market_routes.py` 后服务照常启动，`/health` 报 `market_board=false` 与
+    `ModuleNotFoundError`，盘面接口 404，而筹码体系 / 大佬实验室 / 估值接口全部正常。
+  - 接口路径与参数（`date` / `force` 等）保持不变，前端无需改动。
+
 ### 新增（筹码体系 · SCR 选股）
 
 - **SCR 选股页**（`frontend/chip-scr.html`，股票池页「筹码体系 · SCR 选股」进入）：
