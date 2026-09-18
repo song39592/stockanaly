@@ -45,6 +45,7 @@ logs/
 *.pid
 cordis.runtime.yml
 backend_fastapi/data/*.db*
+backend_fastapi/data/*.db-*
 # SCR 选股：导入的原始数据与计算结果属本地数据，不入库
 backend_fastapi/chip_data/
 agent_dsh/skills_library/mentor-*.skill

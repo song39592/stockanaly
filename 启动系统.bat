@@ -4,7 +4,9 @@ title 股票池追踪系统 - 一键启动
 
 set "ROOT_DIR=%~dp0"
 set "BACKEND_DIR=%ROOT_DIR%backend_fastapi"
-set "BACKEND_PY=%BACKEND_DIR%\venv\Scripts\python.exe"
+set "BACKEND_PY="
+set "PROJECT_PY=%BACKEND_DIR%\.venv\Scripts\python.exe"
+set "LEGACY_PY=%BACKEND_DIR%\venv\Scripts\python.exe"
 set "CODEX_PY=%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
 set "BACKEND_LOG=%BACKEND_DIR%\uvicorn.log"
 set "BACKEND_ERR=%BACKEND_DIR%\uvicorn-error.log"
@@ -24,15 +26,21 @@ if not errorlevel 1 (
   exit /b 1
 )
 echo 正在启动 FastAPI 后端（日志：backend_fastapi\uvicorn.log）...
-if exist "%BACKEND_PY%" "%BACKEND_PY%" -c "import uvicorn, fastapi, akshare, pypdf, multipart" >nul 2>&1
-if errorlevel 1 set "BACKEND_PY="
+if exist "%PROJECT_PY%" (
+  "%PROJECT_PY%" -c "import uvicorn, fastapi, akshare, pypdf, multipart" >nul 2>&1
+  if not errorlevel 1 set "BACKEND_PY=%PROJECT_PY%"
+)
+if not defined BACKEND_PY if exist "%LEGACY_PY%" (
+  "%LEGACY_PY%" -c "import uvicorn, fastapi, akshare, pypdf, multipart" >nul 2>&1
+  if not errorlevel 1 set "BACKEND_PY=%LEGACY_PY%"
+)
 if not defined BACKEND_PY if exist "%CODEX_PY%" (
   "%CODEX_PY%" -c "import uvicorn, fastapi, akshare, pypdf, multipart" >nul 2>&1
   if not errorlevel 1 set "BACKEND_PY=%CODEX_PY%"
 )
 if not defined BACKEND_PY (
   echo [错误] 没有找到可用的 Python 后端环境。
-  echo 请先运行 backend_fastapi\setup_backend.bat。
+  echo Run backend_fastapi\setup_backend.bat first.
   pause
   exit /b 1
 )

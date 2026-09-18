@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import config
+import history_store
 import mentor_store
 
 app = FastAPI(title="个股时效性调研")
@@ -33,6 +34,7 @@ app.add_middleware(
 
 # 业务模块路由：(显示名, 模块名)，模块需暴露 router 对象
 ROUTE_MODULES = (
+    ("股票池历史 · K线与消息", "history_routes"),
     ("筹码体系 · SCR 选股", "chip_routes"),
     ("盘面及板块分析", "market_routes"),
     ("大佬策略实验室", "mentor_routes"),
@@ -64,6 +66,10 @@ def _mount_routes() -> None:
 def _init_stores() -> None:
     """初始化各模块的本地存储；失败同样只记录、不阻止服务启动。"""
     try:
+        history_store.init_db()
+    except Exception as exc:              # noqa: BLE001
+        _record_error("股票池历史（本地库初始化）", "history_store", exc)
+    try:
         mentor_store.init_db()
     except Exception as exc:              # noqa: BLE001
         _record_error("大佬策略实验室（本地库初始化）", "mentor_store", exc)
@@ -89,7 +95,8 @@ def health():
     return {
         "ok": True,
         "service": "stock-research",
-        "api_version": 4,
+        "api_version": 5,
+        "stock_history": _is_loaded("history_routes"),
         "mentor_lab": _is_loaded("mentor_routes"),
         "market_board": _is_loaded("market_routes"),
         "llm_ready": problem is None,

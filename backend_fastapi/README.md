@@ -6,7 +6,7 @@
 ## 一、环境要求
 
 - Python 3.10+（本机可用 `py -3.11`）
-- 已内置虚拟环境 `venv/`，依赖见 `requirements.txt`（fastapi / uvicorn / akshare / requests / beautifulsoup4 / pydantic / python-dotenv）
+- 项目虚拟环境使用 `.venv/`，依赖见 `requirements.txt`（fastapi / uvicorn / akshare / requests / beautifulsoup4 / pydantic / python-dotenv）
 
 ## 二、配置密钥
 
@@ -32,7 +32,7 @@
 
 ```bash
 cd D:/ai/backend_fastapi
-venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+.venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
 ## 四、接口
@@ -88,12 +88,26 @@ curl -X POST "http://127.0.0.1:8000/api/stock/research" \
 
 扫描版 PDF 如果没有文字层会标记为需要 OCR，不会伪造提炼结果。当前迭代方式是“知识库 + 规则版本 + 人工反馈”的可审计闭环，不会直接修改大模型权重。
 
-## 七、说明
+## 七、股票池历史、K线与消息面
+
+股票池页面确认导入后，会把当天快照同步到本地 SQLite，并在后台只为池内股票增量补齐最近两年的前复权日 K。东方财富行情不可用时自动降级到腾讯行情；单只股票失败不会阻塞整批导入。
+
+点击股票可查看日 K、MA5/10/20/60、成交量、入池/出池标记、公告及新闻时间轴，以及历次在池区间。行情在导入后后台更新，消息面在首次打开个股时按需抓取并缓存 12 小时。
+
+SQLite 文件位于 `backend_fastapi/data/stock_history.db`，属于本地运行数据，不提交到 Git。
+
+```text
+POST /api/history/pool/import       保存每日股票池并可启动行情同步
+GET  /api/history/sync/{job_id}     查询后台同步进度
+GET  /api/history/stock/{code}      查询个股 K线、消息和入池轨迹
+```
+
+## 八、说明
 
 - 数据源均为公开接口，反爬/改版可能导致个别来源失败，已做优雅降级，不会导致整体报错。
 - 「东方财富股吧高赞帖子」为可选原型逆向，尚未接入（akshare 1.18 已移除股吧函数），后续可单独扩展。
 
-## 八、盘面及板块分析（`market_service.py`）
+## 九、盘面及板块分析（`market_service.py`）
 
 前端「盘面及板块分析」页（`frontend/market-sector.html`）由 `GET /api/market/*` 五个接口驱动：
 外围环境、大盘资金、板块β、连板梯队、大面股。
