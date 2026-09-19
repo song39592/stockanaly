@@ -100,8 +100,8 @@ input[type=date],input[type=number]{border:1px solid var(--line);background:var(
       <div class="hint-line">
         文件名中的 8 位日期会自动解析为默认日期（如 <code>临时条件股20260912.xls</code> → 2026-09-12），
         解析结果可在下方表格中手动修改；支持一次选择多个文件。<br>
-        计算需要<b>最近 5 周</b>的数据（按周归组，一周内多份只取其一）：<b>周中执行时最新一期为上一周</b>，
-        周末执行时为本周；缺少任意一期会直接报错并列出缺口，窗口之外的更早文件不参与计算。<br>
+        计算需要<b>最近 5 周</b>的数据（按周归组，一周内多份只取其一）：<b>周一~周四及周五收盘前</b>最新一期为上一周，
+        <b>周五 15:00 收盘后及周末</b>为本周；缺少任意一期会直接报错并列出缺口，窗口之外的更早文件不参与计算。<br>
         结果表格中的<b>代码 / 名称可点击</b>，会在新标签页打开「个股分析」（日 K + 入池轨迹 + 消息面时间轴）。
       </div>
       <div id="fileList"><div class="empty">加载中…</div></div>
@@ -142,7 +142,8 @@ input[type=date],input[type=number]{border:1px solid var(--line);background:var(
       <h3>一、数据来源</h3>
       <ul>
         <li>通达信 → 用指标 <b>SCR</b> 做条件选股（<b>SCR 后 100</b>）→ 导出「<b>临时条件股YYYYMMDD.xls</b>」→ 按周导入本系统。</li>
-        <li>每周一份、需覆盖<b>最近 5 周</b>：周中（周一~周五）执行时最新一期为<b>上一周</b>，周末执行为本周；缺少任一期会直接报错并列出缺口。</li>
+        <li>每周一份、需覆盖<b>最近 5 周</b>：<b>周一~周四及周五收盘前（15:00）</b>最新一期为<b>上一周</b>，
+          <b>周五收盘后及周末</b>为本周；缺少任一期会直接报错并列出缺口。</li>
         <li>导出文件多为 GBK 文本表格（扩展名虽是 .xls），本系统已兼容 GBK 文本 / Excel / CSV 三种格式。</li>
       </ul>
 
@@ -471,7 +472,7 @@ function renderBlocked(j) {
     <div class="err"><b>无法计算：${esc(j.error || '数据不完整')}</b></div>
     ${expected.length ? `<div class="tier">
       <div class="tier-h"><h3>最近 ${win.need} 周应有数据窗口</h3>
-        <span class="desc">周中执行时最新一期为上一周（${esc(win.latest_expected || '')} 所在周）</span></div>
+        <span class="desc">最新一期应为 ${esc(win.latest_expected || '')} 所在周（周一~周四及周五收盘前为上一周，周五收盘后及周末为本周）</span></div>
       <table class="tbl">
         <thead><tr><th>周区间（周一 ~ 周日）</th><th>状态</th><th>说明</th></tr></thead>
         <tbody>${rows}</tbody>

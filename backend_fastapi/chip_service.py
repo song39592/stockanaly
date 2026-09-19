@@ -272,23 +272,49 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 # 三档分类计算
 # --------------------------------------------------------------------------- #
+MARKET_CLOSE_HOUR = 15     # A 股 15:00 收盘：周五收盘后当日数据即已生成
+
+
+def _as_moment(value):
+    """把 None / str / date / datetime 统一成 datetime。
+
+    纯日期（含 YYYY-MM-DD 字符串）按「当日结束」处理；带时刻的按给定时刻判断。
+    """
+    if value is None:
+        return dt.datetime.now()
+    if isinstance(value, dt.datetime):
+        return value
+    if isinstance(value, dt.date):
+        return dt.datetime(value.year, value.month, value.day, 23, 59)
+    text = str(value).strip()
+    if len(text) <= 10:                     # 纯日期（YYYY-MM-DD）：按当日结束处理
+        return dt.datetime.combine(dt.date.fromisoformat(text[:10]), dt.time(23, 59))
+    try:
+        return dt.datetime.fromisoformat(text)
+    except ValueError:
+        return dt.datetime.combine(dt.date.fromisoformat(text[:10]), dt.time(23, 59))
+
+
 def week_start(value):
-    """日期（字符串或 date）→ 所在周的周一。"""
-    day = dt.date.fromisoformat(value) if isinstance(value, str) else value
+    """日期（字符串或 date/datetime）→ 所在周的周一。"""
+    day = _as_moment(value).date()
     return day - dt.timedelta(days=day.weekday())
 
 
-def expected_weeks(weeks: int = FULL_WEEKS, today=None) -> list:
+def expected_weeks(weeks: int = FULL_WEEKS, now=None) -> list:
     """推算最近 weeks 期应有的数据节点（按周，由新到旧）。
 
-    SCR 数据每周一份：周中（周一~周五）执行时本周尚未结束，最新节点为上一周；
-    周末（周六/周日）执行时最新节点为本周。
+    SCR 数据每周一份、周五盘后导出，因此最新节点按「当期数据是否已生成」判断：
+      · 周一 ~ 周四        → 上一周（本周尚未结束）
+      · 周五 15:00 之前   → 上一周
+      · 周五 15:00 及之后 → 本周（收盘后当日数据已生成，不必等到周末）
+      · 周六 / 周日       → 本周
     """
-    day = today or dt.date.today()
-    if isinstance(day, str):
-        day = dt.date.fromisoformat(day)
-    this_monday = week_start(day)
-    latest = this_monday if day.weekday() >= 5 else this_monday - dt.timedelta(weeks=1)
+    moment = _as_moment(now)
+    this_monday = week_start(moment)
+    friday_closed = moment.weekday() == 4 and moment.hour >= MARKET_CLOSE_HOUR
+    closed = moment.weekday() >= 5 or friday_closed
+    latest = this_monday if closed else this_monday - dt.timedelta(weeks=1)
     return [latest - dt.timedelta(weeks=index) for index in range(weeks)]
 
 
@@ -341,7 +367,8 @@ def analyze(params: dict = None) -> dict:
             "error": (f"数据不完整：缺少最近 {full_weeks} 周中的 {len(missing)} 期（{detail}）。"
                       f"最新一期应覆盖 {expected[0].isoformat()} ~ "
                       f"{(expected[0] + dt.timedelta(days=6)).isoformat()} 这一周"
-                      f"（周中执行时最新节点为上一周），请补齐后重新计算"),
+                      f"（周一~周四及周五收盘前最新节点为上一周，周五收盘后及周末为本周），"
+                      f"请补齐后重新计算"),
             "missing_weeks": [monday.isoformat() for monday in missing],
             "window": window_info,
             "errors": errors,

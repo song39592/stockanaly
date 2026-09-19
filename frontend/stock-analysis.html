@@ -44,6 +44,12 @@ input:focus{outline:none;border-color:var(--blue)}
 .tbl th{text-align:left;color:var(--muted);font-weight:500;padding:7px 9px;border-bottom:1px solid var(--line);white-space:nowrap}
 .tbl td{padding:7px 9px;border-bottom:1px dashed rgba(255,255,255,.06);white-space:nowrap}
 .tbl .code{font-family:ui-monospace,Consolas,monospace}
+.tbl .num{font-family:ui-monospace,Consolas,monospace;text-align:right}
+.badge{display:inline-block;border-radius:6px;padding:1px 7px;font-size:11px}
+.badge.low{background:#3fb95022;color:var(--green)}
+.badge.fair{background:#ffffff14;color:var(--sub)}
+.badge.high{background:#ef535022;color:var(--red)}
+.up{color:var(--red)}.down{color:var(--green)}.flat{color:var(--sub)}
 .event-list{max-height:420px;overflow-y:auto}
 .event-item{padding:9px 2px;border-bottom:1px dashed rgba(255,255,255,.08)}
 .event-item:last-child{border-bottom:none}
@@ -95,6 +101,17 @@ input:focus{outline:none;border-color:var(--blue)}
     </div>
 
     <div class="note" id="methodNote">行情与消息来自后端 <code>/api/history/stock/{code}</code>；入池/出池轨迹由股票池历史快照推导。本页仅供研究参考，不构成投资建议。</div>
+  </section>
+
+  <!-- 估值计算：结果直接调用股票估值接口，不在此页重复公式；口径与计算过程见 valuation.html -->
+  <section class="card">
+    <div class="card-h">
+      <h2>估值计算</h2>
+      <span class="tag" id="valStatus">待计算</span>
+      <a class="btn" id="valFullLink" href="valuation.html" target="_blank" rel="noopener">打开完整计算过程 ↗</a>
+      <button class="btn" id="btnValuation">↻ 重新计算</button>
+    </div>
+    <div class="card-b" id="valBody"><div class="empty">打开个股后自动计算</div></div>
   </section>
 </div>
 
@@ -256,6 +273,75 @@ function renderEvents(events, sync) {
   }).join('');
 }
 
+/* -------- 估值计算（结果来自 /api/stock/valuation，公式与口径不在此页重复，见 valuation.html） -------- */
+const valNum = (v, d = 2) => (v == null || v === '' ? '—' : Number(v).toFixed(d));
+const valPct = v => (v == null ? '—' : (Number(v) > 0 ? '+' : '') + (Number(v) * 100).toFixed(2) + '%');
+
+function setValStatus(text, kind) {
+  const el = $('valStatus');
+  el.textContent = text;
+  el.className = 'tag' + (kind ? ' ' + kind : '');
+}
+
+function renderValuation(j) {
+  const m = j.market || {}, f = j.finance || {}, g = j.growth || {}, a = j.assumptions || {};
+  const rows = (j.scenarios || []).map(s => {
+    const cls = s.verdict === '低估' ? 'low' : s.verdict === '高估' ? 'high' : 'fair';
+    const tone = s.return_rate > 0 ? 'up' : s.return_rate < 0 ? 'down' : 'flat';
+    return `<tr>
+      <td>${esc(s.label)}</td>
+      <td class="num">${valPct(s.growth)}</td>
+      <td class="num">${valNum(s.value_per_share)} 元</td>
+      <td class="num">${valNum(s.undervalued_ratio, 4)}</td>
+      <td><span class="badge ${cls}">${esc(s.verdict || '—')}</span></td>
+      <td class="num">${valNum(s.target_price)} 元</td>
+      <td class="num ${tone}">${valPct(s.return_rate)}</td>
+    </tr>`;
+  }).join('');
+
+  $('valBody').innerHTML = `
+    <div class="stats">
+      <div class="ds"><div class="ds-v">${valNum(m.price)} 元</div><div class="ds-l">当前股价</div></div>
+      <div class="ds"><div class="ds-v">${valNum(f.net_profit_base)} 亿</div><div class="ds-l">期初净利润（${esc(f.indicator || '—')}）</div></div>
+      <div class="ds"><div class="ds-v">${g.cagr == null ? '走兜底' : valPct(g.cagr)}</div><div class="ds-l">${g.from_consensus ? '机构预测复合增速' : '未提供机构预测，按模板兜底'}</div></div>
+      <div class="ds"><div class="ds-v">${valPct(a.discount_rate)}</div><div class="ds-l">贴现率</div></div>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="tbl">
+        <thead><tr>
+          <th>情景</th><th class="num">增长率</th><th class="num">每股价值</th><th class="num">股价 / 价值</th>
+          <th>判断</th><th class="num">预测 ${a.predict_years || 1} 年价</th><th class="num">预测收益率</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+async function loadValuation(code) {
+  setValStatus('计算中…');
+  $('valBody').innerHTML = '<div class="empty">正在计算估值（需拉取行情与财务数据，约数秒）…</div>';
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60000);
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/stock/valuation`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }), signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    const j = await res.json();
+    if (code !== currentCode) return;
+    if (!j.ok) throw new Error(j.error || '估值失败');
+    renderValuation(j);
+    setValStatus('已计算', 'ok');
+  } catch (e) {
+    clearTimeout(timer);
+    if (code !== currentCode) return;
+    const msg = e.name === 'AbortError' ? '请求超时（60 秒）' : e.message;
+    setValStatus('计算失败', 'bad');
+    $('valBody').innerHTML = `<div class="empty">估值计算失败：${esc(msg)}<br>可点击「打开完整计算过程」手动补填参数后重算。</div>`;
+  }
+}
+
 /* ---------------- 数据加载 ---------------- */
 async function loadName(code) {
   try {
@@ -320,9 +406,11 @@ function open(code) {
   currentCode = code;
   payload = null;
   $('codeInput').value = code;
+  $('valFullLink').href = `valuation.html?code=${encodeURIComponent(code)}`;
   loadName(code);
   disposeKline('<div class="kline-state">正在加载日 K…</div>');
   loadHistory(code, false);
+  loadValuation(code);
 }
 
 /* ---------------- 事件绑定 ---------------- */
@@ -332,6 +420,7 @@ $('codeInput').addEventListener('input', () => {
 });
 $('codeInput').addEventListener('keydown', e => { if (e.key === 'Enter') open($('codeInput').value.trim()); });
 $('btnRefresh').addEventListener('click', () => { if (currentCode) loadHistory(currentCode, true); });
+$('btnValuation').addEventListener('click', () => { if (currentCode) loadValuation(currentCode); });
 document.querySelectorAll('[data-k-range]').forEach(btn => btn.addEventListener('click', () => {
   kRange = Number(btn.dataset.kRange);
   document.querySelectorAll('[data-k-range]').forEach(b => b.classList.toggle('active', b === btn));

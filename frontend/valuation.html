@@ -362,6 +362,16 @@ $('scenarioTabs').addEventListener('click', e => {
 
 $('bodyResult').innerHTML = IDLE_RESULT;
 $('bodySteps').innerHTML = IDLE_STEPS;
+
+// 支持被其他页面带代码直接打开：valuation.html?code=600519 自动填入并计算
+const presetCode = (new URLSearchParams(location.search).get('code') || '').trim();
+if (/^\d{6}$/.test(presetCode)) {
+  $('codeInput').value = presetCode;
+  lookupName();
+  calculate();
+} else {
+  $('codeInput').focus();
+}
 </script>
 </body>
 </html>
