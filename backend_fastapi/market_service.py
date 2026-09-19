@@ -185,6 +185,11 @@ def _num_cn(value):
         return None
 
 
+def _compact_date(value) -> str:
+    """日期归一成 YYYYMMDD（容忍 2026-09-18 / 20260918 两种写法），便于跨数据源比对。"""
+    return "".join(ch for ch in str(value or "") if ch.isdigit())[:8]
+
+
 def _now_str():
     return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -513,21 +518,33 @@ def _ths_market_flow(errors):
         return None
 
 
-def _main_fund_flow(errors):
+def _main_fund_flow(date, errors):
     """沪深主力净流向 / 特大单方向。
 
-    首选东方财富大盘资金流（主力 / 超大单 / 大单，单位亿元）；
-    该接口在当前网络不可用时，降级为同花顺汇总口径，保证页面仍有数据。
+    首选东方财富大盘资金流（主力 / 超大单 / 大单，单位亿元）：该接口一次性返回约 120 个
+    交易日的历史，指定 date 时取对应交易日那一行，因此主力资金流**支持按交易日回溯**
+    （原先只取 iloc[-1]，把自带的历史浪费了）；
+    日期不在区间内时回退最新一期并在 errors 中说明。
+    接口不可用时降级为同花顺汇总口径（实时汇总，无法回溯）。
     """
     df = _ak(ak.stock_market_fund_flow)
     if df is not None and not getattr(df, "empty", True):
         try:
-            last = df.iloc[-1]
+            wanted = _compact_date(date)
+            row, matched = df.iloc[-1], False
+            if wanted:
+                # 东财「日期」列为 2026-09-18，统一成 8 位后再比对
+                same_day = df[df["日期"].astype(str).map(_compact_date) == wanted]
+                if same_day.empty:
+                    errors.append(f"主力资金流无 {wanted} 的数据（东财该接口提供最近约 "
+                                  f"{len(df)} 个交易日），已回退最新一期 {row.get('日期')}")
+                else:
+                    row, matched = same_day.iloc[-1], True
 
             def pick(*names, digits=2):
                 for name in names:
                     if name in df.columns:
-                        value = _num(last.get(name), digits)
+                        value = _num(row.get(name), digits)
                         if value is not None:
                             return value
                 return None
@@ -539,7 +556,7 @@ def _main_fund_flow(errors):
             super_net = pick("超大单净流入-净额")
             big_net = pick("大单净流入-净额")
             return {
-                "date": str(last.get("日期")),
+                "date": str(row.get("日期")),
                 "main_net": to_yi(main_net),
                 "main_pct": pick("主力净流入-净占比"),
                 "super_net": to_yi(super_net),
@@ -548,19 +565,26 @@ def _main_fund_flow(errors):
                 "big_pct": pick("大单净流入-净占比"),
                 "super_direction": ("流入" if (super_net or 0) > 0 else "流出") if super_net is not None else None,
                 "source": "东方财富",
+                "historical": matched,        # 只有真正按日期命中才算回溯（超区间回退不算）
+                "history_days": len(df),
             }
         except Exception as exc:          # noqa: BLE001
             errors.append(f"东财主力资金流向解析失败：{exc}")
 
-    return _ths_market_flow(errors)
+    fallback = _ths_market_flow(errors)
+    if isinstance(fallback, dict):
+        fallback.setdefault("historical", False)
+        fallback.setdefault("history_note", "同花顺汇总口径仅在实时可用，不支持按交易日回溯")
+    return fallback
 
 
 def capital_flow(date=None):
     """② 大盘资金。
 
     成交额 / 涨跌家数 / 主力资金流分属三个不同数据源，彼此独立：并行抓取并设置整体兜底超时。
-    这三个口径当前都没有可用的历史数据源（东财相关接口不可用，新浪/腾讯日线不含成交额），
-    因此指定历史日期时仍返回实时快照，并通过 notice 告知前端。
+    主力资金流支持按交易日回溯（东财 stock_market_fund_flow 自带约 120 个交易日历史）；
+    成交额与涨跌家数当前无可用历史数据源（东财相关接口不可用、新浪/腾讯日线只有成交量不含成交额、
+    乐咕仅提供当日快照），指定历史日期时这两项仍是实时快照，通过 notice 告知前端。
     """
     def build():
         errors = []
@@ -576,7 +600,7 @@ def capital_flow(date=None):
         tasks = [
             ("turnover", lambda: _market_turnover(errors)),
             ("adv_dec", lambda: _adv_dec(errors)),
-            ("main_flow", lambda: _main_fund_flow(errors)),
+            ("main_flow", lambda: _main_fund_flow(date, errors)),
         ]
         threads = [threading.Thread(target=collect, args=(name, fn), daemon=True)
                    for name, fn in tasks]
@@ -593,12 +617,23 @@ def capital_flow(date=None):
             "errors": errors,
         }
         if date:
-            payload["historical"] = False
-            payload["notice"] = ("成交额 / 涨跌家数 / 主力资金流当前均无可用历史数据源"
-                                 "（东财相关接口不可用，新浪/腾讯日线不含成交额），此处仍为实时快照")
+            # notice 按主力资金流的实际回溯结果生成：降级到同花顺时不能声称「已回溯」
+            flow = parts.get("main_flow") or {}
+            if flow.get("historical"):
+                flow_note = (f"主力资金流已回溯到 {date}"
+                             f"（东方财富口径，该接口提供最近约 {flow.get('history_days')} 个交易日）")
+            elif flow.get("source"):
+                flow_note = (f"主力资金流当前为{flow.get('source')}口径"
+                             f"（{flow.get('history_note') or '无历史序列'}），未能回溯到 {date}")
+            else:
+                flow_note = f"主力资金流暂不可用，未能回溯到 {date}"
+            payload["historical"] = False     # 成交额 / 涨跌家数仍非历史，整体不算完整历史
+            payload["notice"] = f"{flow_note}；成交额 / 涨跌家数当前无可用历史数据源，此处仍为实时快照"
         return payload
 
-    data, cached = _cached("capital_flow", build, ttl=60)
+    # 缓存键带上日期，避免查询历史日期时命中实时缓存（与 ①③④⑤ 保持一致）
+    data, cached = _cached(f"capital_flow:{date or 'rt'}", build,
+                           ttl=HIST_CACHE_TTL if date else 60)
     return {**data, "cached": cached}
 
 

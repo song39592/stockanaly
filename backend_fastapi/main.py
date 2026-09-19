@@ -19,7 +19,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import config
-import history_store
+import db
 import mentor_store
 
 app = FastAPI(title="个股时效性调研")
@@ -66,9 +66,9 @@ def _mount_routes() -> None:
 def _init_stores() -> None:
     """初始化各模块的本地存储；失败同样只记录、不阻止服务启动。"""
     try:
-        history_store.init_db()
+        db.init_db()                      # 建齐所有本地表（股票池 / 消息面 / 行情 / 复权因子 / 除权）
     except Exception as exc:              # noqa: BLE001
-        _record_error("股票池历史（本地库初始化）", "history_store", exc)
+        _record_error("本地库初始化（股票池历史与行情）", "db", exc)
     try:
         mentor_store.init_db()
     except Exception as exc:              # noqa: BLE001

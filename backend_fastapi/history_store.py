@@ -1,39 +1,22 @@
-"""股票池快照、日 K 与消息事件的本地 SQLite 存储。"""
+"""股票池快照与消息事件的本地 SQLite 存储（股价行情见 `price_store`）。
+
+连接、库路径与建表调度统一由 `db` 模块负责；本模块只定义自己的表。
+"""
 
 from __future__ import annotations
 
-import datetime as dt
 import hashlib
 import json
-import sqlite3
-from contextlib import contextmanager
-from pathlib import Path
 from typing import Any
 
-DATA_DIR = Path(__file__).resolve().parent / "data"
-DB_PATH = DATA_DIR / "stock_history.db"
-
-
-def now_iso() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat()
-
-
-@contextmanager
-def connect():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(DB_PATH, timeout=20)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
-    try:
-        yield db
-        db.commit()
-    finally:
-        db.close()
+import db
+# 兼容既有调用方与测试的导入习惯（连接与工具函数实际定义在 db 模块）
+from db import DATA_DIR, DB_PATH, connect, now_iso        # noqa: F401
 
 
 def init_db() -> None:
-    with connect() as db:
-        db.executescript("""
+    with connect() as conn:
+        conn.executescript("""
         CREATE TABLE IF NOT EXISTS pool_snapshots (
           snapshot_date TEXT PRIMARY KEY,
           stock_count INTEGER NOT NULL,
@@ -51,17 +34,6 @@ def init_db() -> None:
           FOREIGN KEY(snapshot_date) REFERENCES pool_snapshots(snapshot_date) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_pool_members_code ON pool_members(code, snapshot_date);
-        CREATE TABLE IF NOT EXISTS daily_bars (
-          code TEXT NOT NULL,
-          trade_date TEXT NOT NULL,
-          adjust TEXT NOT NULL DEFAULT 'qfq',
-          open REAL, high REAL, low REAL, close REAL,
-          volume REAL, amount REAL, amplitude REAL,
-          change_pct REAL, change_amount REAL, turnover REAL,
-          fetched_at TEXT NOT NULL,
-          PRIMARY KEY(code, trade_date, adjust)
-        );
-        CREATE INDEX IF NOT EXISTS idx_daily_bars_code_date ON daily_bars(code, trade_date);
         CREATE TABLE IF NOT EXISTS stock_events (
           id TEXT PRIMARY KEY,
           code TEXT NOT NULL,
@@ -114,47 +86,6 @@ def save_snapshot(snapshot_date: str, stocks: list[dict[str, Any]]) -> None:
                 str(s.get("region") or ""), s.get("price"), s.get("change"),
             ) for code, s in clean.items()],
         )
-
-
-def latest_bar_date(code: str, adjust: str = "qfq") -> str | None:
-    with connect() as db:
-        row = db.execute(
-            "SELECT MAX(trade_date) AS d FROM daily_bars WHERE code=? AND adjust=?", (code, adjust)
-        ).fetchone()
-    return row["d"] if row and row["d"] else None
-
-
-def upsert_bars(code: str, bars: list[dict[str, Any]], adjust: str = "qfq") -> int:
-    fetched_at = now_iso()
-    rows = []
-    for bar in bars:
-        rows.append((
-            code, bar["date"], adjust, bar.get("open"), bar.get("high"), bar.get("low"),
-            bar.get("close"), bar.get("volume"), bar.get("amount"), bar.get("amplitude"),
-            bar.get("change_pct"), bar.get("change_amount"), bar.get("turnover"), fetched_at,
-        ))
-    if not rows:
-        return 0
-    with connect() as db:
-        db.executemany("""INSERT OR REPLACE INTO daily_bars(
-          code,trade_date,adjust,open,high,low,close,volume,amount,amplitude,
-          change_pct,change_amount,turnover,fetched_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
-    return len(rows)
-
-
-def list_bars(code: str, start: str | None = None, end: str | None = None,
-              adjust: str = "qfq") -> list[dict[str, Any]]:
-    sql = "SELECT * FROM daily_bars WHERE code=? AND adjust=?"
-    params: list[Any] = [code, adjust]
-    if start:
-        sql += " AND trade_date>=?"
-        params.append(start)
-    if end:
-        sql += " AND trade_date<=?"
-        params.append(end)
-    sql += " ORDER BY trade_date"
-    with connect() as db:
-        return [dict(row) for row in db.execute(sql, params)]
 
 
 def event_id(code: str, kind: str, title: str, published_at: str, url: str) -> str:

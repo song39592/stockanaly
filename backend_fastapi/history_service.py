@@ -1,5 +1,11 @@
-"""池内股票的行情与消息增量同步。"""
+# -*- coding: utf-8 -*-
+"""池内股票的同步编排：股票池快照、消息面与后台任务。
 
+股价行情已拆分到独立模块，本模块不再直接接触行情数据源：
+  - 采集（网络 / 降级）：`price_service`
+  - 存储与复权计算：`price_store`
+这里只负责「按股票池调度这些同步」，以及消息面（公告 / 新闻）的采集与落库。
+"""
 from __future__ import annotations
 
 import datetime as dt
@@ -8,97 +14,18 @@ import time
 import uuid
 from typing import Any
 
-import akshare as ak
-
 import history_store
+import price_service
+import price_store
 from collectors import get_announcements, get_news
-from market_service import _ak
 
 EVENT_TTL_HOURS = 12
 _jobs_lock = threading.Lock()
 _active_dates: set[str] = set()
 
 
-def _number(value: Any) -> float | None:
-    try:
-        num = float(value)
-        return None if num != num else num
-    except (TypeError, ValueError):
-        return None
-
-
-def _date_text(value: Any) -> str:
-    text = str(value or "")[:10]
-    return text.replace("/", "-")
-
-
-def normalize_bars(frame) -> list[dict[str, Any]]:
-    if frame is None or getattr(frame, "empty", True):
-        return []
-    result = []
-    for _, row in frame.iterrows():
-        day = _date_text(row.get("日期", row.get("date")))
-        if not day:
-            continue
-        result.append({
-            "date": day,
-            "open": _number(row.get("开盘", row.get("open"))),
-            "high": _number(row.get("最高", row.get("high"))),
-            "low": _number(row.get("最低", row.get("low"))),
-            "close": _number(row.get("收盘", row.get("close"))),
-            "volume": _number(row.get("成交量", row.get("volume"))),
-            "amount": _number(row.get("成交额", row.get("amount"))),
-            "amplitude": _number(row.get("振幅")),
-            "change_pct": _number(row.get("涨跌幅")),
-            "change_amount": _number(row.get("涨跌额")),
-            "turnover": _number(row.get("换手率", row.get("turnover"))),
-        })
-    return result
-
-
-def market_symbol(code: str) -> str:
-    if code.startswith(("6", "5")):
-        return "sh" + code
-    if code.startswith(("0", "1", "2", "3")):
-        return "sz" + code
-    return "bj" + code
-
-
-def sync_bars(code: str, adjust: str = "qfq") -> dict[str, Any]:
-    today = dt.date.today()
-    latest = history_store.latest_bar_date(code, adjust)
-    if latest:
-        start = dt.date.fromisoformat(latest) - dt.timedelta(days=14)
-    else:
-        start = today - dt.timedelta(days=730)
-    source = "东方财富"
-    frame = _ak(
-        ak.stock_zh_a_hist,
-        symbol=code,
-        period="daily",
-        start_date=start.strftime("%Y%m%d"),
-        end_date=today.strftime("%Y%m%d"),
-        adjust=adjust,
-        timeout=30,
-    )
-    if frame is None or getattr(frame, "empty", True):
-        source = "腾讯证券"
-        frame = _ak(
-            ak.stock_zh_a_hist_tx,
-            symbol=market_symbol(code),
-            start_date=start.strftime("%Y%m%d"),
-            end_date=today.strftime("%Y%m%d"),
-            adjust=adjust,
-            timeout=35,
-        )
-    bars = normalize_bars(frame)
-    count = history_store.upsert_bars(code, bars, adjust)
-    if not bars:
-        raise RuntimeError("行情数据源未返回日 K")
-    return {"count": count, "start": bars[0]["date"], "end": bars[-1]["date"], "source": source}
-
-
 def events_are_fresh(code: str) -> bool:
+    """消息面是否仍在缓存有效期内。"""
     state = history_store.event_state(code)
     if not state:
         return False
@@ -110,6 +37,7 @@ def events_are_fresh(code: str) -> bool:
 
 
 def sync_events(code: str, force: bool = False) -> dict[str, Any]:
+    """采集公告与新闻（合并为消息时间轴）并落库。"""
     if not force and events_are_fresh(code):
         return {"cached": True, "count": len(history_store.list_events(code))}
     announcements, ann_note = get_announcements(code, days=180)
@@ -136,19 +64,35 @@ def sync_events(code: str, force: bool = False) -> dict[str, Any]:
 
 
 def sync_stock(code: str, include_events: bool = False, force_events: bool = False) -> dict[str, Any]:
-    errors = []
+    """同步单只股票：日 K（三口径）+ 复权参考数据（+ 可选消息面）。
+
+    三块互相独立，任一块失败都只记录到 errors，不影响其余部分。
+    """
+    errors: list[str] = []
     bar_result = None
+    reference_result = None
     event_result = None
+
     try:
-        bar_result = sync_bars(code)
-    except Exception as exc:  # noqa: BLE001 - 单股失败不影响整个任务
+        bar_result = price_service.sync_all_adjusts(code)
+        errors.extend(bar_result.get("errors") or [])       # 单口径失败也要上报
+    except Exception as exc:                                # noqa: BLE001 - 单股失败不影响整个任务
         errors.append(f"K线：{exc}")
+
+    try:
+        reference_result = price_service.sync_reference(code)   # 因子 / 除权：默认只首次采集
+        errors.extend(reference_result.get("errors") or [])
+    except Exception as exc:                                # noqa: BLE001 - 参考数据失败不影响日 K
+        errors.append(f"参考数据：{exc}")
+
     if include_events:
         try:
             event_result = sync_events(code, force_events)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:                            # noqa: BLE001
             errors.append(f"消息：{exc}")
-    return {"bars": bar_result, "events": event_result, "errors": errors}
+
+    return {"bars": bar_result, "events": event_result,
+            "reference": reference_result, "errors": errors}
 
 
 def _run_job(job_id: str, snapshot_date: str, stocks: list[dict[str, Any]]) -> None:
@@ -172,6 +116,7 @@ def _run_job(job_id: str, snapshot_date: str, stocks: list[dict[str, Any]]) -> N
 
 
 def enqueue_snapshot_sync(snapshot_date: str, stocks: list[dict[str, Any]]) -> str | None:
+    """为某个交易日的股票池启动后台行情同步；同一天已有任务在跑时返回 None。"""
     with _jobs_lock:
         if snapshot_date in _active_dates:
             return None
@@ -185,11 +130,12 @@ def enqueue_snapshot_sync(snapshot_date: str, stocks: list[dict[str, Any]]) -> s
 
 def stock_detail(code: str, start: str | None = None, end: str | None = None,
                  refresh: bool = False) -> dict[str, Any]:
-    bars = history_store.list_bars(code, start, end)
+    """个股详情：前复权 K 线（现算）+ 消息面 + 入池轨迹，必要时先同步。"""
+    bars = price_store.load_bars(code, "qfq", start, end)
     sync_result = None
     if refresh or not bars:
         sync_result = sync_stock(code, include_events=True, force_events=refresh)
-        bars = history_store.list_bars(code, start, end)
+        bars = price_store.load_bars(code, "qfq", start, end)
     elif not events_are_fresh(code):
         # 有 K 线时仍按需刷新消息；失败只写进 errors，不影响已有图表。
         try:
