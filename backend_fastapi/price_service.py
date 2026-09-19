@@ -21,11 +21,10 @@ import akshare as ak
 import price_store
 from market_service import _ak
 
-# 同步落盘的三套口径（daily_bars 主键含 adjust，可同表并存）：
-#   qfq 前复权：以最新日为基准，价格接近现价，供页面展示；
-#   hfq 后复权：以上市首日为基准，**历史数据不随新的除权变化**，供策略回测（结果可复现）；
-#   raw 不复权：原始成交价，用于准确还原当时的成交价与持仓成本。
-BAR_ADJUSTS = ("qfq", "hfq", "raw")
+# 落盘口径：**只存不复权原始价这一份**。
+# 复权价由 `hfq_factor` 现算（见 `price_store.load_bars`），不落盘——
+# 三套都存的话，5000 只 × 10 年要 7.4 GB，而只存一份只要 2.5 GB。
+SYNC_ADJUSTS = ("raw",)
 _AK_ADJUST = {"qfq": "qfq", "hfq": "hfq", "raw": ""}     # akshare 用空串表示不复权
 BACKFILL_DAYS = 730                                       # 首次同步的默认回看窗口（约 2 年）
 OVERLAP_DAYS = 14                                         # 增量重叠窗口，覆盖数据源事后修订
@@ -82,23 +81,61 @@ def normalize_bars(frame) -> list[dict[str, Any]]:
     return result
 
 
-def sync_bars(code: str, adjust: str = "raw") -> dict[str, Any]:
-    """同步单一口径（raw / hfq / qfq）的日 K，按已落盘的最新日期增量补齐。"""
+def validate_bars(bars: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    """入库前校验：不合格的行**拒绝入库**并给出原因。
+
+    原则：宁可这只股票当日**没有**数据（可以重拉），也不写入不可信的数据——
+    错误数据进入系统后会被后续计算引用，纠正成本远高于缺失。
+
+    这里只做**绝对可靠**的校验（日内 OHLC 关系），不会误伤除权等正常情况；
+    跨日跳变之类的检查容易与除权混淆，交给复权因子与人工核对，不在此处拦截。
+    """
+    ok: list[dict[str, Any]] = []
+    rejected: list[str] = []
+    for bar in bars:
+        reason = _bar_problem(bar)
+        if reason:
+            rejected.append(f"{bar.get('date') or '?'}：{reason}")
+        else:
+            ok.append(bar)
+    return ok, rejected
+
+
+def _bar_problem(bar: dict[str, Any]) -> str | None:
+    """返回不合格原因；合格返回 None。"""
+    high, low = bar.get("high"), bar.get("low")
+    open_, close = bar.get("open"), bar.get("close")
+    values = [open_, high, low, close]
+    if any(value is None for value in values):
+        return "开高低收存在缺失值"
+    if min(values) <= 0:
+        return "价格出现非正数"
+    if high < low:
+        return "最高价低于最低价"
+    if not low <= close <= high:
+        return "收盘价超出当日高低区间"
+    if not low <= open_ <= high:
+        return "开盘价超出当日高低区间"
+    return None
+
+
+def fetch_daily(code: str, start: dt.date, end: dt.date,
+                adjust: str = "raw") -> tuple[list[dict[str, Any]], str, list[str]]:
+    """抓取并校验某区间的日 K（东财优先，不可用则降级腾讯）。
+
+    **只抓取、不写库**——所有写库都由调用方在抓取成功后进行，
+    这样数据源失败时库里的原数据保持不动（供「全量重抓修复」使用）。
+    返回 (已通过校验的 bars, 数据源名, 被拒行的原因)。
+    """
     store_adjust = price_store._store_adjust(adjust)
     ak_adjust = _AK_ADJUST.get(store_adjust, store_adjust)
-    today = dt.date.today()
-    latest = price_store.latest_bar_date(code, store_adjust)
-    if latest:
-        start = dt.date.fromisoformat(latest) - dt.timedelta(days=OVERLAP_DAYS)
-    else:
-        start = today - dt.timedelta(days=BACKFILL_DAYS)
     source = "东方财富"
     frame = _ak(
         ak.stock_zh_a_hist,
         symbol=code,
         period="daily",
         start_date=start.strftime("%Y%m%d"),
-        end_date=today.strftime("%Y%m%d"),
+        end_date=end.strftime("%Y%m%d"),
         adjust=ak_adjust,
         timeout=30,
     )
@@ -108,33 +145,77 @@ def sync_bars(code: str, adjust: str = "raw") -> dict[str, Any]:
             ak.stock_zh_a_hist_tx,
             symbol=market_symbol(code),
             start_date=start.strftime("%Y%m%d"),
-            end_date=today.strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d"),
             adjust=ak_adjust,
             timeout=35,
         )
     bars = normalize_bars(frame)
     if not bars:
         raise RuntimeError("行情数据源未返回日 K")
+    bars, rejected = validate_bars(bars)              # 入库前挡住不合格数据
+    if not bars:
+        raise RuntimeError("行情数据全部未通过校验：" + "；".join(rejected[:3]))
+    return bars, source, rejected
+
+
+def sync_bars(code: str, adjust: str = "raw") -> dict[str, Any]:
+    """同步单一口径（raw / hfq / qfq）的日 K，按已落盘的最新日期**增量**补齐。"""
+    store_adjust = price_store._store_adjust(adjust)
+    today = dt.date.today()
+    latest = price_store.latest_bar_date(code, store_adjust)
+    if latest:
+        start = dt.date.fromisoformat(latest) - dt.timedelta(days=OVERLAP_DAYS)
+    else:
+        start = today - dt.timedelta(days=BACKFILL_DAYS)
+    bars, source, rejected = fetch_daily(code, start, today, store_adjust)
     count = price_store.upsert_bars(code, bars, store_adjust, source=source)
     return {"count": count, "start": bars[0]["date"], "end": bars[-1]["date"],
-            "source": source, "adjust": store_adjust}
+            "source": source, "adjust": store_adjust, "rejected": rejected}
+
+
+def refetch_bars(code: str, adjust: str = "raw") -> dict[str, Any]:
+    """**全量重抓**某股日 K 并整体替换库中数据（指纹校验失败后的自动修复路径）。
+
+    与 `sync_bars` 的区别：后者只从库中最新日期往前重叠 14 天做增量补齐，
+    **碰不到更早的历史行**；因此若被改动的是历史区间，增量同步永远修不好。
+    本函数改从库中**既有的最早日期**开始抓取，并整体替换，
+    从而能还原**任意位置**的改动，替换后重算指纹即恢复可信。
+
+    **先抓取、后写入**：数据源失败时直接抛错，库中原数据保持不动。
+    """
+    store_adjust = price_store._store_adjust(adjust)
+    # 读既有范围时必须跳过指纹校验，否则「因不可信而修复」的调用会被自己拦住
+    existing = price_store.list_bars(code, adjust=store_adjust, verify=False)
+    today = dt.date.today()
+    if existing:
+        start = dt.date.fromisoformat(existing[0]["trade_date"]) - dt.timedelta(days=OVERLAP_DAYS)
+    else:
+        start = today - dt.timedelta(days=BACKFILL_DAYS)
+    bars, source, rejected = fetch_daily(code, start, today, store_adjust)
+    result = price_store.overwrite_bars(code, bars, store_adjust, source=source)
+    return {
+        "code": code, "before": len(existing), "after": result["written"],
+        "removed": result["removed"], "start": bars[0]["date"], "end": bars[-1]["date"],
+        "source": source, "adjust": store_adjust, "rejected": rejected,
+    }
 
 
 def sync_all_adjusts(code: str) -> dict[str, Any]:
-    """一次同步全部口径（qfq / hfq / raw），单口径失败不影响其他口径。
+    """同步日K（当前只落盘**不复权原始价**一份）。
 
-    返回结构兼容单口径调用方的旧字段（count / start / end / source 取自 qfq），
-    各口径明细见 adjusts，失败原因见 errors。
+    历史上曾同时同步 qfq / hfq / raw 三套，但复权价本就可由 `hfq_factor` 现算，
+    落盘三套纯属冗余（5000 只 × 10 年：7.4 GB vs 2.5 GB），故收敛为一份。
+    函数名与返回结构保持不变，以免影响既有调用方。
     """
     results: dict[str, Any] = {}
     errors: list[str] = []
-    for adjust in BAR_ADJUSTS:
+    for adjust in SYNC_ADJUSTS:
         try:
             results[adjust] = sync_bars(code, adjust)
         except Exception as exc:          # noqa: BLE001 - 单口径失败不影响其余口径
             results[adjust] = None
             errors.append(f"{adjust}：{exc}")
-    primary = results.get("qfq") or {}
+    primary = results.get("raw") or {}
     return {
         "count": sum((item or {}).get("count") or 0 for item in results.values()),
         "start": primary.get("start"),

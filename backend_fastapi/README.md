@@ -117,7 +117,46 @@ qfq(t, as_of) = raw(t) × hfq_factor(t) ÷ hfq_factor(as_of)
 点击股票可查看日 K、MA5/10/20/60、成交量、入池/出池标记、公告及新闻时间轴，以及历次在池区间。
 行情在导入后后台更新，消息面在首次打开个股时按需抓取并缓存 12 小时。
 
-SQLite 文件位于 `backend_fastapi/data/stock_history.db`，属于本地运行数据，不提交到 Git。
+**数据存放位置**：所有运行期数据集中在一个数据根目录，便于备份与迁移。
+**默认为「程序上一级的 `stockanaly-data`」**，即与仓库并列：
+
+```text
+<上一级>/
+├── stockanaly-main/     ← 程序
+└── stockanaly-data/     ← 默认数据目录
+    ├── stock_history.db   股票池快照 / 消息面 / 同步任务（体积小）
+    ├── mentor_lab.db      大佬策略实验室
+    ├── bars/
+    │   ├── bars_YYYY.db   日K 原始价，按年分片（5000 只约 250 MB/年）
+    │   └── factors.db     复权因子 + 除权除息明细（全量，行数少）
+    └── chip/              SCR 选股数据（raw 原始文件、processed 计算结果、meta.json）
+```
+
+**日K 按年分片**：单文件体积可控、便于备份与归档（老年份可只读），跨年查询由 `price_store`
+按年份逐库读取后合并排序。表使用 `WITHOUT ROWID`（主键即聚簇数据，省一份索引），
+连接启用 `mmap_size` / `cache_size` 调优。库里**只存不复权原始价**，
+复权价由 `hfq_factor` 现算——这比存三套复权价节省约 2/3 空间。
+
+解析顺序为：`STOCK_DATA_DIR` > `.env` 的 `DATA_DIR` > 默认（程序上一级的 `stockanaly-data`）。
+**启动时会自动把项目内旧位置的数据复制到新目录**（只复制、不删除源文件）。这些数据不提交到 Git。
+
+```text
+GET  /api/system/storage            查看当前数据目录与各项占用
+POST /api/system/storage            修改数据目录（写入 .env，重启后生效）
+GET  /api/system/integrity          重新校验数据完整性（签名 / 写入时间 / 结构版本）
+```
+
+**数据可信原则**：**丢数据可重拉，错误数据不可接受**——可用性可以让步，正确性不能让步。
+完整说明见 `docs/database.md` 第八节。
+
+**完整性校验**：每个库都有一张 `_meta` 表，记录结构版本与「程序最后写入时间」并做 HMAC 签名；
+写事务提交时自动刷新（各 store 无需关心）。校验为**只读**操作，可发现有人绕过程序直接改库：
+签名不匹配、或文件 mtime 明显晚于记录时间（容差 300 秒）都会报出来。
+日 K 还额外有**按股指纹**（`_digests`，覆盖全部行情字段），能定位到具体哪只股票被改动。
+
+发现日 K 不可信时**直接全量重抓该股并整体替换**（先抓取、后写入，失败则保留原数据），
+绝不展示可疑数据；其余库只报告、不自动删除。密钥首次运行自动生成并写入 `.env`，
+Windows 下由 DPAPI 密封（绑定本机 + 当前用户，不提供恢复码）。
 
 ```text
 POST /api/history/pool/import       保存每日股票池并可启动行情同步

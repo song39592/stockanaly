@@ -310,6 +310,34 @@
   .mgmt-item .spacer { flex: 1; }
   .mgmt-list { max-height: 340px; overflow-y: auto; }
 
+  /* 服务端数据目录 */
+  .storage-box {
+    border: 1px solid var(--card-border); border-radius: 8px;
+    padding: 10px 12px; margin-bottom: 14px; background: rgba(255,255,255,.03);
+  }
+  .storage-h {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 13px; font-weight: 600; margin-bottom: 6px;
+  }
+  .storage-tag {
+    font-size: 11px; padding: 1px 7px; border-radius: 6px;
+    background: rgba(255,255,255,.08); color: var(--text-3); font-weight: 400;
+  }
+  .storage-tag.warn { background: rgba(240,160,60,.16); color: var(--orange); }
+  .storage-path {
+    font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+    color: var(--text); word-break: break-all; margin-bottom: 4px;
+  }
+  .storage-size { font-size: 12px; color: var(--text-3); margin-bottom: 8px; }
+  .storage-edit { display: flex; gap: 8px; }
+  .storage-edit input {
+    flex: 1; min-width: 0; padding: 6px 9px; border-radius: 7px;
+    border: 1px solid var(--card-border); background: rgba(255,255,255,.04);
+    color: var(--text); font-size: 13px; font-family: ui-monospace, Consolas, monospace;
+  }
+  .storage-edit input:focus { outline: none; border-color: var(--blue, #5b8def); }
+  .storage-note { font-size: 11.5px; color: var(--text-3); margin-top: 7px; line-height: 1.6; }
+
   /* Toast */
   #toast-wrap { position: fixed; top: 18px; left: 50%; transform: translateX(-50%); z-index: 200; display: flex; flex-direction: column; gap: 8px; align-items: center; }
   .toast {
@@ -695,6 +723,22 @@
   <div class="modal">
     <h2>数据管理</h2>
     <div class="m-sub">共 <span id="mgmtDays">0</span> 个数据日 · 可按天删除</div>
+    <!-- 服务端数据目录：行情库 / 实验室库 / SCR 数据统一存放于此（与代码分离，便于备份迁移） -->
+    <div class="storage-box">
+      <div class="storage-h">
+        <span>服务端数据目录</span>
+        <span class="storage-tag" id="storageTag">加载中…</span>
+      </div>
+      <div class="storage-path" id="storagePath">—</div>
+      <div class="storage-size" id="storageSize"></div>
+      <div class="storage-edit">
+        <input id="storageInput" placeholder="例如 D:\stockanaly-data" />
+        <button class="btn" id="btnStorageSave">保存</button>
+      </div>
+      <div class="storage-note">
+        修改后需<b>重启后端</b>生效；启动时会把项目内旧位置的数据自动补到新目录（只复制，不删除原件）。
+      </div>
+    </div>
     <div class="mgmt-list" id="mgmtList"></div>
     <div class="m-actions" style="justify-content:space-between;">
       <button class="btn danger" id="btnClearAll">🗑 清空全部数据</button>
@@ -1227,7 +1271,57 @@ document.getElementById('jsonInput').addEventListener('change', (e) => {
 /** 打开数据管理弹窗 */
 document.getElementById('btnManage').addEventListener('click', () => {
   renderManageModal();
+  loadStorageInfo();
   openModal('manageModal');
+});
+
+/* ---------------- 服务端数据目录（查询 / 修改） ---------------- */
+async function loadStorageInfo() {
+  const tag = document.getElementById('storageTag');
+  const path = document.getElementById('storagePath');
+  const size = document.getElementById('storageSize');
+  tag.textContent = '加载中…';
+  tag.className = 'storage-tag';
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/system/storage`);
+    const j = await res.json();
+    if (!j.ok) throw new Error(j.detail || '查询失败');
+    path.textContent = j.root;
+    document.getElementById('storageInput').value = j.root;
+    size.textContent = `合计 ${j.total_text}：` +
+      j.items.map(i => `${i.name} ${i.size_text}`).join(' · ');
+    tag.textContent = j.is_default ? '默认位置' : '自定义位置';
+    tag.className = 'storage-tag' + (j.is_inside_project ? ' warn' : '');
+    if (j.is_inside_project) {
+      size.textContent += '（当前位于项目目录内，建议改到项目外以免重装/清理时丢失）';
+    }
+  } catch (e) {
+    path.textContent = '—';
+    size.textContent = '后端未启动，无法读取数据目录';
+    tag.textContent = '不可用';
+    tag.className = 'storage-tag warn';
+  }
+}
+
+document.getElementById('btnStorageSave').addEventListener('click', async () => {
+  const value = document.getElementById('storageInput').value.trim();
+  if (!value) { toast('请填写数据目录', 'err'); return; }
+  const btn = document.getElementById('btnStorageSave');
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/system/storage`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data_dir: value }),
+    });
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.detail || `HTTP ${res.status}`);
+    toast(j.message || '已保存，重启后端后生效');
+    loadStorageInfo();
+  } catch (e) {
+    toast(`保存失败：${e.message}`, 'err');
+  } finally {
+    btn.disabled = false;
+  }
 });
 document.getElementById('btnManageClose').addEventListener('click', () => closeModal('manageModal'));
 
