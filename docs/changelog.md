@@ -61,6 +61,20 @@
 - **修复 akshare 并发调用崩溃**：`py_mini_racer`（新浪、同花顺系接口依赖）并发初始化会触发
   `FATAL: partition_address_space` 直接杀掉后端进程；现按模块自动识别这类接口并串行化执行，其余接口保持并行。
 
+### 新增（个股分析独立页面）
+
+- **个股分析独立成页面**（`frontend/stock-analysis.html`）：原先只在 index.html 的「个股详情弹窗」里，
+  现拆为独立页面，支持通过 URL 参数 `?code=600519` 直接打开与分享。页面内容：前复权日 K
+  （含 MA5/10/20/60、成交量、入池/出池与公告/新闻标记点）、在榜统计卡、入池出池轨迹表、消息面时间轴；
+  数据来自 `GET /api/history/stock/{code}`，名称与现价来自 `GET /api/stock/quote`。
+- **SCR 选股页个股可点击跳转**：三档结果表格中的「代码 / 名称」改为链接，
+  点击在新标签页打开该股的个股分析页（`stock-analysis.html?code=xxxxxx`）。
+- **个股详情弹窗已从 index.html 彻底移除**：原 `#detailModal` 的 HTML（约 30 行）与详情专用脚本
+  （K 线渲染 `renderStockKline`、消息渲染 `renderStockEvents`、历史加载 `loadStockHistory`、
+  入池时间轴、状态变量等约 150 行）全部删除，相关 CSS 保留不影响其他弹窗。
+  `openStockDetail()` 改为直接跳转独立页面，因此顶栏搜索、三个列表表格、变动分析的入池/出池列表、
+  AI 弹窗的「进出池时间轴」共 6 处入口无需改动，行为统一为「新标签页打开个股分析」。
+
 ### 重构
 
 - **业务接口全模块化 + 容错挂载**：

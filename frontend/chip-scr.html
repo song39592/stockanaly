@@ -58,6 +58,11 @@ input[type=date],input[type=number]{border:1px solid var(--line);background:var(
 .err{margin-top:12px;padding:8px 11px;border-radius:8px;background:#ef535017;color:#f0a5a3;font-size:12px}
 .note{margin-top:12px;padding:8px 11px;border-radius:8px;background:#e99a3517;color:#e7c08a;font-size:12px;line-height:1.8}
 .up{color:var(--red)}.down{color:var(--green)}
+/* 个股代码 / 名称：点击在新标签页打开个股分析 */
+.stock-link{color:var(--blue);text-decoration:none}
+.stock-link:hover{text-decoration:underline}
+.stock-link.name{color:var(--text)}
+.stock-link.name:hover{color:var(--blue)}
 /* 使用说明悬浮窗 */
 .modal-mask{display:none;position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:100;padding:26px 18px;overflow:auto}
 .modal-mask.show{display:flex;align-items:flex-start;justify-content:center}
@@ -96,7 +101,8 @@ input[type=date],input[type=number]{border:1px solid var(--line);background:var(
         文件名中的 8 位日期会自动解析为默认日期（如 <code>临时条件股20260912.xls</code> → 2026-09-12），
         解析结果可在下方表格中手动修改；支持一次选择多个文件。<br>
         计算需要<b>最近 5 周</b>的数据（按周归组，一周内多份只取其一）：<b>周中执行时最新一期为上一周</b>，
-        周末执行时为本周；缺少任意一期会直接报错并列出缺口，窗口之外的更早文件不参与计算。
+        周末执行时为本周；缺少任意一期会直接报错并列出缺口，窗口之外的更早文件不参与计算。<br>
+        结果表格中的<b>代码 / 名称可点击</b>，会在新标签页打开「个股分析」（日 K + 入池轨迹 + 消息面时间轴）。
       </div>
       <div id="fileList"><div class="empty">加载中…</div></div>
     </div>
@@ -364,8 +370,8 @@ function tierTable(key, tier) {
 
   const rows = items.map((it, i) => `<tr>
       <td class="num">${i + 1}</td>
-      <td>${esc(it.code)}</td>
-      <td>${esc(it.name)}</td>
+      <td><a class="stock-link" href="stock-analysis.html?code=${esc(it.code)}" target="_blank" rel="noopener" title="打开个股分析">${esc(it.code)}</a></td>
+      <td><a class="stock-link name" href="stock-analysis.html?code=${esc(it.code)}" target="_blank" rel="noopener" title="打开个股分析">${esc(it.name)}</a></td>
       <td>${esc(it.industry || '—')}</td>
       <td class="num">${fmt(it.market, 1)}</td>
       <td class="num">${it.pe == null ? '—' : fmt(it.pe, 2)}</td>

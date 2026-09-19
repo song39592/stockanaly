@@ -737,38 +737,7 @@
   </div>
 </div>
 
-<!-- 个股详情弹窗 -->
-<div class="modal-mask" id="detailModal">
-  <div class="modal research-modal">
-    <div class="research-head">
-      <div><h2 id="dTitle">个股研究详情</h2><div class="m-sub" id="dSub"></div></div>
-      <button class="btn" id="btnDetailClose">✕ 关闭</button>
-    </div>
-    <div class="detail-stats" id="dStats"></div>
-    <div class="research-toolbar">
-      <span class="research-status" id="dSyncStatus">正在读取本地记录…</span>
-      <button class="btn" data-k-range="120">近6月</button>
-      <button class="btn" data-k-range="250">近1年</button>
-      <button class="btn" data-k-range="0">全部</button>
-      <button class="btn" id="btnDetailRefresh">↻ 更新行情/消息</button>
-      <button class="btn primary" id="btnDetailResearch">✨ AI 调研</button>
-    </div>
-    <div id="stockKline" class="stock-kline"></div>
-    <div class="research-grid">
-      <section class="research-panel">
-        <h3>入池 / 出池记录</h3>
-        <div class="table-wrap research-table"><table>
-          <thead><tr><th>入池日期</th><th>出池日期</th><th>在榜天数</th><th>状态</th></tr></thead>
-          <tbody id="dTimeline"></tbody>
-        </table></div>
-      </section>
-      <section class="research-panel">
-        <h3>消息面时间轴</h3>
-        <div id="dEvents" class="event-list"><div class="empty-note">正在加载消息…</div></div>
-      </section>
-    </div>
-  </div>
-</div>
+<!-- 个股详情已拆为独立页面：stock-analysis.html（原弹窗代码已移除） -->
 
 <!-- 个股 AI 调研弹窗 -->
 <div class="modal-mask" id="aiModal">
@@ -1320,11 +1289,6 @@ document.getElementById('btnHelpClose').addEventListener('click', () => closeMod
 document.querySelectorAll('.modal-mask').forEach(m => {
   m.addEventListener('click', (e) => {
     if (e.target !== m) return;
-    if (m.id === 'detailModal') {
-      if (detailRequestController) detailRequestController.abort();
-      detailRequestController = null;
-      disposeStockKline();
-    }
     m.classList.remove('show');
   });
 });
@@ -1343,184 +1307,12 @@ function findStock(code) {
   return null;
 }
 
-/** 计算某只股票的进出池时间片段（按数据日，返回在榜连续片段数组） */
-function getStockTimeline(code) {
-  const dates = getDatesSorted();
-  const spans = [];
-  let si = null;
-  for (let i = 0; i < dates.length; i++) {
-    const inPool = data[dates[i]].some(s => s.code === code);
-    if (inPool && si === null) si = i;
-    if (!inPool && si !== null) { spans.push({ start: dates[si], end: dates[i - 1], days: i - si, open: false }); si = null; }
-  }
-  if (si !== null) spans.push({ start: dates[si], end: dates[dates.length - 1], days: dates.length - si, open: true });
-  return spans;
-}
+/* 个股 K 线 / 入池轨迹 / 消息面的渲染与加载已移至独立页面 stock-analysis.html */
 
-let detailCurrentCode = null;
-let detailPayload = null;
-let detailRange = 250;
-let detailRequestController = null;
-
-function disposeStockKline(content='') {
-  const el = document.getElementById('stockKline');
-  if (typeof echarts !== 'undefined') {
-    const instance = echarts.getInstanceByDom(el);
-    if (instance) instance.dispose();
-  }
-  if (typeof charts !== 'undefined' && charts.stockKline) delete charts.stockKline;
-  el.innerHTML = content;
-}
-
-function renderDetailTimeline(spans) {
-  document.getElementById('dTimeline').innerHTML = spans.length
-    ? spans.slice().reverse().map(sp => `
-      <tr><td class="code">${esc(sp.start)}</td><td class="code">${sp.open ? '至今' : esc(sp.end)}</td>
-      <td><span class="${dayTagClass(sp.days)}">${sp.days} 天</span></td>
-      <td>${sp.open ? '<span class="tag hot">在榜</span>' : '<span class="tag low">已出池</span>'}</td></tr>`).join('')
-    : '<tr><td colspan="4" class="empty-note">无记录</td></tr>';
-}
-
-function movingAverage(values, size) {
-  return values.map((_, i) => {
-    if (i < size - 1) return '-';
-    let sum = 0;
-    for (let j = 0; j < size; j++) sum += Number(values[i - j].close || 0);
-    return +(sum / size).toFixed(3);
-  });
-}
-
-function renderStockKline(payload) {
-  const source = payload.bars || [];
-  const bars = detailRange > 0 ? source.slice(-detailRange) : source;
-  const el = document.getElementById('stockKline');
-  if (!bars.length) {
-    disposeStockKline('<div class="ai-state err">暂未取得日 K 数据，可点击“更新行情/消息”重试。</div>');
-    return;
-  }
-  if (!charts.stockKline || charts.stockKline.isDisposed()) el.innerHTML = '';
-  const chart = getChart('stockKline');
-  chart.clear();
-  const dates = bars.map(x => x.trade_date);
-  const barMap = new Map(bars.map(x => [x.trade_date, x]));
-  const marks = [];
-  for (const span of (payload.pool?.spans || [])) {
-    const entry = barMap.get(span.start);
-    if (entry) marks.push({ name:'入池', coord:[span.start, entry.low], value:'入', symbol:'pin',
-      itemStyle:{color:'#f0534f'}, label:{color:'#fff'} });
-    const out = !span.open && barMap.get(span.end);
-    if (out) marks.push({ name:'出池', coord:[span.end, out.high], value:'出', symbol:'pin',
-      itemStyle:{color:'#7d7c78'}, label:{color:'#fff'} });
-  }
-  const eventDays = new Map();
-  for (const event of (payload.events || [])) {
-    if (barMap.has(event.published_at) && !eventDays.has(event.published_at)) eventDays.set(event.published_at, event);
-  }
-  for (const [day, event] of Array.from(eventDays).slice(0, 25)) {
-    const bar = barMap.get(day);
-    marks.push({ name:event.title, coord:[day, bar.high], value:event.kind === 'announcement' ? '告' : '闻',
-      symbol:'diamond', symbolSize:18, itemStyle:{color:event.kind === 'announcement' ? '#c98500' : '#3987e5'},
-      label:{color:'#fff',fontSize:9} });
-  }
-  const volumes = bars.map(x => ({ value:x.volume || 0,
-    itemStyle:{color:Number(x.close) >= Number(x.open) ? '#f0534f' : '#3fb950'} }));
-  chart.setOption({
-    animation:false,
-    legend:{data:['日K','MA5','MA10','MA20','MA60'],textStyle:{color:'#b8b7b0'},top:8},
-    tooltip:{trigger:'axis',axisPointer:{type:'cross'},backgroundColor:'#202027',borderColor:'#444',textStyle:{color:'#f0f0ef'}},
-    axisPointer:{link:[{xAxisIndex:'all'}]},
-    grid:[{left:55,right:24,top:45,height:'62%'},{left:55,right:24,top:'76%',height:'14%'}],
-    xAxis:[
-      {type:'category',data:dates,boundaryGap:true,axisLine:{lineStyle:{color:'#555'}},axisLabel:{color:'#8b8a85'},min:'dataMin',max:'dataMax'},
-      {type:'category',gridIndex:1,data:dates,boundaryGap:true,axisLine:{lineStyle:{color:'#555'}},axisLabel:{show:false},min:'dataMin',max:'dataMax'}
-    ],
-    yAxis:[
-      {scale:true,splitLine:{lineStyle:{color:'#232329'}},axisLabel:{color:'#8b8a85'}},
-      {scale:true,gridIndex:1,splitNumber:2,splitLine:{show:false},axisLabel:{color:'#8b8a85',formatter:v=>v>=10000?(v/10000).toFixed(0)+'万':v}}
-    ],
-    dataZoom:[{type:'inside',xAxisIndex:[0,1],start:0,end:100},{type:'slider',xAxisIndex:[0,1],bottom:2,height:18,start:0,end:100}],
-    series:[
-      {name:'日K',type:'candlestick',data:bars.map(x=>[x.open,x.close,x.low,x.high]),
-       itemStyle:{color:'#f0534f',color0:'#3fb950',borderColor:'#f0534f',borderColor0:'#3fb950'},
-       markPoint:{data:marks,tooltip:{formatter:p=>p.data.name}}},
-      ...[5,10,20,60].map((n,i)=>({name:'MA'+n,type:'line',data:movingAverage(bars,n),smooth:true,showSymbol:false,
-        lineStyle:{width:1,opacity:.85},color:['#f0a03c','#3987e5','#d55181','#9085e9'][i]})),
-      {name:'成交量',type:'bar',xAxisIndex:1,yAxisIndex:1,data:volumes}
-    ]
-  }, true);
-  setTimeout(() => chart.resize(), 50);
-}
-
-function renderStockEvents(events, sync) {
-  const el = document.getElementById('dEvents');
-  if (!events?.length) {
-    el.innerHTML = `<div class="empty-note">暂未采集到公告或新闻${sync?.errors?.length ? '：'+esc(sync.errors.join('；')) : ''}</div>`;
-    return;
-  }
-  el.innerHTML = events.map(item => {
-    const url = safeHttpUrl(item.source_url);
-    const title = url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a>` : esc(item.title);
-    return `<div class="event-item"><div class="event-meta">${esc(item.published_at || '日期未知')} · ${item.kind === 'announcement' ? '公告' : '新闻'} · ${esc(item.source || '来源未知')}</div>
-      <div>${title}</div>${item.summary ? `<p>${esc(item.summary)}</p>` : ''}</div>`;
-  }).join('');
-}
-
-async function loadStockHistory(code, refresh=false) {
-  if (detailRequestController) detailRequestController.abort();
-  const ctrl = new AbortController();
-  detailRequestController = ctrl;
-  document.getElementById('dSyncStatus').textContent = refresh ? '正在更新真实行情与消息…' : '正在读取K线与消息缓存…';
-  try {
-    const timer = setTimeout(() => ctrl.abort(), 90000);
-    const res = await fetch(`${BACKEND_URL}/api/history/stock/${code}?refresh=${refresh ? 'true' : 'false'}`, {signal:ctrl.signal});
-    clearTimeout(timer);
-    const result = await res.json();
-    if (!res.ok) throw new Error(result.detail || `HTTP ${res.status}`);
-    if (code !== detailCurrentCode) return;
-    detailPayload = result;
-    renderStockKline(result);
-    renderStockEvents(result.events, result.sync);
-    if (result.pool?.spans?.length) renderDetailTimeline(result.pool.spans);
-    const last = result.bars?.length ? result.bars[result.bars.length-1].trade_date : '无数据';
-    const errors = result.sync?.errors?.length ? `；部分失败：${result.sync.errors.join('；')}` : '';
-    document.getElementById('dSyncStatus').textContent = `前复权日K · ${result.bars?.length || 0} 个交易日 · 更新至 ${last}${errors}`;
-  } catch (e) {
-    if (code !== detailCurrentCode || e.name === 'AbortError' && detailRequestController !== ctrl) return;
-    document.getElementById('dSyncStatus').textContent = `K线服务暂不可用：${e.name === 'AbortError' ? '请求超时' : e.message}`;
-    disposeStockKline('<div class="ai-state err">后端行情暂不可用，入池记录仍可正常查看。</div>');
-    document.getElementById('dEvents').innerHTML = '<div class="empty-note">消息面暂不可用</div>';
-  } finally {
-    if (detailRequestController === ctrl) detailRequestController = null;
-  }
-}
-
-/** 打开个股研究详情：本地入池轨迹立即显示，后端 K 线与消息随后加载。 */
+/** 打开个股分析：跳转到独立页面（前复权日K + 入池轨迹 + 消息面时间轴） */
 function openStockDetail(code) {
-  const stock = findStock(code);
-  if (!stock) { toast('未找到该股票', 'err'); return; }
-  detailCurrentCode = code;
-  detailPayload = null;
-  const spans = getStockTimeline(code);
-
-  document.getElementById('dTitle').textContent = `${stock.name}（${code}）`;
-  document.getElementById('dSub').textContent =
-    `细分行业：${stock.industry}${stock.region ? ' · 地区：' + stock.region : ''}`;
-
-  const totalDays = spans.reduce((s, sp) => s + sp.days, 0);
-  const curStreak = spans.length && spans[spans.length - 1].open ? spans[spans.length - 1].days : 0;
-  const first = spans.length ? spans[0].start : '—';
-
-  document.getElementById('dStats').innerHTML = `
-    <div class="ds"><div class="ds-v">${curStreak ? curStreak + ' 天' : '已出池'}</div><div class="ds-l">当前连续在榜</div></div>
-    <div class="ds"><div class="ds-v">${totalDays} 天</div><div class="ds-l">累计上榜（数据日）</div></div>
-    <div class="ds"><div class="ds-v">${spans.length}</div><div class="ds-l">入池次数</div></div>
-    <div class="ds"><div class="ds-v">${first}</div><div class="ds-l">首次入池日期</div></div>`;
-
-  renderDetailTimeline(spans);
-  disposeStockKline('<div class="ai-state"><div class="spinner"></div><div>正在加载真实日 K…</div></div>');
-  document.getElementById('dEvents').innerHTML = '<div class="empty-note">正在加载消息…</div>';
-  openModal('detailModal');
-  loadStockHistory(code, false);
+  if (!code) return;
+  window.open(`stock-analysis.html?code=${encodeURIComponent(code)}`, '_blank');
 }
 
 /** 重建搜索候选（code -> 股票，去重） */
@@ -1532,22 +1324,7 @@ function buildStockList() {
     .map(s => `<option value="${esc(s.code)} ${esc(s.name)}">${esc(s.name)}</option>`).join('');
 }
 
-document.getElementById('btnDetailClose').addEventListener('click', () => {
-  if (detailRequestController) detailRequestController.abort();
-  detailRequestController = null;
-  disposeStockKline();
-  closeModal('detailModal');
-});
-document.getElementById('btnDetailRefresh').addEventListener('click', () => {
-  if (detailCurrentCode) loadStockHistory(detailCurrentCode, true);
-});
-document.getElementById('btnDetailResearch').addEventListener('click', () => {
-  if (detailCurrentCode) { closeModal('detailModal'); openAiResearch(detailCurrentCode); }
-});
-document.querySelectorAll('[data-k-range]').forEach(btn => btn.addEventListener('click', () => {
-  detailRange = Number(btn.dataset.kRange);
-  if (detailPayload) renderStockKline(detailPayload);
-}));
+// 个股详情已拆为独立页面 stock-analysis.html，入口统一走 openStockDetail() 跳转
 
 // 顶栏搜索：回车 → 打开个股详情
 document.getElementById('stockSearch').addEventListener('keydown', (e) => {
