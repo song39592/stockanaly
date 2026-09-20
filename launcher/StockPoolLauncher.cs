@@ -415,6 +415,7 @@ namespace StockPool
         private Label _lbEnvState;
         private Button _btnTheme;
         private bool _light;   // true = 浅色主题（网页 + 本窗口都跟着这个按钮走）
+        private bool _envChecked;   // 本次运行是否已做过环境检查（自动只做一次，装失败也不重试）
 
         // ---- 窗口自身的两套配色 ----
         private Color _cBg, _cPanel, _cText, _cSub, _cInput, _cInputText,
@@ -1031,6 +1032,7 @@ namespace StockPool
             _logSource.Items.Add("全部");
             _logSource.Items.Add("后端");
             _logSource.Items.Add("AI服务");
+            _logSource.Items.Add("环境");
             _logSource.Items.Add("系统");
             _logSource.SelectedIndex = 0;
             _logSource.SelectedIndexChanged += delegate { RenderLog(); };
@@ -1078,6 +1080,25 @@ namespace StockPool
                 if (v == null) Msg("未找到 Node，可手动选择 node.exe");
                 else _tbNode.Text = v;
             }, 88)));
+
+            var lbEnvTip = Lbl("启动时自动检查环境：Python + 后端依赖（requirements.txt）是硬要求，缺了会拉起 launcher\\install_env.bat 装一次，装不上就退出并给出错误日志。");
+            Mute(lbEnvTip);
+            AddRow(body, Row(lbEnvTip, MiniBtn("检查 / 修复环境", delegate
+            {
+                var th = new Thread(delegate()
+                {
+                    try
+                    {
+                        if (PrepareEnv(true)) Ui(delegate { Msg("环境检查通过。"); });
+                    }
+                    catch (Exception ex)
+                    {
+                        Ui(delegate { Msg("环境检查出错：" + ex.Message); });
+                    }
+                });
+                th.IsBackground = true;
+                th.Start();
+            }, 120)));
             AddRow(stack, gb);
 
             TableLayoutPanel body2;
@@ -1348,6 +1369,314 @@ namespace StockPool
 
         #endregion
 
+        #region 环境与依赖检查
+
+        /// <summary>一次环境检查的结果：Problems 是硬伤（后端起不来），Warnings 只影响可选功能。</summary>
+        private sealed class EnvCheck
+        {
+            public string Python;
+            public string Version;
+            public List<string> Problems = new List<string>();
+            public List<string> Warnings = new List<string>();
+
+            public bool Ok { get { return Problems.Count == 0; } }
+
+            public string ProblemText { get { return string.Join("；", Problems.ToArray()); } }
+        }
+
+        /// <summary>
+        /// 启动前检查环境：Python + 后端依赖是硬要求，缺了就拉起 launcher\install_env.bat 装一次；
+        /// 装完复检，还不行就把安装日志显示出来并退出。整个过程只尝试一次，不反复重试。
+        /// </summary>
+        /// <param name="manual">true = 设置页手动点的「检查 / 修复环境」，允许再跑一次。</param>
+        private bool PrepareEnv(bool manual)
+        {
+            if (_envChecked && !manual) return true;
+            _envChecked = true;
+
+            var r = CheckEnv();
+            if (r.Ok)
+            {
+                Ui(delegate { Log("环境", "环境检查通过：Python " + (r.Version ?? "-")); });
+                return true;
+            }
+            Ui(delegate
+            {
+                foreach (var p in r.Problems) Log("环境", "缺失：" + p);
+                foreach (var w in r.Warnings) Log("环境", "提示：" + w);
+            });
+
+            bool go = UiSync<bool>(delegate
+            {
+                return MessageBox.Show(this,
+                    "环境检查未通过：\n  · " + r.ProblemText +
+                    "\n\n是否现在自动安装？\n（创建 backend_fastapi\\.venv 并安装 requirements.txt，只尝试一次）",
+                    AppTitle + " - 环境检查", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes;
+            });
+            if (!go) { EnvFail("环境不完整，且未执行安装（在提示框里选了「否」）", null); return false; }
+
+            var bat = Path.Combine(_root, "launcher", "install_env.bat");
+            if (!File.Exists(bat)) { EnvFail("找不到安装脚本：" + bat, null); return false; }
+
+            Ui(delegate { Log("环境", "开始安装环境（launcher\\install_env.bat）…"); });
+            int code;
+            var output = RunInstaller(bat, out code);
+            if (code != 0) { EnvFail("安装脚本退出码 " + code + "：" + ExitReason(code), output); return false; }
+
+            var r2 = CheckEnv();
+            if (!r2.Ok) { EnvFail("安装完成，但复检仍未通过：" + r2.ProblemText, output); return false; }
+
+            Ui(delegate
+            {
+                Log("环境", "环境安装完成，复检通过：Python " + (r2.Version ?? "-"));
+                if (!string.IsNullOrEmpty(r2.Python) && _tbPython != null)
+                {
+                    _tbPython.Text = r2.Python;
+                    // 服务还没拉起时才改指向，避免丢掉已启动进程的句柄
+                    if (_backend != null && _backend.Proc == null) _backend.Exe = r2.Python;
+                    SaveSettingsQuiet();
+                }
+            });
+            return true;
+        }
+
+        /// <summary>检查 Python / 后端依赖（硬要求），以及 Node、node_modules（只提示）。</summary>
+        private EnvCheck CheckEnv()
+        {
+            var r = new EnvCheck();
+
+            string py = UiSync<string>(delegate
+            {
+                return !string.IsNullOrEmpty(_tbPython.Text) ? _tbPython.Text : FindPython(_root);
+            });
+            r.Python = py;
+
+            if (string.IsNullOrEmpty(py) || !File.Exists(py))
+            {
+                r.Problems.Add("未找到 Python 解释器（后端依赖它启动）");
+            }
+            else
+            {
+                int code;
+                var ver = RunCapture(py, "-c \"import sys; print('%d.%d.%d' % sys.version_info[:3])\"", 30000, out code);
+                if (code != 0 || string.IsNullOrWhiteSpace(ver))
+                {
+                    r.Problems.Add("Python 无法执行：" + py);
+                }
+                else
+                {
+                    r.Version = ver.Trim();
+                    if (!VersionAtLeast(r.Version, 3, 9))
+                        r.Problems.Add("Python 版本过低（" + r.Version + "，需要 3.9 及以上）");
+                }
+
+                int depCode;
+                var depOut = RunCapture(py, "-c \"import uvicorn, fastapi, akshare, pypdf, multipart\"", 180000, out depCode);
+                if (depCode != 0)
+                    r.Problems.Add("后端依赖不完整（requirements.txt 没装齐）" + Brief(depOut));
+            }
+
+            string node = UiSync<string>(delegate
+            {
+                return !string.IsNullOrEmpty(_tbNode.Text) ? _tbNode.Text : FindNode();
+            });
+            if (string.IsNullOrEmpty(node) || !File.Exists(node))
+                r.Warnings.Add("未找到 Node.js：AI 服务（:3080）起不来，后端和网页不受影响");
+            else if (!Directory.Exists(Path.Combine(_root, "agent_dsh", "node_modules")))
+                r.Warnings.Add("agent_dsh\\node_modules 缺失：AI 服务（:3080）起不来，后端和网页不受影响");
+
+            return r;
+        }
+
+        /// <summary>跑一次环境安装脚本，输出实时进日志框，同时收集全文（失败时落盘 + 弹窗展示）。</summary>
+        private string RunInstaller(string bat, out int exitCode)
+        {
+            var sb = new StringBuilder();
+            var psi = new ProcessStartInfo();
+            psi.FileName = "cmd.exe";
+            psi.Arguments = "/c chcp 65001 >nul && \"" + bat + "\" \"" + _root + "\" silent";
+            psi.WorkingDirectory = _root;
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            psi.StandardOutputEncoding = Encoding.UTF8;
+            psi.StandardErrorEncoding = Encoding.UTF8;
+            psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+            psi.EnvironmentVariables["PYTHONUTF8"] = "1";
+
+            // 安装可能很久（首次装 akshare / 拉 npm），给 20 分钟上限
+            exitCode = RunAndCollect(psi, 20 * 60 * 1000, sb,
+                delegate(string line) { Ui(delegate { Log("环境", line); }); });
+            return sb.ToString();
+        }
+
+        /// <summary>跑一条命令并拿到输出（用于探测 Python 版本、依赖是否齐全）。</summary>
+        private static string RunCapture(string exe, string args, int timeoutMs, out int exitCode)
+        {
+            var sb = new StringBuilder();
+            var psi = new ProcessStartInfo();
+            psi.FileName = exe;
+            psi.Arguments = args;
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            psi.StandardOutputEncoding = Encoding.UTF8;
+            psi.StandardErrorEncoding = Encoding.UTF8;
+            psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+            psi.EnvironmentVariables["PYTHONUTF8"] = "1";
+            exitCode = RunAndCollect(psi, timeoutMs, sb, null);
+            return sb.ToString();
+        }
+
+        /// <summary>启动进程：异步收集 stdout/stderr，超时直接终止，返回退出码（-1 = 超时或异常）。</summary>
+        private static int RunAndCollect(ProcessStartInfo psi, int timeoutMs, StringBuilder sink, Action<string> onLine)
+        {
+            try
+            {
+                using (var p = new Process())
+                {
+                    p.StartInfo = psi;
+                    p.OutputDataReceived += delegate(object s, DataReceivedEventArgs e)
+                    {
+                        if (e.Data == null) return;
+                        if (sink != null) lock (sink) sink.AppendLine(e.Data);
+                        if (onLine != null) onLine(e.Data);
+                    };
+                    p.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e)
+                    {
+                        if (e.Data == null) return;
+                        if (sink != null) lock (sink) sink.AppendLine("[err] " + e.Data);
+                        if (onLine != null) onLine("[err] " + e.Data);
+                    };
+                    p.Start();
+                    p.BeginOutputReadLine();
+                    p.BeginErrorReadLine();
+
+                    if (!p.WaitForExit(timeoutMs))
+                    {
+                        try { p.Kill(); } catch { }
+                        p.WaitForExit(5000);
+                        if (sink != null) sink.AppendLine("[timeout] 超过 " + (timeoutMs / 1000) + " 秒仍未结束，已终止。");
+                        return -1;
+                    }
+                    p.WaitForExit();   // 等异步读取把剩下的输出收完
+                    return p.ExitCode;
+                }
+            }
+            catch (Exception ex)
+            {
+                if (sink != null) sink.AppendLine("[error] " + ex.Message);
+                return -1;
+            }
+        }
+
+        /// <summary>环境装不上：日志框切到「环境」+ 弹窗显示原因和日志末尾，然后退出程序。</summary>
+        private void EnvFail(string reason, string installLog)
+        {
+            string path = "";
+            try
+            {
+                var dir = Path.GetDirectoryName(_settingsPath);
+                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                path = Path.Combine(dir, "env-install.log");
+                File.WriteAllText(path, installLog ?? "(没有安装输出)", Encoding.UTF8);
+            }
+            catch { path = ""; }
+
+            Ui(delegate
+            {
+                Log("环境", "==== 环境检查 / 安装失败：" + reason + " ====");
+                if (!string.IsNullOrEmpty(path)) Log("环境", "完整安装日志：" + path);
+                if (_logSource != null)
+                {
+                    _logSource.SelectedItem = "环境";
+                    RenderLog();
+                }
+                SelectTab(3);   // 运行日志页：让日志留在屏幕上
+
+                var sb = new StringBuilder();
+                sb.AppendLine("环境检查 / 安装未通过，程序将退出。");
+                sb.AppendLine();
+                sb.AppendLine("原因：" + reason);
+                var tail = Tail(installLog, 20);
+                if (!string.IsNullOrEmpty(tail))
+                {
+                    sb.AppendLine();
+                    sb.AppendLine("---- 安装日志末尾 ----");
+                    sb.AppendLine(tail);
+                }
+                if (!string.IsNullOrEmpty(path))
+                {
+                    sb.AppendLine();
+                    sb.AppendLine("完整日志：" + path);
+                }
+                sb.AppendLine();
+                sb.AppendLine("也可以手动运行 launcher\\install_env.bat 排查。");
+                MessageBox.Show(this, sb.ToString(), AppTitle + " - 环境错误",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Application.Exit();
+            });
+        }
+
+        private static string ExitReason(int code)
+        {
+            switch (code)
+            {
+                case 1: return "项目根目录不对，找不到 backend_fastapi\\requirements.txt";
+                case 2: return "本机没有可用的 Python 3，请先安装 3.9 及以上版本并勾选 Add to PATH";
+                case 3: return "创建虚拟环境 backend_fastapi\\.venv 失败，或里面没有 pip";
+                case 4: return "pip 安装依赖失败（默认源与清华镜像都失败，多为断网 / 代理 / 杀软拦截）";
+                case 5: return "依赖装完仍无法导入";
+                case -1: return "安装超时或无法启动安装进程";
+                default: return "未知错误";
+            }
+        }
+
+        private static bool VersionAtLeast(string v, int major, int minor)
+        {
+            try
+            {
+                var parts = v.Split('.');
+                int ma = int.Parse(parts[0]);
+                int mi = parts.Length > 1 ? int.Parse(parts[1]) : 0;
+                return ma > major || (ma == major && mi >= minor);
+            }
+            catch { return true; }   // 解析不出版本就当够用，避免误报
+        }
+
+        /// <summary>取输出的头一行（去掉空行），用来在提示里说明缺了什么。</summary>
+        private static string Brief(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            foreach (var line in text.Replace("\r", "").Split('\n'))
+            {
+                var t = line.Trim();
+                if (t.Length == 0) continue;
+                if (t.Length > 160) t = t.Substring(0, 160) + "…";
+                return "（" + t + "）";
+            }
+            return "";
+        }
+
+        private static string Tail(string text, int lines)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            var all = text.Replace("\r", "").Split('\n');
+            int from = Math.Max(0, all.Length - lines);
+            var sb = new StringBuilder();
+            for (int i = from; i < all.Length; i++)
+            {
+                var t = all[i];
+                if (t.Length > 200) t = t.Substring(0, 200) + "…";
+                sb.AppendLine(t);
+            }
+            return sb.ToString();
+        }
+
+        #endregion
+
         #region 服务管控
 
         private void InitServices()
@@ -1374,11 +1703,19 @@ namespace StockPool
         private void Boot()
         {
             RefreshStatus(true);
-            if (!_ckAutoStart.Checked) return;
             var th = new Thread(delegate()
             {
                 try
                 {
+                    // 先把环境跑通：缺依赖就装一次，装不上直接退出（不做第二次尝试）
+                    if (!PrepareEnv(false)) return;
+
+                    if (!UiSync<bool>(delegate { return _ckAutoStart != null && _ckAutoStart.Checked; }))
+                    {
+                        Ui(delegate { RefreshStatus(false); });
+                        return;
+                    }
+
                     if (!Probe(_backend.HealthUrl, 1500))
                     {
                         Ui(delegate { Log("系统", "正在启动后端…"); });
@@ -1771,6 +2108,18 @@ namespace StockPool
                 else a();
             }
             catch { }
+        }
+
+        /// <summary>在工作线程里同步跑一段 UI 代码并拿返回值（弹确认框、读控件值）。</summary>
+        private T UiSync<T>(Func<T> f)
+        {
+            if (IsDisposed) return default(T);
+            try
+            {
+                if (InvokeRequired) return (T)Invoke(f);
+                return f();
+            }
+            catch { return default(T); }
         }
     }
 }
