@@ -44,9 +44,9 @@ logs/
 *.cache
 *.pid
 cordis.runtime.yml
-backend_fastapi/data/*.db*
-backend_fastapi/data/*.db-*
-# SCR 选股：导入的原始数据与计算结果属本地数据，不入库
+# 运行期数据（股票池库 / 实验室库 / SCR 数据）现已集中存放在项目外的数据目录，
+# 默认 D:\stockanaly-data，可用 .env 的 DATA_DIR 修改；下面两项为遗留与回退位置兜底
+backend_fastapi/data/
 backend_fastapi/chip_data/
 agent_dsh/skills_library/mentor-*.skill
 uvicorn.log

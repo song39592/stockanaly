@@ -19,8 +19,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import config
-import history_store
+import crypto
+import db
+import instance_lock
+import integrity
 import mentor_store
+import price_store
+import storage
 
 app = FastAPI(title="个股时效性调研")
 
@@ -39,10 +44,14 @@ ROUTE_MODULES = (
     ("盘面及板块分析", "market_routes"),
     ("大佬策略实验室", "mentor_routes"),
     ("个股调研与股票估值", "stock_routes"),
+    ("系统设置 · 数据目录", "system_routes"),
 )
 
 # 挂载 / 初始化失败的模块：[{label, module, error}]，供 /health 查询
 _module_errors: list = []
+
+# 数据完整性校验结果（启动时算一次并缓存，`GET /api/system/integrity` 可重新校验）
+_integrity_state: dict = {"ok": True, "issues": [], "libraries": []}
 
 
 def _record_error(label: str, module_name: str, exc: BaseException) -> None:
@@ -64,11 +73,59 @@ def _mount_routes() -> None:
 
 
 def _init_stores() -> None:
-    """初始化各模块的本地存储；失败同样只记录、不阻止服务启动。"""
+    """初始化本地存储；失败同样只记录、不阻止服务启动。"""
     try:
-        history_store.init_db()
+        # 数据目录已移到项目外（见 config.DATA_DIR）：启动时把项目内旧位置的数据
+        # 复制过去，避免看起来像「数据丢了」。只复制、不删除源文件。
+        result = storage.migrate_legacy()
+        if result["migrated"]:
+            print(f"[info] 已迁移 {len(result['migrated'])} 个数据文件："
+                  f"{result['from']} → {result['to']}", file=sys.stderr)
     except Exception as exc:              # noqa: BLE001
-        _record_error("股票池历史（本地库初始化）", "history_store", exc)
+        _record_error("数据目录初始化与迁移", "storage", exc)
+    try:
+        db.init_db()                      # 建齐所有本地表（股票池 / 消息面 / 行情分片 / 复权因子 / 除权）
+    except Exception as exc:              # noqa: BLE001
+        _record_error("本地库初始化（股票池历史与行情）", "db", exc)
+    try:
+        # 旧版本把三口径日K放在主库单表里；这里拆到「按年分片 + 因子独立库」结构。
+        # 只读源表、不删除，确认无误后可自行清理旧表。
+        result = price_store.migrate_legacy_shards()
+        if result.get("migrated"):
+            print(f"[info] 行情表已迁移到分片结构：{result['migrated']}", file=sys.stderr)
+    except Exception as exc:              # noqa: BLE001
+        _record_error("行情分片迁移", "price_store", exc)
+    try:
+        # 校验密钥绑定本机：若当前仍是明文存放（早期版本），启动时自动改为 DPAPI 密封。
+        # 密封后密钥只能被本机 + 当前用户解开，拷到其他机器一律校验失败。
+        state = crypto.seal_state()
+        if state.get("usable") and not state.get("sealed") and crypto.dpapi_available():
+            if crypto.seal_now().get("ok"):
+                print("[info] 校验密钥已改由本机 DPAPI 密封保存（不再以明文存放在 .env）",
+                      file=sys.stderr)
+    except Exception as exc:              # noqa: BLE001
+        _record_error("校验密钥密封", "crypto", exc)
+    try:
+        # 按股指纹：为既有数据补算一次（此后每次写入只重算受影响的那几只）
+        digests = price_store.ensure_digests()
+        if digests.get("created"):
+            print(f"[info] 已为 {digests['created']} 只股票补算数据指纹", file=sys.stderr)
+        if digests.get("upgraded"):
+            print(f"[info] 数据指纹算法已升级到 v{digests.get('version')}："
+                  f"按当前数据重算 {digests['upgraded']} 只股票的指纹", file=sys.stderr)
+    except Exception as exc:              # noqa: BLE001
+        _record_error("数据指纹初始化", "price_store", exc)
+    try:
+        # 完整性：先为既有数据补一次签名（首次引入本机制时需要），再整体校验一次
+        signed = integrity.ensure_signed()
+        if signed.get("signed"):
+            print(f"[info] 已为 {len(signed['signed'])} 个数据库补写完整性签名", file=sys.stderr)
+        state = integrity.summary()
+        _integrity_state.update(state)
+        if not state.get("ok"):
+            print(f"[warn] 数据完整性校验发现问题：{state['issues']}", file=sys.stderr)
+    except Exception as exc:              # noqa: BLE001
+        _record_error("数据完整性校验", "integrity", exc)
     try:
         mentor_store.init_db()
     except Exception as exc:              # noqa: BLE001
@@ -78,6 +135,15 @@ def _init_stores() -> None:
 def _is_loaded(module_name: str) -> bool:
     return not any(item["module"] == module_name for item in _module_errors)
 
+
+# 单实例锁：**必须早于任何「写数据目录」的动作**——否则第二个进程已经开始迁移、
+# 建表、刷新指纹，再来拦就已经晚了（两边互相覆盖指纹与签名，属静默损坏）。
+# 锁失败时的提示已足够清楚，直接以非 0 退出码结束，便于启动脚本判断。
+try:
+    instance_lock.acquire(config.DATA_DIR)
+except instance_lock.AlreadyRunningError as exc:
+    print(f"[fatal] {exc}", file=sys.stderr)
+    raise SystemExit(1) from None
 
 _init_stores()
 _mount_routes()
@@ -103,4 +169,5 @@ def health():
         "llm_problem": problem,
         "modules": {label: _is_loaded(name) for label, name in ROUTE_MODULES},
         "route_errors": _module_errors,
+        "integrity": _integrity_state,
     }

@@ -4,10 +4,10 @@
 制表符文本（扩展名虽为 .xls），列含：代码 / 名称 / 现价 / 市盈(动) / 细分行业 /
 30日涨幅% / 换手% / 流通市值 等；同时兼容真正的 Excel 与 CSV。
 
-目录约定（导入与处理结果单独存放）：
-    chip_data/raw/        导入的原始文件，保留原文件名（文件名中的 YYYYMMDD 为默认日期）
-    chip_data/processed/  计算结果：最新一次分析的 JSON 明细与汇总 CSV
-    chip_data/meta.json   文件日期等元信息；用户手动改过的日期会覆盖文件名解析值
+目录约定（位于数据根目录下，位置由 config.DATA_DIR 决定，见 storage.py）：
+    <data>/chip/raw/        导入的原始文件，保留原文件名（文件名中的 YYYYMMDD 为默认日期）
+    <data>/chip/processed/  计算结果：最新一次分析的 JSON 明细与汇总 CSV
+    <data>/chip/meta.json   文件日期等元信息；用户手动改过的日期会覆盖文件名解析值
 
 分类口径对齐参考脚本《SCR 周级三档分类器》：
     第一档 磨主峰     最新一期在榜 ∩ 连续 FULL_WEEKS 期全勤 ∩ 流通市值 100-800 亿 ∩ PE > 0
@@ -23,8 +23,9 @@ import re
 
 import pandas as pd
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "chip_data")
+import storage
+
+DATA_DIR = str(storage.CHIP_DIR)
 RAW_DIR = os.path.join(DATA_DIR, "raw")
 PROCESSED_DIR = os.path.join(DATA_DIR, "processed")
 META_PATH = os.path.join(DATA_DIR, "meta.json")
