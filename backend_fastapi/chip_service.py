@@ -523,5 +523,7 @@ def _save_result(result: dict) -> dict:
     if rows:
         pd.DataFrame(rows).to_csv(csv_path, index=False, encoding="utf-8-sig")
 
-    return {"json": os.path.relpath(json_path, BASE_DIR).replace("\\", "/"),
-            "csv": os.path.relpath(csv_path, BASE_DIR).replace("\\", "/") if rows else ""}
+    # 相对 **chip 数据目录** 展示：数据已迁到数据根目录下（<data>/chip/），
+    # 不再是程序目录内的 chip_data/，因此基准从 BASE_DIR 改为 DATA_DIR。
+    return {"json": os.path.relpath(json_path, DATA_DIR).replace("\\", "/"),
+            "csv": os.path.relpath(csv_path, DATA_DIR).replace("\\", "/") if rows else ""}
