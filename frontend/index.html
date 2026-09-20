@@ -108,7 +108,7 @@
   .brand h1 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: .3px; }
   .brand .sub { font-size: 12px; color: var(--text-3); }
 
-  /* 导航分组：按体系归类（RPS 体系 / 筹码体系 / 分析工具），各组独占一行、统一左对齐 */
+  /* 导航分组（RPS 体系），统一左对齐 */
   .nav-groups { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; flex-basis: 100%; }
   .nav-quick { display: flex; align-items: center; gap: 8px; }
   .nav-group { display: flex; align-items: center; gap: 8px; }
@@ -525,7 +525,7 @@
       <button class="btn" id="btnHelp"><span class="ico">?</span> 使用说明</button>
       <!-- 浅色 / 深色切换在启动器窗口顶部的「主题」按钮上，页面跟随它 -->
     </div>
-    <!-- 下方各组（RPS 体系 / 筹码体系 / 分析工具）各自独占一行，统一左对齐 -->
+    <!-- 下方 RPS 体系按钮组，统一左对齐 -->
     <nav class="nav-groups">
       <div class="nav-group">
         <span class="nav-label">RPS 体系</span>
@@ -533,16 +533,6 @@
         <button class="btn" id="btnExport"><span class="ico">⇩</span> 导出备份</button>
         <button class="btn" id="btnRestore"><span class="ico">⇧</span> 恢复数据</button>
         <button class="btn" id="btnManage"><span class="ico">⚙</span> 数据管理</button>
-      </div>
-      <div class="nav-group break">
-        <span class="nav-label">筹码体系</span>
-        <button class="btn" id="btnScr"><span class="ico">🎯</span> SCR 选股</button>
-      </div>
-      <div class="nav-group break">
-        <span class="nav-label">分析工具</span>
-        <button class="btn" id="btnMarketSector"><span class="ico">📊</span> 盘面及板块分析</button>
-        <button class="btn" id="btnMentorLab"><span class="ico">🧠</span> 大佬策略实验室</button>
-        <button class="btn" id="btnValuation"><span class="ico">📈</span> 股票估值计算</button>
       </div>
     </nav>
   </div>
@@ -1378,10 +1368,6 @@ document.getElementById('btnClearAll').addEventListener('click', () => {
  * ===================================================================== */
 
 document.getElementById('btnHelp').addEventListener('click', () => openModal('helpModal'));
-document.getElementById('btnMarketSector').addEventListener('click', () => window.open('market-sector.html', '_blank'));
-document.getElementById('btnMentorLab').addEventListener('click', () => window.open('mentor-lab.html', '_blank'));
-document.getElementById('btnValuation').addEventListener('click', () => window.open('valuation.html', '_blank'));
-document.getElementById('btnScr').addEventListener('click', () => window.open('chip-scr.html', '_blank'));
 document.getElementById('btnHelpClose').addEventListener('click', () => closeModal('helpModal'));
 document.querySelectorAll('.modal-mask').forEach(m => {
   m.addEventListener('click', (e) => {
