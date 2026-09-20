@@ -64,7 +64,21 @@ code{background:#ffffff10;padding:1px 5px;border-radius:4px;font-family:ui-monos
 .name-tag.show{display:inline-block}
 .name-tag.ok{color:var(--text);border-color:#2ecc7166;background:#2ecc711a}
 .name-tag.bad{color:#ff8080;border-color:#ff6b6b66;background:#ff6b6b1a}
+/* 浅色主题（跟随启动器窗口顶部的「主题」按钮；图表画布保持深色底） */
+html[data-theme=light]{color-scheme:light;--bg:#f9f9f7;--card:#fcfcfb;--surface:#f2f1ee;--line:rgba(11,11,11,.14);--text:#0b0b0b;--sub:#52514e;--muted:#898781;--blue:#2a78d6;--red:#d0393b;--green:#1e7e34;--orange:#b45309}
+html[data-theme=light] .btn:hover{border-color:rgba(11,11,11,.3)}
+html[data-theme=light] .tag{background:rgba(11,11,11,.06)}
+html[data-theme=light] .tag.hot{background:#fdecec;color:#b02a2c}
+html[data-theme=light] .tag.mid{background:#fff4e2;color:#8a5a00}
+html[data-theme=light] .tag.low,html[data-theme=light] .pill,html[data-theme=light] code{background:rgba(11,11,11,.06)}
+html[data-theme=light] .tbl td{border-bottom-color:rgba(11,11,11,.1)}
+html[data-theme=light] .tbl tbody tr:hover{background:rgba(11,11,11,.04)}
+html[data-theme=light] .note,html[data-theme=light] .risk-line{background:#fff7e6;color:#8a5a00}
+html[data-theme=light] .err{background:#fbeaea;color:#a11d1d}
 </style>
+<!-- 浅色 / 深色：由启动器窗口顶部的「主题」按钮控制，页面跟随 -->
+<script src="theme-state.js"></script>
+<script src="theme.js"></script>
 </head>
 <body>
 <div class="wrap">
