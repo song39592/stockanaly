@@ -59,6 +59,3 @@ uvicorn.log
 # ==================== 启动器生成 ====================
 # 浅色 / 深色主题状态，由启动器窗口上的「主题」按钮写入，页面读取它
 frontend/theme-state.js
-# 编译产物（源码在 launcher/StockPoolLauncher.cs，用 csc 现编）
-/*.exe
-launcher/*.exe

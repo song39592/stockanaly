@@ -39,6 +39,10 @@ input[type=date]:hover{border-color:#ffffff44}
 .q-n{flex:1;font-size:13px}
 .q-v{font-family:ui-monospace,Consolas,monospace;font-size:13px}
 .q-p{font-family:ui-monospace,Consolas,monospace;font-size:12px;width:62px;text-align:right}
+/* 开盘 / 休市 小标注：跟在指数名称后面（用 --sub 而非 --muted，后者在深色底上太暗） */
+.mk{font-style:normal;font-size:11px;font-weight:600;padding:1px 6px;border-radius:3px;margin-left:6px;white-space:nowrap}
+.mk-open{color:var(--green);background:rgba(63,185,80,.24)}
+.mk-closed{color:var(--sub);background:rgba(160,160,160,.22)}
 /* 指标 */
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:12px}
 .kpi{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:11px 12px}
@@ -92,7 +96,6 @@ html[data-theme=light] .chart{background:#14141a;border-radius:10px;padding:6px}
     <span class="tag" id="clock">加载中…</span>
     <label class="date-box">📅 交易日 <input type="date" id="tradeDate"></label>
     <button class="btn" id="btnRefresh">🔄 刷新</button>
-    <button class="btn" onclick="location.href='index.html'">返回股票池</button>
     <div class="sub">① 外围环境 · ② 大盘资金 · ③ 板块β · ④ 连板梯队 · ⑤ 大面股｜数据源：新浪行情 / 同花顺 / 乐咕乐股 / 申万 / 东方财富（公开接口，失败自动降级）｜选择交易日即整页刷新：①③④⑤ 按所选交易日取数，② 主力资金流可回溯（东财约 120 个交易日历史）、成交额与涨跌家数暂无历史源恒为实时快照</div>
   </header>
 
@@ -183,6 +186,12 @@ function chart(id, option) {
 }
 
 /* ---------------------------------------------------------------- ① 外围 */
+// 开盘 / 休市 小标注：由后端按各市场交易时段判定；历史模式不带该字段，故不显示
+function sessionTag(s) {
+  if (s === 'open') return '<i class="mk mk-open">交易中</i>';
+  if (s === 'closed') return '<i class="mk mk-closed">休市</i>';
+  return '';
+}
 function renderGlobal(data) {
   const groups = data.groups || [];
   if (!groups.length) { status('global', '无数据', 'bad'); emptyBody('global', '未获取到外围行情'); return; }
@@ -192,7 +201,7 @@ function renderGlobal(data) {
       <div class="grp-h">${esc(g.name)}</div>
       ${g.items.map(it => `
         <div class="q">
-          <span class="q-n">${esc(it.name)}</span>
+          <span class="q-n">${esc(it.name)}${sessionTag(it.session)}</span>
           <span class="q-v">${fmtNum(it.value)}</span>
           <span class="q-p ${dirCls(it.pct)}">${fmtPct(it.pct)}</span>
         </div>`).join('')}
@@ -215,7 +224,7 @@ function renderCapital(data) {
       s: mf ? `方向：${esc(mf.super_direction || '—')}${mf.big_pct != null ? '｜占比 ' + fmtPct(mf.big_pct) : ''}` : '—' },
     { l: '数据口径', v: src || '—', cls: '', s: mf ? `数据日 ${esc(mf.date)}` : '—' },
     { l: '两市成交额', v: (t && t.total != null) ? `${Number(t.total).toFixed(2)} 亿` : '—', cls: '',
-      s: (t && t.items && t.items.length) ? t.items.map(i => `${esc(i.name)} ${Number(i.amount || 0).toFixed(0)}亿`).join(' · ') : '—' },
+      s: (t && t.items && t.items.length) ? t.items.map(i => `${esc(i.name)}${sessionTag(i.session)} ${Number(i.amount || 0).toFixed(0)}亿`).join(' · ') : '—' },
   ];
 
   let advHtml = '';

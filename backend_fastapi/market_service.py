@@ -66,6 +66,48 @@ def clear_cache(prefix: str | None = None):
             _cache.pop(key, None)
 
 
+# A股收盘时间 15:00。收盘后当天行情不再变化，缓存可延长到当天结束——
+# 否则「反复打开页面」每次都要重打一遍数据源，这正是页面加载慢的主因。
+_MARKET_CLOSE_MIN = 15 * 60
+# 美股时段（北京时间，夏令时近似 21:30 - 次日 04:00）：外围数据在这段仍在变
+_US_OPEN_MIN = 21 * 60 + 30
+_US_CLOSE_MIN = 4 * 60
+
+
+def _market_settled(now=None) -> bool:
+    """当天 A 股行情是否已定格：周末，或已过 15:00 收盘。
+
+    节假日不做精确判断——那时退化为「按盘中处理」，只是刷新勤一些，不会出错。
+    """
+    moment = now or dt.datetime.now()
+    if moment.weekday() >= 5:                      # 周六 / 周日
+        return True
+    return moment.hour * 60 + moment.minute >= _MARKET_CLOSE_MIN
+
+
+def _us_session(now=None) -> bool:
+    """是否处于美股交易时段（北京时间 21:30 之后、或凌晨 4:00 之前）。"""
+    moment = now or dt.datetime.now()
+    minutes = moment.hour * 60 + moment.minute
+    return minutes >= _US_OPEN_MIN or minutes < _US_CLOSE_MIN
+
+
+def _ttl(base: int, follow_us: bool = False) -> int:
+    """缓存时长：**行情定格后延长到当天结束**，避免反复打开页面都重拉。
+
+    - 盘中：按 base 走（数据每分钟都在变）
+    - 盘后 / 非交易日：延长到当天 23:59:59，跨天自动失效重新拉
+    - follow_us=True（外围数据）：美股时段内仍按 base 走，其余时间跟随盘后策略
+    """
+    now = dt.datetime.now()
+    if not _market_settled(now):
+        return base
+    if follow_us and _us_session(now):
+        return base
+    end = dt.datetime.combine(now.date(), dt.time(23, 59, 59))
+    return max(base, int((end - now).total_seconds()))
+
+
 def _cached(key: str, producer, ttl: int = CACHE_TTL):
     """带进程内缓存的取值，返回 (value, cached)。"""
     now = time.time()
@@ -213,6 +255,102 @@ SINA_QUOTE_GROUPS = [
     ("大宗商品", [("hf_CL", "纽约原油"), ("hf_GC", "纽约黄金"),
                   ("hf_SI", "纽约白银"), ("hf_HG", "美铜")]),
 ]
+
+
+# 各组的交易时段（北京时间，用「当日 0 点起的分钟数」表示；跨天的拆成两段）
+# 说明：美股按夏令时口径（21:30 - 次日 04:00），冬令时实际顺延约 1 小时。
+#       这里只用于「开盘中 / 休市」提示，1 小时误差可接受，不引入时区库。
+_MARKET_SESSIONS: dict[str, tuple[tuple[int, int], ...]] = {
+    "美股": ((21 * 60 + 30, 24 * 60), (0, 4 * 60)),
+    "费城半导体": ((21 * 60 + 30, 24 * 60), (0, 4 * 60)),
+    "亚太": ((8 * 60, 14 * 60 + 30),),                  # 日经 / 韩国综合（日韩比北京早 1 小时）
+    "港股": ((9 * 60 + 30, 12 * 60), (13 * 60, 16 * 60)),
+    "大宗商品": ((6 * 60, 24 * 60), (0, 5 * 60)),        # 纽约金银油铜，近似连续交易
+}
+
+
+# ---- 交易日与夏令时：不引入时区库，规则自算 + 交易日历（每天拉一次） ----
+_TRADE_DAYS_CACHE: dict = {"day": None, "days": set()}
+
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> dt.date:
+    """某月第 n 个星期 weekday（weekday: 0=周一 … 6=周日）的日期。"""
+    first = dt.date(year, month, 1)
+    return first + dt.timedelta(days=(weekday - first.weekday()) % 7 + (n - 1) * 7)
+
+
+def _us_dst(now=None) -> bool:
+    """按美国规则判断是否夏令时（2007 年起：3 月第 2 个周日 至 11 月第 1 个周日）。
+
+    只用于推算美股开盘时刻是 21:30 还是 22:30（北京时间），
+    切换日那天的边界误差不影响「开盘 / 休市」这类粗粒度提示。
+    """
+    moment = now or dt.datetime.now()
+    start = _nth_weekday(moment.year, 3, 6, 2)      # 3 月第 2 个周日
+    end = _nth_weekday(moment.year, 11, 6, 1)       # 11 月第 1 个周日
+    return start <= moment.date() < end
+
+
+def _a_share_trade_days() -> set[str]:
+    """A 股交易日历，**每天只拉一次**并缓存；取不到返回空集，由调用方退化为按星期判断。"""
+    today = dt.date.today().isoformat()
+    if _TRADE_DAYS_CACHE["day"] == today and _TRADE_DAYS_CACHE["days"]:
+        return _TRADE_DAYS_CACHE["days"]
+    days: set[str] = set()
+    try:
+        frame = _ak(ak.tool_trade_date_hist_sina)
+        if frame is not None and not getattr(frame, "empty", True):
+            days = {str(item)[:10] for item in frame["trade_date"]}
+    except Exception:                               # noqa: BLE001 - 日历拿不到不影响行情
+        days = set()
+    _TRADE_DAYS_CACHE["day"] = today
+    _TRADE_DAYS_CACHE["days"] = days
+    return days
+
+
+def _a_share_is_trade_day(moment) -> bool:
+    """某日是否 A 股交易日：以交易日历为准；日历不可用时退化为「工作日」。"""
+    days = _a_share_trade_days()
+    if days:
+        return moment.date().isoformat() in days
+    return moment.weekday() < 5
+
+
+# A 股交易时段（北京时间）
+_A_SHARE_SESSIONS = ((9 * 60 + 30, 11 * 60 + 30), (13 * 60, 15 * 60))
+
+
+def _a_share_session(now=None) -> str:
+    """A 股当前处于交易时段还是休市（已考虑节假日），返回 'open' / 'closed'。"""
+    moment = now or dt.datetime.now()
+    if not _a_share_is_trade_day(moment):
+        return "closed"
+    minutes = moment.hour * 60 + moment.minute
+    for start, end in _A_SHARE_SESSIONS:
+        if start <= minutes < end:
+            return "open"
+    return "closed"
+
+
+def _session_of(group_name: str, now=None) -> str:
+    """该组当前处于交易时段还是休市（北京时间），返回 'open' / 'closed'。
+
+    周末一律休市——商品期货周六凌晨收盘、周一早上才开，与股市一致。
+    美股 / 费城半导体的开盘时刻随夏令时变动，故动态计算而非查表。
+    """
+    moment = now or dt.datetime.now()
+    if moment.weekday() >= 5:                   # 周六 / 周日
+        return "closed"
+    if group_name in ("美股", "费城半导体"):
+        sessions = ((21 * 60 + 30, 24 * 60), (0, 4 * 60)) if _us_dst(moment) \
+            else ((22 * 60 + 30, 24 * 60), (0, 5 * 60))
+    else:
+        sessions = _MARKET_SESSIONS.get(group_name, ())
+    minutes = moment.hour * 60 + moment.minute
+    for start, end in sessions:
+        if start <= minutes < end:
+            return "open"
+    return "closed"
 
 
 def _parse_sina_quote(symbol, fields):
@@ -374,7 +512,7 @@ def global_market(date=None):
                 fields = quotes.get(symbol)
                 parsed = _parse_sina_quote(symbol, fields) if fields else None
                 if parsed and parsed.get("value") is not None:
-                    rows.append({"name": label, **parsed})
+                    rows.append({"name": label, "session": _session_of(group_name), **parsed})
                 else:
                     errors.append(f"{label} 暂无数据")
             if rows:
@@ -382,6 +520,7 @@ def global_market(date=None):
 
         kospi = _kospi_quote(errors)
         if kospi:
+            kospi["session"] = _session_of("亚太")
             for group in groups:
                 if group["name"] == "亚太":
                     group["items"].append(kospi)
@@ -393,7 +532,7 @@ def global_market(date=None):
                 "groups": groups, "errors": errors}
 
     data, cached = _cached(f"global_market:{date or 'rt'}", build,
-                           ttl=HIST_CACHE_TTL if date else 120)
+                           ttl=HIST_CACHE_TTL if date else _ttl(120, follow_us=True))
     return {**data, "cached": cached}
 
 
@@ -608,6 +747,13 @@ def capital_flow(date=None):
             thread.start()
         for thread in threads:
             thread.join(30)               # 兜底：任一子项超时也照常返回，缺失项由前端降级提示
+        if not date:
+            # 实时模式下给两市指数补上「开盘 / 休市」状态（已按交易日历排除节假日）
+            turnover = parts.get("turnover")
+            if isinstance(turnover, dict):
+                for item in turnover.get("items") or []:
+                    if isinstance(item, dict):
+                        item["session"] = _a_share_session()
         payload = {
             "ok": True,
             "as_of": _now_str(),
@@ -633,7 +779,7 @@ def capital_flow(date=None):
 
     # 缓存键带上日期，避免查询历史日期时命中实时缓存（与 ①③④⑤ 保持一致）
     data, cached = _cached(f"capital_flow:{date or 'rt'}", build,
-                           ttl=HIST_CACHE_TTL if date else 60)
+                           ttl=HIST_CACHE_TTL if date else _ttl(60))
     return {**data, "cached": cached}
 
 
@@ -779,7 +925,7 @@ def sector_beta(date=None):
                 "errors": errors}
 
     data, cached = _cached(f"sector_beta:{date or 'rt'}", build,
-                           ttl=HIST_CACHE_TTL if date else 90)
+                           ttl=HIST_CACHE_TTL if date else _ttl(90))
     return {**data, "cached": cached}
 
 
@@ -881,7 +1027,8 @@ def limit_up_ladder(date=None):
             "errors": errors,
         }
 
-    data, cached = _cached(f"limit_up:{date or 'auto'}", build, ttl=120)
+    data, cached = _cached(f"limit_up:{date or 'auto'}", build,
+                           ttl=HIST_CACHE_TTL if date else _ttl(120))
     return {**data, "cached": cached}
 
 
@@ -955,5 +1102,6 @@ def big_loss(date=None):
         return {"ok": True, "as_of": _now_str(), "trade_date": trade_date,
                 "blasted": blasted, "limit_down": limit_down, "errors": errors}
 
-    data, cached = _cached(f"big_loss:{date or 'auto'}", build, ttl=120)
+    data, cached = _cached(f"big_loss:{date or 'auto'}", build,
+                           ttl=HIST_CACHE_TTL if date else _ttl(120))
     return {**data, "cached": cached}
