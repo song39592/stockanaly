@@ -503,6 +503,9 @@
   .bull-input { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--card-border); background: var(--card); }
   .bull-input textarea { flex: 1; resize: none; height: 42px; min-height: 42px; max-height: 120px; }
 </style>
+<!-- 浅色 / 深色：由启动器窗口顶部的「主题」按钮控制，页面跟随 -->
+<script src="theme-state.js"></script>
+<script src="theme.js"></script>
 </head>
 <body>
 
@@ -520,7 +523,7 @@
       <input id="stockSearch" list="stockList" placeholder="查个股：代码/名称" style="min-width:170px;" />
       <datalist id="stockList"></datalist>
       <button class="btn" id="btnHelp"><span class="ico">?</span> 使用说明</button>
-      <button class="btn" id="btnTheme"><span class="ico" id="themeIco">🌙</span><span id="themeLbl">浅色</span></button>
+      <!-- 浅色 / 深色切换在启动器窗口顶部的「主题」按钮上，页面跟随它 -->
     </div>
     <!-- 下方各组（RPS 体系 / 筹码体系 / 分析工具）各自独占一行，统一左对齐 -->
     <nav class="nav-groups">
@@ -1536,7 +1539,23 @@ async function syncLocalPoolHistory() {
 
 fetchHealth().then(health => {
   if (health?.stock_history) syncLocalPoolHistory();
+  else if (health) warnOutdatedBackend(health);
 });   // 页面打开即预热，并把既有股票池历史补录到后端
+
+/** 旧版后端自检：/health 缺 stock_history，说明进程是更新代码前启动的，
+ *  新接口（/api/history/*）在它里面不存在，页面功能会残缺并报 404，必须重启后端。 */
+function warnOutdatedBackend(health) {
+  if (document.getElementById('backendVersionBar')) return;
+  const bar = document.createElement('div');
+  bar.id = 'backendVersionBar';
+  bar.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:9999;padding:10px 16px;'
+    + 'background:#5a1f1f;color:#ffd9d9;border-bottom:1px solid #7d2c2c;'
+    + 'font:14px/1.6 "Microsoft YaHei UI",sans-serif;box-shadow:0 2px 12px rgba(0,0,0,.35)';
+  bar.textContent = `检测到旧版后端（api_version ${health?.api_version ?? '未知'}）：代码已更新，`
+    + '但正在运行的后端还是旧进程，新接口会返回 404。'
+    + '请关闭旧后端窗口，重新运行「启动系统.bat」，再按 Ctrl+F5 刷新本页。';
+  document.body.prepend(bar);
+}
 
 let aiCurrentCode = null;   // 当前调研的股票代码
 
@@ -2055,18 +2074,11 @@ window.addEventListener('resize', () => Object.values(charts).forEach(c => c.res
 
 // 弹窗遮罩点击关闭已在上方绑定
 
-/* ---------------- 主题切换 ---------------- */
-let theme = localStorage.getItem('stockPool.theme') || 'dark';
-function applyTheme() {
-  document.documentElement.setAttribute('data-theme', theme);
-  document.getElementById('themeIco').textContent = theme === 'light' ? '☀️' : '🌙';
-  document.getElementById('themeLbl').textContent = theme === 'light' ? '深色' : '浅色';
-}
-document.getElementById('btnTheme').addEventListener('click', () => {
-  theme = theme === 'light' ? 'dark' : 'light';
-  localStorage.setItem('stockPool.theme', theme);
-  applyTheme();
-  if (getDatesSorted().length) renderCharts();   // 图表按新主题重绘
+/* ---------------- 主题跟随 ----------------
+ * 浅色 / 深色由启动器窗口顶部的「主题」按钮控制（theme.js），
+ * 这里只负责主题变化时把图表按新主题重绘。 */
+window.addEventListener('themechange', () => {
+  if (getDatesSorted().length) renderCharts();
 });
 
 /* =====================================================================
@@ -2370,7 +2382,6 @@ document.getElementById('skillFileInput').addEventListener('change', (e) => {
 /* =====================================================================
  *  初始化
  * ===================================================================== */
-applyTheme();
 render();
 // 首次渲染后重算图表尺寸，避免初始布局未完成导致图表 0 尺寸
 requestAnimationFrame(() => Object.values(charts).forEach(c => c.resize()));
