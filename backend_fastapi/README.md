@@ -171,7 +171,7 @@ GET  /api/history/stock/{code}      查询个股 K线、消息和入池轨迹
 
 ## 九、盘面及板块分析（`market_service.py`）
 
-前端「盘面及板块分析」页（`frontend/market-sector.html`）由 `GET /api/market/*` 五个接口驱动：
+启动器原生「盘面及板块」标签页（`launcher/MarketPage.cs`；原前端页 `frontend/market-sector.html` 已删除）由 `GET /api/market/*` 五个接口驱动：
 外围环境、大盘资金、板块β、连板梯队、大面股。
 
 - 数据源：新浪行情（外围指数 / 大宗商品）、新浪指数（两市成交额）、乐咕乐股（涨跌家数）、

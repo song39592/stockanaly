@@ -536,6 +536,7 @@ namespace StockPool
             BuildChipPage();
             BuildToolPage();
             BuildValuationPage();
+            BuildMarketPage();
             BuildLogPage();
             BuildSettingsPage();
             BuildServicePage();   // 服务控制台放最后一个标签
@@ -609,6 +610,7 @@ namespace StockPool
             _tabIndex = index;
             for (int i = 0; i < _tabPages.Count; i++) _tabPages[i].Visible = (i == index);
             SkinTabs();
+            if (index == _mktTabIndex) MktOnEnter();   // 进入盘面页自动拉最新数据
         }
 
         /// <summary>标签行配色：选中用卡片色 + 蓝色下划线，未选中用窗口底色。</summary>
@@ -770,6 +772,7 @@ namespace StockPool
             if (_btnTheme != null) _btnTheme.Text = _light ? "主题：浅色" : "主题：深色";
             Skin(this);
             SkinTabs();
+            if (_mktSubBtns != null && _mktSubBtns.Count > 0) SkinMktSubTabs();
             try
             {
                 var f = Path.Combine(_root, "frontend", "theme-state.js");
@@ -827,6 +830,10 @@ namespace StockPool
             if (tag == "dot")
             {
                 // 状态灯的绿 / 橙 / 灰由服务状态决定，不参与换肤
+            }
+            else if (tag == "mkt-dir")
+            {
+                // 盘面页的涨跌色（红涨 / 绿跌）由页面自己设置，不参与换肤
             }
             else if (tag == "theme-btn")
             {
@@ -1152,7 +1159,7 @@ namespace StockPool
 
             AddRow(stack, ToolCard("📊", "盘面及板块分析",
                 "外围市场、大盘资金、行业 / 概念板块强弱与个股联动，一屏看清当日盘面结构。",
-                "market-sector.html", "盘面及板块分析"));
+                null, "盘面及板块分析", onEnter: delegate { SelectTab(_mktTabIndex); }));
             AddRow(stack, ToolCard("🧠", "大佬策略实验室",
                 "把大佬公开资料交给 AI 提炼，人工审核后生成每日观点，沉淀为可回测的候选策略。",
                 "mentor-lab.html", "大佬策略实验室"));
