@@ -18,6 +18,9 @@ namespace StockPool
         private int _mktTabIndex = -1;
         private DateTimePicker _mktDate;
         private Label _mktStatus, _mktGlobalStatus, _mktCapStatus, _mktSectorStatus, _mktLuStatus, _mktBlStatus;
+        private int _mktRound;                                       // 本轮加载编号：上一轮的慢回调不再干扰本轮状态
+        private int _mktPending;                                     // 本轮尚未返回的 job 数
+        private int _mktFailed;                                      // 本轮失败的 job 数
 
         private FlowLayoutPanel _mktGlobalCards;                     // ① 外围：分组卡片
         private FlowLayoutPanel _mktCapKpi;                          // ② KPI 卡片
@@ -424,6 +427,10 @@ namespace StockPool
                 new string[] { "bigloss", "/api/market/big-loss" },
             };
 
+            int round = ++_mktRound;
+            _mktPending = jobs.Length;
+            _mktFailed = 0;
+
             foreach (string[] job in jobs)
             {
                 string name = job[0];
@@ -435,16 +442,28 @@ namespace StockPool
                     {
                         string resp = VRequest(url, null);
                         var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                        Invoke((Action)delegate { MktRender(name, j); });
+                        Invoke((Action)delegate { MktRender(name, j); MktJobDone(round); });
                     }
                     catch (Exception ex)
                     {
                         string msg = "失败：" + ex.Message;
-                        try { Invoke((Action)delegate { MktFail(name, msg); }); }
+                        try { Invoke((Action)delegate { MktFail(name, msg); MktJobDone(round); }); }
                         catch (Exception) { }
                     }
                 });
             }
+        }
+
+        /// <summary>单个 job 收尾：全部返回后才复位顶部状态。
+        /// 之前成功路径从不复位，界面上会一直停在「加载中…」（数据其实早就到了）。</summary>
+        private void MktJobDone(int round)
+        {
+            if (round != _mktRound || _mktPending <= 0) return;      // 过期轮次 / 重复回调
+            if (--_mktPending > 0) return;
+            _mktStatus.Text = _mktFailed > 0
+                ? "部分数据加载失败"
+                : "更新于 " + DateTime.Now.ToString("HH:mm:ss");
+            _mktStatus.Tag = "muted";
         }
 
         private void MktFail(string name, string msg)
@@ -455,8 +474,7 @@ namespace StockPool
                 target.Text = msg;
                 target.ForeColor = Color.FromArgb(208, 57, 59);
             }
-            _mktStatus.Text = "部分数据加载失败";
-            _mktStatus.Tag = "muted";
+            _mktFailed++;
         }
 
         private Label MktStatusOf(string name)
@@ -603,7 +621,11 @@ namespace StockPool
             _mktSwBotBars.SetItems(MktPctItems(sw != null ? VArr(VSafe(sw, "bottom")) : null));
 
             bool hist = (VSafe(j, "historical") is bool) && (bool)VSafe(j, "historical");
-            _mktSectorStatus.Text = hist ? VStr(VSafe(j, "trade_date")) + " 收盘" : VStr(VSafe(j, "as_of"));
+            string st = hist ? VStr(VSafe(j, "trade_date")) + " 收盘" : VStr(VSafe(j, "as_of"));
+            var errs = VArr(VSafe(j, "errors"));
+            if (errs != null && errs.Count > 0)
+                st += "（" + VStr(errs[0]) + "）";     // 说明原因，别让用户只看到「无数据」
+            _mktSectorStatus.Text = st;
         }
 
         /// <summary>行业 / 概念资金流：净流入 + 净流出合并后按净额升序（流出在前、流入在后，与网页图表一致）。</summary>
