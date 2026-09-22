@@ -19,7 +19,7 @@
   ③ 板块β（行业与概念资金流 Top10 + 申万一级行业涨跌）、④ 连板梯队（连板结构 + 晋级率）、⑤ 大面股（炸板 / 跌停）；
   顶部可选择交易日：①③ 支持历史交易日（部分口径有历史源）、④⑤ 按所选交易日回溯、② 暂无历史源恒为实时快照；
   对应后端 `GET /api/market/*`，多源公开接口 + 单源失败自动降级 + 进程内缓存。
-- **股票估值计算**（`frontend/valuation.html`，从股票池页顶部「📈 股票估值计算」按钮进入）：
+- **股票估值计算**（原生启动器「估值计算」标签页，源码 `launcher/ValuationPage.cs`；原 `frontend/valuation.html` 已删除）：
   输入 6 位代码即自动抓取股价 / 总股本 / 期初净利润（TTM 归母优先，缺失时退回年报扣非 / 年报归母），
   输入后即时显示股票名称与股价用于确认（`GET /api/stock/quote`）；
   用两段法（前 5 年净利润贴现 + 永续增长，贴现率 10%）给出乐观 / 中性 / 悲观三档每股价值、
@@ -68,7 +68,7 @@ stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
 ├── 启动系统.bat                  # 一键启动：后端 + dsh + 打开前端
 ├── 股票池追踪系统.exe            # 原生 Windows 窗口程序（由 launcher\build_exe.bat 编译，自带窗口、不加载 HTML）
 ├── launcher/                     # 上述 EXE 的源码 StockPoolLauncher.cs、构建脚本 build_exe.bat、环境安装脚本 install_env.bat
-├── frontend/                     # index.html（股票池）/ market-sector.html（盘面及板块分析）/ mentor-lab.html（大佬策略实验室）/ valuation.html（股票估值计算）/ chip-scr.html（SCR 选股）/ stock-analysis.html（个股分析）
+├── frontend/                     # index.html（股票池）/ market-sector.html（盘面及板块分析）/ mentor-lab.html（大佬策略实验室）/ chip-scr.html（SCR 选股）/ stock-analysis.html（个股分析）
 ├── backend_fastapi/              # FastAPI 后端（业务模块化：*_routes.py 管 HTTP、*_service.py 管逻辑）
 │   ├── main.py                   # 应用入口：容错挂载各模块路由 + /health（单模块故障不影响其他模块）
 │   ├── chip_routes.py            # 筹码体系 · SCR 选股接口
