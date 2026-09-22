@@ -161,6 +161,10 @@ namespace StockPool
             page.Visible = true;
             page.Dock = DockStyle.Fill;
             _mktSubBody.Controls.Add(page);
+            // 二级页只在被选中时才挂到控件树上，而全局换肤 Skin(this) 只递归挂载中的控件，
+            // 所以这些页在首次显示前一直是系统默认配色（表格白底、列头浅灰），
+            // 必须切一次主题才会被补上。这里在挂载的同时按当前主题上色。
+            Skin(page);
             page.Invalidate(true);
 
             SkinMktSubTabs();
@@ -908,6 +912,9 @@ namespace StockPool
             private const int RowH = 20;
             private const int NameW = 98;
             private const int ValueW = 72;
+            private const int BarGapX = 6;          // 名称列与条形之间的间隔
+            /// <summary>条形区最多占可用宽度的比例：右侧留出余量，免得最长的条一路顶到数值列。</summary>
+            private const double BarMaxRatio = 0.72;
             private readonly List<Item> _items = new List<Item>();
 
             public MktBars()
@@ -949,12 +956,20 @@ namespace StockPool
                     if (it.Value >= 0) maxPos = Math.Max(maxPos, it.Value);
                     else maxNeg = Math.Max(maxNeg, -it.Value);
                 }
-                int barX = NameW;
-                int barW = Math.Max(40, Width - NameW - ValueW - 6);
+                int barX = NameW + BarGapX;
+                // 可用宽度再乘 BarMaxRatio：最长的条不铺满整行，右侧留白，条与数值不挤在一起
+                int availW = Math.Max(120, Width - barX - ValueW - 6);
+                int barW = Math.Max(40, (int)(availW * BarMaxRatio));
                 double span = maxPos + maxNeg;
                 // 零轴位置：左侧留给负值（maxNeg）、右侧留给正值（maxPos）。
                 // 之前写反成按 maxPos 分，导致最大负值的条越过 NameW、把左侧名称盖住。
                 int zeroX = span > 0 ? barX + (int)(barW * maxNeg / span) : barX;
+                // 正负混合时画一条零轴参考线，左右两侧的条长更好对比
+                if (maxPos > 0 && maxNeg > 0)
+                {
+                    using (var pen = new Pen(Color.FromArgb(80, 127, 127, 127)))
+                        g.DrawLine(pen, zeroX, 4, zeroX, Height - 6);
+                }
 
                 int y = 8;
                 foreach (Item it in _items)
@@ -971,7 +986,7 @@ namespace StockPool
                     Region old = g.Clip;
                     g.SetClip(new Rectangle(barX, 0, barW, Height), System.Drawing.Drawing2D.CombineMode.Replace);
                     using (var br = new SolidBrush(it.Value >= 0 ? Color.FromArgb(239, 83, 80) : Color.FromArgb(63, 185, 80)))
-                        g.FillRectangle(br, x, y + 3, len, RowH - 9);
+                        g.FillRectangle(br, x, y + 3, len, RowH - 8);
                     g.Clip = old;
 
                     using (var br = new SolidBrush(ForeColor))
