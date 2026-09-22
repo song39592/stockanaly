@@ -28,7 +28,8 @@ echo 正在编译原生窗口程序...
   "/r:%FW%System.Windows.Forms.dll" ^
   "/r:%FW%System.Web.dll" ^
   "/r:%FW%System.Web.Extensions.dll" ^
-  "%SRC%"
+  "%SRC%" ^
+  "%~dp0ValuationPage.cs"
 
 if errorlevel 1 (
   echo.

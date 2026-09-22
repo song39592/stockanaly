@@ -381,7 +381,7 @@ namespace StockPool
         }
     }
 
-    internal sealed class MainForm : Form
+    internal sealed partial class MainForm : Form
     {
         private const string AppTitle = "股票池追踪系统";
         private const string RunKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
@@ -398,6 +398,7 @@ namespace StockPool
         private readonly Label _lbBackendDot;
         private readonly Label _lbAiDot;
         private readonly Label _lbApiVer;
+
 
         private RichTextBox _logBox;
         private ComboBox _logSource;
@@ -534,6 +535,7 @@ namespace StockPool
             BuildRpsPage();
             BuildChipPage();
             BuildToolPage();
+            BuildValuationPage();
             BuildLogPage();
             BuildSettingsPage();
             BuildServicePage();   // 服务控制台放最后一个标签
@@ -854,6 +856,11 @@ namespace StockPool
                 c.BackColor = _cBg;
                 c.ForeColor = _cText;
             }
+            else if (tag == "kpi")
+            {
+                c.BackColor = _cPanel;
+                c.ForeColor = _cText;
+            }
             else if (c is Button)
             {
                 c.BackColor = Color.FromArgb(64, 120, 192);
@@ -881,6 +888,42 @@ namespace StockPool
                 // 说明框里已插入的文字不会跟着 ForeColor 走，用新配色重写一遍
                 if (tag == "doc-rps") FillRpsDoc((RichTextBox)c);
                 else if (tag == "doc-chip") FillChipDoc((RichTextBox)c);
+            }
+            else if (c is DataGridView)
+            {
+                var dgv = (DataGridView)c;
+                dgv.EnableHeadersVisualStyles = false;
+                dgv.BackgroundColor = _cBg;
+                dgv.GridColor = _light ? Color.FromArgb(222, 224, 228) : Color.FromArgb(58, 62, 72);
+                Color sel = Color.FromArgb(64, 120, 192);
+                // 单元格样式优先级：Cell > Row > RowsDefault > AlternatingRows > Column > DefaultCellStyle
+                // 只设 DefaultCellStyle 会被上层压制，这里逐层显式设置，保证行底色跟随主题
+                dgv.DefaultCellStyle.BackColor = _cPanel;
+                dgv.DefaultCellStyle.ForeColor = _cText;
+                dgv.DefaultCellStyle.SelectionBackColor = sel;
+                dgv.DefaultCellStyle.SelectionForeColor = Color.White;
+                dgv.RowsDefaultCellStyle.BackColor = _cPanel;
+                dgv.RowsDefaultCellStyle.ForeColor = _cText;
+                dgv.RowsDefaultCellStyle.SelectionBackColor = sel;
+                dgv.RowsDefaultCellStyle.SelectionForeColor = Color.White;
+                dgv.AlternatingRowsDefaultCellStyle.BackColor = _cPanel;
+                dgv.AlternatingRowsDefaultCellStyle.ForeColor = _cText;
+                dgv.AlternatingRowsDefaultCellStyle.SelectionBackColor = sel;
+                dgv.AlternatingRowsDefaultCellStyle.SelectionForeColor = Color.White;
+                dgv.RowTemplate.DefaultCellStyle.BackColor = _cPanel;
+                dgv.RowTemplate.DefaultCellStyle.ForeColor = _cText;
+                dgv.ColumnHeadersDefaultCellStyle.BackColor = _cBg;
+                dgv.ColumnHeadersDefaultCellStyle.ForeColor = _cSub;
+                dgv.ColumnHeadersDefaultCellStyle.SelectionBackColor = _cBg;
+                dgv.ColumnHeadersDefaultCellStyle.SelectionForeColor = _cSub;
+                foreach (DataGridViewColumn col in dgv.Columns)
+                {
+                    col.DefaultCellStyle.BackColor = _cPanel;
+                    col.DefaultCellStyle.ForeColor = _cText;
+                    col.DefaultCellStyle.SelectionBackColor = sel;
+                    col.DefaultCellStyle.SelectionForeColor = Color.White;
+                }
+                dgv.Invalidate();
             }
             else if (c is GroupBox)
             {
@@ -1099,8 +1142,8 @@ namespace StockPool
             var p = NewPage("分析工具");
             var stack = Stack();
 
-            var tip = Lbl("三个分析工具各开一个自己的窗口（没有地址栏、没有标签页）：打开后按页面上的条件操作即可，"
-                        + "需要后端 / AI 服务在跑。");
+            var tip = Lbl("盘面及板块分析、大佬策略实验室各开一个自己的窗口（没有地址栏、没有标签页）；"
+                        + "股票估值计算已做成原生页面，就在本窗口的「估值计算」标签页里。都需要后端 / AI 服务在跑。");
             Mute(tip);
             tip.AutoSize = false;
             tip.Width = 720;
@@ -1115,9 +1158,9 @@ namespace StockPool
                 "mentor-lab.html", "大佬策略实验室"));
             AddRow(stack, ToolCard("📈", "股票估值计算",
                 "输入标的与假设，按多种估值模型测算内在价值区间，辅助判断高估 / 低估。",
-                "valuation.html", "股票估值计算"));
+                null, "股票估值计算", onEnter: delegate { SelectTab(_valTabIndex); }));
 
-            var tip2 = Lbl("重复点同一个「进入」按钮只会把已开着的窗口切到最前，不会重复开窗口。");
+            var tip2 = Lbl("重复点同一个「进入」按钮，网页版只会把已开着的窗口切到最前；「股票估值计算」则切到本窗口的估值标签页。");
             Mute(tip2);
             AddRow(stack, Row(tip2));
 
@@ -1125,8 +1168,9 @@ namespace StockPool
             return p;
         }
 
+
         /// <summary>一张工具卡片：图标 + 标题（GroupBox 标题）、简介、进入按钮；跟随主题换肤。</summary>
-        private GroupBox ToolCard(string icon, string title, string desc, string file, string pageTitle)
+        private GroupBox ToolCard(string icon, string title, string desc, string file, string pageTitle, Action onEnter = null)
         {
             TableLayoutPanel body;
             var gb = Group(icon + "  " + title, out body);
@@ -1135,7 +1179,10 @@ namespace StockPool
             d.AutoSize = true;
             d.MaximumSize = new Size(780, 0);
             AddRow(body, Row(d));
-            AddRow(body, Row(MiniBtn("进入", delegate { OpenWebPage(file, pageTitle); }, 96)));
+            var enter = onEnter != null
+                ? MiniBtn("进入", delegate { onEnter(); }, 96)
+                : MiniBtn("进入", delegate { OpenWebPage(file, pageTitle); }, 96);
+            AddRow(body, Row(enter));
             return gb;
         }
 
