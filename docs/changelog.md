@@ -266,6 +266,20 @@
 - 个股分析页 `stock-analysis.html` 的「打开完整计算过程 ↗」链接随之移除（原指向 `valuation.html?code=xxx`），
   改为页面内提示「完整计算过程见启动器「估值计算」标签页」；该页的估值结果本身仍直接调用 `POST /api/stock/valuation`，不受影响。
 
+### 变更（盘面及板块分析改为原生内嵌页）
+
+- **盘面及板块分析由网页改为启动器原生页面**：新增标签页「盘面及板块」，嵌在启动器窗口内，不再新开浏览器窗口；
+  五块数据分区展示：① 外围环境 ② 大盘资金 ③ 板块β ④ 连板梯队 ⑤ 大面股，沿用 `Stack / Group / Row` 布局并跟随主题换肤。
+- **数据获取**：并发拉取 `GET /api/market/{global,capital,sectors,limit-up,big-loss}` 五个接口，
+  每块有独立状态与失败提示（任一块失败不影响其他块）；顶部可选交易日（勾选按所选日期取数，不勾选为实时）+ 刷新 / 实时按钮。
+- **图表改为数据表**：网页里 echarts 画的行业 / 概念资金流 Top10、连板结构条形图，原生版改为同数值的表格展示
+  （按净额 / 涨跌幅排序一致）；涨停明细、炸板 / 跌停表支持点击表头排序；涨红跌绿按单元格着色。
+- **代码拆分**：盘面页独立为 `launcher/MarketPage.cs`（仍是 `MainForm` 的 `partial class`），
+  复用估值页已有的 `VRequest`（`HttpWebRequest`，`Proxy=null` / UTF-8）与 JSON 取值辅助、`AddKpi` / `VKpiRow` 控件辅助；
+  `build_exe.bat` 已加入该文件。
+- **删除 `frontend/market-sector.html`**：入口改为启动器标签页，「分析工具」页的盘面卡片「进入」按钮改为切到该标签页；
+  `README.md` 与 `backend_fastapi/README.md` 中对该页面的引用已同步更新。
+
 ## [v0.3.0] - 2026-09-11
 
 ### 新增

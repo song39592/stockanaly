@@ -14,7 +14,7 @@
 - **红色小牛问答 Agent**：右下角悬浮 🐂 聊天窗，基于 dsh（deepseek-harness）运行，
   读取页面股票池快照、按当前 Skill 角色规则回答，可链式调用个股调研工具；
   支持多套 Skill 角色（通用分析 / 短线猎手 / 巴菲特价值投资），完整 Agent 轨迹可在 dsh webui 回看调试。
-- **盘面及板块分析**（`frontend/market-sector.html`，从股票池页顶部「📊 盘面及板块分析」按钮进入）：
+- **盘面及板块分析**（原生启动器「盘面及板块」标签页，源码 `launcher/MarketPage.cs`；原 `frontend/market-sector.html` 已删除）：
   ① 外围环境（美股 / 亚太韩日 / 港股 / 大宗商品 / 费城半导体）、② 大盘资金（主力净流向 / 特大单方向 / 两市成交 / 涨跌家数）、
   ③ 板块β（行业与概念资金流 Top10 + 申万一级行业涨跌）、④ 连板梯队（连板结构 + 晋级率）、⑤ 大面股（炸板 / 跌停）；
   顶部可选择交易日：①③ 支持历史交易日（部分口径有历史源）、④⑤ 按所选交易日回溯、② 暂无历史源恒为实时快照；
@@ -68,7 +68,7 @@ stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
 ├── 启动系统.bat                  # 一键启动：后端 + dsh + 打开前端
 ├── 股票池追踪系统.exe            # 原生 Windows 窗口程序（由 launcher\build_exe.bat 编译，自带窗口、不加载 HTML）
 ├── launcher/                     # 上述 EXE 的源码 StockPoolLauncher.cs、构建脚本 build_exe.bat、环境安装脚本 install_env.bat
-├── frontend/                     # index.html（股票池）/ market-sector.html（盘面及板块分析）/ mentor-lab.html（大佬策略实验室）/ chip-scr.html（SCR 选股）/ stock-analysis.html（个股分析）
+├── frontend/                     # index.html（股票池）/ mentor-lab.html（大佬策略实验室）/ chip-scr.html（SCR 选股）/ stock-analysis.html（个股分析）
 ├── backend_fastapi/              # FastAPI 后端（业务模块化：*_routes.py 管 HTTP、*_service.py 管逻辑）
 │   ├── main.py                   # 应用入口：容错挂载各模块路由 + /health（单模块故障不影响其他模块）
 │   ├── chip_routes.py            # 筹码体系 · SCR 选股接口

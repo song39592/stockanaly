@@ -1153,7 +1153,7 @@ namespace StockPool
 
             AddRow(stack, ToolCard("📊", "盘面及板块分析",
                 "外围市场、大盘资金、行业 / 概念板块强弱与个股联动，一屏看清当日盘面结构。",
-                "market-sector.html", "盘面及板块分析", onEnter: delegate { SelectTab(_mktTabIndex); }));
+                null, "盘面及板块分析", onEnter: delegate { SelectTab(_mktTabIndex); }));
             AddRow(stack, ToolCard("🧠", "大佬策略实验室",
                 "把大佬公开资料交给 AI 提炼，人工审核后生成每日观点，沉淀为可回测的候选策略。",
                 "mentor-lab.html", "大佬策略实验室"));
