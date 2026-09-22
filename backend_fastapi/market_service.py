@@ -108,13 +108,30 @@ def _ttl(base: int, follow_us: bool = False) -> int:
     return max(base, int((end - now).total_seconds()))
 
 
-def _cached(key: str, producer, ttl: int = CACHE_TTL):
-    """带进程内缓存的取值，返回 (value, cached)。"""
+def _has_errors(value) -> bool:
+    """结果里是否记录了数据源错误（用于决定是否缩短缓存）。"""
+    return isinstance(value, dict) and bool(value.get("errors"))
+
+
+# 上次抓取带错误（来源超时 / 解析失败）时的重试间隔。
+# 这类结果不能跟着正常 ttl 一起长缓存：盘后 ttl 会延长到当天 23:59，
+# 数据源明明恢复了，页面却整晚显示「无数据」——这正是「刷新不出来」的主因之一。
+RETRY_TTL = 20
+
+
+def _cached(key: str, producer, ttl: int = CACHE_TTL, retry_ttl: int = RETRY_TTL):
+    """带进程内缓存的取值，返回 (value, cached)。
+
+    正常结果按 ttl 缓存；带 errors 的结果只缓存 retry_ttl 秒，
+    以便数据源恢复后下一次刷新立刻重试。
+    """
     now = time.time()
     with _cache_lock:
         hit = _cache.get(key)
-        if hit and now - hit[0] < ttl:
-            return hit[1], True
+        if hit:
+            age = now - hit[0]
+            if age < ttl and (age < retry_ttl or not _has_errors(hit[1])):
+                return hit[1], True
     value = producer()
     with _cache_lock:
         _cache[key] = (time.time(), value)
@@ -915,8 +932,11 @@ def sector_beta(date=None):
             threads.append(threading.Thread(target=collect, daemon=True))
         for thread in threads:
             thread.start()
+        # 兜底：整体只给一份时间预算。原先逐项 join(30) 会累加，
+        # 三个来源都卡住时最坏要等 90 秒，页面一直停在「加载中」。
+        deadline = time.time() + 35
         for thread in threads:
-            thread.join(30)                   # 兜底：任一子项超时也照常返回，缺失项由前端降级提示
+            thread.join(max(0.1, deadline - time.time()))
 
         return {"ok": True, "as_of": _now_str(), "historical": False,
                 "industry": parts.get("industry") or empty_industry,
