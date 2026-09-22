@@ -116,12 +116,12 @@ html[data-theme=light] .kline-state.err{background:#fbeaea;color:#a11d1d}
     <div class="note" id="methodNote">行情与消息来自后端 <code>/api/history/stock/{code}</code>；入池/出池轨迹由股票池历史快照推导。本页仅供研究参考，不构成投资建议。</div>
   </section>
 
-  <!-- 估值计算：结果直接调用股票估值接口，不在此页重复公式；口径与计算过程见 valuation.html -->
+  <!-- 估值计算：结果直接调用股票估值接口，不在此页重复公式；完整计算过程见启动器「估值计算」标签页 -->
   <section class="card">
     <div class="card-h">
       <h2>估值计算</h2>
       <span class="tag" id="valStatus">待计算</span>
-      <a class="btn" id="valFullLink" href="valuation.html" target="_blank" rel="noopener">打开完整计算过程 ↗</a>
+      <span class="tag">完整计算过程见启动器「估值计算」标签页</span>
       <button class="btn" id="btnValuation">↻ 重新计算</button>
     </div>
     <div class="card-b" id="valBody"><div class="empty">打开个股后自动计算</div></div>
@@ -286,7 +286,7 @@ function renderEvents(events, sync) {
   }).join('');
 }
 
-/* -------- 估值计算（结果来自 /api/stock/valuation，公式与口径不在此页重复，见 valuation.html） -------- */
+/* -------- 估值计算（结果来自 /api/stock/valuation，公式与口径不在此页重复，完整过程见启动器「估值计算」页） -------- */
 const valNum = (v, d = 2) => (v == null || v === '' ? '—' : Number(v).toFixed(d));
 const valPct = v => (v == null ? '—' : (Number(v) > 0 ? '+' : '') + (Number(v) * 100).toFixed(2) + '%');
 
@@ -431,7 +431,6 @@ function open(code) {
   currentCode = code;
   payload = null;
   $('codeInput').value = code;
-  $('valFullLink').href = `valuation.html?code=${encodeURIComponent(code)}`;
   loadName(code);
   disposeKline('<div class="kline-state">正在加载日 K…</div>');
   loadHistory(code, false);
