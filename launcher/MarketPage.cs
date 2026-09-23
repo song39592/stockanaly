@@ -108,10 +108,10 @@ namespace StockPool
             root.Controls.Add(_mktSubBody, 0, 2);
 
             // ---- 四个二级页 ----
-            MktAddSubPage("① 外围环境", MktBuildGlobal);
-            MktAddSubPage("② 大盘资金", MktBuildCapital);
-            MktAddSubPage("③ 板块β", MktBuildSectors);
-            MktAddSubPage("④ 连板 · ⑤ 大面股", MktBuildLadder);
+            MktAddSubPage("外围环境", MktBuildGlobal);
+            MktAddSubPage("大盘资金", MktBuildCapital);
+            MktAddSubPage("板块β", MktBuildSectors);
+            MktAddSubPage("连板 · 大面股", MktBuildLadder);
 
             MktSubSelect(0);
             return p;
@@ -308,9 +308,9 @@ namespace StockPool
             _mktLuFilter.Width = 170;
             _mktLuFilter.DropDownStyle = ComboBoxStyle.DropDownList;
             _mktLuFilter.SelectedIndexChanged += delegate { MktApplyFilter(_mktLuFilter, _mktLuInds, _mktLuStocks, _mktLuAll, _mktLuCaption, "涨停明细", MktLimitUpRow); };
-            AddRow(b4, Row(_mktLuCaption, _mktLuFold, Lbl("板块"), _mktLuFilter));
-
             _mktLuStocks = MktGrid(240, true, new string[] { "代码", "名称", "连板", "行业", "涨幅", "封板资金", "换手", "首封", "涨停统计" });
+            MktWireStockJump(_mktLuStocks);
+            AddRow(b4, Row(_mktLuCaption, _mktLuFold, Lbl("板块"), _mktLuFilter, MktCopyBtn(_mktLuStocks)));
             AddRow(b4, _mktLuStocks);
             AddRow(stack, g4);
 
@@ -325,8 +325,9 @@ namespace StockPool
             _mktBlFilter.Width = 170;
             _mktBlFilter.DropDownStyle = ComboBoxStyle.DropDownList;
             _mktBlFilter.SelectedIndexChanged += delegate { MktApplyFilter(_mktBlFilter, _mktBlInds, _mktBlasted, _mktBlAll, _mktBlCaption, "炸板股", MktBlastRow); };
-            AddRow(b5, Row(_mktBlCaption, _mktBlFold, Lbl("板块"), _mktBlFilter));
             _mktBlasted = MktGrid(200, true, new string[] { "代码", "名称", "涨跌幅", "回撤", "振幅", "炸板次数", "行业" });
+            MktWireStockJump(_mktBlasted);
+            AddRow(b5, Row(_mktBlCaption, _mktBlFold, Lbl("板块"), _mktBlFilter, MktCopyBtn(_mktBlasted)));
             AddRow(b5, _mktBlasted);
 
             _mktDtCaption = Mute(Lbl("跌停股"));
@@ -336,8 +337,9 @@ namespace StockPool
             _mktDtFilter.Width = 170;
             _mktDtFilter.DropDownStyle = ComboBoxStyle.DropDownList;
             _mktDtFilter.SelectedIndexChanged += delegate { MktApplyFilter(_mktDtFilter, _mktDtInds, _mktLimitDown, _mktDtAll, _mktDtCaption, "跌停股", MktDownRow); };
-            AddRow(b5, Row(_mktDtCaption, _mktDtFold, Lbl("板块"), _mktDtFilter));
             _mktLimitDown = MktGrid(180, true, new string[] { "代码", "名称", "涨跌幅", "连续跌停", "开板次数", "行业" });
+            MktWireStockJump(_mktLimitDown);
+            AddRow(b5, Row(_mktDtCaption, _mktDtFold, Lbl("板块"), _mktDtFilter, MktCopyBtn(_mktLimitDown)));
             AddRow(b5, _mktLimitDown);
             AddRow(stack, g5);
         }
@@ -357,16 +359,113 @@ namespace StockPool
             g.BorderStyle = BorderStyle.None;
             g.Tag = "grid";
             g.ScrollBars = ScrollBars.None;   // 不自带滚动条：高度按内容撑开，由页面统一滚动
+            g.TabStop = false;                                       // 不接收焦点，避免点选出现选中态
+            g.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            g.SelectionChanged += delegate { if (g.SelectedRows.Count > 0 || g.SelectedCells.Count > 0) g.ClearSelection(); };   // 选中即清空，表格整体不可被选择
+            g.MultiSelect = false;
+            g.AllowUserToResizeColumns = false;                      // 禁止在客户端拖动调整列宽
+            g.AllowUserToResizeRows = false;                         // 禁止调整行高
             g.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-            g.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
+            g.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;   // 自动适配高度，且禁止拖动调整（不出现可拖拽的线）
             foreach (string cn in cols)
             {
                 var col = new DataGridViewTextBoxColumn();
                 col.HeaderText = cn;
+                col.Name = cn;
                 col.SortMode = sortable ? DataGridViewColumnSortMode.Automatic : DataGridViewColumnSortMode.NotSortable;
                 g.Columns.Add(col);
             }
             return g;
+        }
+
+        /// <summary>给明细表挂上「点击代码 / 名称跳转个股分析」的交互（手型光标 + 单元格点击）。</summary>
+        private void MktWireStockJump(DataGridView g)
+        {
+            g.CellClick += MktJumpToStock;
+            g.CellMouseMove += (s, ev) =>
+            {
+                var gg = (DataGridView)s;
+                bool onKey = ev.RowIndex >= 0 &&
+                    (gg.Columns[ev.ColumnIndex].Name == "代码" || gg.Columns[ev.ColumnIndex].Name == "名称");
+                gg.Cursor = onKey ? Cursors.Hand : Cursors.Default;
+            };
+        }
+
+        /// <summary>连板 / 炸板 / 跌停表格点代码或名称：切到「个股分析」并按该代码打开。</summary>
+        private void MktJumpToStock(object sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex < 0) return;
+            var g = (DataGridView)sender;
+            if (e.RowIndex >= g.Rows.Count) return;
+            var r = g.Rows[e.RowIndex];
+            var code = r.Cells["代码"].Value as string;
+            if (string.IsNullOrWhiteSpace(code) || code.Length != 6) return;
+            foreach (char c in code) if (c < '0' || c > '9') return;
+            _stockCode.Text = code;
+            SelectTab(_stockTabIndex);   // 切到「个股分析」页（会触发 StockOnEnter 重绘）
+            StockOpen();                 // 按代码打开，写入查看历史
+        }
+
+        /// <summary>生成「复制表格」按钮：点击将表格（含表头）以 TSV 写入剪贴板，并短暂反馈结果。</summary>
+        private static Button MktCopyBtn(DataGridView g)
+        {
+            var btn = MiniBtn("复制表格", (EventHandler)null, 100);
+            btn.Click += delegate
+            {
+                string msg;
+                if (g == null || g.Rows.Count == 0) msg = "无数据";
+                else if (MktCopyGrid(g)) msg = "已复制 ✓";
+                else msg = "复制失败";
+                btn.Text = msg;
+                var t = new System.Windows.Forms.Timer();
+                t.Interval = 1500;
+                t.Tick += delegate { btn.Text = "复制表格"; t.Stop(); t.Dispose(); };
+                t.Start();
+            };
+            return btn;
+        }
+
+        /// <summary>将表格（含表头）以 TSV 写入剪贴板。剪贴板可能被其它进程临时占用，这里重试几次。返回是否成功。</summary>
+        private static bool MktCopyGrid(DataGridView g)
+        {
+            if (g == null || g.Rows.Count == 0) return false;
+            var sb = new System.Text.StringBuilder();
+            for (int c = 0; c < g.Columns.Count; c++)
+            {
+                if (c > 0) sb.Append("\t");
+                sb.Append(g.Columns[c].HeaderText ?? "");
+            }
+            sb.Append("\r\n");
+            foreach (DataGridViewRow r in g.Rows)
+            {
+                if (r.IsNewRow) continue;
+                for (int c = 0; c < g.Columns.Count; c++)
+                {
+                    if (c > 0) sb.Append("\t");
+                    object v = r.Cells[c].Value;
+                    sb.Append(v == null ? "" : v.ToString());
+                }
+                sb.Append("\r\n");
+            }
+            string text = sb.ToString();
+            for (int attempt = 0; attempt < 8; attempt++)
+            {
+                try
+                {
+                    // 第二个参数 true：退出程序后剪贴板内容仍保留；重试应对「剪贴板被占用」
+                    System.Windows.Forms.Clipboard.SetDataObject(text, true);
+                    return true;
+                }
+                catch (System.Runtime.InteropServices.ExternalException)
+                {
+                    System.Threading.Thread.Sleep(40);
+                }
+                catch (Exception)
+                {
+                    return false;
+                }
+            }
+            return false;
         }
 
         /// <summary>把表格高度撑到内容高度，避免出现表格内部滚动条（嵌套滚动）。</summary>
