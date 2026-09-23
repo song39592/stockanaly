@@ -775,7 +775,10 @@ namespace StockPool
             Skin(this);
             SkinTabs();
             if (_mktSubBtns != null && _mktSubBtns.Count > 0) SkinMktSubTabs();
+            if (_stockSubBtns != null && _stockSubBtns.Count > 0) SkinStockSubTabs();
+            if (_stockHistoryList != null) StockRenderHistoryNav();
             if (_stockRangeMap != null && _stockRangeMap.Count > 0) StockSetRangeActive();
+            if (_stockAdjustMap != null && _stockAdjustMap.Count > 0) StockSetAdjustActive();
             try
             {
                 var f = Path.Combine(_root, "frontend", "theme-state.js");
@@ -874,6 +877,10 @@ namespace StockPool
             else if (tag == "stock-range")
             {
                 // 范围按钮的配色由 StockSetRangeActive 控制，跳过默认按钮上色
+            }
+            else if (tag == "stock-adjust")
+            {
+                // 复权按钮（前复权 / 不复权）的配色由 StockSetAdjustActive 控制，跳过默认按钮上色
             }
             else if (c is Button)
             {

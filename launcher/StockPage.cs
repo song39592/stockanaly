@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using System.Web.Script.Serialization;
+using System.IO;
 
 namespace StockPool
 {
@@ -27,6 +28,8 @@ namespace StockPool
         private FlowLayoutPanel _stockKpi;                 // 在榜统计 KPI
         private KLineChart _stockKline;
         private int _stockRange = 250;                     // 0 = 全部
+        private string _stockAdjust = "qfq";               // qfq 前复权 / raw 不复权
+        private readonly Dictionary<Button, string> _stockAdjustMap = new Dictionary<Button, string>();
         private DataGridView _stockTimeline;                // 入池 / 出池记录
         private TableLayoutPanel _stockEvents;              // 消息面时间轴
         private Button _stockEventsToggle;                  // 消息面折叠按钮
@@ -38,27 +41,79 @@ namespace StockPool
         private int _stockRound = 0;
         private readonly Dictionary<Button, int> _stockRangeMap = new Dictionary<Button, int>();
 
+        // 二级导航：K线 / 记录·消息 / 估值 各一页（K线页不滚动，图表撑满，避免滚轮缩放与翻页冲突）
+        private FlowLayoutPanel _stockSubBar;
+        private Panel _stockSubBody;
+        private readonly List<Button> _stockSubBtns = new List<Button>();
+        private readonly List<Panel> _stockSubPages = new List<Panel>();
+        private int _stockSubIndex;
+
+        // 历史查看记录（最多 10 条，先进先出滚动覆盖；持久化到 stockanaly-data/history_stock_view.json）
+        private class StockHistoryItem
+        {
+            public string Code = "";
+            public string Name = "";
+            public long Ts = 0;
+        }
+        private List<StockHistoryItem> _stockHistory = new List<StockHistoryItem>();
+        private string _stockHistoryPath = null;
+        private TableLayoutPanel _stockHistoryRoot = null;   // 个股页根（2 列），用于切换列宽
+        private TableLayoutPanel _stockHistoryList = null;   // 历史项列表容器（可滚动）
+        private Label _stockHistoryHeader = null;
+        private Button _stockHistoryToggle = null;           // 折叠/展开按钮
+        private bool _stockHistoryExpanded = true;
+
         #region 个股分析页（原生内嵌标签页）
 
         private Panel BuildStockPage()
         {
             var p = NewPage("个股分析");
             _stockTabIndex = _tabPages.Count - 1;
+            p.AutoScroll = false;   // 内容分到二级页，整页不滚（K线页图表撑满）
 
-            var stack = Stack();
+            var root = new TableLayoutPanel();
+            root.Dock = DockStyle.Fill;
+            root.Margin = new Padding(0);
+            root.Padding = new Padding(0);
+            root.ColumnCount = 2;
+            root.RowCount = 1;
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170f));   // 历史导航（可折叠）
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));    // 主内容
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            p.Controls.Add(root);
+            _stockHistoryRoot = root;
 
+            // 主内容列（标题 / 查询 / 二级标签栏 / 二级页内容）
+            var mainCol = new TableLayoutPanel();
+            mainCol.Dock = DockStyle.Fill;
+            mainCol.Margin = new Padding(0);
+            mainCol.Padding = new Padding(16, 8, 16, 12);
+            mainCol.ColumnCount = 1;
+            mainCol.RowCount = 4;
+            mainCol.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            mainCol.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // 标题
+            mainCol.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // 查询工具区
+            mainCol.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // 二级标签栏
+            mainCol.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));  // 二级页内容
+
+            // 历史查看导航（左侧，可折叠）
+            root.Controls.Add(BuildStockHistoryPanel(), 0, 0);
+
+            // ---- 标题 ----
+            var head = Stack();
             var title = Lbl("📊 个股分析");
             title.Font = new Font("Microsoft YaHei UI", 14f, FontStyle.Bold);
             title.Margin = new Padding(0, 0, 0, 2);
-            AddRow(stack, Row(title));
+            AddRow(head, Row(title));
 
-            var sub = Mute(Lbl("前复权日K（MA5/10/20/60）+ 入池出池轨迹 + 消息面时间轴｜数据来源：GET /api/history/stock/{code}"));
+            var sub = Mute(Lbl("前复权/不复权日K（MA5/10/20/60）+ 成交量红绿 + 入池出池轨迹 + 消息面时间轴｜数据来源：GET /api/history/stock/{code}｜K线页：滚轮缩放 · 拖动平移"));
             sub.AutoSize = false;
             sub.Width = 760;
             sub.Height = 20;
-            AddRow(stack, Row(sub));
+            AddRow(head, Row(sub));
+            mainCol.Controls.Add(head, 0, 0);
 
-            // ---- 查询区 ----
+            // ---- 查询工具区（始终可见，不随二级页滚动）----
             TableLayoutPanel b0;
             var g0 = Group("查询", out b0);
             _stockCode = new TextBox();
@@ -107,34 +162,100 @@ namespace StockPool
             rangeRow.Controls.Add(_stockRefresh);
             rangeRow.Controls.Add(_stockStatus);
             AddRow(b0, rangeRow);
-            AddRow(stack, g0);
 
-            // ---- 在榜统计 ----
+            // 复权切换（前复权 / 不复权）
+            var adjustLabels = new string[] { "前复权", "不复权" };
+            var adjustVals = new string[] { "qfq", "raw" };
+            for (int ai = 0; ai < adjustVals.Length; ai++)
+            {
+                string a = adjustVals[ai];
+                var btn = new Button();
+                btn.Text = adjustLabels[ai];
+                btn.Tag = "stock-adjust";
+                btn.AutoSize = false;
+                btn.Height = 26;
+                btn.Width = Math.Max(72, TextRenderer.MeasureText(adjustLabels[ai], Font).Width + 22);
+                btn.FlatStyle = FlatStyle.Flat;
+                btn.FlatAppearance.BorderSize = 0;
+                btn.Font = new Font("Microsoft YaHei UI", 9f);
+                btn.TabStop = false;
+                btn.Margin = new Padding(0, 0, 8, 0);
+                string cap = a;
+                btn.Click += delegate
+                {
+                    _stockAdjust = cap;
+                    StockSetAdjustActive();
+                    if (_stockKline != null) _stockKline.SetAdjust(_stockAdjust);
+                };
+                _stockAdjustMap[btn] = a;
+            }
+            var adjustRow = Row(Mute(Lbl("复权")));
+            foreach (Button b in _stockAdjustMap.Keys) adjustRow.Controls.Add(b);
+            AddRow(b0, adjustRow);
+            mainCol.Controls.Add(g0, 0, 1);
+
+            // ---- 二级标签栏 ----
+            _stockSubBar = new FlowLayoutPanel();
+            _stockSubBar.Dock = DockStyle.Top;
+            _stockSubBar.Height = 30;
+            _stockSubBar.FlowDirection = FlowDirection.LeftToRight;
+            _stockSubBar.WrapContents = false;
+            _stockSubBar.Margin = new Padding(0, 0, 0, 2);
+            _stockSubBar.Padding = new Padding(0);
+            mainCol.Controls.Add(_stockSubBar, 0, 2);
+
+            _stockSubBody = new Panel();
+            _stockSubBody.Dock = DockStyle.Fill;
+            _stockSubBody.Margin = new Padding(0);
+            mainCol.Controls.Add(_stockSubBody, 0, 3);
+
+            // 主内容列挂到根布局的右列
+            root.Controls.Add(mainCol, 1, 0);
+
+            // ---- 二级页 ① K线：图表撑满、不滚动（滚轮只缩放，不与翻页冲突）----
+            var klinePage = new Panel();
+            klinePage.AutoScroll = false;
+            var kLayout = new TableLayoutPanel();
+            kLayout.Dock = DockStyle.Fill;
+            kLayout.Margin = new Padding(0);
+            kLayout.ColumnCount = 1;
+            kLayout.RowCount = 2;
+            kLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            kLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // 概况 + 同步状态
+            kLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));  // 图表撑满
+            klinePage.Controls.Add(kLayout);
+            var kTop = Stack();
             TableLayoutPanel b1;
             var g1 = Group("个股概况（入池出池轨迹）", out b1);
             _stockKpi = VKpiRow();
             AddRow(b1, _stockKpi);
-            AddRow(stack, g1);
+            AddRow(kTop, g1);
 
-            // ---- K 线 ----
             TableLayoutPanel b2;
-            var g2 = Group("前复权日K线", out b2);
+            var g2 = Group("", out b2);   // 标题交给二级标签
             _stockSyncStatus = Mute(Lbl("待加载"));
             AddRow(b2, Row(_stockSyncStatus));
-            _stockKline = new KLineChart();
-            _stockKline.Dock = DockStyle.Top;
-            _stockKline.Height = 470;
-            _stockKline.Tag = "kline";
-            _stockKline.BackColorChanged += delegate { _stockKline.Invalidate(); };
-            AddRow(b2, _stockKline);
-            AddRow(stack, g2);
+            AddRow(kTop, g2);
 
-            // ---- 入池 / 出池 + 消息面（上下堆叠）----
+            _stockKline = new KLineChart();
+            _stockKline.Dock = DockStyle.Fill;
+            _stockKline.Tag = "kline";
+            _stockKline.TabStop = true;
+            _stockKline.OnRangeChanged = delegate (int r) { _stockRange = r; StockSetRangeActive(); };
+            _stockKline.BackColorChanged += delegate { _stockKline.Invalidate(); };
+            kLayout.Controls.Add(kTop, 0, 0);              // 概况 + 同步状态
+            kLayout.Controls.Add(_stockKline, 0, 1);       // 图表占满剩余高度
+            StockAddSubTab("K线", klinePage);
+
+            // ---- 二级页 ② 记录 · 消息 ----
+            var recPage = new Panel();
+            recPage.AutoScroll = true;
+            var recStack = Stack();
             TableLayoutPanel b3;
             var g3 = Group("入池 / 出池记录", out b3);
             _stockTimeline = MktGrid(180, true, new string[] { "入池日期", "出池日期", "在榜天数", "状态" });
             AddRow(b3, _stockTimeline);
-            AddRow(stack, g3);
+            AddRow(recStack, g3);
 
             TableLayoutPanel b4;
             var g4 = Group("消息面时间轴", out b4);
@@ -147,9 +268,14 @@ namespace StockPool
             AddRow(b4, Row(_stockEventsToggle));
             _stockEvents = Stack();
             AddRow(b4, _stockEvents);
-            AddRow(stack, g4);
+            AddRow(recStack, g4);
+            recPage.Controls.Add(recStack);
+            StockAddSubTab("记录 · 消息", recPage);
 
-            // ---- 估值（内联，完整过程见估值计算标签页）----
+            // ---- 二级页 ③ 估值（完整过程见估值计算标签页）----
+            var valPage = new Panel();
+            valPage.AutoScroll = true;
+            var valStack = Stack();
             TableLayoutPanel b5;
             var g5 = Group("估值计算（结果来自 /api/stock/valuation）", out b5);
             _stockValStatus = Mute(Lbl("打开个股后自动计算"));
@@ -162,9 +288,11 @@ namespace StockPool
             {
                 if (_stockCurrent != null) StockJumpValuation(_stockCurrent);
             }, 180)));
-            AddRow(stack, g5);
+            AddRow(valStack, g5);
+            valPage.Controls.Add(valStack);
+            StockAddSubTab("估值", valPage);
 
-            p.Controls.Add(stack);
+            StockSubSelect(0);
 
             _stockCode.KeyDown += delegate(object s, KeyEventArgs e)
             {
@@ -183,7 +311,67 @@ namespace StockPool
             };
 
             StockSetRangeActive();
+            StockSetAdjustActive();
+
+            // 历史查看记录：从 stockanaly-data 加载并渲染左侧导航
+            StockLoadHistoryFile();
+            StockRenderHistoryNav();
             return p;
+        }
+
+        /// <summary>建一个二级页：按钮进标签栏，页面进内容区（由 StockSubSelect 只挂载当前页）。</summary>
+        private void StockAddSubTab(string title, Panel page)
+        {
+            int idx = _stockSubPages.Count;
+
+            var b = new Button();
+            b.Text = title;
+            b.Tag = "stock-subtab";
+            b.AutoSize = false;
+            b.Height = 28;
+            b.Width = Math.Max(96, TextRenderer.MeasureText(title, Font).Width + 24);
+            b.FlatStyle = FlatStyle.Flat;
+            b.FlatAppearance.BorderSize = 0;
+            b.Font = new Font("Microsoft YaHei UI", 9f);
+            b.TabStop = false;
+            b.Margin = new Padding(0, 0, 2, 0);
+            b.Click += delegate { StockSubSelect(idx); };
+            _stockSubBtns.Add(b);
+            _stockSubBar.Controls.Add(b);
+
+            page.Dock = DockStyle.Fill;
+            page.Visible = false;
+            page.Margin = new Padding(0);
+            page.Tag = "tabpage";
+            _stockSubPages.Add(page);
+        }
+
+        private void StockSubSelect(int index)
+        {
+            if (index < 0 || index >= _stockSubPages.Count) return;
+            _stockSubIndex = index;
+            // 容器里只挂当前页，避免多个 Dock=Fill 面板叠放导致布局错乱
+            _stockSubBody.Controls.Clear();
+            var page = _stockSubPages[index];
+            page.Visible = true;
+            page.Dock = DockStyle.Fill;
+            _stockSubBody.Controls.Add(page);
+            Skin(page);                 // 懒挂载的页首次显示前按当前主题上色
+            page.Invalidate(true);
+            SkinStockSubTabs();
+        }
+
+        /// <summary>二级标签配色（跟随主题）：选中用卡片色，未选中用窗口底色。</summary>
+        private void SkinStockSubTabs()
+        {
+            if (_stockSubBtns == null) return;
+            for (int i = 0; i < _stockSubBtns.Count; i++)
+            {
+                bool sel = (i == _stockSubIndex);
+                _stockSubBtns[i].BackColor = sel ? _cPanel : _cBg;
+                _stockSubBtns[i].ForeColor = sel ? _cText : _cSub;
+                _stockSubBtns[i].Invalidate();
+            }
         }
 
         // ---- 打开 ----
@@ -205,6 +393,7 @@ namespace StockPool
                 _stockHint.Text = "数据加载中…";
             }
             _stockCurrent = code;
+            StockAddHistory(code, null);   // 记录查看历史（名称稍后补全）
             StockLoadName(code);
             StockLoadHistory(code, false);
             StockLoadValuation(code);
@@ -226,7 +415,9 @@ namespace StockPool
                         if (ok && j.ContainsKey("name"))
                         {
                             double? pr = VNum(VSafe(j, "price"));
-                            _stockName.Text = VStr(VSafe(j, "name")) + (pr != null ? "  " + pr.Value.ToString("F2") + " 元" : "");
+                            string nm = VStr(VSafe(j, "name"));
+                            _stockName.Text = nm + (pr != null ? "  " + pr.Value.ToString("F2") + " 元" : "");
+                            StockAddHistory(code, nm);   // 补全历史记录中的名称
                         }
                         else
                         {
@@ -278,7 +469,7 @@ namespace StockPool
             _stockStatus.ForeColor = Color.FromArgb(208, 57, 59);
             _stockSyncStatus.Text = msg;
             _stockSyncStatus.ForeColor = Color.FromArgb(208, 57, 59);
-            _stockKline.SetData(new List<KBar>(), new List<KMark>());
+            _stockKline.SetData(new List<KBar>(), new List<KBar>(), new List<KMark>());
         }
 
         private void StockRenderHistory(Dictionary<string, object> j)
@@ -294,7 +485,7 @@ namespace StockPool
                 return;
             }
 
-            // K 线
+            // K 线（前复权）
             var bars = new List<KBar>();
             var arr = VArr(VSafe(j, "bars"));
             if (arr != null)
@@ -309,6 +500,24 @@ namespace StockPool
                     b.H = VNum(VSafe(d, "high")) ?? 0;
                     b.V = VNum(VSafe(d, "volume")) ?? 0;
                     bars.Add(b);
+                }
+            }
+
+            // K 线（不复权原始价）
+            var barsRaw = new List<KBar>();
+            var arrRaw = VArr(VSafe(j, "bars_raw"));
+            if (arrRaw != null)
+            {
+                foreach (Dictionary<string, object> d in arrRaw)
+                {
+                    var b = new KBar();
+                    b.Date = VStr(VSafe(d, "trade_date"));
+                    b.O = VNum(VSafe(d, "open")) ?? 0;
+                    b.C = VNum(VSafe(d, "close")) ?? 0;
+                    b.L = VNum(VSafe(d, "low")) ?? 0;
+                    b.H = VNum(VSafe(d, "high")) ?? 0;
+                    b.V = VNum(VSafe(d, "volume")) ?? 0;
+                    barsRaw.Add(b);
                 }
             }
 
@@ -351,7 +560,7 @@ namespace StockPool
                 }
             }
 
-            _stockKline.SetData(bars, marks);
+            _stockKline.SetData(bars, barsRaw, marks);
             StockRenderStats(spanList);
             StockRenderTimeline(spanList);
             StockRenderEvents(events);
@@ -612,10 +821,222 @@ namespace StockPool
             }
         }
 
+        private void StockSetAdjustActive()
+        {
+            foreach (KeyValuePair<Button, string> kv in _stockAdjustMap)
+            {
+                bool act = kv.Value == _stockAdjust;
+                kv.Key.BackColor = act ? Color.FromArgb(64, 120, 192) : _cPanel;
+                kv.Key.ForeColor = act ? Color.White : _cSub;
+                kv.Key.Invalidate();
+            }
+        }
+
+        // ---- 历史查看记录（左侧可折叠导航，持久化到 stockanaly-data）----
+        private TableLayoutPanel BuildStockHistoryPanel()
+        {
+            var hist = new TableLayoutPanel();
+            hist.Dock = DockStyle.Fill;
+            hist.Margin = new Padding(0, 8, 8, 12);
+            hist.ColumnCount = 1;
+            hist.RowCount = 2;
+            hist.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            hist.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 头部
+            hist.RowStyles.Add(new RowStyle(SizeType.Percent, 100f)); // 列表
+
+            var head = new FlowLayoutPanel();
+            head.Dock = DockStyle.Top;
+            head.Height = 30;
+            head.WrapContents = false;
+            head.Margin = new Padding(0);
+            head.Padding = new Padding(0);
+            _stockHistoryHeader = Lbl("历史查看");
+            _stockHistoryHeader.Font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold);
+            _stockHistoryHeader.AutoSize = true;
+            _stockHistoryHeader.TextAlign = ContentAlignment.MiddleLeft;
+            head.Controls.Add(_stockHistoryHeader);
+
+            _stockHistoryToggle = new Button();
+            _stockHistoryToggle.Text = "‹";        // ‹ 收起 / › 展开
+            _stockHistoryToggle.FlatStyle = FlatStyle.Flat;
+            _stockHistoryToggle.FlatAppearance.BorderSize = 0;
+            _stockHistoryToggle.Font = new Font("Microsoft YaHei UI", 10f);
+            _stockHistoryToggle.TabStop = false;
+            _stockHistoryToggle.Width = 26;
+            _stockHistoryToggle.Height = 26;
+            _stockHistoryToggle.Margin = new Padding(0, 0, 0, 0);
+            _stockHistoryToggle.Click += delegate { StockToggleHistory(); };
+            head.Controls.Add(_stockHistoryToggle);
+            hist.Controls.Add(head, 0, 0);
+
+            _stockHistoryList = new TableLayoutPanel();
+            _stockHistoryList.Dock = DockStyle.Fill;
+            _stockHistoryList.AutoScroll = true;
+            _stockHistoryList.ColumnCount = 1;
+            _stockHistoryList.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            _stockHistoryList.Margin = new Padding(0);
+            _stockHistoryList.Padding = new Padding(0, 2, 0, 0);
+            hist.Controls.Add(_stockHistoryList, 0, 1);
+            return hist;
+        }
+
+        private void StockToggleHistory()
+        {
+            _stockHistoryExpanded = !_stockHistoryExpanded;
+            if (_stockHistoryRoot != null)
+            {
+                _stockHistoryRoot.ColumnStyles[0] = new ColumnStyle(SizeType.Absolute, _stockHistoryExpanded ? 170f : 32f);
+                _stockHistoryRoot.PerformLayout();
+            }
+            if (_stockHistoryHeader != null) _stockHistoryHeader.Visible = _stockHistoryExpanded;
+            if (_stockHistoryList != null) _stockHistoryList.Visible = _stockHistoryExpanded;
+            if (_stockHistoryToggle != null) _stockHistoryToggle.Text = _stockHistoryExpanded ? "‹" : "›";
+        }
+
+        private void StockRenderHistoryNav()
+        {
+            if (_stockHistoryList == null) return;
+            _stockHistoryList.Controls.Clear();
+            _stockHistoryList.RowStyles.Clear();
+            if (_stockHistory == null || _stockHistory.Count == 0)
+            {
+                var empty = Mute(Lbl("暂无查看记录"));
+                AddRow(_stockHistoryList, empty);
+                return;
+            }
+            foreach (StockHistoryItem h in _stockHistory)
+            {
+                var btn = new Button();
+                btn.Dock = DockStyle.Top;
+                btn.Height = 38;
+                btn.FlatStyle = FlatStyle.Flat;
+                btn.FlatAppearance.BorderSize = 0;
+                btn.Font = new Font("Microsoft YaHei UI", 9f);
+                btn.TextAlign = ContentAlignment.MiddleLeft;
+                btn.TabStop = false;
+                btn.Tag = h.Code;
+                bool cur = (_stockCurrent == h.Code);
+                btn.BackColor = cur ? Color.FromArgb(64, 120, 192) : _cPanel;
+                btn.ForeColor = cur ? Color.White : _cText;
+                string name = string.IsNullOrEmpty(h.Name) ? "" : ("  " + h.Name);
+                btn.Text = h.Code + name;
+                btn.Click += delegate { _stockCode.Text = h.Code; StockOpen(); StockSubSelect(0); };
+                btn.MouseUp += delegate(object s, MouseEventArgs e)
+                {
+                    if (e.Button == MouseButtons.Right) StockRemoveHistory(h.Code);
+                };
+                AddRow(_stockHistoryList, btn);
+            }
+            var clear = MiniBtn("清空历史", delegate { StockClearHistory(); }, 0);
+            clear.Dock = DockStyle.Top;
+            clear.Margin = new Padding(0, 0, 0, 8);
+            AddRow(_stockHistoryList, clear);
+        }
+
+        private string ResolveDataDir()
+        {
+            string env = Environment.GetEnvironmentVariable("STOCK_DATA_DIR");
+            if (!string.IsNullOrEmpty(env)) return env.Trim();
+            env = Environment.GetEnvironmentVariable("DATA_DIR");
+            if (!string.IsNullOrEmpty(env)) return env.Trim();
+            // 默认：程序所在目录的「上一级」下的 stockanaly-data（与后端 config.py 的 DEFAULT_DATA_DIR 一致）
+            string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
+            if (string.IsNullOrEmpty(exeDir)) exeDir = ".";
+            DirectoryInfo di = Directory.GetParent(exeDir);
+            string parent = (di != null && !string.IsNullOrEmpty(di.FullName)) ? di.FullName : exeDir;
+            return Path.Combine(parent, "stockanaly-data");
+        }
+
+        private void StockLoadHistoryFile()
+        {
+            _stockHistory = new List<StockHistoryItem>();
+            try
+            {
+                string dir = ResolveDataDir();
+                _stockHistoryPath = Path.Combine(dir, "history_stock_view.json");
+                if (File.Exists(_stockHistoryPath))
+                {
+                    string txt = File.ReadAllText(_stockHistoryPath, Encoding.UTF8);
+                    var arr = new JavaScriptSerializer().Deserialize<System.Collections.ArrayList>(txt);
+                    if (arr != null)
+                    {
+                        foreach (Dictionary<string, object> d in arr)
+                        {
+                            var it = new StockHistoryItem();
+                            it.Code = VStr(VSafe(d, "code"));
+                            it.Name = VStr(VSafe(d, "name"));
+                            object ts;
+                            if (d.TryGetValue("ts", out ts) && ts != null)
+                            {
+                                try { it.Ts = Convert.ToInt64(ts); } catch (Exception) { it.Ts = 0; }
+                            }
+                            if (!string.IsNullOrEmpty(it.Code)) _stockHistory.Add(it);
+                        }
+                    }
+                }
+            }
+            catch (Exception) { }
+        }
+
+        private void StockSaveHistoryFile()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(_stockHistoryPath)) return;
+                string dir = Path.GetDirectoryName(_stockHistoryPath);
+                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                var arr = new System.Collections.ArrayList();
+                foreach (StockHistoryItem h in _stockHistory)
+                {
+                    var d = new Dictionary<string, object>();
+                    d["code"] = h.Code;
+                    d["name"] = h.Name ?? "";
+                    d["ts"] = h.Ts;
+                    arr.Add(d);
+                }
+                File.WriteAllText(_stockHistoryPath, new JavaScriptSerializer().Serialize(arr), Encoding.UTF8);
+            }
+            catch (Exception) { }
+        }
+
+        private void StockAddHistory(string code, string name)
+        {
+            if (string.IsNullOrEmpty(code) || !Regex.IsMatch(code, "^[0-9]{6}$")) return;
+            StockHistoryItem ex = _stockHistory.Find(h => h.Code == code);
+            if (ex != null) _stockHistory.Remove(ex);
+            _stockHistory.Insert(0, new StockHistoryItem { Code = code, Name = name ?? "", Ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds() });
+            while (_stockHistory.Count > 10) _stockHistory.RemoveAt(_stockHistory.Count - 1);  // 滚动覆盖：超过 10 条丢弃最旧
+            StockSaveHistoryFile();
+            StockRenderHistoryNav();
+        }
+
+        private void StockRemoveHistory(string code)
+        {
+            StockHistoryItem ex = _stockHistory.Find(h => h.Code == code);
+            if (ex != null) _stockHistory.Remove(ex);
+            StockSaveHistoryFile();
+            StockRenderHistoryNav();
+        }
+
+        private void StockClearHistory()
+        {
+            _stockHistory.Clear();
+            StockSaveHistoryFile();
+            StockRenderHistoryNav();
+        }
+
         private void StockOnEnter()
         {
             // 个股页需要代码才能加载，进入时不自动拉取；仅确保图表按当前主题重绘。
             if (_stockKline != null) _stockKline.Invalidate();
+            // 从别的顶级标签切进来时，重新挂载当前二级页并刷新，避免首屏不刷新
+            if (_stockSubBody != null)
+            {
+                StockSubSelect(_stockSubIndex);
+                _stockSubBody.PerformLayout();
+                _stockSubBody.Invalidate(true);
+            }
+            StockRenderHistoryNav();   // 刷新左侧历史导航的当前项高亮
         }
 
         #endregion
@@ -644,12 +1065,20 @@ namespace StockPool
             private const int BottomPad = 18;
             private const int VolRatio = 22;   // 成交量区占纵向比例（%）
 
-            private readonly List<KBar> _bars = new List<KBar>();
+            private List<KBar> _bars = new List<KBar>();      // 当前展示口径（指向 _qfq / _raw）
+            private readonly List<KBar> _qfq = new List<KBar>();
+            private readonly List<KBar> _raw = new List<KBar>();
+            private string _adjust = "qfq";                    // qfq 前复权 / raw 不复权
             private readonly List<KMark> _marks = new List<KMark>();
             private List<List<double>> _ma = new List<List<double>>();
-            private int _range = 250;
+            private int _range = 250;                          // 可见 K 线根数，0 = 全部
+            private int _offset = 0;                           // 平移：从最新端向左偏移的根数
+            private bool _dragging = false;
+            private int _dragStartX = 0;
+            private int _dragStartOffset = 0;
             private readonly ToolTip _tip = new ToolTip();
             private int _hoverIndex = -1;
+            public Action<int> OnRangeChanged;                 // 缩放改变范围时通知外部刷新高亮
 
             private static readonly int[] MaPeriods = new int[] { 5, 10, 20, 60 };
             private static readonly Color[] MaColors = new Color[] {
@@ -667,12 +1096,29 @@ namespace StockPool
                 DoubleBuffered = true;
             }
 
-            public void SetData(List<KBar> bars, List<KMark> marks)
+            public void SetData(List<KBar> qfq, List<KBar> raw, List<KMark> marks)
             {
-                _bars.Clear();
-                if (bars != null) _bars.AddRange(bars);
+                _qfq.Clear();
+                if (qfq != null) _qfq.AddRange(qfq);
+                _raw.Clear();
+                if (raw != null) _raw.AddRange(raw);
                 _marks.Clear();
                 if (marks != null) _marks.AddRange(marks);
+                _offset = 0;
+                ApplyAdjust();
+            }
+
+            public void SetAdjust(string a)
+            {
+                if (_adjust == a) return;
+                _adjust = a;
+                _offset = 0;
+                ApplyAdjust();
+            }
+
+            private void ApplyAdjust()
+            {
+                _bars = (_adjust == "raw" && _raw.Count > 0) ? _raw : _qfq;
                 _ma = ComputeMA(_bars);
                 Invalidate();
             }
@@ -680,6 +1126,7 @@ namespace StockPool
             public void SetRange(int r)
             {
                 _range = r;
+                _offset = 0;
                 Invalidate();
             }
 
@@ -706,12 +1153,68 @@ namespace StockPool
                 return res;
             }
 
+            protected override void OnMouseDown(MouseEventArgs e)
+            {
+                base.OnMouseDown(e);
+                if (e.Button == MouseButtons.Left && _bars.Count > 0)
+                {
+                    _dragging = true;
+                    _dragStartX = e.X;
+                    _dragStartOffset = _offset;
+                    this.Capture = true;
+                }
+            }
+
+            protected override void OnMouseUp(MouseEventArgs e)
+            {
+                base.OnMouseUp(e);
+                if (_dragging) { _dragging = false; this.Capture = false; }
+            }
+
+            protected override void OnMouseEnter(EventArgs e)
+            {
+                base.OnMouseEnter(e);
+                if (!this.TabStop || this.Focused) return;
+                // 聚焦图表以便接收滚轮（缩放）；但外层 AutoScroll 容器会顺手把图表
+                // 滚入视口，导致上方查询区被顶出屏幕——聚焦后把滚动位置还原回去。
+                ScrollableControl host = FindScrollHost();
+                Point saved = host != null ? host.AutoScrollPosition : Point.Empty;
+                this.Focus();
+                if (host != null)
+                    host.AutoScrollPosition = new Point(-saved.X, -saved.Y);
+            }
+
+            private ScrollableControl FindScrollHost()
+            {
+                Control c = this.Parent;
+                while (c != null)
+                {
+                    ScrollableControl s = c as ScrollableControl;
+                    if (s != null && s.AutoScroll) return s;
+                    c = c.Parent;
+                }
+                return null;
+            }
+
             protected override void OnMouseMove(MouseEventArgs e)
             {
                 base.OnMouseMove(e);
                 int n = VisibleCount();
                 if (n <= 0) { _hoverIndex = -1; _tip.Hide(this); return; }
                 int plotW = Math.Max(20, Width - LeftPad - RightPad);
+
+                if (_dragging)
+                {
+                    int dx = e.X - _dragStartX;
+                    int total = _bars.Count;
+                    int deltaBars = (int)Math.Round(dx * (double)n / plotW);   // 右拖露出更早期数据
+                    _offset = Math.Max(0, Math.Min(_dragStartOffset + deltaBars, total - n));
+                    _hoverIndex = -1;
+                    _tip.Hide(this);
+                    Invalidate();
+                    return;
+                }
+
                 double slot = (double)plotW / n;
                 int idx = (int)((e.X - LeftPad) / slot);
                 if (idx < 0) idx = 0;
@@ -737,6 +1240,21 @@ namespace StockPool
                 }
             }
 
+            protected override void OnMouseWheel(MouseEventArgs e)
+            {
+                base.OnMouseWheel(e);
+                int total = _bars.Count;
+                if (total == 0) return;
+                int cur = _range > 0 ? _range : total;
+                int step = e.Delta > 0 ? -20 : 20;   // 上滚放大（更少根），下滚缩小
+                int next = Math.Max(20, Math.Min(total, cur + step));
+                int newRange = (next >= total) ? 0 : next;
+                _range = newRange;
+                _offset = Math.Max(0, Math.Min(_offset, total - VisibleCount()));
+                Invalidate();
+                if (OnRangeChanged != null) OnRangeChanged(_range);
+            }
+
             protected override void OnMouseLeave(EventArgs e)
             {
                 base.OnMouseLeave(e);
@@ -750,11 +1268,22 @@ namespace StockPool
                 return _range > 0 ? Math.Min(_range, _bars.Count) : _bars.Count;
             }
 
+            private void VisibleWindow(out int start, out int count)
+            {
+                int total = _bars.Count;
+                int n = VisibleCount();
+                if (n <= 0) { start = 0; count = 0; return; }
+                int off = Math.Max(0, Math.Min(_offset, total - n));
+                start = Math.Max(0, total - n - off);
+                count = Math.Min(n, total - start);
+            }
+
             private List<KBar> VisibleBars()
             {
-                int n = VisibleCount();
-                if (n <= 0) return new List<KBar>();
-                return _bars.GetRange(_bars.Count - n, n);
+                int s, c;
+                VisibleWindow(out s, out c);
+                if (c <= 0) return new List<KBar>();
+                return _bars.GetRange(s, c);
             }
 
             private static string VolumeText(double v)
@@ -802,10 +1331,12 @@ namespace StockPool
                 // 价格区间（含 MA）
                 double pmin = double.MaxValue, pmax = double.MinValue;
                 foreach (KBar b in vis) { if (b.L < pmin) pmin = b.L; if (b.H > pmax) pmax = b.H; }
+                int wstart, wcount;
+                VisibleWindow(out wstart, out wcount);
                 var maTail = new List<List<double>>();
                 foreach (List<double> s in _ma)
                 {
-                    List<double> tail = s.Count >= n ? s.GetRange(s.Count - n, n) : s;
+                    List<double> tail = (s.Count >= wstart + wcount) ? s.GetRange(wstart, wcount) : new List<double>();
                     maTail.Add(tail);
                     foreach (double v in tail) if (!double.IsNaN(v)) { if (v < pmin) pmin = v; if (v > pmax) pmax = v; }
                 }
@@ -941,6 +1472,16 @@ namespace StockPool
                 }
 
                 DrawLegend(g, text, 0);
+
+                // 缩放 / 平移提示（右下角，淡色）
+                Color hint = dark ? Color.FromArgb(120, 128, 140) : Color.FromArgb(150, 156, 168);
+                using (var hb = new SolidBrush(hint))
+                using (var fmt = new StringFormat { Alignment = StringAlignment.Far })
+                {
+                    g.DrawString("滚轮缩放 · 拖动平移 · " + (_adjust == "raw" ? "不复权" : "前复权"),
+                        new Font("Microsoft YaHei UI", 8.5f), hb,
+                        new RectangleF(0, volBottom + 1, Width - 4, BottomPad), fmt);
+                }
             }
 
             private void DrawLegend(Graphics g, Color text, int dummy)
