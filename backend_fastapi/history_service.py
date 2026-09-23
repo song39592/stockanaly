@@ -205,10 +205,17 @@ def stock_detail(code: str, start: str | None = None, end: str | None = None,
             except Exception as exc:  # noqa: BLE001
                 sync_result = {"bars": None, "events": None, "errors": [f"消息：{exc}"]}
 
+    bars_raw: list[dict[str, Any]] = []
+    try:
+        bars_raw = price_store.load_bars(code, "raw", start, end)
+    except Exception:
+        bars_raw = []
+
     return {
         "code": code,
         "adjust": "qfq",
         "bars": bars,
+        "bars_raw": bars_raw,
         "untrusted": bool(untrusted),
         "untrusted_reason": untrusted,
         "repaired": repaired,

@@ -537,6 +537,7 @@ namespace StockPool
             BuildToolPage();
             BuildValuationPage();
             BuildMarketPage();
+            BuildStockPage();
             BuildLogPage();
             BuildSettingsPage();
             BuildServicePage();   // 服务控制台放最后一个标签
@@ -611,6 +612,7 @@ namespace StockPool
             for (int i = 0; i < _tabPages.Count; i++) _tabPages[i].Visible = (i == index);
             SkinTabs();
             if (index == _mktTabIndex) MktOnEnter();   // 进入盘面页自动拉最新数据
+            if (index == _stockTabIndex) StockOnEnter();
         }
 
         /// <summary>标签行配色：选中用卡片色 + 蓝色下划线，未选中用窗口底色。</summary>
@@ -773,6 +775,10 @@ namespace StockPool
             Skin(this);
             SkinTabs();
             if (_mktSubBtns != null && _mktSubBtns.Count > 0) SkinMktSubTabs();
+            if (_stockSubBtns != null && _stockSubBtns.Count > 0) SkinStockSubTabs();
+            if (_stockHistoryList != null) StockRenderHistoryNav();
+            if (_stockRangeMap != null && _stockRangeMap.Count > 0) StockSetRangeActive();
+            if (_stockAdjustMap != null && _stockAdjustMap.Count > 0) StockSetAdjustActive();
             try
             {
                 var f = Path.Combine(_root, "frontend", "theme-state.js");
@@ -867,6 +873,14 @@ namespace StockPool
             {
                 c.BackColor = _cPanel;
                 c.ForeColor = _cText;
+            }
+            else if (tag == "stock-range")
+            {
+                // 范围按钮的配色由 StockSetRangeActive 控制，跳过默认按钮上色
+            }
+            else if (tag == "stock-adjust")
+            {
+                // 复权按钮（前复权 / 不复权）的配色由 StockSetAdjustActive 控制，跳过默认按钮上色
             }
             else if (c is Button)
             {
@@ -1166,6 +1180,9 @@ namespace StockPool
             AddRow(stack, ToolCard("📈", "股票估值计算",
                 "输入标的与假设，按多种估值模型测算内在价值区间，辅助判断高估 / 低估。",
                 null, "股票估值计算", onEnter: delegate { SelectTab(_valTabIndex); }));
+            AddRow(stack, ToolCard("🔍", "个股分析",
+                "前复权日K + 入池出池轨迹 + 消息面时间轴，一图看清个股历史与异动。",
+                null, "个股分析", onEnter: delegate { SelectTab(_stockTabIndex); }));
 
             var tip2 = Lbl("重复点同一个「进入」按钮，网页版只会把已开着的窗口切到最前；「股票估值计算」则切到本窗口的估值标签页。");
             Mute(tip2);
