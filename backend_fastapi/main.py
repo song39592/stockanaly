@@ -12,8 +12,12 @@
 """
 
 import importlib
+import os
+import subprocess
 import sys
+import time
 import traceback
+import platform
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +30,26 @@ import integrity
 import mentor_store
 import price_store
 import storage
+
+START_TIME = time.time()
+
+def _git_commit():
+    """取当前 git 短哈希（打包/无 git 时返回 None，不影响健康检查）。"""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True, text=True, timeout=2,
+        )
+        if out.returncode == 0:
+            c = out.stdout.strip()
+            if c:
+                return c
+    except Exception:
+        pass
+    return None
+
+_GIT_COMMIT = _git_commit()
 
 app = FastAPI(title="个股时效性调研")
 
@@ -158,10 +182,18 @@ def health():
     modules：各业务模块是否挂载成功；route_errors：失败模块及原因。
     """
     problem = config.llm_config_problem()
+    detail_parts = []
+    if _GIT_COMMIT:
+        detail_parts.append("commit " + _GIT_COMMIT)
+    detail_parts.append("启动 " + time.strftime("%m-%d %H:%M", time.localtime(START_TIME)))
+    detail_parts.append("Py" + platform.python_version())
+    detail_parts.append("LLM" + ("就绪" if problem is None else "未配置"))
+    backend_detail = " · ".join(detail_parts)
     return {
         "ok": True,
         "service": "stock-research",
         "api_version": 5,
+        "pid": os.getpid(),
         "stock_history": _is_loaded("history_routes"),
         "mentor_lab": _is_loaded("mentor_routes"),
         "market_board": _is_loaded("market_routes"),
@@ -170,4 +202,5 @@ def health():
         "modules": {label: _is_loaded(name) for label, name in ROUTE_MODULES},
         "route_errors": _module_errors,
         "integrity": _integrity_state,
+        "backend_detail": backend_detail,
     }
