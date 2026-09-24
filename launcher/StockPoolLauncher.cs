@@ -398,6 +398,7 @@ namespace StockPool
         private readonly Label _lbBackendDot;
         private readonly Label _lbAiDot;
         private readonly Label _lbApiVer;
+        private readonly Label _lbBackendDetail;
 
 
         private RichTextBox _logBox;
@@ -492,6 +493,14 @@ namespace StockPool
             _lbApiVer.AutoSize = true;
             _lbApiVer.Margin = new Padding(0, 4, 0, 0);
             headFlow.Controls.Add(_lbApiVer);
+
+            _lbBackendDetail = new Label();
+            _lbBackendDetail.Text = "后端 -";
+            _lbBackendDetail.ForeColor = Color.FromArgb(170, 178, 190);
+            _lbBackendDetail.Tag = "head-muted";
+            _lbBackendDetail.AutoSize = true;
+            _lbBackendDetail.Margin = new Padding(0, 4, 0, 0);
+            headFlow.Controls.Add(_lbBackendDetail);
 
             // ---- 状态条右侧：浅色 / 深色主题（网页页面跟着这个按钮走）----
             // Dock=Right 的容器要放在 Fill 的流式布局之后添加，才会占住右侧
@@ -909,6 +918,7 @@ namespace StockPool
                 // 说明框里已插入的文字不会跟着 ForeColor 走，用新配色重写一遍
                 if (tag == "doc-rps") FillRpsDoc((RichTextBox)c);
                 else if (tag == "doc-chip") FillChipDoc((RichTextBox)c);
+                else if (tag == "doc-ai") FillAiDoc((RichTextBox)c);
             }
             else if (c is DataGridView)
             {
@@ -1307,9 +1317,9 @@ namespace StockPool
             AddRow(stack, gb);
 
             TableLayoutPanel body2;
-            var gb2 = Group("密钥配置（backend_fastapi\\.env）", out body2);
+            var gb2 = Group("密钥配置（backend_fastapi\\.env · agent_dsh\\.env）", out body2);
             _lbEnvState = Lbl("状态：-");
-            AddRow(body2, Row(_lbEnvState, MiniBtn("打开 .env", delegate
+            AddRow(body2, Row(MiniBtn("打开后端 .env", delegate
             {
                 var f = Path.Combine(_root, "backend_fastapi", ".env");
                 if (!File.Exists(f))
@@ -1319,7 +1329,18 @@ namespace StockPool
                     else File.WriteAllText(f, "LLM_BASE_URL=\r\nLLM_API_KEY=\r\nLLM_MODEL=\r\n", Encoding.UTF8);
                 }
                 OpenDir(f);
-            }, 100)));
+            }, 130), _lbEnvState));
+            AddRow(body2, Row(MiniBtn("打开小牛 .env", delegate
+            {
+                var f = Path.Combine(_root, "agent_dsh", ".env");
+                if (!File.Exists(f))
+                {
+                    var ex = Path.Combine(_root, "agent_dsh", ".env.example");
+                    if (File.Exists(ex)) File.Copy(ex, f, false);
+                    else File.WriteAllText(f, "DEEPSEEK_API_KEY=\r\n", Encoding.UTF8);
+                }
+                OpenDir(f);
+            }, 130), Mute(Lbl("红色小牛问答专用"))));
             AddRow(stack, gb2);
 
             TableLayoutPanel body3;
@@ -1965,11 +1986,11 @@ namespace StockPool
             StartOne(_dsh, warn);
         }
 
-        private void StartOne(ServiceItem svc, bool warn)
+        private void StartOne(ServiceItem svc, bool warn, bool force = false)
         {
             try
             {
-                if (svc.Alive || Probe(svc.HealthUrl, 1200))
+                if (!force && (svc.Alive || Probe(svc.HealthUrl, 1200)))
                 {
                     if (warn) Msg(svc.Name + " 已在运行");
                     return;
@@ -2004,6 +2025,15 @@ namespace StockPool
         {
             if (!svc.Alive)
             {
+                // 后端可能由外部进程启动（本程序没持有句柄，Owned=false，Proc==null）：
+                // 这种进程 svc.Alive 为 false，原来直接 return 会导致「停止/重启」无效
+                // （重启时旧进程没被停掉，新进程又撞实例锁失败）。故从 /health 取 pid 结束它。
+                if (KillByHealth(svc))
+                {
+                    Log("系统", svc.Name + " 已停止（结束外部启动的进程）");
+                    RefreshStatus(false);
+                    return;
+                }
                 svc.Owned = false;
                 if (warn) Msg(svc.Name + " 未在运行");
                 RefreshStatus(false);
@@ -2014,13 +2044,42 @@ namespace StockPool
             RefreshStatus(false);
         }
 
+        /// <summary>结束「非本程序启动」的后端：从 /health 取 pid 后 Kill。返回是否真的结束了进程。</summary>
+        private static bool KillByHealth(ServiceItem svc)
+        {
+            string body;
+            if (!Probe(svc.HealthUrl, 1200, out body)) return false;
+            var pidStr = JsonValue(body, "pid");
+            int pid;
+            if (int.TryParse(pidStr, out pid) && pid > 0)
+            {
+                try
+                {
+                    Process.GetProcessById(pid).Kill();
+                    return true;
+                }
+                catch { return false; }
+            }
+            return false;
+        }
+
+        private static void WaitStop(ServiceItem svc, int seconds)
+        {
+            // 轮询直到后端端口不再响应（旧进程真正退出、端口释放），避免新进程因端口占用/Probe 误判而启动失败
+            for (int i = 0; i < seconds * 4; i++)
+            {
+                if (!Probe(svc.HealthUrl, 800)) return;
+                Thread.Sleep(250);
+            }
+        }
+
         private void Restart(ServiceItem svc)
         {
             var th = new Thread(delegate()
             {
                 Ui(delegate { StopOne(svc, false); });
-                Thread.Sleep(1200);
-                Ui(delegate { StartOne(svc, false); });
+                WaitStop(svc, 20);                            // 等旧进程真正退出、端口释放
+                Ui(delegate { StartOne(svc, false, true); }); // 强制启动，跳过"已在运行"误判
                 WaitHealth(svc, 45);
                 Ui(delegate { RefreshStatus(false); });
             });
@@ -2038,9 +2097,11 @@ namespace StockPool
                 string body;
                 Probe(_backend.HealthUrl, 1500, out body);
                 var ver = JsonValue(body, "api_version");
+                var detail = JsonValue(body, "backend_detail");
                 SetDot(_lbBackendDot, Color.FromArgb(46, 204, 113), "后端 :8000 · 正常");
                 if (_lbBackendState != null) _lbBackendState.Text = "状态：运行中" + (_backend.Owned ? "（本程序启动）" : "（其他进程启动）");
                 if (_lbApiVer != null) _lbApiVer.Text = "接口版本 v" + (ver ?? "-");
+                if (_lbBackendDetail != null) _lbBackendDetail.Text = "后端 " + (detail ?? "-");
             }
             else if (_backend != null && (_backend.Alive || _backend.Starting))
             {

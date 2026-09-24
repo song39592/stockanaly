@@ -14,7 +14,8 @@ namespace StockPool
     /// <summary>
     /// 个股分析（原生内嵌标签页）：MainForm 的拆分文件，替代 frontend/stock-analysis.html。
     /// 数据来自本机后端：GET /api/history/stock/{code}（K线 / 入池出池轨迹 / 消息面），
-    /// GET /api/stock/quote（名称与现价），POST /api/stock/valuation（估值）。
+    /// GET /api/stock/quote（名称与现价），POST /api/stock/valuation（估值），
+    /// POST /api/stock/research（AI 个股调研，返回 markdown，需配置 LLM_API_KEY）。
     /// 呈现贴近原网页：在榜统计 KPI + 自绘日 K 蜡烛图（MA5/10/20/60 + 成交量 + 入池/出池/事件标记）
     /// + 入池出池表 + 消息面时间轴 + 内联估值（完整过程见「估值计算」标签页）。
     /// </summary>
@@ -24,7 +25,7 @@ namespace StockPool
         private int _stockTabIndex = -1;
         private TextBox _stockCode;
         private Button _stockOpen, _stockRefresh;
-        private Label _stockName, _stockHint, _stockStatus, _stockSyncStatus, _stockValStatus;
+        private Label _stockName, _stockHint, _stockStatus, _stockValStatus;
         private FlowLayoutPanel _stockKpi;                 // 在榜统计 KPI
         private KLineChart _stockKline;
         private int _stockRange = 250;                     // 0 = 全部
@@ -32,12 +33,21 @@ namespace StockPool
         private readonly Dictionary<Button, string> _stockAdjustMap = new Dictionary<Button, string>();
         private DataGridView _stockTimeline;                // 入池 / 出池记录
         private TableLayoutPanel _stockEvents;              // 消息面时间轴
-        private Button _stockEventsToggle;                  // 消息面折叠按钮
         private System.Collections.ArrayList _stockEventData = new System.Collections.ArrayList();
-        private bool _stockEventsExpanded = false;          // 默认折叠，仅显示前 3 条
         private FlowLayoutPanel _stockValKpi;               // 估值 KPI
         private DataGridView _stockValGrid;                 // 估值情景表
+        private Label _stockSaoleiStatus;                   // 扫雷状态行
+        private TableLayoutPanel _stockSaoleiList;          // 扫雷 · 风险清单 + 个股亮点
         private string _stockCurrent = null;
+        // AI 分析（调 /api/stock/research）
+        private Label _stockAiStatus;                 // AI 分析状态
+        private RichTextBox _stockAiBox;              // AI 分析 markdown 渲染框
+        private string _stockAiMarkdown = "";         // 当前 AI 分析文本（换肤时重绘）
+        // AI 分析偏好（作为 /api/stock/research 的投喂变量，持久化到本地 JSON）
+        private string _aiDepth = "normal";           // concise | normal | detailed
+        private string _aiHorizon = "mid";            // short | mid | long
+        private List<string> _aiFocus = new List<string> { "板块", "估值", "走势", "大盘" };
+        private List<CheckBox> _aiFocusCbs = new List<CheckBox>();   // 偏好页关注点勾选框
         private int _stockRound = 0;
         private readonly Dictionary<Button, int> _stockRangeMap = new Dictionary<Button, int>();
 
@@ -157,13 +167,8 @@ namespace StockPool
             }
             _stockRefresh = MiniBtn("↻ 更新行情/消息", delegate { if (_stockCurrent != null) StockLoadHistory(_stockCurrent, true); }, 140);
             _stockStatus = Mute(Lbl("待加载"));
-            var rangeRow = Row(Mute(Lbl("范围")));
-            foreach (Button b in _stockRangeMap.Keys) rangeRow.Controls.Add(b);
-            rangeRow.Controls.Add(_stockRefresh);
-            rangeRow.Controls.Add(_stockStatus);
-            AddRow(b0, rangeRow);
 
-            // 复权切换（前复权 / 不复权）
+            // 复权切换（前复权 / 不复权）——先建按钮，再与「范围」并入同一行
             var adjustLabels = new string[] { "前复权", "不复权" };
             var adjustVals = new string[] { "qfq", "raw" };
             for (int ai = 0; ai < adjustVals.Length; ai++)
@@ -189,9 +194,15 @@ namespace StockPool
                 };
                 _stockAdjustMap[btn] = a;
             }
-            var adjustRow = Row(Mute(Lbl("复权")));
-            foreach (Button b in _stockAdjustMap.Keys) adjustRow.Controls.Add(b);
-            AddRow(b0, adjustRow);
+
+            // 范围 + 复权 + 刷新同处一行（复权按钮位于范围之后）
+            var rangeRow = Row(Mute(Lbl("范围")));
+            foreach (Button b in _stockRangeMap.Keys) rangeRow.Controls.Add(b);
+            rangeRow.Controls.Add(Mute(Lbl("复权")));
+            foreach (Button b in _stockAdjustMap.Keys) rangeRow.Controls.Add(b);
+            rangeRow.Controls.Add(_stockRefresh);
+            rangeRow.Controls.Add(_stockStatus);
+            AddRow(b0, rangeRow);
             mainCol.Controls.Add(g0, 0, 1);
 
             // ---- 二级标签栏 ----
@@ -231,11 +242,7 @@ namespace StockPool
             AddRow(b1, _stockKpi);
             AddRow(kTop, g1);
 
-            TableLayoutPanel b2;
-            var g2 = Group("", out b2);   // 标题交给二级标签
-            _stockSyncStatus = Mute(Lbl("待加载"));
-            AddRow(b2, Row(_stockSyncStatus));
-            AddRow(kTop, g2);
+            // 「更新至 …」栏已按需求移除；kTop 只保留概况，下方 K 线区域自动加高。
 
             _stockKline = new KLineChart();
             _stockKline.Dock = DockStyle.Fill;
@@ -259,15 +266,8 @@ namespace StockPool
 
             TableLayoutPanel b4;
             var g4 = Group("消息面时间轴", out b4);
-            _stockEventsToggle = MiniBtn("展开全部", delegate
-            {
-                _stockEventsExpanded = !_stockEventsExpanded;
-                StockRenderEvents(_stockEventData);
-            }, 100);
-            _stockEventsToggle.Visible = false;
-            AddRow(b4, Row(_stockEventsToggle));
             _stockEvents = Stack();
-            AddRow(b4, _stockEvents);
+            AddRow(b4, _stockEvents);          // 全部消息直接展示，不再折叠
             AddRow(recStack, g4);
             recPage.Controls.Add(recStack);
             StockAddSubTab("记录 · 消息", recPage);
@@ -291,6 +291,93 @@ namespace StockPool
             AddRow(valStack, g5);
             valPage.Controls.Add(valStack);
             StockAddSubTab("估值", valPage);
+
+            // ---- 二级页 ③.5 扫雷（通达信「扫雷宝 · 个股亮点」，来自 /api/stock/saolei）----
+            var slPage = new Panel();
+            slPage.AutoScroll = true;
+            var slStack = Stack();
+            TableLayoutPanel bsl;
+            var gsl = Group("扫雷 · 通达信风险清单（来自 /api/stock/saolei）", out bsl);
+            _stockSaoleiStatus = Mute(Lbl("打开个股后自动获取"));
+            AddRow(bsl, Row(_stockSaoleiStatus, MiniBtn("↻ 刷新", delegate
+            {
+                if (_stockCurrent != null) StockLoadSaolei(_stockCurrent);
+            }, 90)));
+            _stockSaoleiList = Stack();
+            AddRow(bsl, _stockSaoleiList);
+            AddRow(slStack, gsl);
+            slPage.Controls.Add(slStack);
+            StockAddSubTab("扫雷", slPage);
+
+            // ---- 二级页 ④ AI 分析（调 /api/stock/research）----
+            var aiPage = new Panel();
+            aiPage.AutoScroll = true;
+            var aiStack = Stack();
+            TableLayoutPanel b6;
+            var g6 = Group("AI 个股分析（来自 /api/stock/research，需配置 LLM_API_KEY）", out b6);
+            _stockAiStatus = Mute(Lbl("打开个股后自动分析"));
+            AddRow(b6, Row(_stockAiStatus, MiniBtn("↻ 重新分析", delegate
+            {
+                if (_stockCurrent != null) StockLoadAi(_stockCurrent, true);
+            }, 120)));
+            _stockAiBox = new RichTextBox();
+            _stockAiBox.Tag = "doc-ai";
+            _stockAiBox.ReadOnly = true;
+            _stockAiBox.BorderStyle = BorderStyle.None;
+            _stockAiBox.Height = 460;
+            _stockAiBox.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
+            _stockAiBox.ScrollBars = RichTextBoxScrollBars.Vertical;
+            _stockAiBox.Font = new Font("Microsoft YaHei UI", 9.5f);
+            _stockAiBox.BackColor = _cPanel;
+            _stockAiBox.ForeColor = _cText;
+            AddRow(b6, _stockAiBox);
+            AddRow(aiStack, g6);
+            aiPage.Controls.Add(aiStack);
+            StockAddSubTab("AI 分析", aiPage);
+
+            // ---- 二级页 ⑤ AI 分析偏好（作为投喂变量，自动存本地）----
+            StockLoadAiPrefs();   // 先加载已保存偏好，供控件初始选中
+            var prefPage = new Panel();
+            prefPage.AutoScroll = true;
+            var prefStack = Stack();
+            TableLayoutPanel bp;
+            var gp = Group("AI 分析偏好（作为投喂变量，自动保存到本地）", out bp);
+            // ① 详细程度
+            TableLayoutPanel bpd;
+            var gpd = Group("① 详细程度（AI 反馈字数）", out bpd);
+            StockRadioGroup(bpd, new[] { "精简", "适中", "详细" }, new[] { "concise", "normal", "detailed" }, _aiDepth,
+                v => { _aiDepth = v; StockSaveAiPrefs(); StockAiPrefChanged(); });
+            AddRow(bp, gpd);
+            // ② 时间范围
+            TableLayoutPanel bph;
+            var gph = Group("② 时间范围（投喂新闻窗口与条数）", out bph);
+            StockRadioGroup(bph, new[] { "短期", "中期", "长期" }, new[] { "short", "mid", "long" }, _aiHorizon,
+                v => { _aiHorizon = v; StockSaveAiPrefs(); StockAiPrefChanged(); });
+            AddRow(bp, gph);
+            // ③ 关注点（可多选）
+            TableLayoutPanel bpf;
+            var gpf = Group("③ 关注点（可多选，作为额外关注维度）", out bpf);
+            foreach (var f in new[] { "板块", "估值", "走势", "大盘" })
+            {
+                var cb = new CheckBox();
+                cb.Text = f;
+                cb.AutoSize = true;
+                cb.Checked = _aiFocus.Contains(f);
+                _aiFocusCbs.Add(cb);
+                cb.CheckedChanged += delegate
+                {
+                    var lst = new List<string>();
+                    foreach (var c in _aiFocusCbs) if (c.Checked) lst.Add(c.Text);
+                    _aiFocus = lst;
+                    StockSaveAiPrefs();
+                    StockAiPrefChanged();
+                };
+                AddRow(bpf, cb);
+            }
+            AddRow(bp, gpf);
+            AddRow(prefStack, gp);
+            prefPage.Controls.Add(prefStack);
+            StockAddSubTab("偏好设置", prefPage);
 
             StockSubSelect(0);
 
@@ -397,6 +484,8 @@ namespace StockPool
             StockLoadName(code);
             StockLoadHistory(code, false);
             StockLoadValuation(code);
+            StockLoadSaolei(code);
+            StockLoadAi(code);
         }
 
         private void StockLoadName(string code)
@@ -439,8 +528,6 @@ namespace StockPool
             int round = ++_stockRound;
             _stockStatus.Text = refresh ? "正在更新真实行情与消息…" : "正在读取K线与消息缓存…";
             _stockStatus.Tag = "muted";
-            _stockSyncStatus.Text = "加载中…";
-            _stockSyncStatus.Tag = "muted";
             System.Threading.Tasks.Task.Run(delegate
             {
                 try
@@ -464,11 +551,9 @@ namespace StockPool
 
         private void StockFail(string msg)
         {
-            _stockStatus.Text = "加载失败";
+            _stockStatus.Text = "加载失败：" + msg;
             _stockStatus.Tag = "bad";
             _stockStatus.ForeColor = Color.FromArgb(208, 57, 59);
-            _stockSyncStatus.Text = msg;
-            _stockSyncStatus.ForeColor = Color.FromArgb(208, 57, 59);
             _stockKline.SetData(new List<KBar>(), new List<KBar>(), new List<KMark>());
         }
 
@@ -565,18 +650,21 @@ namespace StockPool
             StockRenderTimeline(spanList);
             StockRenderEvents(events);
 
-            // 状态
-            string last = bars.Count > 0 ? bars[bars.Count - 1].Date : "无数据";
+            // 状态：「更新至 …」栏与「前复权日K · …」统计文字已按需求移除，
+            // 仅当有同步失败时在状态位提示，否则清空。
             var sync = VMap(VSafe(j, "sync"));
             var syncErrs = VArr(sync != null ? VSafe(sync, "errors") : null);
             string errs = (syncErrs != null && syncErrs.Count > 0) ? "；部分失败：" + JoinErrs(syncErrs) : "";
-            _stockSyncStatus.Text = "更新至 " + last + errs;
-            _stockSyncStatus.Tag = "muted";
-            _stockSyncStatus.ForeColor = Color.FromArgb(150, 158, 172);
-
-            _stockStatus.Text = "前复权日K · " + bars.Count + " 个交易日 · 入池记录 " + spanList.Count + " 段" + errs;
-            _stockStatus.Tag = "muted";
-            _stockStatus.ForeColor = Color.FromArgb(150, 158, 172);
+            if (errs.Length > 0)
+            {
+                _stockStatus.Text = "部分数据同步失败" + errs;
+                _stockStatus.Tag = "muted";
+                _stockStatus.ForeColor = Color.FromArgb(150, 158, 172);
+            }
+            else
+            {
+                _stockStatus.Text = "";
+            }
         }
 
         private static string JoinErrs(System.Collections.ArrayList list)
@@ -640,14 +728,11 @@ namespace StockPool
             int total = _stockEventData.Count;
             if (total == 0)
             {
-                _stockEventsToggle.Visible = false;
                 _stockEvents.Controls.Add(Mute(Lbl("暂未采集到公告或新闻")));
                 return;
             }
-            int show = _stockEventsExpanded ? total : Math.Min(3, total);
-            _stockEventsToggle.Visible = total > 3;
-            _stockEventsToggle.Text = _stockEventsExpanded ? "收起" : ("展开全部 (" + total + ")");
-            for (int i = 0; i < show; i++)
+            // 不再折叠：全部消息直接展示
+            for (int i = 0; i < total; i++)
             {
                 Dictionary<string, object> ev = _stockEventData[i] as Dictionary<string, object>;
                 if (ev == null) continue;
@@ -706,6 +791,211 @@ namespace StockPool
                 panel.Controls.Add(sm);
             }
             return panel;
+        }
+
+        // ---- 扫雷（通达信个股亮点，内联）----
+        private void StockLoadSaolei(string code)
+        {
+            _stockSaoleiStatus.Text = "获取中…";
+            _stockSaoleiStatus.Tag = "muted";
+            _stockSaoleiStatus.ForeColor = Color.FromArgb(150, 158, 172);
+            _stockSaoleiList.Controls.Clear();
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    string resp = VRequest("http://127.0.0.1:8000/api/stock/saolei/" + code, null);
+                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    Invoke((Action)delegate
+                    {
+                        if (code == _stockCurrent) StockRenderSaolei(j);
+                    });
+                }
+                catch (Exception ex)
+                {
+                    string msg = "获取失败：" + ex.Message;
+                    try { Invoke((Action)delegate { if (code == _stockCurrent) StockSaoleiFail(msg); }); }
+                    catch (Exception) { }
+                }
+            });
+        }
+
+        private void StockRenderSaolei(Dictionary<string, object> j)
+        {
+            _stockSaoleiList.Controls.Clear();
+
+            int total = VIntOf(VSafe(j, "total"));
+            int risk = VIntOf(VSafe(j, "risk"));
+            int safe = VIntOf(VSafe(j, "safe"));
+            string date = VStr(VSafe(j, "date"));
+            var cats = VArr(VSafe(j, "categories"));
+
+            _stockSaoleiStatus.Text = "总检查 " + total + " 项 · 风险项 " + risk + " 项 · 安全项 " + safe + " 项"
+                + (date != "" ? "（数据日期 " + date + "）" : "");
+            _stockSaoleiStatus.Tag = "muted";
+            _stockSaoleiStatus.ForeColor = risk > 0
+                ? Color.FromArgb(208, 57, 59)
+                : Color.FromArgb(150, 158, 172);
+
+            // ---- 四大类风险清单（财务 / 市场 / 交易 / ST，并排展示）----
+            if (cats != null && cats.Count > 0)
+            {
+                var grid = new TableLayoutPanel();
+                grid.ColumnCount = cats.Count;
+                grid.RowCount = 1;
+                grid.AutoSize = true;
+                grid.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+                grid.Dock = DockStyle.Top;
+                grid.Margin = new Padding(0, 0, 0, 10);
+                grid.Padding = new Padding(0);
+                grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+                for (int c = 0; c < cats.Count; c++)
+                {
+                    grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+                    var cat = VMap(cats[c]);
+                    if (cat == null) continue;
+                    var blk = SaoleiCategory(VStr(VSafe(cat, "name")), VArr(VSafe(cat, "items")));
+                    blk.Margin = new Padding(0, 0, 18, 0);
+                    grid.Controls.Add(blk, c, 0);
+                }
+                _stockSaoleiList.Controls.Add(grid);
+            }
+            else
+            {
+                _stockSaoleiList.Controls.Add(Mute(Lbl("该股暂无风险清单数据")));
+            }
+
+            // ---- 个股亮点（辅）----
+            var arr = VArr(VSafe(j, "highlights"));
+            int n = arr == null ? 0 : arr.Count;
+            var head = Lbl("个股亮点" + (n > 0 ? "（" + n + " 项）" : ""));
+            head.Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold);
+            head.Margin = new Padding(0, 6, 0, 6);
+            _stockSaoleiList.Controls.Add(head);
+
+            if (n == 0)
+            {
+                _stockSaoleiList.Controls.Add(Mute(Lbl("该股暂无亮点记录")));
+                return;
+            }
+
+            for (int i = 0; i < n; i++)
+            {
+                var ev = VMap(arr[i]);
+                if (ev == null) continue;
+                string name = VStr(VSafe(ev, "name"));
+                string desc = VStr(VSafe(ev, "desc"));
+
+                var panel = new Panel();
+                panel.AutoSize = true;
+                panel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+                panel.Dock = DockStyle.Top;
+                panel.Margin = new Padding(0, 0, 0, 8);
+
+                var t = Lbl("· " + name);
+                t.Font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold);
+                t.AutoSize = true;
+                t.MaximumSize = new Size(760, 0);
+                t.Dock = DockStyle.Top;
+                panel.Controls.Add(t);
+
+                if (desc != "")
+                {
+                    var d = Mute(Lbl(desc));
+                    d.AutoSize = true;
+                    d.MaximumSize = new Size(760, 0);
+                    d.Dock = DockStyle.Top;
+                    d.Margin = new Padding(0, 2, 0, 0);
+                    panel.Controls.Add(d);
+                }
+                _stockSaoleiList.Controls.Add(panel);
+            }
+        }
+
+        /// <summary>扫雷清单里的一个分类列：标题 + 条目（名称 / 有·无）。</summary>
+        private static TableLayoutPanel SaoleiCategory(string title, System.Collections.ArrayList items)
+        {
+            var ok = new List<Dictionary<string, object>>();
+            if (items != null)
+            {
+                foreach (object o in items)
+                {
+                    var m = VMap(o);
+                    if (m != null) ok.Add(m);
+                }
+            }
+
+            var t = new TableLayoutPanel();
+            t.ColumnCount = 1;
+            t.AutoSize = true;
+            t.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            t.Margin = new Padding(0);
+            t.Padding = new Padding(0);
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+            var head = Lbl(title);
+            head.Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold);
+            head.Margin = new Padding(0, 0, 0, 6);
+            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            t.Controls.Add(head, 0, 0);
+
+            var body = new TableLayoutPanel();
+            body.ColumnCount = 2;
+            body.RowCount = Math.Max(1, ok.Count);
+            body.AutoSize = true;
+            body.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            body.Margin = new Padding(0);
+            body.Padding = new Padding(0);
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            for (int i = 0; i < body.RowCount; i++) body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            if (ok.Count == 0)
+            {
+                body.Controls.Add(Mute(Lbl("—")), 0, 0);
+            }
+            else
+            {
+                for (int i = 0; i < ok.Count; i++)
+                {
+                    bool trig = VStr(VSafe(ok[i], "trig")) == "1";
+                    var nm = Lbl(VStr(VSafe(ok[i], "name")));
+                    nm.Margin = new Padding(0, 0, 12, 3);
+                    var st = Lbl(trig ? "有" : "无");
+                    st.Margin = new Padding(0, 0, 0, 3);
+                    if (trig)
+                    {
+                        st.ForeColor = Color.FromArgb(208, 57, 59);
+                        st.Font = new Font("Microsoft YaHei UI", 9f, FontStyle.Bold);
+                    }
+                    else
+                    {
+                        st.Tag = "muted";
+                    }
+                    body.Controls.Add(nm, 0, i);
+                    body.Controls.Add(st, 1, i);
+                }
+            }
+
+            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            t.Controls.Add(body, 0, 1);
+            return t;
+        }
+
+        /// <summary>把 JSON 里的整数（可能是 int / decimal / string）安全转成 int。</summary>
+        private static int VIntOf(object o)
+        {
+            int v;
+            return int.TryParse(VStr(o), out v) ? v : 0;
+        }
+
+        private void StockSaoleiFail(string msg)
+        {
+            _stockSaoleiList.Controls.Clear();
+            _stockSaoleiStatus.Text = msg;
+            _stockSaoleiStatus.Tag = "bad";
+            _stockSaoleiStatus.ForeColor = Color.FromArgb(208, 57, 59);
         }
 
         // ---- 估值（内联）----
@@ -799,6 +1089,261 @@ namespace StockPool
             _stockValStatus.Text = VStr(VSafe(j, "name")) + "（" + VStr(VSafe(j, "code")) + "）已计算";
             _stockValStatus.Tag = "muted";
             _stockValStatus.ForeColor = Color.FromArgb(30, 126, 52);
+        }
+
+        // ---- AI 分析（调 /api/stock/research，返回 AI 生成的 markdown）----
+        private void StockLoadAi(string code, bool force = false)
+        {
+            if (_stockAiStatus != null)
+            {
+                _stockAiStatus.Text = force ? "AI 强制重新分析中…" : "AI 分析中…";
+                _stockAiStatus.Tag = "muted";
+                _stockAiStatus.ForeColor = Color.FromArgb(150, 158, 172);
+            }
+            _stockAiMarkdown = "";
+            if (_stockAiBox != null) FillAiDoc(_stockAiBox);
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    string body = new JavaScriptSerializer().Serialize(new Dictionary<string, object> {
+                        { "code", code }, { "force", force },
+                        { "depth", _aiDepth }, { "horizon", _aiHorizon }, { "focus", _aiFocus }
+                    });
+                    string resp = VRequest("http://127.0.0.1:8000/api/stock/research", body);
+                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    Invoke((Action)delegate { StockRenderAi(j); });
+                }
+                catch (Exception)
+                {
+                    try
+                    {
+                        Invoke((Action)delegate
+                        {
+                            if (_stockAiStatus != null)
+                            {
+                                _stockAiStatus.Text = "分析失败（网络/超时，确认后端已启动且配置了 LLM）";
+                                _stockAiStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                            }
+                        });
+                    }
+                    catch (Exception) { }
+                }
+            });
+        }
+
+        // ---- AI 分析偏好：本地持久化（JSON，存于 ApplicationData\StockPoolLauncher）----
+        private static string AiPrefsPath()
+        {
+            var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "StockPoolLauncher");
+            try { if (!Directory.Exists(dir)) Directory.CreateDirectory(dir); } catch { }
+            return Path.Combine(dir, "ai_prefs.json");
+        }
+
+        private void StockLoadAiPrefs()
+        {
+            try
+            {
+                string p = AiPrefsPath();
+                if (File.Exists(p))
+                {
+                    var d = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(p, Encoding.UTF8));
+                    if (d != null)
+                    {
+                        if (d.ContainsKey("depth"))
+                        {
+                            var ds = d["depth"] as string;
+                            if (ds != null && (ds == "concise" || ds == "normal" || ds == "detailed")) _aiDepth = ds;
+                        }
+                        if (d.ContainsKey("horizon"))
+                        {
+                            var hs = d["horizon"] as string;
+                            if (hs != null && (hs == "short" || hs == "mid" || hs == "long")) _aiHorizon = hs;
+                        }
+                        if (d.ContainsKey("focus"))
+                        {
+                            var fa = d["focus"] as System.Collections.ArrayList;
+                            if (fa != null)
+                            {
+                                var lst = new List<string>();
+                                foreach (var x in fa) { var s = x as string; if (s != null) lst.Add(s); }
+                                _aiFocus = lst;
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void StockSaveAiPrefs()
+        {
+            try
+            {
+                var d = new Dictionary<string, object> { { "depth", _aiDepth }, { "horizon", _aiHorizon }, { "focus", _aiFocus } };
+                File.WriteAllText(AiPrefsPath(), new JavaScriptSerializer().Serialize(d), Encoding.UTF8);
+            }
+            catch { }
+        }
+
+        private void StockAiPrefChanged()
+        {
+            if (_stockCurrent != null) StockLoadAi(_stockCurrent, true);
+        }
+
+        private void StockRadioGroup(TableLayoutPanel b, string[] labels, string[] values, string current, Action<string> onPick)
+        {
+            for (int i = 0; i < labels.Length; i++)
+            {
+                var rb = new RadioButton();
+                rb.Text = labels[i];
+                rb.AutoSize = true;
+                rb.Checked = (values[i] == current);
+                var v = values[i];
+                rb.CheckedChanged += delegate { if (rb.Checked) onPick(v); };
+                AddRow(b, rb);
+            }
+        }
+
+        private void StockRenderAi(Dictionary<string, object> j)
+        {
+            if (_stockAiStatus == null || _stockAiBox == null) return;
+            object okv;
+            bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+            if (!ok)
+            {
+                string emsg = VStr(VSafe(j, "error"));
+                if (emsg == "") emsg = VStr(VSafe(j, "detail"));
+                if (emsg == "") emsg = "分析失败";
+                _stockAiStatus.Text = emsg;
+                _stockAiStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                _stockAiMarkdown = "";
+                FillAiDoc(_stockAiBox);
+                return;
+            }
+            string md = VStr(VSafe(j, "markdown"));
+            _stockAiMarkdown = md;
+            object cached;
+            bool isCached = (j.TryGetValue("cached", out cached) && cached is bool && (bool)cached);
+            string asOf = VStr(VSafe(j, "data_as_of"));
+            string d = VStr(VSafe(j, "depth"));
+            string h = VStr(VSafe(j, "horizon"));
+            var fobj = VSafe(j, "focus") as System.Collections.ArrayList;
+            string f = "";
+            if (fobj != null)
+            {
+                var tmp = new List<string>();
+                foreach (var x in fobj) { var s = x as string; if (s != null) tmp.Add(s); }
+                f = string.Join("、", tmp.ToArray());
+            }
+            string prefs = "";
+            if (d != "" || h != "" || f != "")
+                prefs = "  [偏好：" + (d != "" ? d : "?") + "/" + (h != "" ? h : "?") + (f != "" ? "/" + f : "") + "]";
+            _stockAiStatus.Text = (isCached ? "（缓存）" : "已生成") + (asOf != "" ? " 数据截至 " + asOf : "") + prefs;
+            _stockAiStatus.Tag = "muted";
+            _stockAiStatus.ForeColor = Color.FromArgb(30, 126, 52);
+            FillAiDoc(_stockAiBox);
+        }
+
+        /// <summary>把 AI 调研的 markdown 渲染进只读框；换肤时由 Skin 再调一次，用新配色重排。</summary>
+        private void FillAiDoc(RichTextBox rt)
+        {
+            if (_docFont == null) _docFont = new Font("Microsoft YaHei UI", 9.5f);
+            if (_docBold == null) _docBold = new Font(_docFont, FontStyle.Bold);
+            var normal = _docFont;
+
+            rt.Clear();
+            rt.BackColor = _cPanel;
+            rt.ForeColor = _cText;
+            rt.SelectionFont = normal;
+            rt.SelectionColor = _cText;
+
+            string md = _stockAiMarkdown ?? "";
+            if (md.Trim() == "")
+            {
+                rt.SelectionColor = _cSub;
+                rt.AppendText("（暂无 AI 分析。打开个股后将自动调用 /api/stock/research 生成；需后端已配置 LLM_API_KEY。）");
+                rt.SelectionStart = 0; rt.SelectionLength = 0;
+                return;
+            }
+
+            var lines = md.Replace("\r\n", "\n").Split('\n');
+            bool first = true;
+            foreach (string rawLine in lines)
+            {
+                string line = rawLine.TrimEnd();
+                if (line.Trim() == "") continue;
+
+                var hm = Regex.Match(line, @"^(#{1,6}\s+|[0-9]+[、.)]\s+)(.*)$");
+                if (hm.Success)
+                {
+                    if (!first) rt.AppendText(Environment.NewLine);
+                    rt.SelectionFont = _docBold;
+                    rt.SelectionColor = _cText;
+                    rt.AppendText(hm.Groups[2].Value.Trim() + Environment.NewLine + Environment.NewLine);
+                    first = false;
+                    continue;
+                }
+                if (Regex.IsMatch(line, @"^[-*_]{3,}$"))
+                {
+                    if (!first) rt.AppendText(Environment.NewLine);
+                    rt.SelectionFont = normal;
+                    rt.SelectionColor = _cSub;
+                    rt.AppendText("────────────────────────────" + Environment.NewLine + Environment.NewLine);
+                    first = false;
+                    continue;
+                }
+                var qm = Regex.Match(line, @"^>\s?(.*)$");
+                if (qm.Success)
+                {
+                    rt.SelectionFont = normal;
+                    rt.SelectionColor = _cSub;
+                    rt.AppendText("　　" + qm.Groups[1].Value + Environment.NewLine);
+                    first = false;
+                    continue;
+                }
+                var lm = Regex.Match(line, @"^[-*]\s+(.*)$");
+                if (lm.Success)
+                {
+                    rt.SelectionFont = normal;
+                    rt.SelectionColor = _cText;
+                    rt.AppendText("· ");
+                    AppendInline(rt, lm.Groups[1].Value, normal, _docBold);
+                    rt.AppendText(Environment.NewLine);
+                    first = false;
+                    continue;
+                }
+                rt.SelectionFont = normal;
+                rt.SelectionColor = _cText;
+                AppendInline(rt, line, normal, _docBold);
+                rt.AppendText(Environment.NewLine + Environment.NewLine);
+                first = false;
+            }
+            rt.SelectionStart = 0;
+            rt.SelectionLength = 0;
+        }
+
+        /// <summary>按 **加粗** 标记分段写入 RichTextBox（行内加粗）。</summary>
+        private static void AppendInline(RichTextBox rt, string text, Font normal, Font bold)
+        {
+            var re = new Regex(@"\*\*(.+?)\*\*");
+            int last = 0;
+            foreach (Match m in re.Matches(text))
+            {
+                if (m.Index > last)
+                {
+                    rt.SelectionFont = normal;
+                    rt.AppendText(text.Substring(last, m.Index - last));
+                }
+                rt.SelectionFont = bold;
+                rt.AppendText(m.Groups[1].Value);
+                last = m.Index + m.Length;
+            }
+            if (last < text.Length)
+            {
+                rt.SelectionFont = normal;
+                rt.AppendText(text.Substring(last));
+            }
         }
 
         /// <summary>跳到「估值计算」标签页并把代码填进去重算（完整过程在那一页）。</summary>
