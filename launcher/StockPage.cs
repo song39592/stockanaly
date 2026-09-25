@@ -58,7 +58,9 @@ namespace StockPool
         private readonly List<Panel> _stockSubPages = new List<Panel>();
         private int _stockSubIndex;
 
-        // 历史查看记录（最多 10 条，先进先出滚动覆盖；持久化到 stockanaly-data/history_stock_view.json）
+        // 历史查看记录（最多 10 条，先进先出滚动覆盖）
+        // 持久化到启动器自己的 %APPDATA%\StockPoolLauncher\history_stock_view.json：
+        // 这是界面状态，不该写进行情数据目录（数据目录可能在别的盘、也随时会被改）。
         private class StockHistoryItem
         {
             public string Code = "";
@@ -1478,30 +1480,23 @@ namespace StockPool
             AddRow(_stockHistoryList, clear);
         }
 
-        private string ResolveDataDir()
-        {
-            string env = Environment.GetEnvironmentVariable("STOCK_DATA_DIR");
-            if (!string.IsNullOrEmpty(env)) return env.Trim();
-            env = Environment.GetEnvironmentVariable("DATA_DIR");
-            if (!string.IsNullOrEmpty(env)) return env.Trim();
-            // 默认：程序所在目录的「上一级」下的 stockanaly-data（与后端 config.py 的 DEFAULT_DATA_DIR 一致）
-            string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
-            if (string.IsNullOrEmpty(exeDir)) exeDir = ".";
-            DirectoryInfo di = Directory.GetParent(exeDir);
-            string parent = (di != null && !string.IsNullOrEmpty(di.FullName)) ? di.FullName : exeDir;
-            return Path.Combine(parent, "stockanaly-data");
-        }
-
         private void StockLoadHistoryFile()
         {
             _stockHistory = new List<StockHistoryItem>();
             try
             {
-                string dir = ResolveDataDir();
-                _stockHistoryPath = Path.Combine(dir, "history_stock_view.json");
-                if (File.Exists(_stockHistoryPath))
+                _stockHistoryPath = Path.Combine(LauncherStateDir(), "history_stock_view.json");
+                // 老版本把它写在数据目录里：新位置还没有时先读老位置，
+                // 免得升级后「最近查看」凭空清空（下一次保存就会落到新位置）。
+                string from = _stockHistoryPath;
+                if (!File.Exists(from))
                 {
-                    string txt = File.ReadAllText(_stockHistoryPath, Encoding.UTF8);
+                    string legacy = Path.Combine(ResolveDataDirSetting(), "history_stock_view.json");
+                    if (File.Exists(legacy)) from = legacy;
+                }
+                if (File.Exists(from))
+                {
+                    string txt = File.ReadAllText(from, Encoding.UTF8);
                     var arr = new JavaScriptSerializer().Deserialize<System.Collections.ArrayList>(txt);
                     if (arr != null)
                     {
