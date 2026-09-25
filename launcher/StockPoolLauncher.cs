@@ -414,6 +414,7 @@ namespace StockPool
         private TextBox _tbTdx;
         private Label _lbTdx;
         private Dictionary<string, object> _lastTdxStatus;
+        private bool _backendWasOk;      // 后端从「未就绪」变「就绪」时补一次配置刷新
         private CheckBox _ckAutoStart;
         private CheckBox _ckMinimize;
         private CheckBox _ckStopOnExit;
@@ -1632,6 +1633,19 @@ namespace StockPool
             catch { }
         }
 
+        /// <summary>启动器自己的状态目录（与 settings.ini 同处）。
+        ///
+        /// 界面状态（如最近查看的个股）放这里，**不写进行情数据目录**：
+        /// 数据目录是后端的、可能被改到别的盘，界面状态跟着它跑既会污染数据目录，
+        /// 改目录时还会变成孤儿文件。
+        /// </summary>
+        private static string LauncherStateDir()
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "StockPoolLauncher");
+        }
+
         /// <summary>本地推算 stockanaly-data 数据目录：优先读 backend_fastapi/.env 的
         /// DATA_DIR / STOCK_DATA_DIR，否则用默认 &lt;仓库上级&gt;/stockanaly-data。</summary>
         private string ResolveDataDirSetting()
@@ -2301,6 +2315,14 @@ namespace StockPool
 
             if (bOk)
             {
+                if (!_backendWasOk)
+                {
+                    _backendWasOk = true;
+                    // 后端就绪后补一次：设置页/下载页的首次刷新往往早于后端启动，
+                    // 只刷一次的话通达信路径会一直显示成空（看起来像配置丢了）。
+                    RefreshTdx();
+                    DlRefreshTdx();
+                }
                 string body;
                 Probe(_backend.HealthUrl, 1500, out body);
                 var ver = JsonValue(body, "api_version");
@@ -2317,6 +2339,7 @@ namespace StockPool
             }
             else
             {
+                _backendWasOk = false;           // 后端重启后会重新补一次配置刷新
                 SetDot(_lbBackendDot, Color.Gray, "后端 :8000 · 未运行");
                 if (_lbBackendState != null) _lbBackendState.Text = "状态：未运行";
                 if (_lbApiVer != null) _lbApiVer.Text = "接口版本 -";

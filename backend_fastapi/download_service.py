@@ -516,18 +516,18 @@ def _has_alive_task() -> bool:
                    for runtime in _runtimes.values())
 
 
-def _downloaded_staleness() -> tuple[int, int, list[str]]:
-    """(已下载只数, 落后超过 FRESHNESS_DAYS 天的只数, 落后示例)。
+def _downloaded_staleness() -> tuple[int, int, list[str], str | None]:
+    """(已下载只数, 落后超过 FRESHNESS_DAYS 天的只数, 落后示例, 库里最新的日K日期)。
 
     判定口径：**只看库里已经下过的股票**——没下过的股票不算缺口。
     因此「该补的历史都已到位、只是还差最近几天」时，stale 为 0。
     """
     latest = price_store.code_latest_dates()
     if not latest:
-        return 0, 0, []
+        return 0, 0, [], None
     threshold = (dt.date.today() - dt.timedelta(days=FRESHNESS_DAYS)).isoformat()
     stale = sorted(code for code, day in latest.items() if str(day) < threshold)
-    return len(latest), len(stale), stale[:10]
+    return len(latest), len(stale), stale[:10], max(str(day) for day in latest.values())
 
 
 def _options_for(mode: str, *, source: str = SOURCE_ONLINE, start_date: str | None = None,
@@ -750,9 +750,14 @@ def settings_view() -> dict[str, Any]:
 
 
 def tdx_status(path: str | None = None) -> dict[str, Any]:
-    """通达信目录检测结果（设置页用）：是否有效、有多少只、覆盖到哪天。"""
+    """通达信目录检测结果（设置页 / 下载页用）：是否有效、有多少只、覆盖到哪天。
+
+    没配置时**回退到自动检测**，与 `_resolve_codes` / `_tdx_root` 保持一致：
+    配置存在数据库里，换数据目录后会是一个空库，若这里不回退，
+    下载页的「同步通达信历史数据」会凭空空掉，看起来像「配置丢了」。
+    """
     configured = download_store.get_setting("tdx_path", "")
-    target = path or configured
+    target = path or configured or tdx_reader.auto_detect() or ""
     if target:
         info = tdx_reader.detect(target)
     else:
@@ -785,7 +790,7 @@ def update_settings(*, auto_update: bool | None = None, idle_download: bool | No
     if auto_update is not None:
         download_store.set_setting("auto_update", "1" if auto_update else "0")
     if auto_update:
-        downloaded, stale, _ = _downloaded_staleness()
+        downloaded, stale, _, _ = _downloaded_staleness()
         if downloaded == 0 or stale > 0:
             raise ValueError(
                 f"暂时不能开启自动更新：已下载 {downloaded} 只，"
@@ -809,12 +814,13 @@ def auto_state(force: bool = False) -> dict[str, Any]:
         cached = dict(_auto_state)
         cached["cached"] = True
         return cached
-    downloaded, stale, examples = _downloaded_staleness()
+    downloaded, stale, examples, latest_date = _downloaded_staleness()
     state = dict(settings_view())
     state.update({
         "downloaded": downloaded,
         "stale": stale,
         "stale_examples": examples,
+        "latest_date": latest_date,
         "eligible": downloaded > 0 and stale == 0,
         "freshness_days": FRESHNESS_DAYS,
         "checked_at": db.now_iso(),
