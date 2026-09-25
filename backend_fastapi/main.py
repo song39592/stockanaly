@@ -64,6 +64,7 @@ app.add_middleware(
 # 业务模块路由：(显示名, 模块名)，模块需暴露 router 对象
 ROUTE_MODULES = (
     ("股票池历史 · K线与消息", "history_routes"),
+    ("历史数据下载", "download_routes"),
     ("筹码体系 · SCR 选股", "chip_routes"),
     ("盘面及板块分析", "market_routes"),
     ("大佬策略实验室", "mentor_routes"),

@@ -155,6 +155,19 @@ def pool_history(code: str) -> dict[str, Any]:
     return {"members": members, "spans": spans, "snapshot_dates": all_dates}
 
 
+def latest_snapshot_codes() -> list[str]:
+    """最新一期股票池快照里的代码（按代码升序）；没有快照时返回空列表。"""
+    with connect() as db:
+        row = db.execute(
+            "SELECT snapshot_date FROM pool_snapshots ORDER BY snapshot_date DESC LIMIT 1").fetchone()
+        if not row:
+            return []
+        rows = db.execute(
+            "SELECT code FROM pool_members WHERE snapshot_date=? ORDER BY code",
+            (row["snapshot_date"],)).fetchall()
+    return [str(item["code"]) for item in rows]
+
+
 def create_job(job_id: str, snapshot_date: str, total: int) -> None:
     with connect() as db:
         db.execute("""INSERT OR REPLACE INTO sync_jobs(

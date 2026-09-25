@@ -150,7 +150,9 @@ def ensure_column(conn, table: str, column: str, ddl: str) -> bool:
 def init_db() -> None:
     """建齐所有表。重复执行安全（IF NOT EXISTS + 幂等加列），供服务启动时调用。"""
     # 函数内导入：避免与 db 形成模块级循环依赖
+    import download_store
     import history_store
     import price_store
     price_store.init_db()
     history_store.init_db()
+    download_store.init_db()

@@ -410,6 +410,7 @@ namespace StockPool
         private TextBox _tbPython;
         private TextBox _tbNode;
         private TextBox _tbRoot;
+        private TextBox _tbDataDir;
         private CheckBox _ckAutoStart;
         private CheckBox _ckMinimize;
         private CheckBox _ckStopOnExit;
@@ -547,6 +548,7 @@ namespace StockPool
             BuildValuationPage();
             BuildMarketPage();
             BuildStockPage();
+            BuildDownloadPage();
             BuildLogPage();
             BuildSettingsPage();
             BuildServicePage();   // 服务控制台放最后一个标签
@@ -622,6 +624,7 @@ namespace StockPool
             SkinTabs();
             if (index == _mktTabIndex) MktOnEnter();   // 进入盘面页自动拉最新数据
             if (index == _stockTabIndex) StockOnEnter();
+            if (index == _dlTabIndex) DlOnEnter();     // 进入下载页接着上次的任务刷新进度
         }
 
         /// <summary>标签行配色：选中用卡片色 + 蓝色下划线，未选中用窗口底色。</summary>
@@ -1296,6 +1299,26 @@ namespace StockPool
                 else _tbNode.Text = v;
             }, 88)));
 
+            _tbDataDir = new TextBox();
+            _tbDataDir.Width = 430;
+            AddRow(body, Row(Lbl("数据目录（stockanaly-data）"), _tbDataDir));
+            AddRow(body, Row(MiniBtn("浏览…", delegate
+            {
+                using (var dlg = new FolderBrowserDialog())
+                {
+                    dlg.Description = "选择 stockanaly-data 数据目录";
+                    if (!string.IsNullOrEmpty(_tbDataDir.Text) && Directory.Exists(_tbDataDir.Text))
+                        dlg.SelectedPath = _tbDataDir.Text;
+                    if (dlg.ShowDialog(this) == DialogResult.OK)
+                        _tbDataDir.Text = dlg.SelectedPath;
+                }
+            }, 88), MiniBtn("保存并重载", delegate { SaveDataDir(); }, 110),
+                MiniBtn("刷新", delegate { RefreshDataDir(); }, 80),
+                Mute(Lbl("修改后重启后端生效"))));
+
+            _tbDataDir.Text = ResolveDataDirSetting();
+            RefreshDataDir();
+
             var lbEnvTip = Lbl("启动时自动检查环境：Python + 后端依赖（requirements.txt）是硬要求，缺了会拉起 launcher\\install_env.bat 装一次，装不上就退出并给出错误日志。");
             Mute(lbEnvTip);
             AddRow(body, Row(lbEnvTip, MiniBtn("检查 / 修复环境", delegate
@@ -1584,6 +1607,80 @@ namespace StockPool
                 }
             }
             catch { }
+        }
+
+        /// <summary>本地推算 stockanaly-data 数据目录：优先读 backend_fastapi/.env 的
+        /// DATA_DIR / STOCK_DATA_DIR，否则用默认 &lt;仓库上级&gt;/stockanaly-data。</summary>
+        private string ResolveDataDirSetting()
+        {
+            try
+            {
+                var env = Path.Combine(_root, "backend_fastapi", ".env");
+                if (File.Exists(env))
+                {
+                    foreach (var line in File.ReadAllLines(env, Encoding.UTF8))
+                    {
+                        var t = line.Trim();
+                        if (t.StartsWith("DATA_DIR=", StringComparison.OrdinalIgnoreCase))
+                            return t.Substring(10).Trim().Trim('"');
+                        if (t.StartsWith("STOCK_DATA_DIR=", StringComparison.OrdinalIgnoreCase))
+                            return t.Substring(16).Trim().Trim('"');
+                    }
+                }
+            }
+            catch { }
+            var parent = Path.GetDirectoryName(_root);
+            return Path.Combine(parent ?? _root, "stockanaly-data");
+        }
+
+        /// <summary>从后端 /api/system/storage 取当前数据目录并刷新文本框（后端未运行时静默跳过）。</summary>
+        private void RefreshDataDir()
+        {
+            var th = new Thread(delegate()
+            {
+                string body;
+                if (!Probe("http://127.0.0.1:8000/api/system/storage", 5000, out body)) return;
+                var root = JsonValue(body, "root");
+                if (!string.IsNullOrEmpty(root))
+                    Ui(delegate { if (_tbDataDir != null) _tbDataDir.Text = root; });
+            });
+            th.IsBackground = true;
+            th.Start();
+        }
+
+        /// <summary>把文本框里的路径 POST 给后端 /api/system/storage，写入 .env（重启后端生效）。</summary>
+        private void SaveDataDir()
+        {
+            var path = (_tbDataDir.Text ?? "").Trim();
+            if (string.IsNullOrEmpty(path)) { Msg("请先选择或填写数据目录"); return; }
+            var th = new Thread(delegate()
+            {
+                try
+                {
+                    string body;
+                    if (!Probe("http://127.0.0.1:8000/api/system/storage", 5000, out body))
+                    {
+                        Ui(delegate { Msg("后端未运行，无法保存数据目录（可在后端启动后重试）"); });
+                        return;
+                    }
+                    var js = new JavaScriptSerializer();
+                    var json = js.Serialize(new Dictionary<string, object> { { "data_dir", path } });
+                    if (!PostJson("http://127.0.0.1:8000/api/system/storage", json, 8000, out body))
+                    {
+                        var err = JsonValue(body, "detail") ?? body;
+                        Ui(delegate { Msg("保存失败：" + (err ?? "未知错误")); });
+                        return;
+                    }
+                    Ui(delegate
+                    {
+                        Msg("已保存数据目录，重启后端后生效（旧数据会在启动时自动补到新目录）");
+                        RefreshDataDir();
+                    });
+                }
+                catch (Exception ex) { Ui(delegate { Msg("保存出错：" + ex.Message); }); }
+            });
+            th.IsBackground = true;
+            th.Start();
         }
 
         #endregion
@@ -2205,6 +2302,48 @@ namespace StockPool
                 return Convert.ToString(v);
             }
             catch { return null; }
+        }
+
+        private static bool PostJson(string url, string json, int timeoutMs, out string body)
+        {
+            body = "";
+            HttpWebResponse resp = null;
+            try
+            {
+                var req = (HttpWebRequest)WebRequest.Create(url);
+                req.Method = "POST";
+                req.ContentType = "application/json; charset=utf-8";
+                req.Timeout = timeoutMs;
+                req.ReadWriteTimeout = timeoutMs;
+                req.KeepAlive = false;
+                var bytes = Encoding.UTF8.GetBytes(json);
+                req.ContentLength = bytes.Length;
+                using (var s = req.GetRequestStream())
+                    s.Write(bytes, 0, bytes.Length);
+                resp = (HttpWebResponse)req.GetResponse();
+                using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+                    body = sr.ReadToEnd();
+                return (int)resp.StatusCode < 400;
+            }
+            catch (WebException ex)
+            {
+                try
+                {
+                    if (ex.Response != null)
+                        using (var sr = new StreamReader(ex.Response.GetResponseStream(), Encoding.UTF8))
+                            body = sr.ReadToEnd();
+                }
+                catch { }
+                return false;
+            }
+            catch { return false; }
+            finally
+            {
+                if (resp != null)
+                {
+                    try { resp.Close(); } catch { }
+                }
+            }
         }
 
         #endregion
