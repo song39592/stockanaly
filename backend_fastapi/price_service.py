@@ -158,16 +158,31 @@ def fetch_daily(code: str, start: dt.date, end: dt.date,
     return bars, source, rejected
 
 
-def sync_bars(code: str, adjust: str = "raw") -> dict[str, Any]:
-    """同步单一口径（raw / hfq / qfq）的日 K，按已落盘的最新日期**增量**补齐。"""
+def sync_bars(code: str, adjust: str = "raw", start: dt.date | None = None,
+              end: dt.date | None = None) -> dict[str, Any]:
+    """同步单一口径（raw / hfq / qfq）的日 K。
+
+    `start` 为空时按已落盘的最新日期**增量**补齐（既有行为）；
+    给了 `start` 则从该日期起抓取——遍历下载传一个早于上市日的日期（如 1990-01-01），
+    数据源会自行截断到上市首日，从而拿到完整历史。
+    `end` 用于**分段时间窗**（先近后远）：只抓到该日为止，不碰更新的数据。
+    窗口内没有数据（如起始日晚于截止日）时返回 skipped，不视为失败。
+    """
     store_adjust = price_store._store_adjust(adjust)
     today = dt.date.today()
-    latest = price_store.latest_bar_date(code, store_adjust)
-    if latest:
-        start = dt.date.fromisoformat(latest) - dt.timedelta(days=OVERLAP_DAYS)
+    stop = end or today
+    if start is not None:
+        begin = start
     else:
-        start = today - dt.timedelta(days=BACKFILL_DAYS)
-    bars, source, rejected = fetch_daily(code, start, today, store_adjust)
+        latest = price_store.latest_bar_date(code, store_adjust)
+        if latest:
+            begin = dt.date.fromisoformat(latest) - dt.timedelta(days=OVERLAP_DAYS)
+        else:
+            begin = today - dt.timedelta(days=BACKFILL_DAYS)
+    if begin > stop:
+        return {"count": 0, "start": None, "end": None, "source": None,
+                "adjust": store_adjust, "rejected": [], "skipped": True}
+    bars, source, rejected = fetch_daily(code, begin, stop, store_adjust)
     count = price_store.upsert_bars(code, bars, store_adjust, source=source)
     return {"count": count, "start": bars[0]["date"], "end": bars[-1]["date"],
             "source": source, "adjust": store_adjust, "rejected": rejected}
@@ -200,8 +215,11 @@ def refetch_bars(code: str, adjust: str = "raw") -> dict[str, Any]:
     }
 
 
-def sync_all_adjusts(code: str) -> dict[str, Any]:
+def sync_all_adjusts(code: str, start: dt.date | None = None,
+                     end: dt.date | None = None) -> dict[str, Any]:
     """同步日K（当前只落盘**不复权原始价**一份）。
+
+    `start` / `end` 透传给 `sync_bars`：遍历下载用它们指定「抓哪一段时间窗」（见该函数说明）。
 
     历史上曾同时同步 qfq / hfq / raw 三套，但复权价本就可由 `hfq_factor` 现算，
     落盘三套纯属冗余（5000 只 × 10 年：7.4 GB vs 2.5 GB），故收敛为一份。
@@ -211,7 +229,7 @@ def sync_all_adjusts(code: str) -> dict[str, Any]:
     errors: list[str] = []
     for adjust in SYNC_ADJUSTS:
         try:
-            results[adjust] = sync_bars(code, adjust)
+            results[adjust] = sync_bars(code, adjust, start=start, end=end)
         except Exception as exc:          # noqa: BLE001 - 单口径失败不影响其余口径
             results[adjust] = None
             errors.append(f"{adjust}：{exc}")
@@ -224,6 +242,46 @@ def sync_all_adjusts(code: str) -> dict[str, Any]:
         "adjusts": results,
         "errors": errors,
     }
+
+
+def import_bars(code: str, bars: list[dict[str, Any]], source: str = "",
+                adjust: str = "raw") -> dict[str, Any]:
+    """把**已经取到的** bars 按统一口径校验后落盘。
+
+    与 `sync_bars` 的区别：后者自己去数据源抓，这里只负责「校验 + 写库」。
+    因此本地通达信文件、任何第三方接口都能复用同一套校验与存储——
+    换数据来源时，校验规则与存储结构一行都不用改。
+    """
+    store_adjust = price_store._store_adjust(adjust)
+    ok, rejected = validate_bars(bars)
+    if not ok:
+        raise RuntimeError("行情数据全部未通过校验：" + "；".join(rejected[:3]))
+    count = price_store.upsert_bars(code, ok, store_adjust, source=source)
+    return {"count": count, "start": ok[0]["date"], "end": ok[-1]["date"],
+            "source": source, "adjust": store_adjust, "rejected": rejected}
+
+
+def fill_missing_turnover(code: str, bars: list[dict[str, Any]],
+                          adjust: str = "raw") -> None:
+    """本地来源（通达信）算不出换手率——缺流通股本。用库里已有的值补上。
+
+    不补的话 `upsert_bars` 会用「换手率=空」整行覆盖掉此前在线抓到的值，
+    等于把已有信息抹掉；这里只在**该股已有数据**时才回读，避免无谓的库扫描。
+    """
+    if not bars or all(bar.get("turnover") is not None for bar in bars):
+        return
+    store_adjust = price_store._store_adjust(adjust)
+    try:
+        if not price_store.latest_bar_date(code, store_adjust):
+            return
+        existing = price_store.list_bars(code, bars[0]["date"], bars[-1]["date"],
+                                         adjust=store_adjust, verify=False)
+    except Exception:                            # noqa: BLE001 - 读不到就不补，不影响导入
+        return
+    known = {row.get("trade_date"): row.get("turnover") for row in existing}
+    for bar in bars:
+        if bar.get("turnover") is None:
+            bar["turnover"] = known.get(bar.get("date"))
 
 
 def sync_factors(code: str) -> dict[str, Any]:

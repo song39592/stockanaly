@@ -31,6 +31,14 @@
   阈值可调，点「🔄 刷新计算」手动触发；计算需**最近 5 周**数据（按周归组，周中执行时最新一期为上一周，
   缺失任一期的数据会直接报错并列出缺口，不做静默跳过）；对应 `POST /api/chip/scr/analyze` 等接口，
   原始文件与计算结果分别存放于 `backend_fastapi/chip_data/raw` 与 `chip_data/processed`。
+- **历史数据下载**（原生启动器「历史数据下载」标签页，源码 `launcher/DownloadPage.cs`）：
+  按代码逐只遍历下载历史日 K（默认最近 5 年，起始日期可改；可带复权因子 / 除权明细），后端 worker 池并发 + 令牌桶限速，
+  支持暂停 / 继续 / 取消 / 重试失败项；任务落库，**暂停后重启后端仍可从断点续跑**。
+  下载顺序「由近到远」：全市场先补齐最近 3 年，再回头补更早历史，中途被打断也已经拿到近几年的数据。
+  另有两项后台能力：**每天自动更新**（固定时刻补最新数据，且要求已下载数据只缺最近 10 天才可开启）与
+  **后台闲时下载**（并发 1–2，接着上次没下完的继续补）。
+  数据来源可切换为**本机通达信**：在设置页配置目录后直接读本地 `.day` 文件，**秒级完成、完全不联网**
+  （本机约 5 年数据，对现有分析足够）。详见 [backend_fastapi/README.md](backend_fastapi/README.md) 第八节。
 
 ## 系统架构
 
@@ -67,7 +75,9 @@ frontend/index.html（原生 HTML/JS 单页，浏览器本地 localStorage 存�
 stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
 ├── 启动系统.bat                  # 一键启动：后端 + dsh + 打开前端
 ├── 股票池追踪系统.exe            # 原生 Windows 窗口程序（由 launcher\build_exe.bat 编译，自带窗口、不加载 HTML）
-├── launcher/                     # 上述 EXE 的源码 StockPoolLauncher.cs、构建脚本 build_exe.bat、环境安装脚本 install_env.bat
+├── launcher/                     # 上述 EXE 的源码：主窗体 StockPoolLauncher.cs + 各业务标签页
+│                                 #   （MarketPage / StockPage / ValuationPage / DownloadPage.cs）、
+│                                 #   构建脚本 build_exe.bat、环境安装脚本 install_env.bat
 ├── frontend/                     # index.html（股票池）/ mentor-lab.html（大佬策略实验室）/ chip-scr.html（SCR 选股）/ stock-analysis.html（个股分析）
 ├── backend_fastapi/              # FastAPI 后端（业务模块化：*_routes.py 管 HTTP、*_service.py 管逻辑）
 │   ├── main.py                   # 应用入口：容错挂载各模块路由 + /health（单模块故障不影响其他模块）
@@ -75,6 +85,10 @@ stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
 │   ├── market_routes.py          # 盘面及板块分析接口
 │   ├── mentor_routes.py          # 大佬策略实验室接口
 │   ├── stock_routes.py           # 个股调研与股票估值接口
+│   ├── download_routes.py        # 历史数据下载接口（启动 / 进度 / 暂停 / 继续 / 取消 / 重试失败项）
+│   ├── download_service.py       # 遍历编排：worker 池、限速、失败重试、断点续传、后台调度
+│   ├── download_store.py         # 下载任务与队列持久化（download_tasks / download_codes / download_settings）
+│   ├── tdx_reader.py             # 本机通达信 .day 日线文件解析（纯读取，不联网）
 │   ├── llm_client.py             # LLM 调用与错误翻译（各模块共用）
 │   ├── start_backend.bat         # 单独启动后端
 │   └── .env.example              # 密钥模板（复制为 .env）
@@ -155,7 +169,7 @@ C:\Users\Admin\Desktop\stockanaly-main\agent_dsh\.env         →  DEEPSEEK_API_
 
 | 服务 | 端口 | 主要接口 |
 |---|---|---|
-| backend_fastapi | 8000 | `GET /health`；`POST /api/stock/research`（`{"code","name"}` → markdown）；`POST /api/stock/valuation`（估值计算）；`GET /api/market/*`（盘面及板块五类数据） |
+| backend_fastapi | 8000 | `GET /health`；`POST /api/stock/research`（`{"code","name"}` → markdown）；`POST /api/stock/valuation`（估值计算）；`GET /api/market/*`（盘面及板块五类数据）；`GET/POST /api/history/download/*`（历史数据遍历下载与后台自动化）；`GET /api/history/stock/{code}`（个股 K线与消息）；`GET/POST /api/system/storage`（数据目录） |
 | agent_dsh（dsh webui + REST） | 3080 | `GET /`（webui）；`/api/bull/session/*`、`/api/bull/skill/*`（会话/快照/对话/Skill CRUD） |
 
 ## 内置 Skill 角色

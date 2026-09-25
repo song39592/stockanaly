@@ -272,6 +272,48 @@ def latest_bar_date(code: str, adjust: str = "raw") -> str | None:
     return None
 
 
+def earliest_bar_date(code: str, adjust: str = "raw") -> str | None:
+    """最早一条日 K 的日期：从最老的分片往后找，找到即返回；没有数据返回 None。
+
+    用来判断「这只股票还有没有更老的历史可抓」：若最早一条已经晚于某个分界日，
+    说明它是在那之后才上市的，再往回抓只会拿到空结果。
+    """
+    store_adjust = _store_adjust(adjust)
+    for year in _shard_years():
+        with db.connect(db.bars_db(year)) as conn:
+            row = conn.execute(
+                "SELECT MIN(trade_date) AS d FROM daily_bars WHERE code=? AND adjust=?",
+                (code, store_adjust),
+            ).fetchone()
+        if row and row["d"]:
+            return row["d"]
+    return None
+
+
+def code_latest_dates(adjust: str = "raw") -> dict[str, str]:
+    """**一次性**取回每只已下载股票的最新日 K 日期 {code: YYYY-MM-DD}。
+
+    不能逐只调 `latest_bar_date`——那是「按 code 查、逐分片回溯」，
+    几千只股票会退化成几十万次开库。这里改成**每个分片一次聚合查询**，
+    再在内存里按 code 取全局最大值，全库只扫一遍。
+    成本是一次全表扫描，因此调用方请勿高频调用（见 download_service 的缓存）。
+    """
+    store_adjust = _store_adjust(adjust)
+    result: dict[str, str] = {}
+    for year in _shard_years():
+        with db.connect(db.bars_db(year)) as conn:
+            for row in conn.execute(
+                "SELECT code, MAX(trade_date) AS d FROM daily_bars "
+                "WHERE adjust=? GROUP BY code", (store_adjust,)):
+                day = row["d"]
+                if not day:
+                    continue
+                code = row["code"]
+                if code not in result or day > result[code]:
+                    result[code] = day
+    return result
+
+
 def _digest_is_broken(conn, code: str) -> bool:
     """该股**既有**指纹是否已不匹配（供写入前判定）。无指纹记录时视为正常。
 

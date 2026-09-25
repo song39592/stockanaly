@@ -410,6 +410,10 @@ namespace StockPool
         private TextBox _tbPython;
         private TextBox _tbNode;
         private TextBox _tbRoot;
+        private TextBox _tbDataDir;
+        private TextBox _tbTdx;
+        private Label _lbTdx;
+        private Dictionary<string, object> _lastTdxStatus;
         private CheckBox _ckAutoStart;
         private CheckBox _ckMinimize;
         private CheckBox _ckStopOnExit;
@@ -547,6 +551,7 @@ namespace StockPool
             BuildValuationPage();
             BuildMarketPage();
             BuildStockPage();
+            BuildDownloadPage();
             BuildLogPage();
             BuildSettingsPage();
             BuildServicePage();   // 服务控制台放最后一个标签
@@ -622,6 +627,7 @@ namespace StockPool
             SkinTabs();
             if (index == _mktTabIndex) MktOnEnter();   // 进入盘面页自动拉最新数据
             if (index == _stockTabIndex) StockOnEnter();
+            if (index == _dlTabIndex) DlOnEnter();     // 进入下载页接着上次的任务刷新进度
         }
 
         /// <summary>标签行配色：选中用卡片色 + 蓝色下划线，未选中用窗口底色。</summary>
@@ -1296,6 +1302,46 @@ namespace StockPool
                 else _tbNode.Text = v;
             }, 88)));
 
+            _tbDataDir = new TextBox();
+            _tbDataDir.Width = 430;
+            AddRow(body, Row(Lbl("数据目录（stockanaly-data）"), _tbDataDir));
+            AddRow(body, Row(MiniBtn("浏览…", delegate
+            {
+                using (var dlg = new FolderBrowserDialog())
+                {
+                    dlg.Description = "选择 stockanaly-data 数据目录";
+                    if (!string.IsNullOrEmpty(_tbDataDir.Text) && Directory.Exists(_tbDataDir.Text))
+                        dlg.SelectedPath = _tbDataDir.Text;
+                    if (dlg.ShowDialog(this) == DialogResult.OK)
+                        _tbDataDir.Text = dlg.SelectedPath;
+                }
+            }, 88), MiniBtn("保存并重载", delegate { SaveDataDir(); }, 110),
+                MiniBtn("刷新", delegate { RefreshDataDir(); }, 80),
+                Mute(Lbl("修改后重启后端生效"))));
+
+            _tbDataDir.Text = ResolveDataDirSetting();
+            RefreshDataDir();
+
+            _tbTdx = new TextBox();
+            _tbTdx.Width = 430;
+            AddRow(body, Row(Lbl("通达信目录（new_tdx64）"), _tbTdx));
+            _lbTdx = Mute(Lbl("未检测"));
+            AddRow(body, Row(MiniBtn("浏览…", delegate
+            {
+                using (var dlg = new FolderBrowserDialog())
+                {
+                    dlg.Description = "选择通达信安装目录（里面有 vipdoc 的那个）";
+                    if (!string.IsNullOrEmpty(_tbTdx.Text) && Directory.Exists(_tbTdx.Text))
+                        dlg.SelectedPath = _tbTdx.Text;
+                    if (dlg.ShowDialog(this) == DialogResult.OK)
+                        _tbTdx.Text = dlg.SelectedPath;
+                }
+            }, 88), MiniBtn("保存", delegate { SaveTdxPath(); }, 80),
+                MiniBtn("自动检测", delegate { DetectTdx(); }, 96),
+                MiniBtn("刷新", delegate { RefreshTdx(); }, 80), _lbTdx));
+
+            RefreshTdx();
+
             var lbEnvTip = Lbl("启动时自动检查环境：Python + 后端依赖（requirements.txt）是硬要求，缺了会拉起 launcher\\install_env.bat 装一次，装不上就退出并给出错误日志。");
             Mute(lbEnvTip);
             AddRow(body, Row(lbEnvTip, MiniBtn("检查 / 修复环境", delegate
@@ -1584,6 +1630,167 @@ namespace StockPool
                 }
             }
             catch { }
+        }
+
+        /// <summary>本地推算 stockanaly-data 数据目录：优先读 backend_fastapi/.env 的
+        /// DATA_DIR / STOCK_DATA_DIR，否则用默认 &lt;仓库上级&gt;/stockanaly-data。</summary>
+        private string ResolveDataDirSetting()
+        {
+            try
+            {
+                var env = Path.Combine(_root, "backend_fastapi", ".env");
+                if (File.Exists(env))
+                {
+                    foreach (var line in File.ReadAllLines(env, Encoding.UTF8))
+                    {
+                        var t = line.Trim();
+                        if (t.StartsWith("DATA_DIR=", StringComparison.OrdinalIgnoreCase))
+                            return t.Substring(10).Trim().Trim('"');
+                        if (t.StartsWith("STOCK_DATA_DIR=", StringComparison.OrdinalIgnoreCase))
+                            return t.Substring(16).Trim().Trim('"');
+                    }
+                }
+            }
+            catch { }
+            var parent = Path.GetDirectoryName(_root);
+            return Path.Combine(parent ?? _root, "stockanaly-data");
+        }
+
+        /// <summary>从后端 /api/system/storage 取当前数据目录并刷新文本框（后端未运行时静默跳过）。</summary>
+        private void RefreshDataDir()
+        {
+            var th = new Thread(delegate()
+            {
+                string body;
+                if (!Probe("http://127.0.0.1:8000/api/system/storage", 5000, out body)) return;
+                var root = JsonValue(body, "root");
+                if (!string.IsNullOrEmpty(root))
+                    Ui(delegate { if (_tbDataDir != null) _tbDataDir.Text = root; });
+            });
+            th.IsBackground = true;
+            th.Start();
+        }
+
+        /// <summary>把文本框里的路径 POST 给后端 /api/system/storage，写入 .env（重启后端生效）。</summary>
+        private void SaveDataDir()
+        {
+            var path = (_tbDataDir.Text ?? "").Trim();
+            if (string.IsNullOrEmpty(path)) { Msg("请先选择或填写数据目录"); return; }
+            var th = new Thread(delegate()
+            {
+                try
+                {
+                    string body;
+                    if (!Probe("http://127.0.0.1:8000/api/system/storage", 5000, out body))
+                    {
+                        Ui(delegate { Msg("后端未运行，无法保存数据目录（可在后端启动后重试）"); });
+                        return;
+                    }
+                    var js = new JavaScriptSerializer();
+                    var json = js.Serialize(new Dictionary<string, object> { { "data_dir", path } });
+                    if (!PostJson("http://127.0.0.1:8000/api/system/storage", json, 8000, out body))
+                    {
+                        var err = JsonValue(body, "detail") ?? body;
+                        Ui(delegate { Msg("保存失败：" + (err ?? "未知错误")); });
+                        return;
+                    }
+                    Ui(delegate
+                    {
+                        Msg("已保存数据目录，重启后端后生效（旧数据会在启动时自动补到新目录）");
+                        RefreshDataDir();
+                    });
+                }
+                catch (Exception ex) { Ui(delegate { Msg("保存出错：" + ex.Message); }); }
+            });
+            th.IsBackground = true;
+            th.Start();
+        }
+
+        // ---- 通达信目录（配置后，下载页才会出现「同步通达信历史数据」）----
+
+        private const string TdxStatusUrl = "http://127.0.0.1:8000/api/history/download/tdx/status";
+
+        /// <summary>把通达信目录写到后端设置里（后端会校验该目录是否真有日线数据）。</summary>
+        private void SaveTdxPath()
+        {
+            var path = (_tbTdx.Text ?? "").Trim();
+            var th = new Thread(delegate()
+            {
+                try
+                {
+                    string resp;
+                    if (!Probe(TdxStatusUrl, 5000, out resp))
+                    {
+                        Ui(delegate { Msg("后端未运行，无法保存通达信目录"); });
+                        return;
+                    }
+                    var json = new JavaScriptSerializer().Serialize(
+                        new Dictionary<string, object> { { "tdx_path", path } });
+                    if (!PostJson("http://127.0.0.1:8000/api/history/download/settings",
+                                  json, 15000, out resp))
+                    {
+                        var err = JsonValue(resp, "detail");
+                        Ui(delegate { Msg("保存失败：" + (string.IsNullOrEmpty(err) ? resp : err)); });
+                        return;
+                    }
+                    Ui(delegate { Msg("已保存通达信目录"); RefreshTdx(); });
+                }
+                catch (Exception ex) { Ui(delegate { Msg("保存出错：" + ex.Message); }); }
+            });
+            th.IsBackground = true;
+            th.Start();
+        }
+
+        /// <summary>拉一次后端的通达信检测结果，填入路径框并给出「可用 / 未配置」提示。</summary>
+        private void RefreshTdx()
+        {
+            var th = new Thread(delegate()
+            {
+                string resp;
+                try
+                {
+                    if (!Probe(TdxStatusUrl, 10000, out resp)) return;
+                    var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    Ui(delegate
+                    {
+                        if (_tbTdx == null || _lbTdx == null) return;
+                        _lastTdxStatus = root;
+                        var configured = Convert.ToString(DictVal(root, "configured") ?? "");
+                        var auto = Convert.ToString(DictVal(root, "auto_detected") ?? "");
+                        bool valid = false;
+                        try { valid = Convert.ToBoolean(DictVal(root, "valid")); }
+                        catch { }
+                        int codes = 0;
+                        try { codes = Convert.ToInt32(DictVal(root, "codes")); }
+                        catch { }
+                        var sample = Convert.ToString(DictVal(root, "sample") ?? "");
+                        if (_tbTdx.Text.Length == 0) _tbTdx.Text = configured.Length > 0 ? configured : auto;
+                        if (valid) _lbTdx.Text = string.Format("可用：{0} 只，{1}", codes, sample);
+                        else if (auto.Length > 0) _lbTdx.Text = "未配置（检测到 " + auto + "）";
+                        else _lbTdx.Text = "未配置，也没检测到通达信";
+                        DlRefreshTdx();          // 让下载页同步显示 / 隐藏本地同步入口
+                    });
+                }
+                catch { }
+            });
+            th.IsBackground = true;
+            th.Start();
+        }
+
+        /// <summary>用后端自动检测到的路径填入并保存。</summary>
+        private void DetectTdx()
+        {
+            if (_lastTdxStatus == null) { RefreshTdx(); return; }
+            var auto = Convert.ToString(DictVal(_lastTdxStatus, "auto_detected") ?? "");
+            if (string.IsNullOrEmpty(auto)) { Msg("本机没有检测到通达信目录，请手动浏览选择"); return; }
+            _tbTdx.Text = auto;
+            SaveTdxPath();
+        }
+
+        private static object DictVal(Dictionary<string, object> dict, string key)
+        {
+            object value;
+            return (dict != null && dict.TryGetValue(key, out value)) ? value : null;
         }
 
         #endregion
@@ -2205,6 +2412,48 @@ namespace StockPool
                 return Convert.ToString(v);
             }
             catch { return null; }
+        }
+
+        private static bool PostJson(string url, string json, int timeoutMs, out string body)
+        {
+            body = "";
+            HttpWebResponse resp = null;
+            try
+            {
+                var req = (HttpWebRequest)WebRequest.Create(url);
+                req.Method = "POST";
+                req.ContentType = "application/json; charset=utf-8";
+                req.Timeout = timeoutMs;
+                req.ReadWriteTimeout = timeoutMs;
+                req.KeepAlive = false;
+                var bytes = Encoding.UTF8.GetBytes(json);
+                req.ContentLength = bytes.Length;
+                using (var s = req.GetRequestStream())
+                    s.Write(bytes, 0, bytes.Length);
+                resp = (HttpWebResponse)req.GetResponse();
+                using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+                    body = sr.ReadToEnd();
+                return (int)resp.StatusCode < 400;
+            }
+            catch (WebException ex)
+            {
+                try
+                {
+                    if (ex.Response != null)
+                        using (var sr = new StreamReader(ex.Response.GetResponseStream(), Encoding.UTF8))
+                            body = sr.ReadToEnd();
+                }
+                catch { }
+                return false;
+            }
+            catch { return false; }
+            finally
+            {
+                if (resp != null)
+                {
+                    try { resp.Close(); } catch { }
+                }
+            }
         }
 
         #endregion
