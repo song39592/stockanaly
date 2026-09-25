@@ -38,6 +38,11 @@ def init_db() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_download_tasks_created
           ON download_tasks(created_at DESC);
+        CREATE TABLE IF NOT EXISTS download_settings (
+          key        TEXT PRIMARY KEY,
+          value      TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS download_codes (
           task_id TEXT NOT NULL,
           seq     INTEGER NOT NULL,
@@ -55,6 +60,10 @@ def init_db() -> None:
         # 早期已建的库没有这两列，这里补上（SQLite 的 ADD COLUMN 带默认值即可）。
         ensure_column(conn, "download_tasks", "phase1_done", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "download_codes", "phase", "INTEGER NOT NULL DEFAULT 1")
+        # skipped：库里历史已足量、整只跳过没下载的股票数
+        ensure_column(conn, "download_tasks", "skipped", "INTEGER NOT NULL DEFAULT 0")
+        # origin 区分「谁发起的」：manual 手动 / auto 每日自动更新 / idle 后台闲时
+        ensure_column(conn, "download_tasks", "origin", "TEXT NOT NULL DEFAULT 'manual'")
 
 
 def _loads(text: str | None, default: Any) -> Any:
@@ -75,7 +84,7 @@ def _decode(row) -> dict[str, Any]:
 # 任务
 # --------------------------------------------------------------------------- #
 def create_task(task_id: str, scope: str, options: dict[str, Any], codes: list[str],
-                phases: int = 1) -> None:
+                phases: int = 1, origin: str = "manual") -> None:
     """建任务并铺开待下载队列（一次事务，5000 行也就几十毫秒）。
 
     `phases=2` 时每只股票排**两行**：前半段 seq 是「近期」阶段，后半段是「更早历史」。
@@ -92,10 +101,10 @@ def create_task(task_id: str, scope: str, options: dict[str, Any], codes: list[s
     with connect() as conn:
         conn.execute(
             """INSERT INTO download_tasks(
-                 id,scope,status,total,completed,failed,cursor_seq,phase1_done,
+                 id,scope,origin,status,total,completed,failed,cursor_seq,phase1_done,
                  options_json,errors_json,created_at,updated_at,finished_at)
-               VALUES(?,?,?,?,0,0,0,0,?,'[]',?,?,NULL)""",
-            (task_id, scope, "queued", len(codes),
+               VALUES(?,?,?,?,?,0,0,0,0,?,'[]',?,?,NULL)""",
+            (task_id, scope, origin, "queued", len(codes),
              json.dumps(options, ensure_ascii=False), stamp, stamp),
         )
         conn.executemany(
@@ -174,6 +183,43 @@ def recover_stale() -> int:
             (now_iso(),))
         conn.execute("UPDATE download_codes SET status='pending' WHERE status='running'")
     return int(cursor.rowcount or 0)
+
+
+# --------------------------------------------------------------------------- #
+# 后台开关（持久化：重启后端后依然生效）
+# --------------------------------------------------------------------------- #
+def get_setting(key: str, default: str = "") -> str:
+    with connect() as conn:
+        row = conn.execute("SELECT value FROM download_settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(key: str, value: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO download_settings(key,value,updated_at) VALUES(?,?,?)",
+            (key, str(value), now_iso()))
+
+
+def settings_map() -> dict[str, str]:
+    with connect() as conn:
+        rows = conn.execute("SELECT key,value FROM download_settings").fetchall()
+    return {row["key"]: row["value"] for row in rows}
+
+
+def task_code_set(task_id: str) -> set[str]:
+    """该任务覆盖过的股票代码（去重）。用于「闲时下载」跳过已排过的股票。"""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT code FROM download_codes WHERE task_id=?", (task_id,)).fetchall()
+    return {row["code"] for row in rows}
+
+
+def update_options(task_id: str, options: dict[str, Any]) -> None:
+    """整份替换任务选项（闲时下载降并发时用）。"""
+    with connect() as conn:
+        conn.execute("UPDATE download_tasks SET options_json=?, updated_at=? WHERE id=?",
+                     (json.dumps(options, ensure_ascii=False), now_iso(), task_id))
 
 
 # --------------------------------------------------------------------------- #
@@ -265,6 +311,31 @@ def reset_failed(task_id: str) -> int:
             "UPDATE download_tasks SET failed=0, errors_json='[]', updated_at=?, finished_at=NULL "
             "WHERE id=?", (now_iso(), task_id))
     return int(cursor.rowcount or 0)
+
+
+def skip_stock(task_id: str, code: str) -> int:
+    """这只股票库里的数据已经够了，**整只跳过**：所有未完成阶段一并标完成。
+
+    既不打数据源（省请求额度、也降低被限流的风险），也不算失败。
+    计入 `completed`（数据确实在位）并单独计入 `skipped`（标明这次没真的下载）。
+    """
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT seq, phase FROM download_codes "
+            "WHERE task_id=? AND code=? AND status IN ('pending','running')",
+            (task_id, code)).fetchall()
+        if not rows:
+            return 0
+        conn.executemany(
+            "UPDATE download_codes SET status='done', error='' WHERE task_id=? AND seq=?",
+            [(task_id, row["seq"]) for row in rows])
+        stamp = now_iso()
+        if any(row["phase"] == 1 for row in rows):
+            conn.execute("UPDATE download_tasks SET phase1_done=phase1_done+1 WHERE id=?", (task_id,))
+        conn.execute(
+            "UPDATE download_tasks SET completed=completed+1, skipped=skipped+1, updated_at=? "
+            "WHERE id=?", (stamp, task_id))
+    return len(rows)
 
 
 def remaining(task_id: str) -> int:

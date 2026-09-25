@@ -244,6 +244,46 @@ def sync_all_adjusts(code: str, start: dt.date | None = None,
     }
 
 
+def import_bars(code: str, bars: list[dict[str, Any]], source: str = "",
+                adjust: str = "raw") -> dict[str, Any]:
+    """把**已经取到的** bars 按统一口径校验后落盘。
+
+    与 `sync_bars` 的区别：后者自己去数据源抓，这里只负责「校验 + 写库」。
+    因此本地通达信文件、任何第三方接口都能复用同一套校验与存储——
+    换数据来源时，校验规则与存储结构一行都不用改。
+    """
+    store_adjust = price_store._store_adjust(adjust)
+    ok, rejected = validate_bars(bars)
+    if not ok:
+        raise RuntimeError("行情数据全部未通过校验：" + "；".join(rejected[:3]))
+    count = price_store.upsert_bars(code, ok, store_adjust, source=source)
+    return {"count": count, "start": ok[0]["date"], "end": ok[-1]["date"],
+            "source": source, "adjust": store_adjust, "rejected": rejected}
+
+
+def fill_missing_turnover(code: str, bars: list[dict[str, Any]],
+                          adjust: str = "raw") -> None:
+    """本地来源（通达信）算不出换手率——缺流通股本。用库里已有的值补上。
+
+    不补的话 `upsert_bars` 会用「换手率=空」整行覆盖掉此前在线抓到的值，
+    等于把已有信息抹掉；这里只在**该股已有数据**时才回读，避免无谓的库扫描。
+    """
+    if not bars or all(bar.get("turnover") is not None for bar in bars):
+        return
+    store_adjust = price_store._store_adjust(adjust)
+    try:
+        if not price_store.latest_bar_date(code, store_adjust):
+            return
+        existing = price_store.list_bars(code, bars[0]["date"], bars[-1]["date"],
+                                         adjust=store_adjust, verify=False)
+    except Exception:                            # noqa: BLE001 - 读不到就不补，不影响导入
+        return
+    known = {row.get("trade_date"): row.get("turnover") for row in existing}
+    for bar in bars:
+        if bar.get("turnover") is None:
+            bar["turnover"] = known.get(bar.get("date"))
+
+
 def sync_factors(code: str) -> dict[str, Any]:
     """采集后复权因子（新浪 hfq-factor）并落盘。
 

@@ -32,6 +32,13 @@ namespace StockPool
         private Label _dlCount;
         private DataGridView _dlFailures;
         private Button _dlBtnStart, _dlBtnPause, _dlBtnResume, _dlBtnCancel, _dlBtnRetry;
+        private CheckBox _dlAuto, _dlIdle;
+        private ComboBox _dlIdleConc;
+        private Label _dlAutoNote;
+        private bool _dlSettingsLoading;          // 程序回填控件值时抑制保存事件
+        private GroupBox _dlTdxGroup;             // 本地通达信区块（配置有效才显示）
+        private Label _dlTdxNote;
+        private Button _dlTdxBtn;
         private System.Windows.Forms.Timer _dlTimer;
         private string _dlTaskId = "";
         private string _dlLastStatus = "";
@@ -79,11 +86,13 @@ namespace StockPool
             _dlHint = Mute(Lbl("预计：—"));
             AddRow(b1, Row(Lbl("模式"), _dlMode, _dlHint));
             AddRow(b1, Row(Mute(Lbl("完整历史：全市场先跑最近 3 年，再回头补更早历史；"
-                + "增量更新：按库里最新日期只补最近几天，用于日常更新"))));
+                + "增量更新：按库里最新日期只补最近几天，用于日常更新。"
+                + "库里已覆盖该窗口的股票会自动跳过，不重复下载。"))));
 
             _dlStart = new TextBox();
             _dlStart.Width = 100;
-            _dlStart.Text = "1990-01-01";
+            _dlStart.Text = DateTime.Today.AddYears(-5).ToString("yyyy-MM-dd");   // 默认最近 5 年
+            _dlStart.Leave += delegate { DlUpdateHint(); };                       // 改完重算容量提示
             _dlConcurrency = new ComboBox();
             _dlConcurrency.DropDownStyle = ComboBoxStyle.DropDownList;
             _dlConcurrency.Width = 64;
@@ -94,7 +103,7 @@ namespace StockPool
             _dlRate.Text = "3";
             AddRow(b1, Row(Lbl("起始日期"), _dlStart, Lbl("并发"), _dlConcurrency,
                 Lbl("限速(次/秒)"), _dlRate));
-            AddRow(b1, Row(Mute(Lbl("起始日期早于上市日即可拿到完整历史（数据源会自动截断）"))));
+            AddRow(b1, Row(Mute(Lbl("默认最近 5 年，可直接改：改成 1990-01-01 即拿到上市至今（数据源会自动截断）"))));
 
             _dlReference = Check("同时下载复权因子 / 除权明细（用于复权与审计）", true);
             AddRow(b1, Row(_dlReference));
@@ -104,7 +113,7 @@ namespace StockPool
             TableLayoutPanel b2;
             var g2 = Group("任务控制与进度", out b2);
 
-            _dlBtnStart = MiniBtn("开始下载", delegate { DlStart(); }, 100);
+            _dlBtnStart = MiniBtn("开始下载", delegate { DlStart("online"); }, 100);
             _dlBtnPause = MiniBtn("暂停", delegate { DlControl("pause"); }, 80);
             _dlBtnResume = MiniBtn("继续", delegate { DlControl("resume"); }, 80);
             _dlBtnCancel = MiniBtn("取消", delegate { DlControl("cancel"); }, 80);
@@ -124,6 +133,29 @@ namespace StockPool
             AddRow(b2, Row(_dlStatus));
             _dlCount = Mute(Lbl(""));
             AddRow(b2, Row(_dlCount));
+
+            // ---- 后台自动化：每日自动更新 / 闲时补历史 ----
+            _dlAuto = Check("每天自动更新数据", false);
+            _dlAuto.Enabled = false;              // 等检测出「只缺最近 10 天」才放开
+            _dlAuto.CheckedChanged += delegate { DlSaveSettings(); };
+            _dlIdle = Check("后台闲时下载（补完整历史）", false);
+            _dlIdle.CheckedChanged += delegate { DlSaveSettings(); };
+            _dlIdleConc = new ComboBox();
+            _dlIdleConc.DropDownStyle = ComboBoxStyle.DropDownList;
+            _dlIdleConc.Width = 50;
+            _dlIdleConc.Items.AddRange(new object[] { "1", "2" });
+            _dlIdleConc.SelectedItem = "2";
+            _dlIdleConc.SelectedIndexChanged += delegate { DlSaveSettings(); };
+            AddRow(b2, Row(_dlAuto, _dlIdle, Lbl("闲时并发"), _dlIdleConc));
+
+            _dlAutoNote = Mute(Lbl("正在检测数据完整性…"));
+            _dlAutoNote.AutoSize = false;
+            _dlAutoNote.Width = 700;
+            _dlAutoNote.Height = 34;
+            AddRow(b2, Row(_dlAutoNote));
+            AddRow(b2, Row(Mute(Lbl("自动更新：每到一个固定时刻给已下载的股票补最新数据；"
+                + "闲时下载：低并发接着上次没下完的股票继续补，够新了再转由自动更新维持。"
+                + "两者同时只有一个在跑。"))));
             AddRow(stack, g2);
 
             // ---- ③ 失败清单 ----
@@ -133,6 +165,22 @@ namespace StockPool
             _dlFailures.ScrollBars = ScrollBars.Vertical;   // 失败可能很多，这里要能滚
             AddRow(b3, _dlFailures);
             AddRow(stack, g3);
+
+            // ---- ④ 本地通达信（配置了该目录才会显示）----
+            TableLayoutPanel b4;
+            var g4 = Group("同步通达信历史数据（本地）", out b4);
+            _dlTdxNote = Mute(Lbl("未检测到通达信目录：到「设置」页配置后出现本功能"));
+            _dlTdxNote.AutoSize = false;
+            _dlTdxNote.Width = 700;
+            _dlTdxNote.Height = 32;
+            AddRow(b4, Row(_dlTdxNote));
+            _dlTdxBtn = MiniBtn("同步通达信历史数据", delegate { DlStart("tdx"); }, 176);
+            AddRow(b4, Row(_dlTdxBtn));
+            AddRow(b4, Row(Mute(Lbl("只读本机 .day 文件（秒级、完全不联网），本机有几年的日线就同步几年。"
+                + "本地数据没有换手率（缺流通股本），会保留库里已有的值。"))));
+            g4.Visible = false;                  // 等检测到通达信目录再显示
+            _dlTdxGroup = g4;
+            AddRow(stack, g4);
 
             p.Controls.Add(stack);
             DlSyncInputs();
@@ -155,11 +203,12 @@ namespace StockPool
         private void DlUpdateHint()
         {
             if (_dlHint == null || _dlScope == null || _dlMode == null) return;
-            string scope = "all";
-            if (_dlScope.SelectedIndex == 1) scope = "pool";
-            else if (_dlScope.SelectedIndex == 2) scope = "custom";
+            string scope = _dlScope.SelectedIndex == 1 ? "pool" : "all";
             string mode = _dlMode.SelectedIndex == 0 ? "full" : "incremental";
             string query = "?scope=" + scope + "&mode=" + mode;
+            var since = _dlStart == null ? "" : _dlStart.Text.Trim();
+            if (mode == "full" && since.Length == 10)
+                query += "&start_date=" + Uri.EscapeDataString(since);   // 容量预估随窗口变化
             _dlHint.Text = "预计：计算中…";
             int round = ++_dlRound;
             var th = new Thread(delegate()
@@ -204,7 +253,7 @@ namespace StockPool
 
         // ---------------------------------------------------------------- 启动
 
-        private void DlStart()
+        private void DlStart(string source)
         {
             if (_dlLastStatus == "running" || _dlLastStatus == "queued")
             {
@@ -222,6 +271,7 @@ namespace StockPool
 
             var body = new Dictionary<string, object>();
             body["scope"] = scope;
+            body["source"] = source;
             body["mode"] = mode;
             body["start_date"] = (_dlStart.Text ?? "").Trim();
             body["concurrency"] = concurrency;
@@ -277,8 +327,174 @@ namespace StockPool
         private void DlOnEnter()
         {
             DlUpdateHint();
+            DlLoadAutoState(false);
+            DlRefreshTdx();
             if (string.IsNullOrEmpty(_dlTaskId)) return;
             DlRefresh();
+        }
+
+        // ------------------------------------------------- 本地通达信
+
+        /// <summary>查询本机通达信目录是否可用；可用才显示「同步通达信历史数据」。</summary>
+        private void DlRefreshTdx()
+        {
+            if (_dlTdxGroup == null) return;
+            var th = new Thread(delegate()
+            {
+                string resp;
+                try
+                {
+                    if (!Probe(DlApi + "/tdx/status", 10000, out resp)) return;
+                    var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    Ui(delegate { DlRenderTdx(root); });
+                }
+                catch { }
+            });
+            th.IsBackground = true;
+            th.Start();
+        }
+
+        private void DlRenderTdx(Dictionary<string, object> root)
+        {
+            if (_dlTdxGroup == null || _dlTdxNote == null || _dlTdxBtn == null) return;
+            bool valid = false;
+            try { valid = Convert.ToBoolean(DlVal(root, "valid")); }
+            catch { }
+            if (!valid)
+            {
+                _dlTdxGroup.Visible = false;
+                return;
+            }
+            int codes = DlInt(DlVal(root, "codes"));
+            var sample = Convert.ToString(DlVal(root, "sample") ?? "");
+            _dlTdxNote.Text = string.Format("本机通达信：{0} 只 A 股，数据覆盖 {1}。"
+                + "同步只读取本地文件（秒级、不联网），不补更早的历史。", codes, sample);
+            _dlTdxGroup.Visible = true;
+        }
+
+        // ------------------------------------------------- 后台自动化（开关状态）
+
+        /// <summary>拉一次 /auto-state：既有开关的当前值，也有是否允许勾选。</summary>
+        private void DlLoadAutoState(bool refresh)
+        {
+            if (_dlAuto == null) return;
+            string query = "/auto-state" + (refresh ? "?refresh=true" : "");
+            var th = new Thread(delegate()
+            {
+                string resp;
+                try
+                {
+                    if (!Probe(DlApi + query, 30000, out resp)) return;
+                    var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    Ui(delegate { DlRenderAutoState(root); });
+                }
+                catch { }
+            });
+            th.IsBackground = true;
+            th.Start();
+        }
+
+        private void DlRenderAutoState(Dictionary<string, object> root)
+        {
+            int downloaded = DlInt(DlVal(root, "downloaded"));
+            int stale = DlInt(DlVal(root, "stale"));
+            int days = DlInt(DlVal(root, "freshness_days"));
+            bool eligible = false;
+            try { eligible = Convert.ToBoolean(DlVal(root, "eligible")); }
+            catch { }
+
+            _dlSettingsLoading = true;            // 回填控件不算用户操作，别触发保存
+            try
+            {
+                try { _dlAuto.Checked = Convert.ToBoolean(DlVal(root, "auto_update")); }
+                catch { }
+                try { _dlIdle.Checked = Convert.ToBoolean(DlVal(root, "idle_download")); }
+                catch { }
+                _dlIdleConc.SelectedItem = DlInt(DlVal(root, "idle_concurrency")) == 1 ? "1" : "2";
+                _dlAuto.Enabled = eligible;
+            }
+            finally { _dlSettingsLoading = false; }
+
+            string note;
+            if (downloaded == 0)
+                note = "库里还没有日K数据：先「开始下载」一次，之后才能开启自动更新。";
+            else if (eligible)
+                note = string.Format("已下载 {0} 只，数据只缺最近 {1} 天内 → 可以开启自动更新。",
+                                     downloaded, days);
+            else
+            {
+                note = string.Format("已下载 {0} 只，其中 {1} 只落后超过 {2} 天 → 暂不可开启自动更新；"
+                                     + "可勾选「后台闲时下载」先把历史补齐。", downloaded, stale, days);
+                var examples = DlVal(root, "stale_examples") as ArrayList;
+                if (examples != null && examples.Count > 0)
+                {
+                    var names = new List<string>();
+                    foreach (var item in examples) names.Add(Convert.ToString(item));
+                    note += "　例：" + string.Join("、", names.ToArray());
+                }
+            }
+            _dlAutoNote.Text = note;
+        }
+
+        /// <summary>保存后台开关；服务端会即时生效（不等下一个轮询周期）。</summary>
+        private void DlSaveSettings()
+        {
+            if (_dlSettingsLoading || _dlAuto == null || _dlIdle == null) return;
+            int concurrency;
+            if (!int.TryParse(Convert.ToString(_dlIdleConc.SelectedItem), out concurrency)) concurrency = 2;
+
+            var body = new Dictionary<string, object>();
+            body["auto_update"] = _dlAuto.Checked;
+            body["idle_download"] = _dlIdle.Checked;
+            body["idle_concurrency"] = concurrency;
+            string json = new JavaScriptSerializer().Serialize(body);
+            _dlAutoNote.Text = "正在保存…";
+
+            var th = new Thread(delegate()
+            {
+                string resp;
+                if (!PostJson(DlApi + "/settings", json, 20000, out resp))
+                {
+                    var err = JsonValue(resp, "detail");
+                    Ui(delegate
+                    {
+                        Msg("设置未生效：" + (string.IsNullOrEmpty(err) ? resp : err));
+                        DlLoadAutoState(true);           // 回读真实状态
+                    });
+                    return;
+                }
+                Ui(delegate
+                {
+                    DlLoadAutoState(true);
+                    if (_dlAuto.Checked || _dlIdle.Checked) DlPickLatestTask();
+                });
+            });
+            th.IsBackground = true;
+            th.Start();
+        }
+
+        /// <summary>把界面切到刚由后台自动发起的那个任务，方便看进度。</summary>
+        private void DlPickLatestTask()
+        {
+            var th = new Thread(delegate()
+            {
+                string resp;
+                try
+                {
+                    if (!Probe(DlApi + "/list", 10000, out resp)) return;
+                    var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    var tasks = DlVal(root, "tasks") as ArrayList;
+                    if (tasks == null || tasks.Count == 0) return;
+                    var first = tasks[0] as Dictionary<string, object>;
+                    if (first == null) return;
+                    var id = Convert.ToString(DlVal(first, "id") ?? "");
+                    if (string.IsNullOrEmpty(id)) return;
+                    Ui(delegate { _dlTaskId = id; DlRefresh(); DlStartPoll(); });
+                }
+                catch { }
+            });
+            th.IsBackground = true;
+            th.Start();
         }
 
         private void DlRefresh()
@@ -339,9 +555,12 @@ namespace StockPool
             _dlStatus.Text = "状态：" + DlStatusText(status)
                 + (string.IsNullOrEmpty(_dlTaskId) ? "" : "　任务 " + _dlTaskId);
             int recent = DlInt(DlVal(task, "phase1_done"));
+            int skipped = DlInt(DlVal(task, "skipped"));
+            var extra = "";
+            if (recent > 0) extra += string.Format("　近期阶段已覆盖 {0} 只", recent);
+            if (skipped > 0) extra += string.Format("　跳过 {0} 只（库里已足量）", skipped);
             _dlCount.Text = string.Format("已完成 {0} / 共 {1}　失败 {2}　剩余 {3}　进度 {4:0.0}%{5}",
-                                          completed, total, failed, remaining, percent,
-                                          recent > 0 ? string.Format("　近期阶段已覆盖 {0} 只", recent) : "");
+                                          completed, total, failed, remaining, percent, extra);
 
             _dlFailures.Rows.Clear();
             var failures = DlVal(task, "failures") as ArrayList;
@@ -357,7 +576,12 @@ namespace StockPool
             }
 
             DlRenderButtons(status, failed);
-            if (status == "completed" || status == "cancelled") DlStopPoll();
+            if (status == "completed" || status == "cancelled")
+            {
+                DlStopPoll();
+                // 跑完一轮后重算「是否只缺最近 10 天」——可能刚好攒够资格开启自动更新
+                DlLoadAutoState(true);
+            }
             else DlStartPoll();
         }
 
@@ -371,6 +595,7 @@ namespace StockPool
             _dlBtnResume.Enabled = status == "paused";
             _dlBtnCancel.Enabled = active || status == "paused";
             _dlBtnRetry.Enabled = failed > 0 && !active;
+            if (_dlTdxBtn != null) _dlTdxBtn.Enabled = !active && status != "paused";
             if (string.IsNullOrEmpty(status) && failed == 0) _dlBtnStart.Enabled = true;
         }
 

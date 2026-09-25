@@ -411,6 +411,9 @@ namespace StockPool
         private TextBox _tbNode;
         private TextBox _tbRoot;
         private TextBox _tbDataDir;
+        private TextBox _tbTdx;
+        private Label _lbTdx;
+        private Dictionary<string, object> _lastTdxStatus;
         private CheckBox _ckAutoStart;
         private CheckBox _ckMinimize;
         private CheckBox _ckStopOnExit;
@@ -1319,6 +1322,26 @@ namespace StockPool
             _tbDataDir.Text = ResolveDataDirSetting();
             RefreshDataDir();
 
+            _tbTdx = new TextBox();
+            _tbTdx.Width = 430;
+            AddRow(body, Row(Lbl("通达信目录（new_tdx64）"), _tbTdx));
+            _lbTdx = Mute(Lbl("未检测"));
+            AddRow(body, Row(MiniBtn("浏览…", delegate
+            {
+                using (var dlg = new FolderBrowserDialog())
+                {
+                    dlg.Description = "选择通达信安装目录（里面有 vipdoc 的那个）";
+                    if (!string.IsNullOrEmpty(_tbTdx.Text) && Directory.Exists(_tbTdx.Text))
+                        dlg.SelectedPath = _tbTdx.Text;
+                    if (dlg.ShowDialog(this) == DialogResult.OK)
+                        _tbTdx.Text = dlg.SelectedPath;
+                }
+            }, 88), MiniBtn("保存", delegate { SaveTdxPath(); }, 80),
+                MiniBtn("自动检测", delegate { DetectTdx(); }, 96),
+                MiniBtn("刷新", delegate { RefreshTdx(); }, 80), _lbTdx));
+
+            RefreshTdx();
+
             var lbEnvTip = Lbl("启动时自动检查环境：Python + 后端依赖（requirements.txt）是硬要求，缺了会拉起 launcher\\install_env.bat 装一次，装不上就退出并给出错误日志。");
             Mute(lbEnvTip);
             AddRow(body, Row(lbEnvTip, MiniBtn("检查 / 修复环境", delegate
@@ -1681,6 +1704,93 @@ namespace StockPool
             });
             th.IsBackground = true;
             th.Start();
+        }
+
+        // ---- 通达信目录（配置后，下载页才会出现「同步通达信历史数据」）----
+
+        private const string TdxStatusUrl = "http://127.0.0.1:8000/api/history/download/tdx/status";
+
+        /// <summary>把通达信目录写到后端设置里（后端会校验该目录是否真有日线数据）。</summary>
+        private void SaveTdxPath()
+        {
+            var path = (_tbTdx.Text ?? "").Trim();
+            var th = new Thread(delegate()
+            {
+                try
+                {
+                    string resp;
+                    if (!Probe(TdxStatusUrl, 5000, out resp))
+                    {
+                        Ui(delegate { Msg("后端未运行，无法保存通达信目录"); });
+                        return;
+                    }
+                    var json = new JavaScriptSerializer().Serialize(
+                        new Dictionary<string, object> { { "tdx_path", path } });
+                    if (!PostJson("http://127.0.0.1:8000/api/history/download/settings",
+                                  json, 15000, out resp))
+                    {
+                        var err = JsonValue(resp, "detail");
+                        Ui(delegate { Msg("保存失败：" + (string.IsNullOrEmpty(err) ? resp : err)); });
+                        return;
+                    }
+                    Ui(delegate { Msg("已保存通达信目录"); RefreshTdx(); });
+                }
+                catch (Exception ex) { Ui(delegate { Msg("保存出错：" + ex.Message); }); }
+            });
+            th.IsBackground = true;
+            th.Start();
+        }
+
+        /// <summary>拉一次后端的通达信检测结果，填入路径框并给出「可用 / 未配置」提示。</summary>
+        private void RefreshTdx()
+        {
+            var th = new Thread(delegate()
+            {
+                string resp;
+                try
+                {
+                    if (!Probe(TdxStatusUrl, 10000, out resp)) return;
+                    var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    Ui(delegate
+                    {
+                        if (_tbTdx == null || _lbTdx == null) return;
+                        _lastTdxStatus = root;
+                        var configured = Convert.ToString(DictVal(root, "configured") ?? "");
+                        var auto = Convert.ToString(DictVal(root, "auto_detected") ?? "");
+                        bool valid = false;
+                        try { valid = Convert.ToBoolean(DictVal(root, "valid")); }
+                        catch { }
+                        int codes = 0;
+                        try { codes = Convert.ToInt32(DictVal(root, "codes")); }
+                        catch { }
+                        var sample = Convert.ToString(DictVal(root, "sample") ?? "");
+                        if (_tbTdx.Text.Length == 0) _tbTdx.Text = configured.Length > 0 ? configured : auto;
+                        if (valid) _lbTdx.Text = string.Format("可用：{0} 只，{1}", codes, sample);
+                        else if (auto.Length > 0) _lbTdx.Text = "未配置（检测到 " + auto + "）";
+                        else _lbTdx.Text = "未配置，也没检测到通达信";
+                        DlRefreshTdx();          // 让下载页同步显示 / 隐藏本地同步入口
+                    });
+                }
+                catch { }
+            });
+            th.IsBackground = true;
+            th.Start();
+        }
+
+        /// <summary>用后端自动检测到的路径填入并保存。</summary>
+        private void DetectTdx()
+        {
+            if (_lastTdxStatus == null) { RefreshTdx(); return; }
+            var auto = Convert.ToString(DictVal(_lastTdxStatus, "auto_detected") ?? "");
+            if (string.IsNullOrEmpty(auto)) { Msg("本机没有检测到通达信目录，请手动浏览选择"); return; }
+            _tbTdx.Text = auto;
+            SaveTdxPath();
+        }
+
+        private static object DictVal(Dictionary<string, object> dict, string key)
+        {
+            object value;
+            return (dict != null && dict.TryGetValue(key, out value)) ? value : null;
         }
 
         #endregion
