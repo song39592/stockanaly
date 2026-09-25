@@ -20,20 +20,14 @@ namespace StockPool
         private const string DlApi = "http://127.0.0.1:8000/api/history/download";
 
         private int _dlTabIndex = -1;
-        private ComboBox _dlScope;
-        private ComboBox _dlMode;
+        private ComboBox _dlYear;         // 起始年份（只精确到年，统一按该年 1 月 1 日）
         private Label _dlHint;
-        private TextBox _dlStart;
-        private ComboBox _dlConcurrency;
-        private TextBox _dlRate;
         private CheckBox _dlReference;
         private ProgressBar _dlBar;
         private Label _dlStatus;
         private Label _dlCount;
-        private DataGridView _dlFailures;
         private Button _dlBtnStart, _dlBtnPause, _dlBtnResume, _dlBtnCancel, _dlBtnRetry;
         private CheckBox _dlAuto, _dlIdle;
-        private ComboBox _dlIdleConc;
         private Label _dlAutoNote;
         private bool _dlSettingsLoading;          // 程序回填控件值时抑制保存事件
         private GroupBox _dlTdxGroup;             // 本地通达信区块（配置有效才显示）
@@ -44,7 +38,7 @@ namespace StockPool
         private string _dlLastStatus = "";
         private int _dlRound;                 // 本轮请求编号：上一轮的慢回调不再覆盖本轮
 
-        /// <summary>历史数据下载：① 范围与参数 → ② 控制与进度 → ③ 失败清单。</summary>
+        /// <summary>历史数据下载：① 范围与参数 → ② 控制与进度。</summary>
         private Panel BuildDownloadPage()
         {
             var p = NewPage("历史数据下载");
@@ -64,49 +58,26 @@ namespace StockPool
             sub.Height = 36;
             AddRow(stack, Row(sub));
 
-            // ---- ① 范围与参数 ----
+            // ---- ① 下载范围与参数（范围 / 模式 / 并发 / 限速都固定，只留起始年份）----
             TableLayoutPanel b1;
             var g1 = Group("下载范围与参数", out b1);
 
-            _dlScope = new ComboBox();
-            _dlScope.DropDownStyle = ComboBoxStyle.DropDownList;
-            _dlScope.Width = 140;
-            _dlScope.Items.AddRange(new object[] { "全市场 A 股", "当前股票池" });
-            _dlScope.SelectedIndex = 0;
-            _dlScope.SelectedIndexChanged += delegate { DlSyncInputs(); };
-            AddRow(b1, Row(Lbl("范围"), _dlScope,
-                Mute(Lbl("全市场约 5000 只，完整日K 合计约 2.5 GB，耗时以小时计"))));
-
-            _dlMode = new ComboBox();
-            _dlMode.DropDownStyle = ComboBoxStyle.DropDownList;
-            _dlMode.Width = 160;
-            _dlMode.Items.AddRange(new object[] { "完整历史（由近到远）", "增量更新（只补最新）" });
-            _dlMode.SelectedIndex = 0;
-            _dlMode.SelectedIndexChanged += delegate { DlSyncInputs(); };
+            int thisYear = DateTime.Today.Year;
+            _dlYear = new ComboBox();
+            _dlYear.DropDownStyle = ComboBoxStyle.DropDownList;
+            _dlYear.Width = 74;
+            for (int year = thisYear; year >= 1990; year--) _dlYear.Items.Add(year.ToString());
+            _dlYear.SelectedItem = (thisYear - 5).ToString();     // 默认最近 5 年
+            _dlYear.SelectedIndexChanged += delegate { DlUpdateHint(); };
             _dlHint = Mute(Lbl("预计：—"));
-            AddRow(b1, Row(Lbl("模式"), _dlMode, _dlHint));
-            AddRow(b1, Row(Mute(Lbl("完整历史：全市场先跑最近 3 年，再回头补更早历史；"
-                + "增量更新：按库里最新日期只补最近几天，用于日常更新。"
-                + "库里已覆盖该窗口的股票会自动跳过，不重复下载。"))));
-
-            _dlStart = new TextBox();
-            _dlStart.Width = 100;
-            _dlStart.Text = DateTime.Today.AddYears(-5).ToString("yyyy-MM-dd");   // 默认最近 5 年
-            _dlStart.Leave += delegate { DlUpdateHint(); };                       // 改完重算容量提示
-            _dlConcurrency = new ComboBox();
-            _dlConcurrency.DropDownStyle = ComboBoxStyle.DropDownList;
-            _dlConcurrency.Width = 64;
-            _dlConcurrency.Items.AddRange(new object[] { "1", "2", "4", "6", "8" });
-            _dlConcurrency.SelectedItem = "4";
-            _dlRate = new TextBox();
-            _dlRate.Width = 56;
-            _dlRate.Text = "3";
-            AddRow(b1, Row(Lbl("起始日期"), _dlStart, Lbl("并发"), _dlConcurrency,
-                Lbl("限速(次/秒)"), _dlRate));
-            AddRow(b1, Row(Mute(Lbl("默认最近 5 年，可直接改：改成 1990-01-01 即拿到上市至今（数据源会自动截断）"))));
+            AddRow(b1, Row(Lbl("起始年份"), _dlYear, _dlHint));
 
             _dlReference = Check("同时下载复权因子 / 除权明细（用于复权与审计）", true);
             AddRow(b1, Row(_dlReference));
+            AddRow(b1, Row(Mute(Lbl("范围固定为全市场 A 股，模式为完整下载（先近后远）；"
+                + "并发与限速由后端统一控制。库里已覆盖该窗口的股票会自动跳过，不重复下载。"))));
+            AddRow(b1, Row(Mute(Lbl("默认最近 5 年，够 MA60 / RPS 等现有分析用；"
+                + "要更长历史就选更早的年份，数据源会自动截断到上市首日。"))));
             AddRow(stack, g1);
 
             // ---- ② 控制与进度 ----
@@ -140,13 +111,7 @@ namespace StockPool
             _dlAuto.CheckedChanged += delegate { DlSaveSettings(); };
             _dlIdle = Check("后台闲时下载（补完整历史）", false);
             _dlIdle.CheckedChanged += delegate { DlSaveSettings(); };
-            _dlIdleConc = new ComboBox();
-            _dlIdleConc.DropDownStyle = ComboBoxStyle.DropDownList;
-            _dlIdleConc.Width = 50;
-            _dlIdleConc.Items.AddRange(new object[] { "1", "2" });
-            _dlIdleConc.SelectedItem = "2";
-            _dlIdleConc.SelectedIndexChanged += delegate { DlSaveSettings(); };
-            AddRow(b2, Row(_dlAuto, _dlIdle, Lbl("闲时并发"), _dlIdleConc));
+            AddRow(b2, Row(_dlAuto, _dlIdle));
 
             _dlAutoNote = Mute(Lbl("正在检测数据完整性…"));
             _dlAutoNote.AutoSize = false;
@@ -158,15 +123,7 @@ namespace StockPool
                 + "两者同时只有一个在跑。"))));
             AddRow(stack, g2);
 
-            // ---- ③ 失败清单 ----
-            TableLayoutPanel b3;
-            var g3 = Group("失败清单（可点「重试失败项」只补这些）", out b3);
-            _dlFailures = MktGrid(180, false, new string[] { "代码", "原因" });
-            _dlFailures.ScrollBars = ScrollBars.Vertical;   // 失败可能很多，这里要能滚
-            AddRow(b3, _dlFailures);
-            AddRow(stack, g3);
-
-            // ---- ④ 本地通达信（配置了该目录才会显示）----
+            // ---- ③ 本地通达信（配置了该目录才会显示）----
             TableLayoutPanel b4;
             var g4 = Group("同步通达信历史数据（本地）", out b4);
             _dlTdxNote = Mute(Lbl("未检测到通达信目录：到「设置」页配置后出现本功能"));
@@ -183,32 +140,27 @@ namespace StockPool
             AddRow(stack, g4);
 
             p.Controls.Add(stack);
-            DlSyncInputs();
+            DlUpdateHint();
             DlRenderButtons("", 0);
             return p;
         }
 
-        /// <summary>按「范围 / 模式」放开对应的输入框，并刷新容量提示。</summary>
-        private void DlSyncInputs()
+        /// <summary>界面只选到「年」，统一按该年 1 月 1 日作为起始日。</summary>
+        private string DlStartDate()
         {
-            // 增量更新按库里最新日期补，不需要起始日
-            bool full = _dlMode.SelectedIndex == 0;
-            _dlStart.Enabled = full;
-            _dlStart.BackColor = full ? SystemColors.Window : SystemColors.Control;
-
-            DlUpdateHint();
+            int year;
+            if (_dlYear == null || !int.TryParse(Convert.ToString(_dlYear.SelectedItem), out year))
+                year = DateTime.Today.Year - 5;
+            return year.ToString("0000") + "-01-01";
         }
 
         /// <summary>拉一次 /universe，把「多少只 · 多大 · 磁盘可用多少」显示出来。</summary>
         private void DlUpdateHint()
         {
-            if (_dlHint == null || _dlScope == null || _dlMode == null) return;
-            string scope = _dlScope.SelectedIndex == 1 ? "pool" : "all";
-            string mode = _dlMode.SelectedIndex == 0 ? "full" : "incremental";
-            string query = "?scope=" + scope + "&mode=" + mode;
-            var since = _dlStart == null ? "" : _dlStart.Text.Trim();
-            if (mode == "full" && since.Length == 10)
-                query += "&start_date=" + Uri.EscapeDataString(since);   // 容量预估随窗口变化
+            if (_dlHint == null) return;
+            // 范围与模式固定，容量预估只随起始年份变化
+            string query = "?scope=all&mode=full&source=online&start_date="
+                           + Uri.EscapeDataString(DlStartDate());
             _dlHint.Text = "预计：计算中…";
             int round = ++_dlRound;
             var th = new Thread(delegate()
@@ -260,22 +212,13 @@ namespace StockPool
                 Msg("已有任务正在下载，请先暂停或取消");
                 return;
             }
-            string scope = _dlScope.SelectedIndex == 1 ? "pool" : "all";
-            string mode = _dlMode.SelectedIndex == 0 ? "full" : "incremental";
-
-            double rate;
-            if (!double.TryParse((_dlRate.Text ?? "").Trim(), NumberStyles.Any,
-                                 CultureInfo.InvariantCulture, out rate)) rate = 3.0;
-            int concurrency;
-            if (!int.TryParse(Convert.ToString(_dlConcurrency.SelectedItem), out concurrency)) concurrency = 4;
-
+            // 范围 / 模式 / 并发 / 限速都不再暴露给界面：范围固定全市场，
+            // 模式固定完整下载，并发与限速用后端默认值（4 / 3）。
             var body = new Dictionary<string, object>();
-            body["scope"] = scope;
+            body["scope"] = "all";
             body["source"] = source;
-            body["mode"] = mode;
-            body["start_date"] = (_dlStart.Text ?? "").Trim();
-            body["concurrency"] = concurrency;
-            body["rate_limit"] = rate;
+            body["mode"] = "full";
+            body["start_date"] = DlStartDate();
             body["with_reference"] = _dlReference.Checked;
             string json = new JavaScriptSerializer().Serialize(body);
 
@@ -397,8 +340,6 @@ namespace StockPool
         private void DlRenderAutoState(Dictionary<string, object> root)
         {
             int downloaded = DlInt(DlVal(root, "downloaded"));
-            int stale = DlInt(DlVal(root, "stale"));
-            int days = DlInt(DlVal(root, "freshness_days"));
             bool eligible = false;
             try { eligible = Convert.ToBoolean(DlVal(root, "eligible")); }
             catch { }
@@ -410,43 +351,26 @@ namespace StockPool
                 catch { }
                 try { _dlIdle.Checked = Convert.ToBoolean(DlVal(root, "idle_download")); }
                 catch { }
-                _dlIdleConc.SelectedItem = DlInt(DlVal(root, "idle_concurrency")) == 1 ? "1" : "2";
                 _dlAuto.Enabled = eligible;
             }
             finally { _dlSettingsLoading = false; }
 
-            string note;
-            if (downloaded == 0)
-                note = "库里还没有日K数据：先「开始下载」一次，之后才能开启自动更新。";
-            else if (eligible)
-                note = string.Format("已下载 {0} 只，数据只缺最近 {1} 天内 → 可以开启自动更新。",
-                                     downloaded, days);
-            else
-            {
-                note = string.Format("已下载 {0} 只，其中 {1} 只落后超过 {2} 天 → 暂不可开启自动更新；"
-                                     + "可勾选「后台闲时下载」先把历史补齐。", downloaded, stale, days);
-                var examples = DlVal(root, "stale_examples") as ArrayList;
-                if (examples != null && examples.Count > 0)
-                {
-                    var names = new List<string>();
-                    foreach (var item in examples) names.Add(Convert.ToString(item));
-                    note += "　例：" + string.Join("、", names.ToArray());
-                }
-            }
-            _dlAutoNote.Text = note;
+            // 只报「数据更新到哪天」：还差多少只由「自动更新」开关能否点开体现，不再堆提示文字
+            string latest = Convert.ToString(DlVal(root, "latest_date") ?? "");
+            if (downloaded == 0) _dlAutoNote.Text = "库里还没有日K数据：先「开始下载」一次。";
+            else if (!string.IsNullOrEmpty(latest)) _dlAutoNote.Text = "数据已更新到 " + latest;
+            else _dlAutoNote.Text = string.Format("已下载 {0} 只。", downloaded);
         }
 
         /// <summary>保存后台开关；服务端会即时生效（不等下一个轮询周期）。</summary>
         private void DlSaveSettings()
         {
             if (_dlSettingsLoading || _dlAuto == null || _dlIdle == null) return;
-            int concurrency;
-            if (!int.TryParse(Convert.ToString(_dlIdleConc.SelectedItem), out concurrency)) concurrency = 2;
 
             var body = new Dictionary<string, object>();
             body["auto_update"] = _dlAuto.Checked;
             body["idle_download"] = _dlIdle.Checked;
-            body["idle_concurrency"] = concurrency;
+            body["idle_concurrency"] = 2;         // 闲时并发固定 2，不在界面暴露
             string json = new JavaScriptSerializer().Serialize(body);
             _dlAutoNote.Text = "正在保存…";
 
@@ -549,10 +473,12 @@ namespace StockPool
             int remaining = DlInt(DlVal(task, "remaining"));
             double percent = DlDbl(DlVal(task, "percent"));
             _dlLastStatus = status;
+            // 来源决定用词：本地通达信是「同步」（读本机文件、不联网），在线才是「下载」
+            var source = Convert.ToString(DlVal(DlVal(task, "options"), "source") ?? "");
 
             int value = (int)Math.Round(percent * 10);
             _dlBar.Value = Math.Max(0, Math.Min(_dlBar.Maximum, value));
-            _dlStatus.Text = "状态：" + DlStatusText(status)
+            _dlStatus.Text = "状态：" + DlStatusText(status, source)
                 + (string.IsNullOrEmpty(_dlTaskId) ? "" : "　任务 " + _dlTaskId);
             int recent = DlInt(DlVal(task, "phase1_done"));
             int skipped = DlInt(DlVal(task, "skipped"));
@@ -561,19 +487,6 @@ namespace StockPool
             if (skipped > 0) extra += string.Format("　跳过 {0} 只（库里已足量）", skipped);
             _dlCount.Text = string.Format("已完成 {0} / 共 {1}　失败 {2}　剩余 {3}　进度 {4:0.0}%{5}",
                                           completed, total, failed, remaining, percent, extra);
-
-            _dlFailures.Rows.Clear();
-            var failures = DlVal(task, "failures") as ArrayList;
-            if (failures != null)
-            {
-                foreach (var row in failures)
-                {
-                    var item = DlDict(row);
-                    if (item == null) continue;
-                    _dlFailures.Rows.Add(Convert.ToString(DlVal(item, "code") ?? ""),
-                                         Convert.ToString(DlVal(item, "error") ?? ""));
-                }
-            }
 
             DlRenderButtons(status, failed);
             if (status == "completed" || status == "cancelled")
@@ -599,14 +512,16 @@ namespace StockPool
             if (string.IsNullOrEmpty(status) && failed == 0) _dlBtnStart.Enabled = true;
         }
 
-        private static string DlStatusText(string status)
+        /// <summary>状态文案按数据来源区分：本地通达信是「同步」，在线才是「下载」。</summary>
+        private static string DlStatusText(string status, string source)
         {
+            bool tdx = source == "tdx";
             switch (status)
             {
-                case "queued": return "排队中";
-                case "running": return "下载中";
+                case "queued": return tdx ? "排队中（本地同步）" : "排队中";
+                case "running": return tdx ? "本地同步中（读本机文件，不联网）" : "下载中（联网）";
                 case "paused": return "已暂停";
-                case "completed": return "已完成";
+                case "completed": return tdx ? "同步完成" : "下载完成";
                 case "cancelled": return "已取消";
                 default: return string.IsNullOrEmpty(status) ? "未开始" : status;
             }
