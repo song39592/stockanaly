@@ -11,6 +11,7 @@
   - "main"   主图叠加（共用主图价格坐标轴），如 MA / EMA / BOLL
   - "lower"  主图下方副图（共享时间轴、独立 y 轴，可多个堆叠），如 MACD / RSI / KDJ
   - "right"  主图右侧副图（与主图等高并列、独立 y 轴），如需要独立纵轴的指标
+  - "none"   不显示：仅注册、可计算（用于导出 / 内部辅助 / 暂不开放），前端不把它放入任何渲染面板
 
 指标函数约定：
   def my_indicator(df: pd.DataFrame, **params) -> dict:
@@ -33,7 +34,7 @@ from . import data
 
 REGISTRY: dict[str, "IndicatorMeta"] = {}
 
-VALID_PANELS = ("main", "lower", "right")
+VALID_PANELS = ("main", "lower", "right", "none")
 VALID_KINDS = ("line", "bar")
 
 
@@ -72,7 +73,7 @@ def series_bar(name: str, data) -> dict:
 def indicator(id: str, name: str, category: str, panel: str, params: list[ParamSpec]):
     """装饰器：把指标函数登记进 REGISTRY。
 
-    panel 必须是 "main" / "lower" / "right" 之一，否则在模块导入时即报错，
+    panel 必须是 "main" / "lower" / "right" / "none" 之一，否则在模块导入时即报错，
     便于尽早发现错误的面板声明。
     """
     if panel not in VALID_PANELS:

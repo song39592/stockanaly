@@ -21,6 +21,7 @@ using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 using System.Web.Script.Serialization;
@@ -421,6 +422,8 @@ namespace StockPool
         private CheckBox _ckRunOnBoot;
         private Label _lbEnvState;
         private Button _btnTheme;
+        private TextBox _quickSearch;       // 右下角隐藏搜索框（键盘输入即唤出）
+        private Control _quickPrevFocus;    // 唤出前拥有焦点的控件，取消时还原
         private bool _light;   // true = 浅色主题（网页 + 本窗口都跟着这个按钮走）
         private bool _envChecked;   // 本次运行是否已做过环境检查（自动只做一次，装失败也不重试）
         private static Font _docFont;   // RPS 页说明框的正文 / 加粗字体（缓存，换肤时复用）
@@ -447,6 +450,7 @@ namespace StockPool
             Size = new Size(1020, 700);
             MinimumSize = new Size(880, 560);
             Font = new Font("Microsoft YaHei UI", 9f);
+            KeyPreview = true;   // 让窗体能接收子控件按键，用于「键盘输入即唤出搜索框」
             BackColor = Color.FromArgb(245, 246, 248);
 
             // ---- 根布局：顶部状态条 + 页面区 ----
@@ -557,6 +561,55 @@ namespace StockPool
             BuildSettingsPage();
             BuildServicePage();   // 服务控制台放最后一个标签
 
+            // ---- 右下角隐藏搜索框：键盘输入即唤出，回车/ESC/切换界面隐藏 ----
+            _quickSearch = new TextBox();
+            _quickSearch.Width = 150;
+            _quickSearch.MaxLength = 6;
+            _quickSearch.Visible = false;
+            _quickSearch.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+            _quickSearch.Location = new Point(ClientSize.Width - _quickSearch.Width - 18,
+                                              ClientSize.Height - _quickSearch.Height - 18);
+            _quickSearch.TextChanged += delegate
+            {
+                string digits = Regex.Replace(_quickSearch.Text, "[^0-9]", "");
+                if (digits.Length > 6) digits = digits.Substring(0, 6);
+                if (_quickSearch.Text != digits)
+                {
+                    int sel = _quickSearch.SelectionStart;
+                    _quickSearch.Text = digits;
+                    _quickSearch.SelectionStart = Math.Min(sel, digits.Length);
+                }
+            };
+            _quickSearch.KeyDown += delegate(object s, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    e.Handled = true;
+                    string code = _quickSearch.Text.Trim();
+                    if (Regex.IsMatch(code, "^[0-9]{6}$"))
+                    {
+                        SelectTab(_stockTabIndex);
+                        _stockCode.Text = code;
+                        StockOpen();
+                        StockSubSelect(0);
+                        HideQuickSearch();
+                    }
+                    else
+                    {
+                        MessageBox.Show("请输入 6 位数字股票代码（如 600519）", "提示",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                }
+                else if (e.KeyCode == Keys.Escape)
+                {
+                    e.Handled = true;
+                    HideQuickSearch();
+                }
+            };
+            _quickSearch.Leave += delegate { if (_quickSearch.Text.Length == 0) HideQuickSearch(); };
+            Controls.Add(_quickSearch);
+            _quickSearch.BringToFront();
+
             _timer = new System.Windows.Forms.Timer();
             _timer.Interval = 3000;
             _timer.Tick += delegate { RefreshStatus(false); };
@@ -569,6 +622,45 @@ namespace StockPool
             Shown += delegate { Boot(); };
             Resize += OnResize;
             FormClosing += OnFormClosing;
+        }
+
+        // ---- 右下角隐藏搜索框：键盘输入即唤出；回车打开 / ESC 取消 / 切换界面隐藏 ----
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            // 仅当搜索框未显示、且当前焦点不在文本类控件（避免劫持已有输入框）时，用数字键唤出。
+            if (_quickSearch != null && !_quickSearch.Visible
+                && !(ActiveControl is TextBox) && !(ActiveControl is ComboBox) && !(ActiveControl is RichTextBox))
+            {
+                Keys k = keyData & Keys.KeyCode;
+                if (((k >= Keys.D0 && k <= Keys.D9) || (k >= Keys.NumPad0 && k <= Keys.NumPad9))
+                    && (keyData & (Keys.Control | Keys.Alt)) == 0)
+                {
+                    int off = (k >= Keys.D0) ? ((int)k - (int)Keys.D0) : ((int)k - (int)Keys.NumPad0);
+                    ShowQuickSearch();
+                    _quickSearch.AppendText(((char)('0' + off)).ToString());
+                    return true;   // 已消费该按键，不再向下传递
+                }
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        private void ShowQuickSearch()
+        {
+            if (_quickSearch == null) return;
+            _quickPrevFocus = ActiveControl;
+            _quickSearch.Visible = true;
+            _quickSearch.BringToFront();
+            _quickSearch.Focus();
+        }
+
+        private void HideQuickSearch()
+        {
+            if (_quickSearch == null || !_quickSearch.Visible) return;
+            _quickSearch.Visible = false;
+            _quickSearch.Text = "";
+            Control prev = _quickPrevFocus;
+            _quickPrevFocus = null;
+            if (prev != null && !prev.IsDisposed && prev.Visible) prev.Focus();
         }
 
         #region 页面构建
@@ -623,6 +715,7 @@ namespace StockPool
         private void SelectTab(int index)
         {
             if (index < 0 || index >= _tabPages.Count) return;
+            HideQuickSearch();
             _tabIndex = index;
             for (int i = 0; i < _tabPages.Count; i++) _tabPages[i].Visible = (i == index);
             SkinTabs();
@@ -2453,6 +2546,42 @@ namespace StockPool
                 req.ContentLength = bytes.Length;
                 using (var s = req.GetRequestStream())
                     s.Write(bytes, 0, bytes.Length);
+                resp = (HttpWebResponse)req.GetResponse();
+                using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+                    body = sr.ReadToEnd();
+                return (int)resp.StatusCode < 400;
+            }
+            catch (WebException ex)
+            {
+                try
+                {
+                    if (ex.Response != null)
+                        using (var sr = new StreamReader(ex.Response.GetResponseStream(), Encoding.UTF8))
+                            body = sr.ReadToEnd();
+                }
+                catch { }
+                return false;
+            }
+            catch { return false; }
+            finally
+            {
+                if (resp != null)
+                {
+                    try { resp.Close(); } catch { }
+                }
+            }
+        }
+
+        private static bool GetText(string url, int timeoutMs, out string body)
+        {
+            body = "";
+            HttpWebResponse resp = null;
+            try
+            {
+                var req = (HttpWebRequest)WebRequest.Create(url);
+                req.Method = "GET";
+                req.Timeout = timeoutMs;
+                req.KeepAlive = false;
                 resp = (HttpWebResponse)req.GetResponse();
                 using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
                     body = sr.ReadToEnd();

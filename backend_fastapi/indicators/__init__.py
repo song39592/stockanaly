@@ -12,7 +12,21 @@ import `price_store` / `akshare` / 任何外部源**，只能 `from .data import
 from .base import compute, REGISTRY, indicator, ParamSpec, IndicatorMeta
 from .registry import list_indicators
 from . import data, base, registry
-from . import ma, macd, rsi  # 触发指标注册（每个指标一个文件，新增文件在此 import）
+
+# 自动发现并注册所有指标模块：新增一个 <id>.py 指标文件即被自动枚举，
+# 无需在本文件手动 import（每个指标文件用 @indicator 在导入时登记）。
+import importlib
+import pkgutil
+
+_EXCLUDE = {"__init__", "base", "registry", "data"}
+for _finder, _name, _ispkg in pkgutil.iter_modules(__path__):
+    if _ispkg or _name in _EXCLUDE:
+        continue
+    try:
+        importlib.import_module(f"{__name__}.{_name}")
+    except Exception as _exc:  # 单个指标文件异常不应拖垮整个包
+        import sys
+        print(f"[indicators] 跳过无法导入的指标模块 {_name}: {_exc}", file=sys.stderr)
 
 __all__ = [
     "compute", "list_indicators", "REGISTRY",

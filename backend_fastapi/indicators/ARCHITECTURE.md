@@ -27,8 +27,8 @@ backend_fastapi/indicators/
 ```
 
 > 本期**每个指标独立成文件，文件名即指标 id**（如 `ma.py` / `macd.py` / `rsi.py`）。
-> 新增指标时新建 `<id>.py` 并在 `__init__.py` 里 `from . import <id>` 触发注册即可；
-> `category` 仅作为注册元数据（前端分组用），不再是文件边界。
+> 新增指标时**只需新建 `<id>.py`**，`__init__.py` 会在包加载时**自动扫描目录**并 import 触发注册，
+> 无需手动在 `__init__.py` 里 `from . import <id>`；`category` 仅作为注册元数据（前端分组用），不再是文件边界。
 
 ---
 
@@ -60,7 +60,10 @@ backend_fastapi/indicators/
 ## 5. 指标注册机制 `base.py`
 
 每个指标是一个**普通函数**，用 `@indicator(...)` 装饰即完成登记。装饰时声明
-**面板位置 `panel`**，取值只能是 `"main"` / `"lower"` / `"right"`（非法值在模块导入时即报错）：
+**面板位置 `panel`**，取值只能是 `"main"` / `"lower"` / `"right"` / `"none"`（非法值在模块导入时即报错）：
+
+- `"none"`（**不显示类型**）：指标照常注册、可经 `compute` 计算（例如导出 / 内部辅助 / 暂不开放给界面），
+  但 `panel="none"` 时前端不把它放入任何渲染面板，即「能枚举到、能算、但不显示」。
 
 - `"main"`   主图叠加（共用主图价格坐标轴），如 MA / EMA / BOLL
 - `"lower"`  主图下方副图（与主图共享时间轴、独立 y 轴，可多个堆叠），如 MACD / RSI / KDJ
@@ -206,8 +209,9 @@ rightPanel:  Series[]            // 右侧并列面板
    一个文件只放一个指标；`category` 仅作为注册元数据（前端分组用），不再是文件边界。
 2. **写指标函数**：入参 `df`，返回 `{"series": [series_line(...), ...]}`，见 §5 示例。
 3. **加 `@indicator` 注册**：填唯一 `id`、中文 `name`、`category`、**`panel`**（main/lower/right）、以及 `params` 规格。
-4. **（若是新文件）**在 `indicators/__init__.py` 里 `from . import <id>`（如 `from . import rsi`）触发注册
-   （已注册的文件保持 import 即可）。
+4. **（若是新文件）无需手动登记**：`__init__.py` 会在包加载时自动扫描本目录并 import 新文件，
+   触发 `@indicator` 装饰器完成注册——直接跳过本步即可（请勿再手动在 `__init__.py` 里 `from . import <id>`，
+   否则重复导入无害但多余）。
 5. **本地验证**：
    ```python
    import indicators
