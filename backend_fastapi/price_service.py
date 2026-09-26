@@ -47,6 +47,33 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _to_hand_volume(volume, amount, close) -> float | None:
+    """把任意数据源的成交量归一成**手**（项目统一口径）。
+
+    判定依据：成交额 ≈ 收盘价 × 成交量(股)，因此
+      成交量(股) ≈ amount / close
+      成交量(手) ≈ amount / close / 100
+    若原始 volume 更接近「股」则 ÷100，更接近「手」则保持。
+
+    东财/通达信本就是手、腾讯接口内部 ×100 后是股、新浪是股——
+    用金额反推可兼容各路数据源，不依赖代码前缀特例，
+    也避免「腾讯对 sh688/sz000 等跳过 ×100」这类特例被遗漏。
+    """
+    if volume is None:
+        return None
+    if amount and close and close > 0 and amount > 0:
+        try:
+            vol_shares = float(amount) / float(close)     # 反推的股数
+            vol_hands = vol_shares / 100.0                # 反推的手数
+        except (TypeError, ValueError, ZeroDivisionError):
+            return volume
+        # 100 倍的差距远大于「成交均价 vs 收盘价」的误差，判定稳定
+        if abs(volume - vol_shares) <= abs(volume - vol_hands):
+            return volume / 100.0                         # 原始是股，转手
+        return volume                                     # 原始已是手
+    return volume
+
+
 def _date_text(value: Any) -> str:
     """日期归一成 YYYY-MM-DD；空值 / NaT / nan 一律返回空串（避免 "NaT" 这类字符串入库）。"""
     text = str(value or "")[:10].replace("/", "-")
@@ -71,7 +98,11 @@ def normalize_bars(frame) -> list[dict[str, Any]]:
             "high": _number(row.get("最高", row.get("high"))),
             "low": _number(row.get("最低", row.get("low"))),
             "close": _number(row.get("收盘", row.get("close"))),
-            "volume": _number(row.get("成交量", row.get("volume"))),
+            "volume": _to_hand_volume(
+                _number(row.get("成交量", row.get("volume"))),
+                _number(row.get("成交额", row.get("amount"))),
+                _number(row.get("收盘", row.get("close"))),
+            ),
             "amount": _number(row.get("成交额", row.get("amount"))),
             "amplitude": _number(row.get("振幅")),
             "change_pct": _number(row.get("涨跌幅")),

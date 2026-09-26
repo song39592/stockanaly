@@ -39,6 +39,7 @@ namespace StockPool
         private Label _stockSaoleiStatus;                   // 扫雷状态行
         private TableLayoutPanel _stockSaoleiList;          // 扫雷 · 风险清单 + 个股亮点
         private string _stockCurrent = null;
+        private readonly HashSet<string> _stockIndicators = new HashSet<string>();   // 已勾选的下方副图指标 id
         // AI 分析（调 /api/stock/research）
         private Label _stockAiStatus;                 // AI 分析状态
         private RichTextBox _stockAiBox;              // AI 分析 markdown 渲染框
@@ -243,6 +244,18 @@ namespace StockPool
             _stockKpi = VKpiRow();
             AddRow(b1, _stockKpi);
             AddRow(kTop, g1);
+
+            // 副图指标（lower 面板）勾选：勾选后拉取后端指标并叠加到 K 线下方副图
+            var indFlow = new FlowLayoutPanel();
+            indFlow.WrapContents = false;
+            indFlow.AutoSize = true;
+            indFlow.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            indFlow.Margin = new Padding(0, 0, 0, 6);
+            indFlow.Padding = new Padding(0);
+            var macdCb = Check("副图·MACD", false);
+            macdCb.CheckedChanged += delegate { StockSetIndicator("macd", macdCb.Checked); };
+            indFlow.Controls.Add(macdCb);
+            AddRow(kTop, indFlow);
 
             // 「更新至 …」栏已按需求移除；kTop 只保留概况，下方 K 线区域自动加高。
 
@@ -557,6 +570,115 @@ namespace StockPool
             _stockStatus.Tag = "bad";
             _stockStatus.ForeColor = Color.FromArgb(208, 57, 59);
             _stockKline.SetData(new List<KBar>(), new List<KBar>(), new List<KMark>());
+        }
+
+        // ---- 副图指标（lower 面板）：勾选 → 后端计算 → 按日期对齐 → 叠加到 K 线下方 ----
+        private void StockSetIndicator(string id, bool on)
+        {
+            if (on) _stockIndicators.Add(id); else _stockIndicators.Remove(id);
+            if (_stockCurrent != null) StockLoadIndicators(_stockCurrent);
+        }
+
+        private void StockLoadIndicators(string code)
+        {
+            if (_stockIndicators.Count == 0)
+            {
+                if (_stockKline != null) _stockKline.SetIndicators(new List<LowerPanel>());
+                return;
+            }
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    var items = new System.Collections.ArrayList();
+                    foreach (var id in _stockIndicators)
+                    {
+                        var it = new Dictionary<string, object>();
+                        it["id"] = id;
+                        it["params"] = new Dictionary<string, object>();
+                        items.Add(it);
+                    }
+                    var req = new Dictionary<string, object> { { "code", code }, { "items", items } };
+                    string json = new JavaScriptSerializer().Serialize(req);
+                    string body;
+                    if (!PostJson("http://127.0.0.1:8000/api/indicators/batch", json, 20000, out body) || string.IsNullOrEmpty(body))
+                        return;
+                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body);
+                    var itemsResp = VArr(VSafe(j, "items"));
+                    var dates = (_stockKline != null) ? _stockKline.GetDates() : new List<string>();
+                    var panels = new List<LowerPanel>();
+                    if (itemsResp != null)
+                    {
+                        foreach (Dictionary<string, object> it in itemsResp)
+                        {
+                            string id = VStr(VSafe(it, "id"));
+                            string name = VStr(VSafe(it, "name"));
+                            if (VSafe(it, "error") != null) continue;
+                            var sArr = VArr(VSafe(it, "series"));
+                            var panel = new LowerPanel { Id = id, Title = name, Weight = 1, Series = new List<ChartSeries>() };
+                            if (sArr != null)
+                            {
+                                foreach (Dictionary<string, object> s in sArr)
+                                {
+                                    string sname = VStr(VSafe(s, "name"));
+                                    string kind = VStr(VSafe(s, "kind"));
+                                    var dArr = VArr(VSafe(s, "data"));
+                                    var data = AlignSeries(dates, VSafe(s, "dates"), dArr);
+                                    panel.Series.Add(new ChartSeries { Name = sname, Kind = kind, Data = data, Color = LineColor(sname) });
+                                }
+                            }
+                            panels.Add(panel);
+                        }
+                    }
+                    Invoke((Action)delegate { if (_stockKline != null) _stockKline.SetIndicators(panels); });
+                }
+                catch { }
+            });
+        }
+
+        // 把后端返回的指标序列按 K 线日期对齐为等长数组（缺失填 NaN）
+        private static List<double> AlignSeries(List<string> dates, object datesObj, System.Collections.ArrayList dataArr)
+        {
+            var data = new List<double>();
+            for (int i = 0; i < dates.Count; i++) data.Add(double.NaN);
+            if (dataArr == null) return data;
+            var srcDates = new List<string>();
+            var dl = datesObj as System.Collections.ArrayList;
+            if (dl != null)
+                foreach (object d in dl) srcDates.Add(Convert.ToString(d));
+            if (srcDates.Count == dataArr.Count)
+            {
+                var map = new Dictionary<string, double>();
+                for (int k = 0; k < srcDates.Count; k++)
+                {
+                    object v = dataArr[k];
+                    map[srcDates[k]] = (v == null) ? double.NaN : Convert.ToDouble(v);
+                }
+                for (int i = 0; i < dates.Count; i++)
+                {
+                    double val;
+                    if (map.TryGetValue(dates[i], out val)) data[i] = val;
+                }
+            }
+            else
+            {
+                for (int i = 0; i < dates.Count && i < dataArr.Count; i++)
+                {
+                    object v = dataArr[i];
+                    data[i] = (v == null) ? double.NaN : Convert.ToDouble(v);
+                }
+            }
+            return data;
+        }
+
+        private static Color LineColor(string name)
+        {
+            if (name != null)
+            {
+                if (name.Contains("DIF")) return Color.FromArgb(240, 160, 60);
+                if (name.Contains("DEA")) return Color.FromArgb(57, 135, 229);
+            }
+            return Color.FromArgb(144, 133, 233);
         }
 
         private void StockRenderHistory(Dictionary<string, object> j)
@@ -1597,6 +1719,23 @@ namespace StockPool
             public string Text;
         }
 
+        // 指标副图（lower 面板）数据结构：一个面板含若干序列（线 / 柱）
+        private sealed class ChartSeries
+        {
+            public string Name;
+            public string Kind;          // "line" | "bar"
+            public List<double> Data;    // 与 K 线等长（按日期对齐），NaN 表示缺失
+            public Color Color;
+        }
+
+        private sealed class LowerPanel
+        {
+            public string Id;
+            public string Title;
+            public int Weight = 1;
+            public List<ChartSeries> Series = new List<ChartSeries>();
+        }
+
         private sealed class KLineChart : Control
         {
             private const int LeftPad = 54;
@@ -1611,6 +1750,7 @@ namespace StockPool
             private string _adjust = "qfq";                    // qfq 前复权 / raw 不复权
             private readonly List<KMark> _marks = new List<KMark>();
             private List<List<double>> _ma = new List<List<double>>();
+            private List<LowerPanel> _indicators = new List<LowerPanel>();   // 指标副图（lower）
             private int _range = 250;                          // 可见 K 线根数，0 = 全部
             private int _offset = 0;                           // 平移：从最新端向左偏移的根数
             private bool _dragging = false;
@@ -1668,6 +1808,21 @@ namespace StockPool
                 _range = r;
                 _offset = 0;
                 Invalidate();
+            }
+
+            /// <summary>设置下方指标副图（lower 面板）。传空列表即清除。</summary>
+            public void SetIndicators(List<LowerPanel> panels)
+            {
+                _indicators = panels ?? new List<LowerPanel>();
+                Invalidate();
+            }
+
+            /// <summary>当前显示口径下的交易日序列（副图数据按此对齐）。</summary>
+            public List<string> GetDates()
+            {
+                var d = new List<string>();
+                foreach (var b in _bars) d.Add(b.Date);
+                return d;
             }
 
             public override Size GetPreferredSize(Size proposedSize)
@@ -1861,12 +2016,33 @@ namespace StockPool
                 int n = vis.Count;
                 int plotW = Math.Max(20, Width - LeftPad - RightPad);
                 int totalH = Height - TopPad - BottomPad;
-                int mainH = (int)(totalH * (100 - VolRatio) / 100.0);
-                int volH = (int)(totalH * VolRatio / 100.0);
+                // 面板栈：主图（价格 + MA）→ 下方区（成交量 + 指标副图 lower）
+                double mainShare = 0.58;
                 int plotTop = TopPad;
-                int plotBottom = plotTop + mainH;
-                int volTop = plotBottom + 8;
+                int plotBottom = plotTop + (int)(totalH * mainShare);
+                int lowerTop = plotBottom + 8;
+                int lowerBottom = Height - BottomPad;
+                int lowerH = Math.Max(10, lowerBottom - lowerTop);
+                int indCount = _indicators.Count;
+                int volH = (int)(lowerH * 0.42);
+                int volTop = lowerTop;
                 int volBottom = volTop + volH;
+                int indTop = volBottom + 6;
+                int indBottom = lowerBottom;
+                // 指标副图矩形（每个均分指标区）
+                var indRects = new List<Rectangle>();
+                if (indCount > 0)
+                {
+                    int gap = 6;
+                    int eachH = (indBottom - indTop - gap * (indCount - 1)) / indCount;
+                    int y = indTop;
+                    for (int p = 0; p < indCount; p++)
+                    {
+                        indRects.Add(new Rectangle(LeftPad, y, plotW, Math.Max(12, eachH)));
+                        y += eachH + gap;
+                    }
+                }
+                int bottomMost = (indCount > 0) ? indBottom : volBottom;
 
                 // 价格区间（含 MA）
                 double pmin = double.MaxValue, pmax = double.MinValue;
@@ -1961,6 +2137,91 @@ namespace StockPool
                     }
                 }
 
+                // 指标副图（lower 面板）：与主图共享 x 轴 / 缩放 / 平移 / 悬停
+                for (int p = 0; p < indCount; p++)
+                {
+                    Rectangle rect = indRects[p];
+                    LowerPanel panel = _indicators[p];
+                    double ipmin = double.MaxValue, ipmax = double.MinValue;
+                    foreach (ChartSeries s in panel.Series)
+                        for (int i = 0; i < n; i++)
+                        {
+                            int gi = wstart + i;
+                            if (gi >= s.Data.Count) continue;
+                            double v = s.Data[gi];
+                            if (double.IsNaN(v)) continue;
+                            if (v < ipmin) ipmin = v;
+                            if (v > ipmax) ipmax = v;
+                        }
+                    if (ipmax <= ipmin) ipmax = ipmin + 1;
+                    double ppad = (ipmax - ipmin) * 0.12; ipmin -= ppad; ipmax += ppad;
+                    double ispan = ipmax - ipmin;
+                    Func<double, double> yInd = val => rect.Bottom - (val - ipmin) / ispan * rect.Height;
+                    using (var pen = new Pen(grid))
+                    {
+                        int gN = 2;
+                        for (int i = 0; i <= gN; i++)
+                        {
+                            double v = ipmin + ispan * i / gN;
+                            int y = (int)yInd(v);
+                            g.DrawLine(pen, LeftPad, y, LeftPad + plotW, y);
+                            using (var b2 = new SolidBrush(text)) g.DrawString(v.ToString("F2"), Font, b2, 2, y - 7);
+                        }
+                        g.DrawLine(pen, LeftPad, rect.Bottom, LeftPad + plotW, rect.Bottom);
+                    }
+                    foreach (ChartSeries s in panel.Series)
+                    {
+                        if (s.Kind == "bar")
+                        {
+                            for (int i = 0; i < n; i++)
+                            {
+                                int gi = wstart + i;
+                                if (gi >= s.Data.Count) continue;
+                                double v = s.Data[gi];
+                                if (double.IsNaN(v)) continue;
+                                int x = (int)xOf(i);
+                                Color c = v >= 0 ? Color.FromArgb(239, 83, 80) : Color.FromArgb(63, 185, 80);
+                                using (var br = new SolidBrush(c))
+                                {
+                                    int zero = (int)yInd(0);
+                                    int top = v >= 0 ? (int)yInd(v) : zero;
+                                    int h = Math.Abs((int)yInd(v) - zero);
+                                    if (h < 1) h = 1;
+                                    g.FillRectangle(br, (int)(x - bodyW / 2), top, (int)bodyW, h);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            using (var pen = new Pen(s.Color, 1.4f))
+                            {
+                                bool penUp = false;
+                                for (int i = 0; i < n; i++)
+                                {
+                                    int gi = wstart + i;
+                                    if (gi >= s.Data.Count) { penUp = false; continue; }
+                                    double v = s.Data[gi];
+                                    if (double.IsNaN(v)) { penUp = false; continue; }
+                                    int x = (int)xOf(i);
+                                    int y = (int)yInd(v);
+                                    if (penUp) g.DrawLine(pen, (int)xOf(i - 1), (int)yInd(s.Data[wstart + i - 1]), x, y);
+                                    penUp = true;
+                                }
+                            }
+                        }
+                    }
+                    int lx = LeftPad + 4; int ly = rect.Top + 2;
+                    using (var b = new SolidBrush(text))
+                    {
+                        g.DrawString(panel.Title, Font, b, lx, ly); lx += 44;
+                        foreach (ChartSeries s in panel.Series)
+                        {
+                            using (var pen = new Pen(s.Color, 2f)) g.DrawLine(pen, lx, ly + 7, lx + 14, ly + 7);
+                            g.DrawString(s.Name, Font, b, lx + 18, ly); lx += 58;
+                        }
+                    }
+                }
+
                 // 标记（入池/出池/事件）
                 var idxMap = new Dictionary<string, int>();
                 for (int i = 0; i < vis.Count; i++) idxMap[vis[i].Date] = i;
@@ -1989,7 +2250,7 @@ namespace StockPool
                 {
                     int x = (int)xOf(_hoverIndex);
                     using (var pen = new Pen(Color.FromArgb(150, 158, 172)))
-                        g.DrawLine(pen, x, plotTop, x, volBottom);
+                        g.DrawLine(pen, x, plotTop, x, bottomMost);
                 }
 
                 // 日期刻度
@@ -2006,7 +2267,8 @@ namespace StockPool
                             if (d.Length >= 5) d = d.Substring(5);   // MM-DD
                             int x = (int)xOf(idx);
                             var fmt = new StringFormat { Alignment = StringAlignment.Center };
-                            g.DrawString(d, Font, b3, new RectangleF((float)(x - slot / 2), (float)(volBottom + 2), (float)slot, (float)BottomPad), fmt);
+                            int labelW = step > 0 ? step : 1;   // 标签间距（根），避免矩形过窄被裁
+                            g.DrawString(d, Font, b3, new RectangleF((float)(x - labelW * slot / 2), (float)(bottomMost + 2), (float)(labelW * slot), (float)BottomPad), fmt);
                         }
                     }
                 }
@@ -2020,7 +2282,7 @@ namespace StockPool
                 {
                     g.DrawString("滚轮缩放 · 拖动平移 · " + (_adjust == "raw" ? "不复权" : "前复权"),
                         new Font("Microsoft YaHei UI", 8.5f), hb,
-                        new RectangleF(0, volBottom + 1, Width - 4, BottomPad), fmt);
+                        new RectangleF(0, bottomMost + 1, Width - 4, BottomPad), fmt);
                 }
             }
 
