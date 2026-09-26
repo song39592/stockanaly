@@ -39,7 +39,8 @@ namespace StockPool
         private Label _stockSaoleiStatus;                   // 扫雷状态行
         private TableLayoutPanel _stockSaoleiList;          // 扫雷 · 风险清单 + 个股亮点
         private string _stockCurrent = null;
-        private readonly HashSet<string> _stockIndicators = new HashSet<string>();   // 已勾选的下方副图指标 id
+        private readonly HashSet<string> _stockIndicators = new HashSet<string>();   // 已勾选的指标 id（跨面板）
+        private FlowLayoutPanel _stockIndFlow;                                       // 指标勾选区（动态生成）
         // AI 分析（调 /api/stock/research）
         private Label _stockAiStatus;                 // AI 分析状态
         private RichTextBox _stockAiBox;              // AI 分析 markdown 渲染框
@@ -245,17 +246,15 @@ namespace StockPool
             AddRow(b1, _stockKpi);
             AddRow(kTop, g1);
 
-            // 副图指标（lower 面板）勾选：勾选后拉取后端指标并叠加到 K 线下方副图
-            var indFlow = new FlowLayoutPanel();
-            indFlow.WrapContents = false;
-            indFlow.AutoSize = true;
-            indFlow.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            indFlow.Margin = new Padding(0, 0, 0, 6);
-            indFlow.Padding = new Padding(0);
-            var macdCb = Check("副图·MACD", false);
-            macdCb.CheckedChanged += delegate { StockSetIndicator("macd", macdCb.Checked); };
-            indFlow.Controls.Add(macdCb);
-            AddRow(kTop, indFlow);
+            // 指标勾选：从后端 /api/indicators 自动枚举，按 panel 分组（主图 / 副图），none 类型不显示
+            _stockIndFlow = new FlowLayoutPanel();
+            _stockIndFlow.WrapContents = true;
+            _stockIndFlow.AutoSize = true;
+            _stockIndFlow.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            _stockIndFlow.Margin = new Padding(0, 0, 0, 6);
+            _stockIndFlow.Padding = new Padding(0);
+            AddRow(kTop, _stockIndFlow);
+            StockRefreshIndicatorList();   // 异步拉取指标清单并动态生成勾选项
 
             // 「更新至 …」栏已按需求移除；kTop 只保留概况，下方 K 线区域自动加高。
 
@@ -495,6 +494,7 @@ namespace StockPool
                 _stockHint.Text = "数据加载中…";
             }
             _stockCurrent = code;
+            StockRefreshIndicatorList();   // 每次打开同步后端指标清单（后端可能刚启动）
             StockAddHistory(code, null);   // 记录查看历史（名称稍后补全）
             StockLoadName(code);
             StockLoadHistory(code, false);
@@ -579,11 +579,63 @@ namespace StockPool
             if (_stockCurrent != null) StockLoadIndicators(_stockCurrent);
         }
 
+        // 从后端自动枚举指标清单，按 panel 分组动态生成勾选框（none 类型不显示）
+        private void StockRefreshIndicatorList()
+        {
+            if (_stockIndFlow == null) return;
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    string body;
+                    if (!GetText("http://127.0.0.1:8000/api/indicators", 15000, out body) || string.IsNullOrEmpty(body))
+                        return;
+                    var list = new JavaScriptSerializer().Deserialize<System.Collections.ArrayList>(body);
+                    var groups = new System.Collections.SortedList<string, List<Dictionary<string, object>>>();
+                    if (list != null)
+                    {
+                        foreach (Dictionary<string, object> it in list)
+                        {
+                            string panel = VStr(VSafe(it, "panel"));
+                            if (panel == "none") continue;                   // 不显示类型：不进勾选列表
+                            string grp = (panel == "main") ? "主图" : "副图";
+                            if (!groups.ContainsKey(grp)) groups[grp] = new List<Dictionary<string, object>>();
+                            groups[grp].Add(it);
+                        }
+                    }
+                    Invoke((Action)delegate { BuildIndicatorToggles(groups); });
+                }
+                catch { }
+            });
+        }
+
+        private void BuildIndicatorToggles(System.Collections.SortedList<string, List<Dictionary<string, object>>> groups)
+        {
+            if (_stockIndFlow == null) return;
+            _stockIndFlow.Controls.Clear();
+            foreach (var kv in groups)
+            {
+                _stockIndFlow.Controls.Add(Lbl(kv.Key + "："));
+                foreach (var it in kv.Value)
+                {
+                    string id = VStr(VSafe(it, "id"));
+                    string name = VStr(VSafe(it, "name"));
+                    var cb = Check(name, _stockIndicators.Contains(id));
+                    cb.CheckedChanged += delegate { StockSetIndicator(id, cb.Checked); };
+                    _stockIndFlow.Controls.Add(cb);
+                }
+            }
+        }
+
         private void StockLoadIndicators(string code)
         {
             if (_stockIndicators.Count == 0)
             {
-                if (_stockKline != null) _stockKline.SetIndicators(new List<LowerPanel>());
+                if (_stockKline != null)
+                {
+                    _stockKline.SetIndicators(new List<LowerPanel>());
+                    _stockKline.SetMainIndicators(new List<ChartSeries>());
+                }
                 return;
             }
             System.Threading.Tasks.Task.Run(delegate
@@ -607,30 +659,53 @@ namespace StockPool
                     var itemsResp = VArr(VSafe(j, "items"));
                     var dates = (_stockKline != null) ? _stockKline.GetDates() : new List<string>();
                     var panels = new List<LowerPanel>();
+                    var mainSeries = new List<ChartSeries>();
                     if (itemsResp != null)
                     {
                         foreach (Dictionary<string, object> it in itemsResp)
                         {
                             string id = VStr(VSafe(it, "id"));
                             string name = VStr(VSafe(it, "name"));
+                            string panel = VStr(VSafe(it, "panel"));
                             if (VSafe(it, "error") != null) continue;
                             var sArr = VArr(VSafe(it, "series"));
-                            var panel = new LowerPanel { Id = id, Title = name, Weight = 1, Series = new List<ChartSeries>() };
-                            if (sArr != null)
+                            if (sArr == null) continue;
+                            if (panel == "main")
                             {
+                                // 主图叠加：序列直接叠加到价格轴
                                 foreach (Dictionary<string, object> s in sArr)
                                 {
                                     string sname = VStr(VSafe(s, "name"));
                                     string kind = VStr(VSafe(s, "kind"));
                                     var dArr = VArr(VSafe(s, "data"));
                                     var data = AlignSeries(dates, VSafe(s, "dates"), dArr);
-                                    panel.Series.Add(new ChartSeries { Name = sname, Kind = kind, Data = data, Color = LineColor(sname) });
+                                    mainSeries.Add(new ChartSeries { Name = sname, Kind = kind, Data = data, Color = LineColor(sname) });
                                 }
                             }
-                            panels.Add(panel);
+                            else
+                            {
+                                // lower / right：作为下方副图面板
+                                var lp = new LowerPanel { Id = id, Title = name, Weight = 1, Series = new List<ChartSeries>() };
+                                foreach (Dictionary<string, object> s in sArr)
+                                {
+                                    string sname = VStr(VSafe(s, "name"));
+                                    string kind = VStr(VSafe(s, "kind"));
+                                    var dArr = VArr(VSafe(s, "data"));
+                                    var data = AlignSeries(dates, VSafe(s, "dates"), dArr);
+                                    lp.Series.Add(new ChartSeries { Name = sname, Kind = kind, Data = data, Color = LineColor(sname) });
+                                }
+                                panels.Add(lp);
+                            }
                         }
                     }
-                    Invoke((Action)delegate { if (_stockKline != null) _stockKline.SetIndicators(panels); });
+                    Invoke((Action)delegate
+                    {
+                        if (_stockKline != null)
+                        {
+                            _stockKline.SetIndicators(panels);
+                            _stockKline.SetMainIndicators(mainSeries);
+                        }
+                    });
                 }
                 catch { }
             });
@@ -1751,6 +1826,7 @@ namespace StockPool
             private readonly List<KMark> _marks = new List<KMark>();
             private List<List<double>> _ma = new List<List<double>>();
             private List<LowerPanel> _indicators = new List<LowerPanel>();   // 指标副图（lower）
+            private List<ChartSeries> _mainIndicators = new List<ChartSeries>();   // 主图叠加指标（main 面板）
             private int _range = 250;                          // 可见 K 线根数，0 = 全部
             private int _offset = 0;                           // 平移：从最新端向左偏移的根数
             private bool _dragging = false;
@@ -1814,6 +1890,13 @@ namespace StockPool
             public void SetIndicators(List<LowerPanel> panels)
             {
                 _indicators = panels ?? new List<LowerPanel>();
+                Invalidate();
+            }
+
+            /// <summary>设置主图叠加指标（main 面板）。传空列表即清除。</summary>
+            public void SetMainIndicators(List<ChartSeries> series)
+            {
+                _mainIndicators = series ?? new List<ChartSeries>();
                 Invalidate();
             }
 
@@ -2119,6 +2202,44 @@ namespace StockPool
                         int top = Math.Min(yO, yC);
                         int h = Math.Max(1, Math.Abs(yC - yO));
                         g.FillRectangle(br, (int)(x - bodyW / 2), top, (int)bodyW, h);
+                    }
+                }
+
+                // 主图叠加指标（main 面板）：在价格轴范围内绘制线 / 柱
+                foreach (ChartSeries s in _mainIndicators)
+                {
+                    if (s.Data == null) continue;
+                    if (s.Kind == "bar")
+                    {
+                        using (var br = new SolidBrush(s.Color))
+                        {
+                            for (int i = 0; i < s.Data.Count && i < n; i++)
+                            {
+                                double v = s.Data[i];
+                                if (double.IsNaN(v)) continue;
+                                int x = (int)xOf(i);
+                                int y = (int)yOf(v);
+                                int y0 = plotBottom;
+                                int top = Math.Min(y, y0), hh = Math.Max(1, Math.Abs(y - y0));
+                                g.FillRectangle(br, (int)(x - bodyW / 2), top, (int)bodyW, hh);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        using (var pen = new Pen(s.Color, 1.4f))
+                        {
+                            bool penUp = false;
+                            for (int i = 0; i < s.Data.Count && i < n; i++)
+                            {
+                                double v = s.Data[i];
+                                if (double.IsNaN(v)) { penUp = false; continue; }
+                                int x = (int)xOf(i);
+                                int y = (int)yOf(v);
+                                if (penUp) g.DrawLine(pen, (int)xOf(i - 1), (int)yOf(s.Data[i - 1]), x, y);
+                                penUp = true;
+                            }
+                        }
                     }
                 }
 

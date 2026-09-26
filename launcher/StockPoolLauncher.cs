@@ -2479,6 +2479,42 @@ namespace StockPool
             }
         }
 
+        private static bool GetText(string url, int timeoutMs, out string body)
+        {
+            body = "";
+            HttpWebResponse resp = null;
+            try
+            {
+                var req = (HttpWebRequest)WebRequest.Create(url);
+                req.Method = "GET";
+                req.Timeout = timeoutMs;
+                req.KeepAlive = false;
+                resp = (HttpWebResponse)req.GetResponse();
+                using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+                    body = sr.ReadToEnd();
+                return (int)resp.StatusCode < 400;
+            }
+            catch (WebException ex)
+            {
+                try
+                {
+                    if (ex.Response != null)
+                        using (var sr = new StreamReader(ex.Response.GetResponseStream(), Encoding.UTF8))
+                            body = sr.ReadToEnd();
+                }
+                catch { }
+                return false;
+            }
+            catch { return false; }
+            finally
+            {
+                if (resp != null)
+                {
+                    try { resp.Close(); } catch { }
+                }
+            }
+        }
+
         #endregion
 
         #region 日志 / 打开动作
