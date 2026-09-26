@@ -121,7 +121,11 @@ def _bar_problem(bar: dict[str, Any]) -> str | None:
 
 def fetch_daily(code: str, start: dt.date, end: dt.date,
                 adjust: str = "raw") -> tuple[list[dict[str, Any]], str, list[str]]:
-    """抓取并校验某区间的日 K（东财优先，不可用则降级腾讯）。
+    """抓取并校验某区间的日 K。
+
+    数据源策略：
+      - **北交所**（920 新段 + 原精选层 8/4 段）：东财/腾讯常取不到，统一走新浪；
+      - 其余：东方财富优先，失败降级腾讯证券。
 
     **只抓取、不写库**——所有写库都由调用方在抓取成功后进行，
     这样数据源失败时库里的原数据保持不动（供「全量重抓修复」使用）。
@@ -129,26 +133,26 @@ def fetch_daily(code: str, start: dt.date, end: dt.date,
     """
     store_adjust = price_store._store_adjust(adjust)
     ak_adjust = _AK_ADJUST.get(store_adjust, store_adjust)
-    source = "东方财富"
-    frame = _ak(
-        ak.stock_zh_a_hist,
-        symbol=code,
-        period="daily",
-        start_date=start.strftime("%Y%m%d"),
-        end_date=end.strftime("%Y%m%d"),
-        adjust=ak_adjust,
-        timeout=30,
-    )
-    if frame is None or getattr(frame, "empty", True):
-        source = "腾讯证券"
-        frame = _ak(
-            ak.stock_zh_a_hist_tx,
-            symbol=market_symbol(code),
-            start_date=start.strftime("%Y%m%d"),
-            end_date=end.strftime("%Y%m%d"),
-            adjust=ak_adjust,
-            timeout=35,
-        )
+    sd, ed = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+
+    # 北交所（920 新段 + 原精选层 8/4 段）：东财/腾讯接口对该段常返回空，改走新浪
+    if code.startswith(("920", "8", "4")):
+        source = "新浪财经"
+        frame = _ak(ak.stock_zh_a_daily, symbol=market_symbol(code),
+                    start_date=sd, end_date=ed, adjust=ak_adjust, timeout=35)
+        if frame is None or getattr(frame, "empty", True):
+            source = "东方财富"
+            frame = _ak(ak.stock_zh_a_hist, symbol=code, period="daily",
+                        start_date=sd, end_date=ed, adjust=ak_adjust, timeout=30)
+    else:
+        source = "东方财富"
+        frame = _ak(ak.stock_zh_a_hist, symbol=code, period="daily",
+                    start_date=sd, end_date=ed, adjust=ak_adjust, timeout=30)
+        if frame is None or getattr(frame, "empty", True):
+            source = "腾讯证券"
+            frame = _ak(ak.stock_zh_a_hist_tx, symbol=market_symbol(code),
+                        start_date=sd, end_date=ed, adjust=ak_adjust, timeout=35)
+
     bars = normalize_bars(frame)
     if not bars:
         raise RuntimeError("行情数据源未返回日 K")
@@ -293,7 +297,8 @@ def sync_factors(code: str) -> dict[str, Any]:
     """
     frame = _ak(ak.stock_zh_a_daily, symbol=market_symbol(code), adjust="hfq-factor", timeout=30)
     if frame is None or getattr(frame, "empty", True):
-        raise RuntimeError("复权因子数据源未返回数据")
+        # 数据源未返回因子（如 CDR、部分北交所）：不阻断整只下载，留空即可
+        return {"count": 0, "source": "新浪", "note": "复权因子数据源未返回数据"}
     rows = []
     for _, row in frame.iterrows():
         ex_date = _date_text(row.get("date"))
@@ -302,7 +307,7 @@ def sync_factors(code: str) -> dict[str, Any]:
             rows.append({"ex_date": ex_date, "hfq_factor": factor})
     count = price_store.upsert_factors(code, rows, source="新浪")
     if not count:
-        raise RuntimeError("复权因子解析后为空")
+        return {"count": 0, "source": "新浪", "note": "复权因子解析后为空"}
     return {"count": count, "source": "新浪"}
 
 
