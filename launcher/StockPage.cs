@@ -591,7 +591,7 @@ namespace StockPool
                     if (!GetText("http://127.0.0.1:8000/api/indicators", 15000, out body) || string.IsNullOrEmpty(body))
                         return;
                     var list = new JavaScriptSerializer().Deserialize<System.Collections.ArrayList>(body);
-                    var groups = new System.Collections.SortedList<string, List<Dictionary<string, object>>>();
+                    var groups = new System.Collections.Generic.SortedList<string, List<Dictionary<string, object>>>();
                     if (list != null)
                     {
                         foreach (Dictionary<string, object> it in list)
@@ -609,7 +609,7 @@ namespace StockPool
             });
         }
 
-        private void BuildIndicatorToggles(System.Collections.SortedList<string, List<Dictionary<string, object>>> groups)
+        private void BuildIndicatorToggles(System.Collections.Generic.SortedList<string, List<Dictionary<string, object>>> groups)
         {
             if (_stockIndFlow == null) return;
             _stockIndFlow.Controls.Clear();
