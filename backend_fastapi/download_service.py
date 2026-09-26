@@ -530,6 +530,19 @@ def _downloaded_staleness() -> tuple[int, int, list[str], str | None]:
     return len(latest), len(stale), stale[:10], max(str(day) for day in latest.values())
 
 
+# 长期停牌 / 已无新数据的股票天然落后，不该因此锁死自动更新：
+# 允许「落后超过 FRESHNESS_DAYS 天的只数」在 10 只或已下载总数的 1% 以内（取大者）。
+STALE_TOLERANCE_MIN = 10
+STALE_TOLERANCE_RATIO = 0.01
+
+
+def _auto_eligible(downloaded: int, stale: int) -> bool:
+    """能否开启「每天自动更新」：历史基本到位即算过（容忍少量停牌股）。"""
+    if downloaded <= 0:
+        return False
+    return stale <= max(STALE_TOLERANCE_MIN, int(downloaded * STALE_TOLERANCE_RATIO))
+
+
 def _options_for(mode: str, *, source: str = SOURCE_ONLINE, start_date: str | None = None,
                  concurrency: int = DEFAULT_CONCURRENCY,
                  rate_limit: float = DEFAULT_RATE_LIMIT,
@@ -791,10 +804,10 @@ def update_settings(*, auto_update: bool | None = None, idle_download: bool | No
         download_store.set_setting("auto_update", "1" if auto_update else "0")
     if auto_update:
         downloaded, stale, _, _ = _downloaded_staleness()
-        if downloaded == 0 or stale > 0:
+        if not _auto_eligible(downloaded, stale):
             raise ValueError(
                 f"暂时不能开启自动更新：已下载 {downloaded} 只，"
-                f"其中 {stale} 只落后超过 {FRESHNESS_DAYS} 天。"
+                f"其中 {stale} 只落后超过 {FRESHNESS_DAYS} 天（超出容忍范围）。"
                 f"请先把历史补齐（可用「后台闲时下载」），再开启。")
         _kick_auto_update()
     if idle_download:
@@ -821,7 +834,7 @@ def auto_state(force: bool = False) -> dict[str, Any]:
         "stale": stale,
         "stale_examples": examples,
         "latest_date": latest_date,
-        "eligible": downloaded > 0 and stale == 0,
+        "eligible": _auto_eligible(downloaded, stale),
         "freshness_days": FRESHNESS_DAYS,
         "checked_at": db.now_iso(),
         "cached": False,
