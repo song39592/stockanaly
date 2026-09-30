@@ -23,6 +23,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import sys
+import json
 import threading
 import time
 
@@ -614,7 +615,7 @@ def _ths_market_flow(errors):
     box: dict = {}
 
     def fetch_individual():
-        box["individual"] = _ak(ak.stock_fund_flow_individual, symbol="即时")
+        box["individual"] = _ak(ak.stock_fund_flow_individual, symbol=sym)
 
     def fetch_big_deal():
         box["big_deal"] = _ak(ak.stock_fund_flow_big_deal)
@@ -811,9 +812,12 @@ def _rank_sectors(df, errors, label, top=10):
             net = _num(row.get("净额"))
             if net is None:
                 continue
+            pct = _num(row.get("行业-涨跌幅"))
+            if pct is None:
+                pct = _num(row.get("阶段涨跌幅"))   # 多日（近5/10日）口径列名为「阶段涨跌幅」
             rows.append({
                 "name": str(row.get("行业")),
-                "pct": _num(row.get("行业-涨跌幅")),
+                "pct": pct,
                 "net": net,
                 "inflow": _num(row.get("流入资金")),
                 "outflow": _num(row.get("流出资金")),
@@ -880,31 +884,37 @@ def _sw_first_sectors_hist(date_str, errors, top=10):
     return {"top": rows[:top], "bottom": list(reversed(rows[-top:])), "count": len(rows)}
 
 
-def sector_beta(date=None):
+_SECTOR_WINDOW_SYMBOL = {"今日": "即时", "5日": "5日排行", "10日": "10日排行"}
+
+
+def sector_beta(date=None, window="今日"):
     """③ 板块β。
 
-    date 为空：行业 / 概念 / 申万三个数据源并行抓取实时数据。
-    date 指定历史交易日：申万一级行业按该日收盘计算涨跌；行业/概念资金流无历史数据源，返回空。
+    date 为空：行业 / 概念 / 申万三个数据源并行抓取；行业/概念资金流支持 window
+               （今日=实时，5日 / 10日=近 N 日净流入排名，数据源同花顺）。
+    date 指定历史交易日：申万一级行业按该日收盘计算涨跌；行业/概念为实时/近 N 日口径，
+                       不对应单一历史交易日，故该分支返回空。
     """
+    sym = _SECTOR_WINDOW_SYMBOL.get(window, "即时")
     def build():
         errors = []
         if date:
             empty_flow = {"top_in": [], "top_out": [], "count": 0}
-            errors.append("行业/概念板块资金流仅有实时数据，历史交易日不显示")
+            errors.append("行业/概念板块资金流为实时/近N日口径，指定历史交易日不显示")
             return {"ok": True, "as_of": _now_str(), "trade_date": date, "historical": True,
                     "industry": empty_flow, "concept": dict(empty_flow),
                     "sw_first": _sw_first_sectors_hist(date, errors), "errors": errors}
         parts: dict = {}
 
         def fetch_industry():
-            df = _ak(ak.stock_fund_flow_industry, symbol="即时")
+            df = _ak(ak.stock_fund_flow_industry, symbol=sym)
             if df is None or getattr(df, "empty", True):
                 errors.append("行业板块资金流获取失败（同花顺）")
                 return {"top_in": [], "top_out": [], "count": 0}
             return _rank_sectors(df, errors, "行业板块资金流")
 
         def fetch_concept():
-            df = _ak(ak.stock_fund_flow_concept, symbol="即时")
+            df = _ak(ak.stock_fund_flow_concept, symbol=sym)
             if df is None or getattr(df, "empty", True):
                 errors.append("概念板块资金流获取失败（同花顺）")
                 return {"top_in": [], "top_out": [], "count": 0}
@@ -944,7 +954,7 @@ def sector_beta(date=None):
                 "sw_first": parts.get("sw_first") or empty_sw,
                 "errors": errors}
 
-    data, cached = _cached(f"sector_beta:{date or 'rt'}", build,
+    data, cached = _cached(f"sector_beta:{date or 'rt'}:{window}", build,
                            ttl=HIST_CACHE_TTL if date else _ttl(90))
     return {**data, "cached": cached}
 
@@ -1125,3 +1135,96 @@ def big_loss(date=None):
     data, cached = _cached(f"big_loss:{date or 'auto'}", build,
                            ttl=HIST_CACHE_TTL if date else _ttl(120))
     return {**data, "cached": cached}
+
+
+def market_ai_digest(date=None):
+    """汇总盘面五大维度，裁剪后转成结构化文本，供 AI 分析投喂（避免 prompt 过大）。
+
+    投喂内容：① 外围环境 ② 大盘资金 ③ 当日板块资金流 ④ 5 日板块资金流
+             ⑤ 连板梯队 ⑥ 跌停大面。
+    返回 (text, errors)：text 为 json 文本，errors 为各数据源的告警汇总。
+    """
+    g = global_market(date) or {}
+    cap = capital_flow(date) or {}
+    ind_today = sector_beta(date, "今日") or {}
+    ind_5d = sector_beta(date, "5日") or {}
+    ladder = limit_up_ladder(date) or {}
+    loss = big_loss(date) or {}
+
+    def sectors_full(block):
+        out = []
+        for key in ("industry", "concept"):
+            sub = (block or {}).get(key) or {}
+            prefix = "行业" if key == "industry" else "概念"
+            for arr in (sub.get("top_in") or [], sub.get("top_out") or []):
+                for r in arr[:10]:
+                    out.append({
+                        "类型": prefix, "名称": r.get("name"), "净额(亿)": r.get("net"),
+                        "涨跌幅%": r.get("pct"), "流入(亿)": r.get("inflow"),
+                        "流出(亿)": r.get("outflow"), "领涨股": r.get("leader"),
+                        "公司家数": r.get("count"),
+                    })
+        return out
+
+    def cut(lst, n=15):
+        return (lst or [])[:n]
+
+    adv = (cap.get("adv_dec") or {})
+    flow = (cap.get("main_flow") or {})
+    turn = (cap.get("turnover") or {})
+
+    digest = {
+        "外围环境": [
+            {"板块": grp.get("name"), "标的": [
+                {"名称": it.get("name"), "涨跌幅%": it.get("pct"), "最新价": it.get("value")}
+                for it in (grp.get("items") or [])[:10]
+            ]}
+            for grp in (g.get("groups") or [])
+        ],
+        "大盘资金": {
+            "日期": flow.get("date"),
+            "主力净流入(亿)": flow.get("main_net"),
+            "主力净占比%": flow.get("main_pct"),
+            "超大单方向": flow.get("super_direction"),
+            "大单净流入(亿)": flow.get("big_net"),
+            "两市成交额(亿)": turn.get("total"),
+            "上涨家数": adv.get("up"),
+            "下跌家数": adv.get("down"),
+            "涨停家数": adv.get("limit_up"),
+            "跌停家数": adv.get("limit_down"),
+        },
+        "板块资金流_当日": sectors_full(ind_today),
+        "板块资金流_5日": sectors_full(ind_5d),
+        "连板梯队": {
+            "交易日": ladder.get("trade_date"),
+            "涨停总数": ladder.get("total"),
+            "最高连板": ladder.get("max_level"),
+            "连板结构": ladder.get("structure"),
+            "晋级率": ladder.get("promotion"),
+            "代表个股": [
+                {"名称": s.get("name"), "代码": s.get("code"), "连板数": s.get("level"),
+                 "涨跌幅%": s.get("pct"), "行业": s.get("industry"), "涨停统计": s.get("stat")}
+                for s in cut(ladder.get("stocks"), 15)
+            ],
+        },
+        "跌停大面": {
+            "交易日": loss.get("trade_date"),
+            "炸板(回撤最大在前)": [
+                {"名称": s.get("name"), "涨跌幅%": s.get("pct"), "回撤%": s.get("drawdown"),
+                 "行业": s.get("industry")}
+                for s in cut(loss.get("blasted"), 15)
+            ],
+            "跌停": [
+                {"名称": s.get("name"), "涨跌幅%": s.get("pct"), "连续跌停": s.get("continuous"),
+                 "行业": s.get("industry")}
+                for s in cut(loss.get("limit_down"), 15)
+            ],
+        },
+    }
+
+    errors = []
+    for src in (g, cap, ind_today, ind_5d, ladder, loss):
+        for e in (src.get("errors") or []):
+            errors.append(e)
+    text = json.dumps(digest, ensure_ascii=False, indent=2)
+    return text, errors
