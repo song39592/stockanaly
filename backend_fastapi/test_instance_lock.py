@@ -46,7 +46,8 @@ class InstanceLockTest(unittest.TestCase):
             f"print(os.getpid(), flush=True)\n"
             f"time.sleep(30)\n"
         )
-        proc = subprocess.Popen([sys.executable, "-c", code],
+        # 直接启动真实解释器，避免 Windows venv 转发器退出后仍遗留持锁子进程。
+        proc = subprocess.Popen([getattr(sys, "_base_executable", sys.executable), "-c", code],
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         reported = proc.stdout.readline().strip()
         self.assertTrue(reported.isdigit(), f"子进程未成功持锁：{reported!r}")

@@ -4,11 +4,13 @@ from pathlib import Path
 
 import db
 import history_store
+from test_support import isolate_crypto
 
 
 class HistoryStoreTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        isolate_crypto(self, Path(self.tmp.name))
         db.DATA_DIR = Path(self.tmp.name)
         db.DB_PATH = Path(self.tmp.name) / "history.db"
         history_store.init_db()

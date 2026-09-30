@@ -7,11 +7,13 @@ import pandas as pd
 import db
 import price_service
 import price_store
+from test_support import isolate_crypto
 
 
 class PriceStoreTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        isolate_crypto(self, Path(self.tmp.name))
         db.DATA_DIR = Path(self.tmp.name)
         db.DB_PATH = Path(self.tmp.name) / "history.db"
         db.BARS_DIR = Path(self.tmp.name) / "bars"

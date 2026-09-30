@@ -195,10 +195,15 @@ def get_setting(key: str, default: str = "") -> str:
 
 
 def set_setting(key: str, value: str) -> None:
+    set_settings({key: value})
+
+
+def set_settings(values: dict[str, str]) -> None:
+    """同一次用户操作的设置全部提交或全部回滚。"""
     with connect() as conn:
-        conn.execute(
+        conn.executemany(
             "INSERT OR REPLACE INTO download_settings(key,value,updated_at) VALUES(?,?,?)",
-            (key, str(value), now_iso()))
+            [(key, str(value), now_iso()) for key, value in values.items()])
 
 
 def settings_map() -> dict[str, str]:

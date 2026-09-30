@@ -103,6 +103,7 @@ namespace StockPool
                 };
                 p.Exited += delegate(object s, EventArgs e)
                 {
+                    Starting = false;
                     if (log != null) log(Name + " 进程已退出");
                 };
                 p.Start();
@@ -412,6 +413,11 @@ namespace StockPool
         private TextBox _tbNode;
         private TextBox _tbRoot;
         private TextBox _tbDataDir;
+        private Label _lbDataDirState;
+        private Button _btnSaveDataDir;
+        private bool _savingDataDir;
+        private bool _statusRefreshing;
+        private int _dataDirRound;
         private TextBox _tbTdx;
         private Label _lbTdx;
         private Dictionary<string, object> _lastTdxStatus;
@@ -1399,6 +1405,12 @@ namespace StockPool
             _tbDataDir = new TextBox();
             _tbDataDir.Width = 430;
             AddRow(body, Row(Lbl("数据目录（stockanaly-data）"), _tbDataDir));
+            _lbDataDirState = Mute(Lbl("正在读取当前与已保存的数据目录…"));
+            _lbDataDirState.AutoSize = false;
+            _lbDataDirState.Width = 760;
+            _lbDataDirState.Height = 50;
+            AddRow(body, Row(_lbDataDirState));
+            _btnSaveDataDir = MiniBtn("保存目录", delegate { SaveDataDir(); }, 100);
             AddRow(body, Row(MiniBtn("浏览…", delegate
             {
                 using (var dlg = new FolderBrowserDialog())
@@ -1409,9 +1421,10 @@ namespace StockPool
                     if (dlg.ShowDialog(this) == DialogResult.OK)
                         _tbDataDir.Text = dlg.SelectedPath;
                 }
-            }, 88), MiniBtn("保存并重载", delegate { SaveDataDir(); }, 110),
-                MiniBtn("刷新", delegate { RefreshDataDir(); }, 80),
-                Mute(Lbl("修改后重启后端生效"))));
+            }, 88), _btnSaveDataDir,
+                MiniBtn("重启后端生效", delegate { Restart(_backend); }, 120),
+                MiniBtn("刷新", delegate { RefreshDataDir(); }, 80)));
+            AddRow(body, Row(Mute(Lbl("先保存；数据不会自动搬迁，请先备份并复制后再重启后端"))));
 
             _tbDataDir.Text = ResolveDataDirSetting();
             RefreshDataDir();
@@ -1492,7 +1505,8 @@ namespace StockPool
             var lbTheme = Lbl("浅色 / 深色在窗口顶栏右侧的「主题」按钮上切换，本窗口和网页页面会一起变。");
             Mute(lbTheme);
             AddRow(body3, Row(lbTheme));
-            AddRow(body3, Row(MiniBtn("保存设置", delegate { SaveSettings(); Msg("已保存"); }, 100)));
+            AddRow(body3, Row(MiniBtn("保存运行环境与行为", delegate { SaveSettings(); }, 170),
+                Mute(Lbl("数据目录和通达信目录请使用各自的保存按钮"))));
             AddRow(stack, gb3);
 
             p.Controls.Add(stack);
@@ -1705,6 +1719,7 @@ namespace StockPool
                 sb.AppendLine("theme=" + (_light ? "light" : "dark"));
                 File.WriteAllText(_settingsPath, sb.ToString(), Encoding.UTF8);
                 ApplyRunOnBoot(_ckRunOnBoot.Checked);
+                Msg("运行环境与行为已保存；Python / Node 路径在重启对应服务后生效。");
             }
             catch (Exception ex)
             {
@@ -1718,12 +1733,12 @@ namespace StockPool
             {
                 using (var rk = Registry.CurrentUser.OpenSubKey(RunKey, true))
                 {
-                    if (rk == null) return;
+                    if (rk == null) throw new IOException("无法打开开机启动设置");
                     if (on) rk.SetValue("StockPoolLauncher", "\"" + Application.ExecutablePath + "\"");
                     else rk.DeleteValue("StockPoolLauncher", false);
                 }
             }
-            catch { }
+            catch (Exception ex) { throw new IOException("开机启动设置未生效：" + ex.Message, ex); }
         }
 
         /// <summary>启动器自己的状态目录（与 settings.ini 同处）。
@@ -1743,19 +1758,33 @@ namespace StockPool
         /// DATA_DIR / STOCK_DATA_DIR，否则用默认 &lt;仓库上级&gt;/stockanaly-data。</summary>
         private string ResolveDataDirSetting()
         {
+            foreach (var key in new string[] { "STOCK_DATA_DIR", "DATA_DIR" })
+            {
+                var external = Environment.GetEnvironmentVariable(key);
+                if (!string.IsNullOrWhiteSpace(external)) return external.Trim();
+            }
             try
             {
                 var env = Path.Combine(_root, "backend_fastapi", ".env");
                 if (File.Exists(env))
                 {
+                    string data = null, stock = null;
                     foreach (var line in File.ReadAllLines(env, Encoding.UTF8))
                     {
                         var t = line.Trim();
-                        if (t.StartsWith("DATA_DIR=", StringComparison.OrdinalIgnoreCase))
-                            return t.Substring(10).Trim().Trim('"');
-                        if (t.StartsWith("STOCK_DATA_DIR=", StringComparison.OrdinalIgnoreCase))
-                            return t.Substring(16).Trim().Trim('"');
+                        if (t.StartsWith("export ")) t = t.Substring(7).Trim();
+                        var pair = t.Split(new char[] { '=' }, 2);
+                        if (pair.Length != 2) continue;
+                        var key = pair[0].Trim();
+                        var value = pair[1].Trim();
+                        if (value.StartsWith("'") && value.EndsWith("'"))
+                            value = value.Substring(1, value.Length - 2).Replace("\\\\", "\\").Replace("\\'", "'");
+                        else value = value.Trim('"');
+                        if (key == "DATA_DIR") data = value;
+                        if (key == "STOCK_DATA_DIR") stock = value;
                     }
+                    if (!string.IsNullOrWhiteSpace(stock)) return stock;
+                    if (!string.IsNullOrWhiteSpace(data)) return data;
                 }
             }
             catch { }
@@ -1766,13 +1795,32 @@ namespace StockPool
         /// <summary>从后端 /api/system/storage 取当前数据目录并刷新文本框（后端未运行时静默跳过）。</summary>
         private void RefreshDataDir()
         {
+            int round = ++_dataDirRound;
+            var original = _tbDataDir == null ? "" : _tbDataDir.Text;
             var th = new Thread(delegate()
             {
                 string body;
-                if (!Probe("http://127.0.0.1:8000/api/system/storage", 5000, out body)) return;
+                if (!Probe("http://127.0.0.1:8000/api/system/storage", 5000, out body))
+                {
+                    Ui(delegate {
+                        if (round == _dataDirRound && _lbDataDirState != null)
+                            _lbDataDirState.Text = "后端未运行；已保存：" + ResolveDataDirSetting()
+                                + "。可直接修改并保存目录，再启动后端。";
+                    });
+                    return;
+                }
                 var root = JsonValue(body, "root");
+                var configured = JsonValue(body, "configured_root") ?? root;
                 if (!string.IsNullOrEmpty(root))
-                    Ui(delegate { if (_tbDataDir != null) _tbDataDir.Text = root; });
+                    Ui(delegate {
+                        if (round != _dataDirRound) return;
+                        if (_tbDataDir != null && _tbDataDir.Text == original && !_savingDataDir)
+                            _tbDataDir.Text = configured;
+                        if (_lbDataDirState != null)
+                            _lbDataDirState.Text = "当前使用：" + root + "　已保存：" + configured
+                                + (string.Equals(root, configured, StringComparison.OrdinalIgnoreCase)
+                                    ? "（已生效）" : "（待重启后端）");
+                    });
             });
             th.IsBackground = true;
             th.Start();
@@ -1782,7 +1830,12 @@ namespace StockPool
         private void SaveDataDir()
         {
             var path = (_tbDataDir.Text ?? "").Trim();
+            var python = _tbPython.Text;
             if (string.IsNullOrEmpty(path)) { Msg("请先选择或填写数据目录"); return; }
+            if (_savingDataDir) return;
+            _savingDataDir = true;
+            ++_dataDirRound;
+            _btnSaveDataDir.Enabled = false;
             var th = new Thread(delegate()
             {
                 try
@@ -1790,7 +1843,13 @@ namespace StockPool
                     string body;
                     if (!Probe("http://127.0.0.1:8000/api/system/storage", 5000, out body))
                     {
-                        Ui(delegate { Msg("后端未运行，无法保存数据目录（可在后端启动后重试）"); });
+                        var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(path));
+                        var script = Path.Combine(_root, "backend_fastapi", "storage.py");
+                        int exitCode;
+                        body = RunCapture(python, "\"" + script + "\" --set-data-dir-base64 " + encoded, 15000, out exitCode);
+                        var message = exitCode == 0 ? "目录已离线保存，请启动或重启后端生效。数据不会自动搬迁。"
+                            : "目录保存失败：" + (JsonValue(body, "error") ?? body);
+                        Ui(delegate { Msg(message); });
                         return;
                     }
                     var js = new JavaScriptSerializer();
@@ -1803,11 +1862,11 @@ namespace StockPool
                     }
                     Ui(delegate
                     {
-                        Msg("已保存数据目录，重启后端后生效（旧数据会在启动时自动补到新目录）");
-                        RefreshDataDir();
+                        Msg(JsonValue(body, "message") ?? "目录已保存，请重启后端生效。");
                     });
                 }
                 catch (Exception ex) { Ui(delegate { Msg("保存出错：" + ex.Message); }); }
+                finally { Ui(delegate { _savingDataDir = false; _btnSaveDataDir.Enabled = true; RefreshDataDir(); }); }
             });
             th.IsBackground = true;
             th.Start();
@@ -2315,7 +2374,6 @@ namespace StockPool
                     return;
                 }
                 svc.Start(delegate(string line) { Log(svc.Name, line); });
-                svc.Starting = true;
                 Log("系统", svc.Name + " 已发起启动（" + Path.GetFileName(svc.Exe) + "）");
                 RefreshStatus(false);
             }
@@ -2391,11 +2449,20 @@ namespace StockPool
         {
             var th = new Thread(delegate()
             {
-                Ui(delegate { StopOne(svc, false); });
+                UiSync<bool>(delegate { StopOne(svc, false); return true; });
                 WaitStop(svc, 20);                            // 等旧进程真正退出、端口释放
-                Ui(delegate { StartOne(svc, false, true); }); // 强制启动，跳过"已在运行"误判
+                if (Probe(svc.HealthUrl, 1000))
+                {
+                    Ui(delegate { Msg("旧服务未停止，重启未完成。请检查服务控制台。"); });
+                    return;
+                }
+                UiSync<bool>(delegate { StartOne(svc, false, true); return true; });
                 WaitHealth(svc, 45);
-                Ui(delegate { RefreshStatus(false); });
+                Ui(delegate {
+                    RefreshStatus(false);
+                    if (!Probe(svc.HealthUrl, 1000)) Msg("服务重启失败，请检查运行日志。");
+                    if (svc == _backend) { RefreshDataDir(); DlPickLatestTask(); }
+                });
             });
             th.IsBackground = true;
             th.Start();
@@ -2403,8 +2470,24 @@ namespace StockPool
 
         private void RefreshStatus(bool initial)
         {
-            bool bOk = Probe(_backend.HealthUrl, 1500);
-            bool aOk = Probe(_dsh.HealthUrl, 1500);
+            if (_statusRefreshing || _backend == null || _dsh == null) return;
+            _statusRefreshing = true;
+            var thread = new Thread(delegate()
+            {
+                string body;
+                bool bOk = Probe(_backend.HealthUrl, 1500, out body);
+                bool aOk = Probe(_dsh.HealthUrl, 1500);
+                Ui(delegate {
+                    try { RenderServiceStatus(initial, bOk, aOk, body); }
+                    finally { _statusRefreshing = false; }
+                });
+            });
+            thread.IsBackground = true;
+            thread.Start();
+        }
+
+        private void RenderServiceStatus(bool initial, bool bOk, bool aOk, string body)
+        {
 
             if (bOk)
             {
@@ -2414,10 +2497,10 @@ namespace StockPool
                     // 后端就绪后补一次：设置页/下载页的首次刷新往往早于后端启动，
                     // 只刷一次的话通达信路径会一直显示成空（看起来像配置丢了）。
                     RefreshTdx();
+                    RefreshDataDir();
+                    DlPickLatestTask();
                     DlRefreshTdx();
                 }
-                string body;
-                Probe(_backend.HealthUrl, 1500, out body);
                 var ver = JsonValue(body, "api_version");
                 var detail = JsonValue(body, "backend_detail");
                 SetDot(_lbBackendDot, Color.FromArgb(46, 204, 113), "后端 :8000 · 正常");
@@ -2615,6 +2698,7 @@ namespace StockPool
         private void Log(string tag, string text)
         {
             if (text == null) return;
+            if (InvokeRequired) { Ui(delegate { Log(tag, text); }); return; }
             var line = DateTime.Now.ToString("HH:mm:ss") + "  " + text;
             _logs.Add(new LogEntry { Tag = tag, Text = line });
             if (_logs.Count > 4000) _logs.RemoveRange(0, _logs.Count - 4000);
