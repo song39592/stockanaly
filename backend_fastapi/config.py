@@ -12,7 +12,11 @@ from dotenv import load_dotenv
 import dpapi
 import envfile
 
-load_dotenv()  # 加载同目录下的 .env；默认不覆盖真实环境变量，因此环境变量优先
+ENV_PATH = Path(__file__).resolve().parent / ".env"
+# 留下真正来自父进程的覆盖项，避免把 dotenv 注入的旧值误认为外部配置。
+DATA_DIR_OVERRIDES = {key: os.environ[key] for key in ("STOCK_DATA_DIR", "DATA_DIR")
+                      if os.environ.get(key, "").strip()}
+load_dotenv(ENV_PATH)
 
 # 密钥字段：**优先本机 DPAPI 密封值，其次明文**。
 # 密封值只能被本机 + 当前用户解开，因此 .env 里不再留可直接读取的明文凭据；

@@ -16,6 +16,7 @@ import shutil
 import threading
 import time
 import uuid
+from functools import wraps
 from typing import Any
 
 import akshare as ak
@@ -112,6 +113,16 @@ class _Runtime:
 # 运行中的任务：task_id → 运行态
 _runtimes: dict[str, _Runtime] = {}
 _runtimes_lock = threading.Lock()
+_operations_lock = threading.RLock()
+
+
+def _serialized(action):
+    @wraps(action)
+    def call(*args, **kwargs):
+        with _operations_lock:
+            return action(*args, **kwargs)
+    return call
+
 _claim_lock = threading.Lock()        # 领取代码：保证同一条不会被两个 worker 领走
 
 
@@ -385,7 +396,7 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
         split = _option_date(options, "split_date") or _split_date()
         oldest = _option_date(options, "start_date") or _default_start_date()
         if phase == 1:
-            begin, stop = split, None          # 近：分界点 → 今天
+            begin, stop = max(oldest, split), None
         else:
             begin, stop = oldest, split        # 远：起始日 → 分界点
 
@@ -591,7 +602,11 @@ def _resume_idle(task_id: str, task: dict[str, Any]) -> None:
     options = dict(task.get("options") or {})
     options["concurrency"] = _idle_concurrency()
     download_store.update_options(task_id, options)
-    download_store.requeue_running(task_id)
+    with _runtimes_lock:
+        runtime = _runtimes.get(task_id)
+        alive = runtime is not None and runtime.manager is not None and runtime.manager.is_alive()
+    if not alive:
+        download_store.requeue_running(task_id)
     download_store.update_task(task_id, status="running")
     _spawn(task_id, options)
 
@@ -628,10 +643,10 @@ def _ensure_idle_task() -> str | None:
     today = dt.date.today().isoformat()
     if download_store.get_setting("idle_refreshed_at", "") == today:
         return None                               # 今天已排过一轮，不再重复拉清单
-    download_store.set_setting("idle_refreshed_at", today)
     covered = download_store.task_code_set(current) if current else set()
     missing = [code for code in _normalize_codes(_universe_codes()) if code not in covered]
     if not missing:
+        download_store.set_setting("idle_refreshed_at", today)
         return None
     _ensure_disk_space(len(missing), MODE_FULL)
     options = _options_for(MODE_FULL, concurrency=_idle_concurrency())
@@ -640,9 +655,11 @@ def _ensure_idle_task() -> str | None:
                                options["phases"], origin=ORIGIN_IDLE)
     download_store.set_setting("idle_task_id", task_id)
     _spawn(task_id, options)
+    download_store.set_setting("idle_refreshed_at", today)
     return task_id
 
 
+@_serialized
 def _scheduler_tick() -> None:
     """一次调度：到点就补最新数据，空闲就接着补完整历史（两者不同时跑）。"""
     if _has_alive_task():
@@ -688,6 +705,7 @@ def universe_view(scope: str = "all", mode: str = MODE_FULL,
     }
 
 
+@_serialized
 def start_task(*, scope: str = "all", source: str = SOURCE_ONLINE,
                mode: str = MODE_FULL, start_date: str | None = None,
                concurrency: int = DEFAULT_CONCURRENCY,
@@ -702,6 +720,8 @@ def start_task(*, scope: str = "all", source: str = SOURCE_ONLINE,
     source=tdx 时**只同步本机通达信已有的日线**（实测约 5 年），走一轮、不联网：
     系统里最长的需求是 MA60 / RPS≈250 个交易日，5 年绰绰有余，不再联网补更早的历史。
     """
+    if _has_alive_task():
+        raise RuntimeError("已有任务正在运行或暂停中，请继续该任务，或取消并等待收尾后再新建")
     if mode not in (MODE_FULL, MODE_INCREMENTAL):
         raise ValueError(f"未知的下载模式：{mode}")
     if source not in (SOURCE_ONLINE, SOURCE_TDX):
@@ -782,6 +802,7 @@ def tdx_status(path: str | None = None) -> dict[str, Any]:
     return info
 
 
+@_serialized
 def update_settings(*, auto_update: bool | None = None, idle_download: bool | None = None,
                     idle_concurrency: int | None = None,
                     tdx_path: str | None = None) -> dict[str, Any]:
@@ -790,18 +811,19 @@ def update_settings(*, auto_update: bool | None = None, idle_download: bool | No
     开启「自动更新」要求：已下载的股票里没有一只落后超过 FRESHNESS_DAYS 天。
     否则用户会以为它在保持最新，实际大片历史还空着。
     """
+    global _auto_state_at
+    values = {}
     if tdx_path is not None:
         text = str(tdx_path).strip()
         if text and not tdx_reader.detect(text)["valid"]:
             raise ValueError(f"该目录下没有通达信日线数据（vipdoc/*/lday）：{text}")
-        download_store.set_setting("tdx_path", text)
+        values["tdx_path"] = text
     if idle_concurrency is not None:
-        download_store.set_setting(
-            "idle_concurrency", str(_clamp_int(idle_concurrency, IDLE_CONCURRENCY, 1, 2)))
+        values["idle_concurrency"] = str(_clamp_int(idle_concurrency, IDLE_CONCURRENCY, 1, 2))
     if idle_download is not None:
-        download_store.set_setting("idle_download", "1" if idle_download else "0")
+        values["idle_download"] = "1" if idle_download else "0"
     if auto_update is not None:
-        download_store.set_setting("auto_update", "1" if auto_update else "0")
+        values["auto_update"] = "1" if auto_update else "0"
     if auto_update:
         downloaded, stale, _, _ = _downloaded_staleness()
         if not _auto_eligible(downloaded, stale):
@@ -809,11 +831,25 @@ def update_settings(*, auto_update: bool | None = None, idle_download: bool | No
                 f"暂时不能开启自动更新：已下载 {downloaded} 只，"
                 f"其中 {stale} 只落后超过 {FRESHNESS_DAYS} 天（超出容忍范围）。"
                 f"请先把历史补齐（可用「后台闲时下载」），再开启。")
-        _kick_auto_update()
-    if idle_download:
-        _revive_idle_task()          # 重新勾选 = 解除上一次的取消
-        _ensure_idle_task()
-    return settings_view()
+    download_store.set_settings(values)
+    _auto_state_at = 0.0
+    # 关闭开关也要暂停对应的在途任务；已发出的单次请求允许完成。
+    for task in download_store.list_tasks(1000):
+        if ((auto_update is False and task.get("origin") == ORIGIN_AUTO)
+                or (idle_download is False and task.get("origin") == ORIGIN_IDLE)):
+            if task["status"] in ("queued", "running"):
+                cancel(task["id"])
+    warning = None
+    try:
+        if auto_update:
+            _kick_auto_update()
+        if idle_download:
+            _revive_idle_task()
+            if not _has_alive_task():
+                _ensure_idle_task()
+    except Exception as exc:
+        warning = f"设置已保存，但本次启动下载失败：{exc}；后台将按调度重试"
+    return {**settings_view(), "scheduling_warning": warning}
 
 
 def auto_state(force: bool = False) -> dict[str, Any]:
@@ -825,6 +861,7 @@ def auto_state(force: bool = False) -> dict[str, Any]:
     now = time.time()
     if not force and _auto_state and now - _auto_state_at < AUTO_STATE_TTL:
         cached = dict(_auto_state)
+        cached.update(settings_view())
         cached["cached"] = True
         return cached
     downloaded, stale, examples, latest_date = _downloaded_staleness()
@@ -844,6 +881,7 @@ def auto_state(force: bool = False) -> dict[str, Any]:
     return dict(state)
 
 
+@_serialized
 def pause(task_id: str) -> dict[str, Any]:
     task = download_store.get_task(task_id)
     if task is None:
@@ -853,18 +891,28 @@ def pause(task_id: str) -> dict[str, Any]:
     return task_view(task_id)
 
 
+@_serialized
 def resume(task_id: str) -> dict[str, Any]:
     task = download_store.get_task(task_id)
     if task is None:
         raise KeyError(task_id)
     if task["status"] == "cancelled":
         raise RuntimeError("任务已取消，不能继续（请重新「开始下载」）")
-    download_store.requeue_running(task_id)       # 上次领了没做完的，退回队列重跑
+    if task["status"] != "paused":
+        raise RuntimeError("只有已暂停的任务可以继续")
+    with _runtimes_lock:
+        runtime = _runtimes.get(task_id)
+        alive = runtime is not None and runtime.manager is not None and runtime.manager.is_alive()
+    if not alive:
+        if _has_alive_task():
+            raise RuntimeError("请先结束当前运行的任务")
+        download_store.requeue_running(task_id)
     download_store.update_task(task_id, status="running")
     _spawn(task_id, task["options"])
     return task_view(task_id)
 
 
+@_serialized
 def cancel(task_id: str) -> dict[str, Any]:
     task = download_store.get_task(task_id)
     if task is None:
@@ -877,11 +925,14 @@ def cancel(task_id: str) -> dict[str, Any]:
     return task_view(task_id)
 
 
+@_serialized
 def retry_failed(task_id: str) -> dict[str, Any]:
     """只重跑失败的那几只（成功的不动），用于收尾补漏。"""
     task = download_store.get_task(task_id)
     if task is None:
         raise KeyError(task_id)
+    if _has_alive_task():
+        raise RuntimeError("请先取消当前任务并等待在途请求结束，再重试失败项")
     count = download_store.reset_failed(task_id)
     if not count:
         return task_view(task_id)

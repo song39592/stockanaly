@@ -121,11 +121,10 @@ def secret(force_new: bool = False) -> bytes:
         return _key
     value = "" if force_new else _read_secret()
     if not value:
+        if not force_new and _env_value(ENV_SEALED):
+            raise RuntimeError("已存在密封校验密钥但无法解开，拒绝自动生成新密钥。请在原 Windows 用户环境中启动服务。")
         value = secrets.token_hex(32)           # 256 位随机
-        try:
-            _write_secret(value)
-        except OSError:
-            pass                                # 写不进不致命，本次进程内仍可用
+        _write_secret(value)                    # 持久化失败时禁止用临时密钥写入数据
     _key = value.encode("utf-8")
     return _key
 

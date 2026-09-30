@@ -10,12 +10,14 @@ import db
 import history_store
 import integrity
 import price_store
+from test_support import isolate_crypto
 
 
 class IntegrityTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         base = Path(self.tmp.name)
+        isolate_crypto(self, base)
         db.DATA_DIR = base
         db.DB_PATH = base / "history.db"
         db.BARS_DIR = base / "bars"

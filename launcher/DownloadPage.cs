@@ -26,6 +26,7 @@ namespace StockPool
         private ProgressBar _dlBar;
         private Label _dlStatus;
         private Label _dlCount;
+        private TextBox _dlErrors;
         private Button _dlBtnStart, _dlBtnPause, _dlBtnResume, _dlBtnCancel, _dlBtnRetry;
         private CheckBox _dlAuto, _dlIdle;
         private Label _dlAutoNote;
@@ -37,6 +38,8 @@ namespace StockPool
         private string _dlTaskId = "";
         private string _dlLastStatus = "";
         private int _dlRound;                 // 本轮请求编号：上一轮的慢回调不再覆盖本轮
+        private int _dlHintRound, _dlSettingsRound;
+        private bool _dlSavingSettings, _dlRefreshing, _dlCommandBusy;
 
         /// <summary>历史数据下载：① 范围与参数 → ② 控制与进度。</summary>
         private Panel BuildDownloadPage()
@@ -104,13 +107,21 @@ namespace StockPool
             AddRow(b2, Row(_dlStatus));
             _dlCount = Mute(Lbl(""));
             AddRow(b2, Row(_dlCount));
+            _dlErrors = new TextBox();
+            _dlErrors.ReadOnly = true;
+            _dlErrors.Multiline = true;
+            _dlErrors.ScrollBars = ScrollBars.Vertical;
+            _dlErrors.Width = 740;
+            _dlErrors.Height = 78;
+            _dlErrors.Text = "失败原因将在这里显示。";
+            AddRow(b2, Row(_dlErrors));
 
             // ---- 后台自动化：每日自动更新 / 闲时补历史 ----
             _dlAuto = Check("每天自动更新数据", false);
             _dlAuto.Enabled = false;              // 等检测出「只缺最近 10 天」才放开
-            _dlAuto.CheckedChanged += delegate { DlSaveSettings(); };
+            _dlAuto.CheckedChanged += delegate { DlSaveSettings("auto_update", _dlAuto.Checked); };
             _dlIdle = Check("后台闲时下载（补完整历史）", false);
-            _dlIdle.CheckedChanged += delegate { DlSaveSettings(); };
+            _dlIdle.CheckedChanged += delegate { DlSaveSettings("idle_download", _dlIdle.Checked); };
             AddRow(b2, Row(_dlAuto, _dlIdle));
 
             _dlAutoNote = Mute(Lbl("正在检测数据完整性…"));
@@ -162,15 +173,19 @@ namespace StockPool
             string query = "?scope=all&mode=full&source=online&start_date="
                            + Uri.EscapeDataString(DlStartDate());
             _dlHint.Text = "预计：计算中…";
-            int round = ++_dlRound;
+            int round = ++_dlHintRound;
             var th = new Thread(delegate()
             {
                 string resp;
                 try
                 {
-                    if (!Probe(DlApi + "/universe" + query, 30000, out resp)) return;
+                    if (!Probe(DlApi + "/universe" + query, 30000, out resp))
+                    {
+                        Ui(delegate { if (round == _dlHintRound) _dlHint.Text = "预估失败，请检查后端后刷新"; });
+                        return;
+                    }
                     var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    Ui(delegate { if (round == _dlRound) DlRenderHint(root); });
+                    Ui(delegate { if (round == _dlHintRound) DlRenderHint(root); });
                 }
                 catch { }
             });
@@ -207,6 +222,7 @@ namespace StockPool
 
         private void DlStart(string source)
         {
+            if (_dlCommandBusy) return;
             if (_dlLastStatus == "running" || _dlLastStatus == "queued")
             {
                 Msg("已有任务正在下载，请先暂停或取消");
@@ -223,6 +239,9 @@ namespace StockPool
             string json = new JavaScriptSerializer().Serialize(body);
 
             _dlBtnStart.Enabled = false;
+            _dlCommandBusy = true;
+            ++_dlRound;
+            if (_dlTdxBtn != null) _dlTdxBtn.Enabled = false;
             _dlStatus.Text = "状态：正在启动…（全市场范围要先取一次 A 股代码清单，可能十几秒）";
 
             var th = new Thread(delegate()
@@ -233,11 +252,11 @@ namespace StockPool
                 {
                     var err = JsonValue(resp, "detail");
                     if (string.IsNullOrEmpty(err)) err = resp;
-                    Ui(delegate { Msg("启动失败：" + err); _dlBtnStart.Enabled = true; });
+                    Ui(delegate { _dlCommandBusy = false; Msg("未确认启动结果：" + err); DlPickLatestTask(); DlRenderButtons(_dlLastStatus, 0); });
                     return;
                 }
                 var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                Ui(delegate { DlRenderTask(root); });
+                Ui(delegate { _dlCommandBusy = false; DlRenderTask(root); });
             });
             th.IsBackground = true;
             th.Start();
@@ -247,8 +266,12 @@ namespace StockPool
 
         private void DlControl(string action)
         {
+            if (_dlCommandBusy) return;
             if (string.IsNullOrEmpty(_dlTaskId)) { Msg("还没有下载任务，请先点「开始下载」"); return; }
             string id = _dlTaskId;
+            _dlCommandBusy = true;
+            ++_dlRound;
+            DlRenderButtons(_dlLastStatus, 0);
             var th = new Thread(delegate()
             {
                 string resp;
@@ -256,11 +279,11 @@ namespace StockPool
                 {
                     var err = JsonValue(resp, "detail");
                     if (string.IsNullOrEmpty(err)) err = resp;
-                    Ui(delegate { Msg("操作失败：" + err); });
+                    Ui(delegate { _dlCommandBusy = false; Msg("操作失败：" + err); DlRefresh(); });
                     return;
                 }
                 var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                Ui(delegate { DlRenderTask(root); });
+                Ui(delegate { _dlCommandBusy = false; DlRenderTask(root); });
             });
             th.IsBackground = true;
             th.Start();
@@ -272,8 +295,7 @@ namespace StockPool
             DlUpdateHint();
             DlLoadAutoState(false);
             DlRefreshTdx();
-            if (string.IsNullOrEmpty(_dlTaskId)) return;
-            DlRefresh();
+            DlPickLatestTask();
         }
 
         // ------------------------------------------------- 本地通达信
@@ -321,6 +343,7 @@ namespace StockPool
         private void DlLoadAutoState(bool refresh)
         {
             if (_dlAuto == null) return;
+            int round = ++_dlSettingsRound;
             string query = "/auto-state" + (refresh ? "?refresh=true" : "");
             var th = new Thread(delegate()
             {
@@ -329,7 +352,7 @@ namespace StockPool
                 {
                     if (!Probe(DlApi + query, 30000, out resp)) return;
                     var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    Ui(delegate { DlRenderAutoState(root); });
+                    Ui(delegate { if (round == _dlSettingsRound && !_dlSavingSettings) DlRenderAutoState(root); });
                 }
                 catch { }
             });
@@ -351,7 +374,8 @@ namespace StockPool
                 catch { }
                 try { _dlIdle.Checked = Convert.ToBoolean(DlVal(root, "idle_download")); }
                 catch { }
-                _dlAuto.Enabled = eligible;
+                _dlAuto.Enabled = eligible || _dlAuto.Checked;
+                _dlIdle.Enabled = true;
             }
             finally { _dlSettingsLoading = false; }
 
@@ -360,17 +384,19 @@ namespace StockPool
             if (downloaded == 0) _dlAutoNote.Text = "库里还没有日K数据：先「开始下载」一次。";
             else if (!string.IsNullOrEmpty(latest)) _dlAutoNote.Text = "数据已更新到 " + latest;
             else _dlAutoNote.Text = string.Format("已下载 {0} 只。", downloaded);
+            if (!eligible) _dlAutoNote.Text += " 自动更新暂不可开启：请先补齐过期历史；已开启的仍可关闭。";
         }
 
         /// <summary>保存后台开关；服务端会即时生效（不等下一个轮询周期）。</summary>
-        private void DlSaveSettings()
+        private void DlSaveSettings(string key, bool value)
         {
-            if (_dlSettingsLoading || _dlAuto == null || _dlIdle == null) return;
+            if (_dlSettingsLoading || _dlSavingSettings || _dlAuto == null || _dlIdle == null) return;
 
             var body = new Dictionary<string, object>();
-            body["auto_update"] = _dlAuto.Checked;
-            body["idle_download"] = _dlIdle.Checked;
-            body["idle_concurrency"] = 2;         // 闲时并发固定 2，不在界面暴露
+            body[key] = value;
+            _dlSavingSettings = true;
+            ++_dlSettingsRound;
+            _dlAuto.Enabled = _dlIdle.Enabled = false;
             string json = new JavaScriptSerializer().Serialize(body);
             _dlAutoNote.Text = "正在保存…";
 
@@ -382,6 +408,8 @@ namespace StockPool
                     var err = JsonValue(resp, "detail");
                     Ui(delegate
                     {
+                        _dlSavingSettings = false;
+                        _dlAuto.Enabled = _dlIdle.Enabled = true;
                         Msg("设置未生效：" + (string.IsNullOrEmpty(err) ? resp : err));
                         DlLoadAutoState(true);           // 回读真实状态
                     });
@@ -389,6 +417,11 @@ namespace StockPool
                 }
                 Ui(delegate
                 {
+                    _dlSavingSettings = false;
+                    _dlAuto.Enabled = _dlIdle.Enabled = true;
+                    var result = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    var warning = Convert.ToString(DlVal(DlVal(result, "settings"), "scheduling_warning") ?? "");
+                    if (warning.Length > 0) Msg(warning);
                     DlLoadAutoState(true);
                     if (_dlAuto.Checked || _dlIdle.Checked) DlPickLatestTask();
                 });
@@ -408,8 +441,20 @@ namespace StockPool
                     if (!Probe(DlApi + "/list", 10000, out resp)) return;
                     var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
                     var tasks = DlVal(root, "tasks") as ArrayList;
-                    if (tasks == null || tasks.Count == 0) return;
+                    if (tasks == null || tasks.Count == 0)
+                    {
+                        Ui(delegate { _dlTaskId = ""; _dlLastStatus = ""; DlStopPoll(); _dlBar.Value = 0;
+                            _dlStatus.Text = "状态：未开始"; _dlCount.Text = ""; _dlErrors.Text = "失败原因将在这里显示。"; DlRenderButtons("", 0); });
+                        return;
+                    }
                     var first = tasks[0] as Dictionary<string, object>;
+                    foreach (var item in tasks)
+                    {
+                        var candidate = item as Dictionary<string, object>;
+                        var status = Convert.ToString(DlVal(candidate, "status"));
+                        if (status == "running" || status == "queued" || status == "paused")
+                        { first = candidate; break; }
+                    }
                     if (first == null) return;
                     var id = Convert.ToString(DlVal(first, "id") ?? "");
                     if (string.IsNullOrEmpty(id)) return;
@@ -423,7 +468,8 @@ namespace StockPool
 
         private void DlRefresh()
         {
-            if (string.IsNullOrEmpty(_dlTaskId)) return;
+            if (string.IsNullOrEmpty(_dlTaskId) || _dlRefreshing || _dlCommandBusy) return;
+            _dlRefreshing = true;
             string id = _dlTaskId;
             int round = ++_dlRound;
             var th = new Thread(delegate()
@@ -431,11 +477,16 @@ namespace StockPool
                 string resp;
                 try
                 {
-                    if (!Probe(DlApi + "/" + id, 8000, out resp)) return;
+                    if (!Probe(DlApi + "/" + id, 8000, out resp))
+                    {
+                        Ui(delegate { _dlStatus.Text = "进度暂不可用：请检查后端后刷新"; });
+                        return;
+                    }
                     var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    Ui(delegate { if (round == _dlRound) DlRenderTask(root); });
+                    Ui(delegate { if (round == _dlRound && id == _dlTaskId && !_dlCommandBusy) DlRenderTask(root); });
                 }
                 catch { }
+                finally { Ui(delegate { _dlRefreshing = false; }); }
             });
             th.IsBackground = true;
             th.Start();
@@ -487,6 +538,13 @@ namespace StockPool
             if (skipped > 0) extra += string.Format("　跳过 {0} 只（库里已足量）", skipped);
             _dlCount.Text = string.Format("已完成 {0} / 共 {1}　失败 {2}　剩余 {3}　进度 {4:0.0}%{5}",
                                           completed, total, failed, remaining, percent, extra);
+            var failures = DlVal(task, "failures") as ArrayList;
+            var errors = new List<string>();
+            if (failures != null)
+                foreach (var failure in failures)
+                    errors.Add(Convert.ToString(DlVal(failure, "code")) + "：" + Convert.ToString(DlVal(failure, "error")));
+            _dlErrors.Text = errors.Count > 0 ? string.Join(Environment.NewLine, errors.ToArray()) : "暂无失败记录。";
+            if (status == "completed" && failed > 0) _dlStatus.Text += "（部分失败，请查看原因并重试）";
 
             DlRenderButtons(status, failed);
             if (status == "completed" || status == "cancelled")
@@ -507,9 +565,15 @@ namespace StockPool
             _dlBtnPause.Enabled = active;
             _dlBtnResume.Enabled = status == "paused";
             _dlBtnCancel.Enabled = active || status == "paused";
-            _dlBtnRetry.Enabled = failed > 0 && !active;
+            _dlBtnRetry.Enabled = failed > 0 && terminal;
             if (_dlTdxBtn != null) _dlTdxBtn.Enabled = !active && status != "paused";
             if (string.IsNullOrEmpty(status) && failed == 0) _dlBtnStart.Enabled = true;
+            if (_dlCommandBusy)
+            {
+                _dlBtnStart.Enabled = _dlBtnPause.Enabled = _dlBtnResume.Enabled = false;
+                _dlBtnCancel.Enabled = _dlBtnRetry.Enabled = false;
+                if (_dlTdxBtn != null) _dlTdxBtn.Enabled = false;
+            }
         }
 
         /// <summary>状态文案按数据来源区分：本地通达信是「同步」，在线才是「下载」。</summary>
