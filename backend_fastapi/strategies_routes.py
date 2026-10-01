@@ -18,16 +18,30 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import strategies
-import strategies.backtest as backtest
-import strategies.data as sdata
+import strategies.core.backtest as backtest
+import strategies.core.data as sdata
+import strategies.core.registry as registry
 
 router = APIRouter(prefix="/api/strategies", tags=["策略回测"])
 
 
 @router.get("")
 def list_strategies():
-    """策略清单：每项含 id / name / category / description / params。"""
+    """策略清单：仅返回**通过接口校验**的策略（每项含 id / name / category / description / params）。"""
     return strategies.list_strategies()
+
+
+@router.get("/validation")
+def validation():
+    """校验报告：全部策略文件的校验状态（含未通过文件的错误与最后修改时间）。"""
+    return registry.validation_report()
+
+
+@router.post("/refresh")
+def refresh():
+    """强制重新扫描并校验全部策略文件（文件改动后无需重启即可生效）。"""
+    registry.scan(force=True)
+    return registry.validation_report()
 
 
 @router.get("/codes")
@@ -64,6 +78,7 @@ def do_backtest(req: BacktestRequest):
         return backtest.run_backtest(
             req.strategy_id, req.params, codes, req.start, req.end,
             req.initial_capital, req.commission, req.benchmark,
+            allow_sample=req.use_all,   # 「全部本地」超上限时自动抽样，不直接报错
         )
     except (KeyError, ValueError, RuntimeError) as exc:
         code = _CODE_ERR[type(exc)]

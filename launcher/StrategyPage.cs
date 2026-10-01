@@ -226,7 +226,7 @@ namespace StockPool
             object po;
             if (meta.TryGetValue("params", out po))
             {
-                var plist = po as List<object>;
+                var plist = po as System.Collections.IList;   // JSON 数组反序列化为 object[]
                 if (plist != null)
                 {
                     foreach (var item in plist)
@@ -252,7 +252,7 @@ namespace StockPool
             _stParamPanel.Controls.Add(lbl);
 
             Control ctrl;
-            var ch = p["choices"] as List<object>;
+            var ch = p["choices"] as System.Collections.IList;
             if (type == "choice" && ch != null && ch.Count > 0)
             {
                 var cb = new ComboBox();
@@ -294,9 +294,15 @@ namespace StockPool
                 var tb = new TextBox();
                 tb.Width = 160;
                 object def = StGet(p, "default");
-                tb.Text = def == null ? ""
-                    : (def is List<object> ? string.Join(",", ((List<object>)def).ConvertAll(x => x.ToString()))
-                                          : def.ToString());
+                var defList = def as System.Collections.IList;
+                if (def == null) tb.Text = "";
+                else if (defList != null)
+                {
+                    var parts = new List<string>();
+                    foreach (var x in defList) parts.Add(x == null ? "" : x.ToString());
+                    tb.Text = string.Join(",", parts);
+                }
+                else tb.Text = def.ToString();
                 ctrl = tb;
             }
             ctrl.Margin = new Padding(0, 0, 18, 0);
@@ -541,12 +547,16 @@ namespace StockPool
             _stEqBench = (hasEb && eb != null) ? ToNullableDoubleList(eb) : null;
             _stEquityBox.Invalidate();
 
-            var ps = (List<object>)j["per_stock"];
+            var ps = j["per_stock"] as System.Collections.IList;
             _stPerStockGrid.Rows.Clear();
-            foreach (var it in ps)
+            if (ps != null)
             {
-                var d = (Dictionary<string, object>)it;
-                _stPerStockGrid.Rows.Add(StStr(d["code"], ""), Pct(ToDbl(d["total_return"])), ToInt(d["trades"]).ToString());
+                foreach (var it in ps)
+                {
+                    var d = it as Dictionary<string, object>;
+                    if (d == null) continue;
+                    _stPerStockGrid.Rows.Add(StStr(d["code"], ""), Pct(ToDbl(d["total_return"])), ToInt(d["trades"]).ToString());
+                }
             }
 
             _stResultStatus.Text = "回测完成";
@@ -554,9 +564,18 @@ namespace StockPool
             object errs;
             if (j.TryGetValue("data_errors", out errs))
             {
-                var el = errs as List<object>;
+                var el = errs as System.Collections.IList;
                 if (el != null && el.Count > 0)
                     _stResultStatus.Text = "回测完成（" + el.Count + " 只数据缺失/跳过）";
+            }
+            object sc;
+            if (j.TryGetValue("scope", out sc))
+            {
+                var sm = sc as Dictionary<string, object>;
+                object smp;
+                if (sm != null && sm.TryGetValue("sampled", out smp) && smp is bool && (bool)smp)
+                    _stResultStatus.Text = "回测完成（全部本地超上限，已随机抽样 "
+                        + ToInt(sm["codes_count"]) + " 只）";
             }
         }
 
@@ -627,15 +646,20 @@ namespace StockPool
                 {
                     string rs = VRequest("http://127.0.0.1:8000/api/strategies", null);
                     string rc = VRequest("http://127.0.0.1:8000/api/strategies/codes", null);
-                    var js = new JavaScriptSerializer().Deserialize<List<object>>(rs);
+                    var js = new JavaScriptSerializer().Deserialize<object[]>(rs);
                     var jc = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(rc);
                     var list = new List<Dictionary<string, object>>();
-                    foreach (var it in (List<object>)js) list.Add((Dictionary<string, object>)it);
+                    if (js != null)
+                        foreach (var it in js)
+                        {
+                            var m = it as Dictionary<string, object>;
+                            if (m != null) list.Add(m);
+                        }
                     int cnt = 0;
                     object co;
                     if (jc.TryGetValue("codes", out co))
                     {
-                        var cl = co as List<object>;
+                        var cl = co as System.Collections.IList;
                         if (cl != null) cnt = cl.Count;
                     }
                     Invoke((Action)(() =>
@@ -715,14 +739,14 @@ namespace StockPool
         private static List<string> ToStringList(object o)
         {
             var outp = new List<string>();
-            var l = o as List<object>;
+            var l = o as System.Collections.IList;
             if (l != null) foreach (var x in l) outp.Add(x == null ? "" : x.ToString());
             return outp;
         }
         private static List<double?> ToNullableDoubleList(object o)
         {
             var outp = new List<double?>();
-            var l = o as List<object>;
+            var l = o as System.Collections.IList;
             if (l != null)
                 foreach (var x in l) outp.Add(x == null ? (double?)null : Convert.ToDouble(x));
             return outp;
