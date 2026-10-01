@@ -563,6 +563,7 @@ namespace StockPool
             BuildMarketPage();
             BuildStockPage();
             BuildDownloadPage();
+            BuildStrategyPage();          // 策略回测（顶层标签 + 三个二级页）
             BuildLogPage();
             BuildSettingsPage();
             BuildServicePage();   // 服务控制台放最后一个标签
@@ -727,6 +728,7 @@ namespace StockPool
             SkinTabs();
             if (index == _mktTabIndex) MktOnEnter();   // 进入盘面页自动拉最新数据
             if (index == _stockTabIndex) StockOnEnter();
+            if (index == _stTabIndex) StOnEnter();
             if (index == _dlTabIndex) DlOnEnter();     // 进入下载页接着上次的任务刷新进度
         }
 

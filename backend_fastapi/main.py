@@ -71,6 +71,7 @@ ROUTE_MODULES = (
     ("个股调研与股票估值", "stock_routes"),
     ("系统设置 · 数据目录", "system_routes"),
     ("技术指标", "indicators_routes"),
+    ("策略回测", "strategies_routes"),
 )
 
 # 挂载 / 初始化失败的模块：[{label, module, error}]，供 /health 查询

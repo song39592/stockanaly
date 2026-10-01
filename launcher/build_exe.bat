@@ -32,7 +32,8 @@ echo 正在编译原生窗口程序...
   "%~dp0ValuationPage.cs" ^
   "%~dp0MarketPage.cs" ^
   "%~dp0StockPage.cs" ^
-  "%~dp0DownloadPage.cs"
+  "%~dp0DownloadPage.cs" ^
+  "%~dp0StrategyPage.cs"
 
 if errorlevel 1 (
   echo.
