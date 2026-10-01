@@ -1024,7 +1024,7 @@ namespace StockPool
                 // 说明框里已插入的文字不会跟着 ForeColor 走，用新配色重写一遍
                 if (tag == "doc-rps") FillRpsDoc((RichTextBox)c);
                 else if (tag == "doc-chip") FillChipDoc((RichTextBox)c);
-                else if (tag == "doc-ai") FillAiDoc((RichTextBox)c);
+                else if (tag == "doc-ai") FillAiDoc((RichTextBox)c, (c == _mktAiBox ? _mktAiMarkdown : _stockAiMarkdown));
             }
             else if (c is DataGridView)
             {

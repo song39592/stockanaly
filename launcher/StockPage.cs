@@ -1300,7 +1300,7 @@ namespace StockPool
                 _stockAiStatus.ForeColor = Color.FromArgb(150, 158, 172);
             }
             _stockAiMarkdown = "";
-            if (_stockAiBox != null) FillAiDoc(_stockAiBox);
+            if (_stockAiBox != null) FillAiDoc(_stockAiBox, _stockAiMarkdown);
             System.Threading.Tasks.Task.Run(delegate
             {
                 try
@@ -1417,7 +1417,7 @@ namespace StockPool
                 _stockAiStatus.Text = emsg;
                 _stockAiStatus.ForeColor = Color.FromArgb(208, 57, 59);
                 _stockAiMarkdown = "";
-                FillAiDoc(_stockAiBox);
+                FillAiDoc(_stockAiBox, _stockAiMarkdown);
                 return;
             }
             string md = VStr(VSafe(j, "markdown"));
@@ -1441,11 +1441,11 @@ namespace StockPool
             _stockAiStatus.Text = (isCached ? "（缓存）" : "已生成") + (asOf != "" ? " 数据截至 " + asOf : "") + prefs;
             _stockAiStatus.Tag = "muted";
             _stockAiStatus.ForeColor = Color.FromArgb(30, 126, 52);
-            FillAiDoc(_stockAiBox);
+            FillAiDoc(_stockAiBox, _stockAiMarkdown);
         }
 
         /// <summary>把 AI 调研的 markdown 渲染进只读框；换肤时由 Skin 再调一次，用新配色重排。</summary>
-        private void FillAiDoc(RichTextBox rt)
+        private void FillAiDoc(RichTextBox rt, string md)
         {
             if (_docFont == null) _docFont = new Font("Microsoft YaHei UI", 9.5f);
             if (_docBold == null) _docBold = new Font(_docFont, FontStyle.Bold);
@@ -1457,11 +1457,10 @@ namespace StockPool
             rt.SelectionFont = normal;
             rt.SelectionColor = _cText;
 
-            string md = _stockAiMarkdown ?? "";
-            if (md.Trim() == "")
+            if (string.IsNullOrEmpty(md) || md.Trim() == "")
             {
                 rt.SelectionColor = _cSub;
-                rt.AppendText("（暂无 AI 分析。打开个股后将自动调用 /api/stock/research 生成；需后端已配置 LLM_API_KEY。）");
+                rt.AppendText("（暂无 AI 分析。配置好 LLM_API_KEY 并启动后端后，点击「生成分析」即可生成。）");
                 rt.SelectionStart = 0; rt.SelectionLength = 0;
                 return;
             }

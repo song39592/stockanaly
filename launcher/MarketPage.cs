@@ -35,6 +35,7 @@ namespace StockPool
         private Label _mktLuCaption;                                 // 涨停明细标题（含计数）
         private Button _mktLuFold;                                   // 折叠 / 展开
         private ComboBox _mktLuFilter;                               // 板块筛选
+        private ComboBox _mktSectorWindow;                            // ③ 板块β 时间窗口：今日 / 5日 / 10日
         private List<string> _mktLuInds;                             // 下拉里的板块名（与 Items 一一对应，index 0 之后）
         private List<Dictionary<string, object>> _mktBlAll, _mktDtAll;  // 炸板 / 跌停原始数据
         private List<string> _mktBlInds, _mktDtInds;
@@ -42,6 +43,14 @@ namespace StockPool
         private Label _mktBlCaption, _mktDtCaption;
         private Button _mktBlFold, _mktDtFold;
         private DataGridView _mktBlasted, _mktLimitDown;             // ⑤ 炸板 / 跌停（表格）
+
+        // ⑥ AI 分析（调 /api/market/ai-analysis，复用同一个 LLM_API_KEY）
+        private Label _mktAiStatus;
+        private RichTextBox _mktAiBox;
+        private ComboBox _mktAiDepth;
+        private string _mktAiMarkdown = "";
+        private int _mktAiSubIndex = -1;      // 「AI 分析」二级页下标
+        private bool _mktAiFired = false;     // 是否已自动生成过一次
 
         // 二级导航：① / ② / ③ 各自一页，④ 连板 + ⑤ 大面股 合为一页
         private FlowLayoutPanel _mktSubBar;
@@ -112,6 +121,8 @@ namespace StockPool
             MktAddSubPage("大盘资金", MktBuildCapital);
             MktAddSubPage("板块β", MktBuildSectors);
             MktAddSubPage("连板 · 大面股", MktBuildLadder);
+            _mktAiSubIndex = _mktSubPages.Count;
+            MktAddSubPage("AI 分析", MktBuildMktAi);
 
             MktSubSelect(0);
             return p;
@@ -171,6 +182,14 @@ namespace StockPool
             page.Invalidate(true);
 
             SkinMktSubTabs();
+
+            // 首次切到「AI 分析」页时才生成：此时应用早已启动、后端已就绪，
+            // 避免在 BuildMarketPage（应用启动瞬间）抢跑导致「连不上后端」。
+            if (index == _mktAiSubIndex && !_mktAiFired)
+            {
+                _mktAiFired = true;
+                MktLoadMktAi(false);
+            }
         }
 
         /// <summary>二级标签配色（跟随主题）：选中用卡片色，未选中用窗口底色。</summary>
@@ -253,7 +272,12 @@ namespace StockPool
             TableLayoutPanel b3;
             var g3 = Group("", out b3);   // 标题与二级标签重复，留空
             _mktSectorStatus = Mute(Lbl("—"));
-            AddRow(b3, Row(_mktSectorStatus));
+            _mktSectorWindow = new ComboBox();
+            _mktSectorWindow.DropDownStyle = ComboBoxStyle.DropDownList;
+            _mktSectorWindow.Items.AddRange(new string[] { "今日", "5日", "10日" });
+            _mktSectorWindow.SelectedIndex = 0;
+            _mktSectorWindow.Width = 70;
+            AddRow(b3, Row(_mktSectorStatus, _mktSectorWindow));
 
             AddRow(b3, Row(Mute(Lbl("行业板块资金净额 Top10（单位：亿，红=净流入 / 绿=净流出）"))));
             _mktIndBars = new MktBars { Dock = DockStyle.Top };
@@ -534,7 +558,14 @@ namespace StockPool
             {
                 string name = job[0];
                 string path = job[1];
-                string url = "http://127.0.0.1:8000" + path + (date == "" ? "" : "?date=" + date);
+                string sep = date == "" ? "" : "?date=" + date;
+                string url = "http://127.0.0.1:8000" + path + sep;
+                if (name == "sectors")
+                {
+                    string w = (_mktSectorWindow != null && _mktSectorWindow.SelectedItem != null)
+                        ? _mktSectorWindow.SelectedItem.ToString() : "今日";
+                    url += (sep == "" ? "?" : "&") + "window=" + Uri.EscapeDataString(w);
+                }
                 System.Threading.Tasks.Task.Run(delegate
                 {
                     try
@@ -763,6 +794,208 @@ namespace StockPool
                 items.Add(MktBarItem(VStr(VSafe(x, "name")), pct ?? 0, MktPct(pct)));
             }
             return items;
+        }
+
+        // ---------------- ⑥ AI 分析 ----------------
+        private void MktBuildMktAi(TableLayoutPanel stack)
+        {
+            TableLayoutPanel b;
+            var g = Group("盘面 AI 分析", out b);
+            _mktAiStatus = Mute(Lbl("准备分析…"));
+            _mktAiDepth = new ComboBox();
+            _mktAiDepth.DropDownStyle = ComboBoxStyle.DropDownList;
+            _mktAiDepth.Items.AddRange(new string[] { "精简", "适中", "详细" });
+            _mktAiDepth.SelectedIndex = 1;
+            _mktAiDepth.Width = 70;
+            AddRow(b, Row(_mktAiStatus, _mktAiDepth,
+                MiniBtn("生成分析", delegate { MktLoadMktAi(false); }, 96),
+                MiniBtn("↻ 重新生成", delegate { MktLoadMktAi(true); }, 110)));
+            _mktAiBox = new RichTextBox();
+            _mktAiBox.Tag = "doc-ai";
+            _mktAiBox.ReadOnly = true;
+            _mktAiBox.BorderStyle = BorderStyle.None;
+            _mktAiBox.Height = 460;
+            _mktAiBox.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
+            _mktAiBox.ScrollBars = RichTextBoxScrollBars.Vertical;
+            _mktAiBox.Font = new Font("Microsoft YaHei UI", 9.5f);
+            _mktAiBox.BackColor = _cPanel;
+            _mktAiBox.ForeColor = _cText;
+            AddRow(b, _mktAiBox);
+            AddRow(stack, g);
+        }
+
+        private void MktLoadMktAi(bool force)
+        {
+            if (_mktAiStatus != null)
+            {
+                _mktAiStatus.Text = force ? "AI 强制重新分析中…" : "AI 分析中…";
+                _mktAiStatus.Tag = "muted";
+                _mktAiStatus.ForeColor = Color.FromArgb(150, 158, 172);
+            }
+            _mktAiMarkdown = "";
+            if (_mktAiBox != null) _mktAiBox.Clear();
+            MktAiLog("· 正在准备盘面数据…");
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                string depth = (_mktAiDepth != null && _mktAiDepth.SelectedIndex >= 0)
+                    ? new[] { "concise", "normal", "detailed" }[_mktAiDepth.SelectedIndex] : "normal";
+                string body = new JavaScriptSerializer().Serialize(new Dictionary<string, object> {
+                    { "depth", depth }, { "force", force }
+                });
+                const string url = "http://127.0.0.1:8000/api/market/ai-analysis/stream";
+                int got = 0;
+                // 后端可能仍在启动（akshare 首次导入较慢），连不上时等待并重试若干次。
+                for (int attempt = 1; attempt <= 6; attempt++)
+                {
+                    bool done = false;
+                    try
+                    {
+                        VRequestStream(url, body, delegate(string line)
+                        {
+                            Dictionary<string, object> j;
+                            try { j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(line); }
+                            catch (Exception) { return; }
+                            if (j == null) return;
+
+                            object donev;
+                            if (j.TryGetValue("done", out donev) && donev is bool && (bool)donev)
+                            {
+                                done = true;
+                                Invoke((Action)delegate { MktRenderMktAi(j); });
+                                return;
+                            }
+                            string stage = VStr(VSafe(j, "stage"));
+                            if (stage == "") return;
+                            if (stage == "AI 生成")
+                            {
+                                Invoke((Action)delegate
+                                {
+                                    MktAiLog("· 数据就绪，正在调用大模型生成分析…");
+                                    if (_mktAiStatus != null)
+                                    {
+                                        _mktAiStatus.Text = "AI 生成中…";
+                                        _mktAiStatus.ForeColor = Color.FromArgb(150, 158, 172);
+                                    }
+                                });
+                                return;
+                            }
+                            got++;
+                            int n = got;
+                            object cv; bool cached = (j.TryGetValue("cached", out cv) && cv is bool && (bool)cv);
+                            var errs = VArr(VSafe(j, "errors"));
+                            string msg = "✓ " + stage + (cached ? "（复用缓存）" : "（已拉取）");
+                            if (errs != null && errs.Count > 0) msg += "  ⚠ " + errs.Count + " 项数据源告警";
+                            Invoke((Action)delegate
+                            {
+                                MktAiLog(msg);
+                                if (_mktAiStatus != null) _mktAiStatus.Text = "数据准备中（" + n + "/6）…";
+                            });
+                        });
+                        if (done) return;
+                    }
+                    catch (System.Net.WebException)
+                    {
+                        // 连不上 / 超时：后端可能仍在启动，稍后重试
+                    }
+                    catch (Exception ex)
+                    {
+                        Invoke((Action)delegate { MktAiFail("分析失败：" + ex.Message); });
+                        return;
+                    }
+                    if (attempt == 6)
+                    {
+                        Invoke((Action)delegate { MktAiFail("分析失败：无法连接后端（请确认后端已启动）"); });
+                        return;
+                    }
+                    try
+                    {
+                        Invoke((Action)delegate
+                        {
+                            if (_mktAiStatus != null)
+                            {
+                                _mktAiStatus.Text = "等待后端就绪…（第 " + attempt + " 次重试）";
+                                _mktAiStatus.ForeColor = Color.FromArgb(150, 158, 172);
+                            }
+                        });
+                    }
+                    catch (Exception) { }
+                    System.Threading.Thread.Sleep(3000);
+                }
+            });
+        }
+
+        /// <summary>把一行状态追加到 AI 输出框（供流式进度直接打印在页面上）。</summary>
+        private void MktAiLog(string msg)
+        {
+            if (_mktAiBox == null) return;
+            _mktAiBox.SelectionStart = _mktAiBox.TextLength;
+            _mktAiBox.SelectionLength = 0;
+            _mktAiBox.SelectionColor = Color.FromArgb(150, 158, 172);
+            _mktAiBox.AppendText(msg + Environment.NewLine);
+            _mktAiBox.SelectionStart = _mktAiBox.TextLength;
+            _mktAiBox.ScrollToCaret();
+        }
+
+        /// <summary>流式 POST：逐行回调 SSE 的 data 负载（用于 /api/market/ai-analysis/stream）。</summary>
+        private static void VRequestStream(string url, string body, Action<string> onDataLine)
+        {
+            var req = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(url);
+            req.Proxy = null;                  // 本机直连，绕开系统代理 / 自动发现
+            req.KeepAlive = false;
+            req.Timeout = 300000;              // 数据拉取 + LLM 生成可能较慢
+            req.ReadWriteTimeout = 300000;
+            req.Method = "POST";
+            req.ServicePoint.Expect100Continue = false;
+            req.ContentType = "application/json; charset=utf-8";
+            byte[] data = System.Text.Encoding.UTF8.GetBytes(body);
+            req.ContentLength = data.Length;
+            using (var s = req.GetRequestStream()) s.Write(data, 0, data.Length);
+            using (var resp = (System.Net.HttpWebResponse)req.GetResponse())
+            using (var sr = new System.IO.StreamReader(resp.GetResponseStream(), System.Text.Encoding.UTF8))
+            {
+                string line;
+                while ((line = sr.ReadLine()) != null)
+                {
+                    if (line.StartsWith("data:")) onDataLine(line.Substring(5).Trim());
+                }
+            }
+        }
+
+        private void MktAiFail(string msg)
+        {
+            if (_mktAiStatus != null)
+            {
+                _mktAiStatus.Text = msg;
+                _mktAiStatus.ForeColor = Color.FromArgb(208, 57, 59);
+            }
+            _mktAiMarkdown = "";
+            if (_mktAiBox != null) FillAiDoc(_mktAiBox, "");
+        }
+
+        private void MktRenderMktAi(Dictionary<string, object> j)
+        {
+            if (_mktAiStatus == null || _mktAiBox == null) return;
+            object okv;
+            bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+            if (!ok)
+            {
+                string emsg = VStr(VSafe(j, "error"));
+                if (emsg == "") emsg = VStr(VSafe(j, "detail"));
+                if (emsg == "") emsg = "分析失败";
+                _mktAiStatus.Text = emsg;
+                _mktAiStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                _mktAiMarkdown = "";
+                FillAiDoc(_mktAiBox, "");
+                return;
+            }
+            _mktAiMarkdown = VStr(VSafe(j, "markdown"));
+            object cached;
+            bool isCached = (j.TryGetValue("cached", out cached) && cached is bool && (bool)cached);
+            string asOf = VStr(VSafe(j, "data_as_of"));
+            _mktAiStatus.Text = (isCached ? "（缓存）" : "已生成") + (asOf != "" ? " 数据截至 " + asOf : "");
+            _mktAiStatus.Tag = "muted";
+            _mktAiStatus.ForeColor = Color.FromArgb(30, 126, 52);
+            FillAiDoc(_mktAiBox, _mktAiMarkdown);
         }
 
         // ---------------- ④ 连板梯队 ----------------
