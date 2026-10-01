@@ -10,17 +10,20 @@
     GET /limit-up   ④ 连板梯队（连板结构 + 晋级率）
     GET /big-loss   ⑤ 大面股（炸板池 + 跌停池）
     POST /ai-analysis ⑥ 盘面 AI 分析（投喂五大维度，调用 LLM，需配置 LLM_API_KEY）
+    POST /ai-analysis/stream ⑥ 同上，但以 SSE 流式返回各数据块的拉取进度与最终结果
 
 均支持 ?date=YYYYMMDD 指定交易日（①②③ 仅部分口径有历史数据源，② 恒为实时快照）
 与 ?force=1 跳过进程内缓存（ai-analysis 为 POST，date/depth/force 放 body）。
 """
 
 import datetime as dt
+import json
 import threading
 import time
 
 import requests
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 import config
@@ -49,6 +52,21 @@ MARKET_PROMPT_TEMPLATE = """你是 A 股盘面分析师，仅基于下方 <data>
 2、热点板块：基于当日与 5 日板块资金净流入，概括资金正在进攻的方向与可能的主线，点出代表性板块（文字概括，勿列表）；
 3、连板与情绪：基于连板结构、晋级率与涨停/炸板/跌停家数，概括短线情绪的冷热与持续性（整体描述，勿逐档列晋级率）；
 4、风险声明：本内容由 AI 生成，仅供参考，不构成任何投资建议。"""
+
+
+def _build_prompt(depth: str, data_text: str) -> str:
+    """按详细程度拼装最终 prompt。"""
+    prompt = MARKET_PROMPT_TEMPLATE
+    if depth == "concise":
+        prompt += "\n\n【输出篇幅】精简：每块仅 2-3 句要点，总字数 400 以内，仍以结论为主。"
+    elif depth == "detailed":
+        prompt += "\n\n【输出篇幅】详细：充分展开逻辑与论证，可点名代表性板块/个股方向，但同样禁止罗列原始数值明细。"
+    return prompt + "\n\n<data>\n" + data_text + "\n</data>"
+
+
+def _sse(obj) -> str:
+    """把一条事件编码为 SSE 帧（JSON 单行，换行已转义，不会破坏帧结构）。"""
+    return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
 
 
 class MarketAiRequest(BaseModel):
@@ -111,14 +129,7 @@ def market_ai_analysis(req: MarketAiRequest):
 
     try:
         text, errors = market_service.market_ai_digest(req.date or None)
-        prompt = MARKET_PROMPT_TEMPLATE
-        if req.depth == "concise":
-            prompt += "\n\n【输出篇幅】精简：每块仅 2-3 句要点，总字数 400 以内，仍以结论为主。"
-        elif req.depth == "detailed":
-            prompt += "\n\n【输出篇幅】详细：充分展开逻辑与论证，可点名代表性板块/个股方向，但同样禁止罗列原始数值明细。"
-        prompt = prompt + "\n\n<data>\n" + text + "\n</data>"
-        markdown = call_llm(prompt)
-        markdown = (markdown or "").strip() + DISCLAIMER
+        markdown = (call_llm(_build_prompt(req.depth, text)) or "").strip() + DISCLAIMER
     except requests.HTTPError as e:
         raise HTTPException(status_code=502, detail=llm_error_detail(e))
     except Exception as e:
@@ -129,3 +140,54 @@ def market_ai_analysis(req: MarketAiRequest):
     with _ai_cache_lock:
         _ai_cache[cache_key] = {"ts": time.time(), "payload": payload}
     return {"ok": True, **payload, "cached": False}
+
+
+@router.post("/ai-analysis/stream")
+def market_ai_analysis_stream(req: MarketAiRequest):
+    """⑥ 盘面 AI 分析（SSE 流式）：先逐块推送数据拉取进度，再推送 LLM 生成结果。
+
+    事件格式（每行以 "data: " 开头，JSON 负载）：
+      {"stage": "外围环境", "cached": true/false, "errors": [...]}   某块数据就绪
+      {"done": true, "ok": true, "markdown": "...", ...}              最终结果
+    """
+    if not config.llm_ready() or config.llm_config_problem():
+        raise HTTPException(status_code=503, detail=config.llm_config_problem() or "服务端未配置 LLM")
+
+    cache_key = f"{req.date or 'rt'}|{req.depth}"
+    with _ai_cache_lock:
+        hit = _ai_cache.get(cache_key)
+    if hit and not req.force and (time.time() - hit["ts"]) < AI_CACHE_TTL:
+        payload = {**hit["payload"], "cached": True}
+
+        def cached_gen():
+            yield _sse({"done": True, "ok": True, **payload})
+
+        return StreamingResponse(cached_gen(), media_type="text/event-stream")
+
+    def gen():
+        text, errors = "", []
+        try:
+            for kind, payload in market_service.market_ai_digest_progress(req.date or None):
+                if kind == "progress":
+                    yield _sse({"stage": payload["stage"],
+                                "cached": payload["cached"],
+                                "errors": payload["errors"]})
+                else:
+                    text, errors = payload["text"], payload["errors"]
+            yield _sse({"stage": "AI 生成", "cached": False, "errors": []})
+            markdown = (call_llm(_build_prompt(req.depth, text)) or "").strip() + DISCLAIMER
+        except requests.HTTPError as e:
+            yield _sse({"done": True, "ok": False, "error": llm_error_detail(e)})
+            return
+        except Exception as e:
+            yield _sse({"done": True, "ok": False, "error": f"盘面 AI 分析失败：{e}"})
+            return
+
+        payload = {"markdown": markdown, "data_errors": errors,
+                   "data_as_of": dt.date.today().isoformat()}
+        with _ai_cache_lock:
+            _ai_cache[cache_key] = {"ts": time.time(), "payload": payload}
+        yield _sse({"done": True, "ok": True, "cached": False, **payload})
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

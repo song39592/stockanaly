@@ -26,6 +26,7 @@ import sys
 import json
 import threading
 import time
+from concurrent import futures as cf
 
 import pandas as pd
 import requests
@@ -615,7 +616,7 @@ def _ths_market_flow(errors):
     box: dict = {}
 
     def fetch_individual():
-        box["individual"] = _ak(ak.stock_fund_flow_individual, symbol=sym)
+        box["individual"] = _ak(ak.stock_fund_flow_individual, symbol="即时")
 
     def fetch_big_deal():
         box["big_deal"] = _ak(ak.stock_fund_flow_big_deal)
@@ -1137,19 +1138,58 @@ def big_loss(date=None):
     return {**data, "cached": cached}
 
 
-def market_ai_digest(date=None):
-    """汇总盘面五大维度，裁剪后转成结构化文本，供 AI 分析投喂（避免 prompt 过大）。
+# 盘面 AI 分析的六块数据（顺序仅作参考，实际并行抓取）
+AI_DIGEST_BLOCKS = (
+    ("外围环境", lambda date: global_market(date)),
+    ("大盘资金", lambda date: capital_flow(date)),
+    ("当日板块资金流", lambda date: sector_beta(date, "今日")),
+    ("5日板块资金流", lambda date: sector_beta(date, "5日")),
+    ("连板梯队", lambda date: limit_up_ladder(date)),
+    ("跌停大面", lambda date: big_loss(date)),
+)
 
-    投喂内容：① 外围环境 ② 大盘资金 ③ 当日板块资金流 ④ 5 日板块资金流
-             ⑤ 连板梯队 ⑥ 跌停大面。
-    返回 (text, errors)：text 为 json 文本，errors 为各数据源的告警汇总。
+
+def market_ai_digest_progress(date=None):
+    """汇总盘面六大维度，**并行**抓取（各块自身带进程内缓存，未过期即复用，不重复打数据源）。
+
+    生成器逐个产出：
+      ("progress", {"stage": 名称, "cached": bool, "errors": [...]})  某块数据就绪
+      ("digest",   {"text": json 文本, "errors": [...]})             全部就绪后的投喂文本
     """
-    g = global_market(date) or {}
-    cap = capital_flow(date) or {}
-    ind_today = sector_beta(date, "今日") or {}
-    ind_5d = sector_beta(date, "5日") or {}
-    ladder = limit_up_ladder(date) or {}
-    loss = big_loss(date) or {}
+    blocks = {}
+    jobs = list(AI_DIGEST_BLOCKS)
+    with cf.ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+        futs = {ex.submit(fn, date): label for label, fn in jobs}
+        for fut in cf.as_completed(futs):
+            label = futs[fut]
+            try:
+                data = fut.result() or {}
+                errs = list(data.get("errors") or [])
+            except Exception as e:
+                data, errs = {}, [f"{label}获取异常：{e}"]
+            blocks[label] = data
+            yield "progress", {"stage": label, "cached": bool(data.get("cached")), "errors": errs}
+    text, errors = _assemble_digest(blocks)
+    yield "digest", {"text": text, "errors": errors}
+
+
+def market_ai_digest(date=None):
+    """汇总盘面数据并转成结构化文本，返回 (text, errors)。非流式调用复用上面的实现。"""
+    text, errors = "", []
+    for kind, payload in market_ai_digest_progress(date):
+        if kind == "digest":
+            text, errors = payload["text"], payload["errors"]
+    return text, errors
+
+
+def _assemble_digest(blocks):
+    """把六块数据裁剪后拼成结构化 json 文本（避免 prompt 过大），返回 (text, errors)。"""
+    g = blocks.get("外围环境") or {}
+    cap = blocks.get("大盘资金") or {}
+    ind_today = blocks.get("当日板块资金流") or {}
+    ind_5d = blocks.get("5日板块资金流") or {}
+    ladder = blocks.get("连板梯队") or {}
+    loss = blocks.get("跌停大面") or {}
 
     def sectors_full(block):
         out = []
@@ -1226,5 +1266,4 @@ def market_ai_digest(date=None):
     for src in (g, cap, ind_today, ind_5d, ladder, loss):
         for e in (src.get("errors") or []):
             errors.append(e)
-    text = json.dumps(digest, ensure_ascii=False, indent=2)
-    return text, errors
+    return json.dumps(digest, ensure_ascii=False, indent=2), errors

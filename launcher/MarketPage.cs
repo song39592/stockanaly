@@ -800,7 +800,7 @@ namespace StockPool
         private void MktBuildMktAi(TableLayoutPanel stack)
         {
             TableLayoutPanel b;
-            var g = Group("盘面 AI 分析（来自 /api/market/ai-analysis，复用同一个 LLM_API_KEY）", out b);
+            var g = Group("盘面 AI 分析", out b);
             _mktAiStatus = Mute(Lbl("准备分析…"));
             _mktAiDepth = new ComboBox();
             _mktAiDepth.DropDownStyle = ComboBoxStyle.DropDownList;
@@ -833,7 +833,8 @@ namespace StockPool
                 _mktAiStatus.ForeColor = Color.FromArgb(150, 158, 172);
             }
             _mktAiMarkdown = "";
-            if (_mktAiBox != null) FillAiDoc(_mktAiBox, "");
+            if (_mktAiBox != null) _mktAiBox.Clear();
+            MktAiLog("· 正在准备盘面数据…");
             System.Threading.Tasks.Task.Run(delegate
             {
                 string depth = (_mktAiDepth != null && _mktAiDepth.SelectedIndex >= 0)
@@ -841,45 +842,123 @@ namespace StockPool
                 string body = new JavaScriptSerializer().Serialize(new Dictionary<string, object> {
                     { "depth", depth }, { "force", force }
                 });
+                const string url = "http://127.0.0.1:8000/api/market/ai-analysis/stream";
+                int got = 0;
                 // 后端可能仍在启动（akshare 首次导入较慢），连不上时等待并重试若干次。
                 for (int attempt = 1; attempt <= 6; attempt++)
                 {
+                    bool done = false;
                     try
                     {
-                        string resp = VRequest("http://127.0.0.1:8000/api/market/ai-analysis", body);
-                        var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                        Invoke((Action)delegate { MktRenderMktAi(j); });
-                        return;
+                        VRequestStream(url, body, delegate(string line)
+                        {
+                            Dictionary<string, object> j;
+                            try { j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(line); }
+                            catch (Exception) { return; }
+                            if (j == null) return;
+
+                            object donev;
+                            if (j.TryGetValue("done", out donev) && donev is bool && (bool)donev)
+                            {
+                                done = true;
+                                Invoke((Action)delegate { MktRenderMktAi(j); });
+                                return;
+                            }
+                            string stage = VStr(VSafe(j, "stage"));
+                            if (stage == "") return;
+                            if (stage == "AI 生成")
+                            {
+                                Invoke((Action)delegate
+                                {
+                                    MktAiLog("· 数据就绪，正在调用大模型生成分析…");
+                                    if (_mktAiStatus != null)
+                                    {
+                                        _mktAiStatus.Text = "AI 生成中…";
+                                        _mktAiStatus.ForeColor = Color.FromArgb(150, 158, 172);
+                                    }
+                                });
+                                return;
+                            }
+                            got++;
+                            int n = got;
+                            object cv; bool cached = (j.TryGetValue("cached", out cv) && cv is bool && (bool)cv);
+                            var errs = VArr(VSafe(j, "errors"));
+                            string msg = "✓ " + stage + (cached ? "（复用缓存）" : "（已拉取）");
+                            if (errs != null && errs.Count > 0) msg += "  ⚠ " + errs.Count + " 项数据源告警";
+                            Invoke((Action)delegate
+                            {
+                                MktAiLog(msg);
+                                if (_mktAiStatus != null) _mktAiStatus.Text = "数据准备中（" + n + "/6）…";
+                            });
+                        });
+                        if (done) return;
                     }
                     catch (System.Net.WebException)
                     {
-                        // VRequest 仅在「连不上 / 超时」时抛 WebException（带响应体的 4xx/5xx 会直接返回）
-                        if (attempt == 6)
-                        {
-                            Invoke((Action)delegate { MktAiFail("分析失败：无法连接后端（请确认后端已启动）"); });
-                            return;
-                        }
-                        try
-                        {
-                            Invoke((Action)delegate
-                            {
-                                if (_mktAiStatus != null)
-                                {
-                                    _mktAiStatus.Text = "等待后端就绪…（第 " + attempt + " 次重试）";
-                                    _mktAiStatus.ForeColor = Color.FromArgb(150, 158, 172);
-                                }
-                            });
-                        }
-                        catch (Exception) { }
-                        System.Threading.Thread.Sleep(3000);
+                        // 连不上 / 超时：后端可能仍在启动，稍后重试
                     }
                     catch (Exception ex)
                     {
                         Invoke((Action)delegate { MktAiFail("分析失败：" + ex.Message); });
                         return;
                     }
+                    if (attempt == 6)
+                    {
+                        Invoke((Action)delegate { MktAiFail("分析失败：无法连接后端（请确认后端已启动）"); });
+                        return;
+                    }
+                    try
+                    {
+                        Invoke((Action)delegate
+                        {
+                            if (_mktAiStatus != null)
+                            {
+                                _mktAiStatus.Text = "等待后端就绪…（第 " + attempt + " 次重试）";
+                                _mktAiStatus.ForeColor = Color.FromArgb(150, 158, 172);
+                            }
+                        });
+                    }
+                    catch (Exception) { }
+                    System.Threading.Thread.Sleep(3000);
                 }
             });
+        }
+
+        /// <summary>把一行状态追加到 AI 输出框（供流式进度直接打印在页面上）。</summary>
+        private void MktAiLog(string msg)
+        {
+            if (_mktAiBox == null) return;
+            _mktAiBox.SelectionStart = _mktAiBox.TextLength;
+            _mktAiBox.SelectionLength = 0;
+            _mktAiBox.SelectionColor = Color.FromArgb(150, 158, 172);
+            _mktAiBox.AppendText(msg + Environment.NewLine);
+            _mktAiBox.SelectionStart = _mktAiBox.TextLength;
+            _mktAiBox.ScrollToCaret();
+        }
+
+        /// <summary>流式 POST：逐行回调 SSE 的 data 负载（用于 /api/market/ai-analysis/stream）。</summary>
+        private static void VRequestStream(string url, string body, Action<string> onDataLine)
+        {
+            var req = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(url);
+            req.Proxy = null;                  // 本机直连，绕开系统代理 / 自动发现
+            req.KeepAlive = false;
+            req.Timeout = 300000;              // 数据拉取 + LLM 生成可能较慢
+            req.ReadWriteTimeout = 300000;
+            req.Method = "POST";
+            req.ServicePoint.Expect100Continue = false;
+            req.ContentType = "application/json; charset=utf-8";
+            byte[] data = System.Text.Encoding.UTF8.GetBytes(body);
+            req.ContentLength = data.Length;
+            using (var s = req.GetRequestStream()) s.Write(data, 0, data.Length);
+            using (var resp = (System.Net.HttpWebResponse)req.GetResponse())
+            using (var sr = new System.IO.StreamReader(resp.GetResponseStream(), System.Text.Encoding.UTF8))
+            {
+                string line;
+                while ((line = sr.ReadLine()) != null)
+                {
+                    if (line.StartsWith("data:")) onDataLine(line.Substring(5).Trim());
+                }
+            }
         }
 
         private void MktAiFail(string msg)
