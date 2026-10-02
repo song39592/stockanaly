@@ -111,8 +111,12 @@ def _normalize_series(result: dict, df: pd.DataFrame) -> list[dict]:
     return out
 
 
-def compute(code: str, indicator_id: str, params: dict | None = None) -> dict:
+def compute(code: str, indicator_id: str, params: dict | None = None,
+            period: str = "day") -> dict:
     """计算单个指标，返回**标准化输出**。
+
+    `period` 是 K 线周期（day / week / month）：**必须与 K 线展示的周期一致**，
+    否则周线蜡烛会配上日线指标（MA5 变成 5 日而非 5 周），口径是错的。
 
     返回结构（详见 ARCHITECTURE.md §6）：
       {
@@ -130,7 +134,7 @@ def compute(code: str, indicator_id: str, params: dict | None = None) -> dict:
     if meta is None:
         raise KeyError(f"未知指标: {indicator_id}")
 
-    df = data.get_ohlcv(code)                 # 唯一取数点
+    df = data.get_ohlcv(code, period=period)   # 唯一取数点
     if df is None or df.empty:
         raise RuntimeError(f"无行情数据: {code}")
     # 指标函数只收 df，拿不到代码；这里挂在 df.attrs 上供需要按代码再取数的

@@ -18,6 +18,7 @@ import json
 from fastapi import APIRouter, HTTPException, Query
 
 import chip_formulas
+from periods import normalize
 
 router = APIRouter(prefix="/api/chip/dist", tags=["筹码体系 · 筹码分布"])
 
@@ -40,14 +41,20 @@ def chip_dist(code: str = Query(..., min_length=6, max_length=6,
               end: str | None = None,
               adjust: str = "qfq",
               days: int = 0,
-              bins: int = chip_formulas.base.DEFAULT_BINS):
+              bins: int = chip_formulas.base.DEFAULT_BINS,
+              period: str = "day"):
     """筹码分布：按价格分箱的占比（合计 100）+ 逐日快照 + 成本统计。
 
     params 为 JSON 对象字符串（公式参数，如 {"decay": 1.5}），缺省用公式默认值。
+    period 与 K 线周期一致（周线时换手率即周换手率）。
     数据不足 / 缺流通股本时返回 200 + ok=false（便于前端在窗口内直接显示原因）。
     """
     if adjust not in ("qfq", "hfq", "raw"):
         raise HTTPException(status_code=400, detail=f"不支持的复权口径：{adjust}")
+    try:
+        period = normalize(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     parsed = None
     if params:
         try:
@@ -59,7 +66,7 @@ def chip_dist(code: str = Query(..., min_length=6, max_length=6,
     try:
         return chip_formulas.compute(
             code, formula_id=formula, params=parsed, start=start, end=end,
-            adjust=adjust, days=days or None, bins=bins)
+            adjust=adjust, days=days or None, bins=bins, period=period)
     except KeyError as exc:                     # 公式 id 不存在
         raise HTTPException(status_code=400, detail=str(exc).strip("'"))
     except RuntimeError as exc:                 # 行情不足 / 缺流通股本：业务性失败

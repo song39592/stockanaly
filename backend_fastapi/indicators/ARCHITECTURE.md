@@ -35,6 +35,8 @@ backend_fastapi/indicators/
 ## 3. 核心约束（⚠️ 最重要）
 
 1. **唯一数据入口**：`data.py` 是指标包内**唯一**允许 `import price_store`（以及将来任何外部源/akshare/网络）的文件。
+   K 线本身不经它直连存储，而是调用 **`kline_service.get_bars()`**——
+   全项目唯一的「取数 + 周期合样」出口，保证指标的输入与用户看到的 K 线是**同一个序列**。
 2. **指标文件禁止直连外部**：`ma.py / macd.py / rsi.py` 等「**每个指标一个文件、文件名即指标 id**」的实现文件**只能**
    `from .data import get_ohlcv`，不得 `import price_store`、`import akshare`、读取文件或发起请求。
    所有取数、复权、缺失处理、口径对齐都在 `data.py` 一次性解决。
@@ -53,6 +55,8 @@ backend_fastapi/indicators/
   - `adjust` 默认 `"qfq"`（前复权，用于展示型技术指标）；回测用途调用方应显式传 `"hfq"`。
   - 数据不足（< 2 行）或无数据时抛 `RuntimeError`。
 - 内部 `_load(...)` 带 `lru_cache`，同一 `(code, 区间, 口径)` 只解析一次，指标常反复取同一段数据时可显著提速。
+- **取数与周期合样都不在本文件实现**：统一走 `kline_service.get_bars(code, ..., period=)`，
+  本文件只做列裁剪与缓存。指标不再自己 resample，避免出现「蜡烛是周线、指标按日线算」的错位。
 - 若指标需要成交额/换手率等额外列，只在 `data.py` 扩展，实现文件无需改动。
 
 **已扩展的三项（筹码分布用，非指标序列）**：
@@ -66,6 +70,11 @@ backend_fastapi/indicators/
 > 背景：本地通达信日线没有流通股本（`tdx_reader` 的 `turnover` 一律留空），
 > 换手率算不出来；筹码分布的衰减完全由换手率驱动，故单独接了 `share_service`
 > 这一路数据源，落库在 `price_store.share_capital`（按生效日存序列）。
+
+**周期 `period`（day / week / month）**：`get_ohlcv` / `get_turnover` / `get_vwap` 均可传。
+日线是唯一落库口径，周线 / 月线由 `periods.resample_bars` **读取时现算**（复权之后再合样）。
+⚠️ 周期必须与 K 线展示的周期一致：周线蜡烛要配周线 MA（MA5 = 5 周），
+拿日线序列去对齐周线日期是错的。
 
 ---
 

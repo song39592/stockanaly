@@ -192,6 +192,7 @@ class ChipResult:
     float_shares: float
     warm: int
     adjust: str
+    period: str
     formula_id: str
     formula_name: str
     params: dict
@@ -200,7 +201,7 @@ class ChipResult:
 def compute_matrix(code: str, formula_id: str | None = None, params: dict | None = None,
                    start: str | None = None, end: str | None = None,
                    adjust: str = "qfq", days: int | None = None,
-                   bins: int = DEFAULT_BINS) -> ChipResult:
+                   bins: int = DEFAULT_BINS, period: str = "day") -> ChipResult:
     """按指定公式算出**筹码矩阵**（不含 HTTP 响应包装）。
 
     指标侧的延伸量（获利比例 / 平均成本 / 集中度）复用这一份结果，
@@ -217,7 +218,7 @@ def compute_matrix(code: str, formula_id: str | None = None, params: dict | None
 
     bins = int(bins) if bins and int(bins) > 1 else DEFAULT_BINS
     kwargs = _fill_params(meta, params)
-    inp = data.load_input(code, start, end, adjust, days, bins)
+    inp = data.load_input(code, start, end, adjust, days, bins, period=period)
     ctx = ChipContext(
         dates=inp.dates, open=inp.open, high=inp.high, low=inp.low, close=inp.close,
         volume=inp.volume, turnover=inp.turnover, vwap=inp.vwap,
@@ -231,6 +232,7 @@ def compute_matrix(code: str, formula_id: str | None = None, params: dict | None
         dates=inp.dates[-win:], close=ctx.close[-win:], centers=ctx.centers,
         edges=ctx.edges, pct=matrix[-win:], turnover=ctx.turnover[-win:],
         float_shares=inp.float_shares, warm=inp.warm, adjust=inp.adjust,
+        period=inp.period,
         formula_id=meta.id, formula_name=meta.name, params=kwargs,
     )
 
@@ -238,9 +240,10 @@ def compute_matrix(code: str, formula_id: str | None = None, params: dict | None
 def compute(code: str, formula_id: str | None = None, params: dict | None = None,
             start: str | None = None, end: str | None = None,
             adjust: str = "qfq", days: int | None = None,
-            bins: int = DEFAULT_BINS) -> dict:
+            bins: int = DEFAULT_BINS, period: str = "day") -> dict:
     """按指定公式计算筹码分布，返回**标准化响应**（字段见 ARCHITECTURE.md §5）。"""
-    res = compute_matrix(code, formula_id, params, start, end, adjust, days, bins)
+    res = compute_matrix(code, formula_id, params, start, end, adjust, days, bins,
+                         period=period)
     pct = res.pct[-1]
     win = len(res.dates)
     frame_stats = [_stats_of(res.pct[i], res.centers, float(res.close[i]))
@@ -263,6 +266,7 @@ def compute(code: str, formula_id: str | None = None, params: dict | None = None
         "code": code,
         "formula": {"id": res.formula_id, "name": res.formula_name, "params": res.params},
         "adjust": res.adjust,
+        "period": res.period,
         "as_of": res.dates[-1],
         "start": res.dates[0],
         "end": res.dates[-1],

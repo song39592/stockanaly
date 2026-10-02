@@ -37,12 +37,16 @@ stats.py      ⑥ 用收盘价序列算净值与指标（与策略无关）
 
 > `data.load_bars` 按 (code, start, end, adjust) **逐标的缓存**底层全量 OHLCV，
 > 因此「回测预检 / 策略拉数 / 统计拉数」多次调用（即使字段或 code 集合不同）只触发一次真实取数。
+> 底层 K 线由 `kline_service` 提供（与个股页 K 线 / 指标 / 筹码同一份实现），
+> 但**回测固定日线**：`stats.py` 的年化与夏普按 **252 交易日/年**折算，
+> 换成周 / 月会让这两个指标静默算错，故 `load_bars` 不开放 period
+> （真要做周期回测，须先改 stats 的年化口径并重定义 T+1 与持仓天数的语义）。
 
 ## 分层（各层职责单一，互不越界）
 
 | 文件 | 角色 | 职责 | 允许依赖 |
 | --- | --- | --- | --- |
-| `data.py` | **数据层** | `load_bars(codes, fields) -> {code: DataFrame}`、`list_universe_codes()`；包内**唯一**允许 `import price_store` 的地方 | `indicators.data`、`price_store` |
+| `data.py` | **数据层** | `load_bars(codes, fields) -> {code: DataFrame}`、`list_universe_codes()`；取数走 **`kline_service`**（全项目唯一的「取数 + 周期合样」出口）；包内**唯一**允许 `import price_store` 的地方 | `kline_service`、`price_store` |
 | `base.py` | **契约层** | `@strategy` / `ParamSpec` / `Signal` / `StrategyContext`；`run()` 调策略、`signals_to_positions()` 信号→仓位 | `data`（仅类型）、`pandas` |
 | `stats.py` | **统计引擎** | 目标仓位序列 + 收盘价 → 净值曲线与指标；**与策略完全解耦** | 仅 `numpy/pandas` |
 | `backtest.py` | **编排层** | 范围 → 策略信号 → 统计，串起来并规范化返回 | `data/base/stats` |
@@ -112,6 +116,9 @@ def macd(ctx, fast: int = 12, position: float = 1.0) -> list[Signal]:
 
 ## 统计口径（`stats.py`）
 - 输入：{code: 目标仓位序列} + {code: 收盘价序列}（均由编排层从 `data` 取好后传入）。
+- **日线口径**：年化与夏普按 `252` 交易日/年折算（`stats.py` 中的 `252.0`），
+  夏普的分母也用它做年化。因此**序列必须是日线**——这也是 `data.load_bars` 不开放
+  period 的原因；若将来支持周 / 月回测，这里要改成按实际周期数/年折算。
 - 次日生效：`w_{t-1}` 承担第 `t` 日收益（当日收盘算信号）。
 - 交易成本：按目标仓位变化量 × `commission`（单边）。
 - 组合：各标的**等权**，每只分到 `initial_capital / N` 一条资金带；未建仓即现金（收益 0）。
