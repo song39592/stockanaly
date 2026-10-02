@@ -26,7 +26,6 @@ namespace StockPool
         private TextBox _stockCode;
         private Button _stockOpen, _stockRefresh;
         private Label _stockName, _stockHint, _stockStatus, _stockValStatus;
-        private FlowLayoutPanel _stockKpi;                 // 在榜统计 KPI
         private KLineChart _stockKline;
         private ChipPanel _stockChip;                      // K 线右侧的筹码分布窗口
         private ComboBox _stockChipFormula;                // 筹码公式下拉（后端 /api/chip/dist/formulas 枚举）
@@ -253,15 +252,18 @@ namespace StockPool
             kLayout.RowCount = 2;
             kLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));   // K 线
             kLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 178f));  // 右侧筹码分布窗口
-            kLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // 概况 + 同步状态
+            kLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // 指标勾选 / 筹码公式下拉
             kLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));  // 图表撑满
             klinePage.Controls.Add(kLayout);
             var kTop = Stack();
-            TableLayoutPanel b1;
-            var g1 = Group("个股概况（入池出池轨迹）", out b1);
-            _stockKpi = VKpiRow();
-            AddRow(b1, _stockKpi);
-            AddRow(kTop, g1);
+            // ⚠️ 这里的列宽必须给**具体值**，不能沿用 Stack() 的 Percent 100。
+            // 在 AutoSize 表里 Percent 会绕成「列宽 ← 表宽 ← 子项首选宽」的循环，
+            // 指标勾选那行 FlowLayoutPanel（WrapContents=true）会被用 ~98px 去测量 →
+            // 8 个控件各占一行 → 首选高度 208px，而 AutoSize 行取的正是它，
+            // 于是 K 线上方空出一大块（实测：Percent 时 kTop=208/图表=517，
+            // Absolute 时 kTop=36/图表=689，且 520~1400 宽度下空余均为 0）。
+            kTop.ColumnStyles.Clear();
+            kTop.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 300f));
 
             // 指标勾选：从后端 /api/indicators 自动枚举，按 panel 分组（主图 / 副图），none 类型不显示
             _stockIndFlow = new FlowLayoutPanel();
@@ -273,7 +275,8 @@ namespace StockPool
             AddRow(kTop, _stockIndFlow);
             StockRefreshIndicatorList();   // 异步拉取指标清单并动态生成勾选项
 
-            // 「更新至 …」栏已按需求移除；kTop 只保留概况，下方 K 线区域自动加高。
+            // 「更新至 …」与「个股概况（在榜统计 KPI）」已按需求移除，kTop 只留指标勾选；
+            // 省下的高度全部归 K 线——row1 是 Percent 100，会自动吃满剩余空间。
 
             _stockKline = new KLineChart();
             _stockKline.Dock = DockStyle.Fill;
@@ -296,16 +299,13 @@ namespace StockPool
             _stockKline.PriceAxisChanged += delegate { if (_stockChip != null) _stockChip.Invalidate(); };
             _stockChip.BackColorChanged += delegate { _stockChip.Invalidate(); };
 
-            // 公式下拉放在右侧列的**第 0 行**：它绝不能压在筹码窗口上——
-            // 筹码窗口必须与 K 线同顶同高，价格轴才对得齐（差几像素峰位就偏了）。
-            var chipHead = new Panel();
-            chipHead.Dock = DockStyle.Fill;
-            chipHead.Margin = new Padding(0);
-            chipHead.Padding = new Padding(0);
+            // 公式下拉放在右侧列的**第 0 行**（不能压在筹码窗口上——筹码窗口必须与
+            // K 线同顶同高，价格轴才对得齐）。直接放控件、不套 Panel：
+            // 普通 Panel 默认高 100px，会把 AutoSize 行撑出一大块空白。
             _stockChipFormula = new ComboBox();
             _stockChipFormula.DropDownStyle = ComboBoxStyle.DropDownList;
-            _stockChipFormula.Dock = DockStyle.Top;
             _stockChipFormula.Width = 170;
+            _stockChipFormula.Margin = new Padding(0, 3, 0, 0);
             _stockChipFormula.TabStop = false;
             _stockChipFormula.Visible = false;             // 只有 ≥2 个公式才值得选
             _stockChipFormula.SelectedIndexChanged += delegate
@@ -316,10 +316,9 @@ namespace StockPool
                 _stockChipFormulaId = it.Id;
                 if (_stockCurrent != null) StockLoadChip(_stockCurrent);
             };
-            chipHead.Controls.Add(_stockChipFormula);
 
-            kLayout.Controls.Add(kTop, 0, 0);              // 概况 + 同步状态
-            kLayout.Controls.Add(chipHead, 1, 0);          // 筹码公式下拉
+            kLayout.Controls.Add(kTop, 0, 0);                  // 指标勾选
+            kLayout.Controls.Add(_stockChipFormula, 1, 0);     // 筹码公式下拉
             kLayout.Controls.Add(_stockKline, 0, 1);       // 图表占满剩余高度
             kLayout.Controls.Add(_stockChip, 1, 1);        // 右侧筹码分布窗口
             StockAddSubTab("K线", klinePage);
@@ -1134,7 +1133,9 @@ namespace StockPool
             }
 
             _stockKline.SetData(bars, barsRaw, marks);
-            StockRenderStats(spanList);
+            // SetData 不重置可见根数，这里按当前选中的「范围」按钮同步一次：
+            // 否则按钮高亮与图表实际根数会不一致，筹码帧窗口也会跟着对不上光标。
+            _stockKline.SetRange(_stockRange);
             StockRenderTimeline(spanList);
             StockRenderEvents(events);
 
@@ -1160,27 +1161,6 @@ namespace StockPool
             var parts = new List<string>();
             foreach (object o in list) parts.Add(VStr(o));
             return string.Join("；", parts.ToArray());
-        }
-
-        private void StockRenderStats(List<Dictionary<string, object>> spans)
-        {
-            _stockKpi.Controls.Clear();
-            int totalDays = 0;
-            int curStreak = 0;
-            string first = "—";
-            if (spans.Count > 0)
-            {
-                foreach (Dictionary<string, object> s in spans) totalDays += MktInt(VSafe(s, "days"));
-                Dictionary<string, object> last = spans[spans.Count - 1];
-                object openv = VSafe(last, "open");
-                bool open = (openv is bool) && (bool)openv;
-                curStreak = open ? MktInt(VSafe(last, "days")) : 0;
-                first = VStr(VSafe(spans[0], "start"));
-            }
-            AddKpi(_stockKpi, "当前连续在榜", curStreak > 0 ? curStreak + " 天" : "已出池", curStreak > 0 ? "仍在榜" : "已离榜");
-            AddKpi(_stockKpi, "累计上榜", totalDays + " 天", "数据日累计");
-            AddKpi(_stockKpi, "入池次数", spans.Count.ToString(), "历史合计");
-            AddKpi(_stockKpi, "首次入池日期", first, spans.Count > 0 ? "最早记录" : "暂无记录");
         }
 
         private void StockRenderTimeline(List<Dictionary<string, object>> spans)
