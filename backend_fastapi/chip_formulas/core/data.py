@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 
 from indicators import data as ind_data
+from periods import normalize
 
 # 预热：窗口首日的筹码只累积了一天，直接算会退化成一根尖刺
 # （实测首帧 90% 集中度 0.009、获利比例 0.88%），故迭代区间在窗口之前再取等长的一段。
@@ -43,25 +44,31 @@ class ChipInput:
     win: int                    # 输出帧数（= 窗口 = K 线可见根数）
     warm: int                   # 预热根数（只用于养状态，不输出）
     adjust: str
+    period: str = "day"         # K 线周期（与 K 线展示一致）
 
 
 def load_input(code: str, start: str | None = None, end: str | None = None,
                adjust: str = "qfq", days: int | None = None,
-               bins: int = 80) -> ChipInput:
+               bins: int = 80, period: str = "day") -> ChipInput:
     """取一段行情并装配成公式输入。
+
+    `period` 与 K 线周期一致：周线的一根 = 一周的成交量合计 + 一周的高低区间，
+    换手率（成交量 ÷ 流通股本）自然就是**周换手率**，衰减按周期步进，无需另算。
 
     异常：RuntimeError 行情不足 / 缺流通股本（由路由层转成业务性失败）。
     """
-    full = ind_data.get_ohlcv(code, start, end, adjust=adjust)
+    period = normalize(period)
+    full = ind_data.get_ohlcv(code, start, end, adjust=adjust, period=period)
     n_all = len(full)
     win = int(days) if days and int(days) > 0 else n_all
     win = max(1, min(win, n_all))
     warm = min(n_all - win, int(win * WARMUP_RATIO))
     df = full.iloc[n_all - win - warm:] if warm else full.iloc[n_all - win:]
 
-    turnover = ind_data.get_turnover(code, start, end, adjust=adjust)
+    turnover = ind_data.get_turnover(code, start, end, adjust=adjust, period=period)
     turnover = turnover.reindex(df.index).fillna(0.0)
-    vwap = ind_data.get_vwap(code, start, end, adjust=adjust).reindex(df.index)
+    vwap = ind_data.get_vwap(code, start, end, adjust=adjust,
+                             period=period).reindex(df.index)
     float_shares = ind_data.get_float_shares(code, str(df.index[-1])[:10])
 
     low = df["low"].astype(float).to_numpy()
@@ -90,6 +97,7 @@ def load_input(code: str, start: str | None = None, end: str | None = None,
         win=win,
         warm=warm,
         adjust=adjust,
+        period=period,
     )
 
 

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 
 import history_service
 import history_store
+from periods import normalize
 
 router = APIRouter(prefix="/api/history", tags=["股票池历史与K线"])
 
@@ -54,10 +55,15 @@ def sync_status(job_id: str):
 
 @router.get("/stock/{code}")
 def get_stock_history(code: str, start: str | None = None, end: str | None = None,
-                      refresh: bool = False):
+                      refresh: bool = False, period: str = "day"):
     if not re.fullmatch(r"\d{6}", code):
         raise HTTPException(status_code=400, detail="股票代码必须是6位数字")
     try:
-        return {"ok": True, **history_service.stock_detail(code, start, end, refresh)}
+        period = normalize(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    try:
+        return {"ok": True, **history_service.stock_detail(code, start, end, refresh,
+                                                           period=period)}
     except Exception as exc:  # noqa: BLE001 - 转换为可读接口错误
         raise HTTPException(status_code=500, detail=f"个股历史加载失败：{exc}")

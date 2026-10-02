@@ -15,6 +15,7 @@ import uuid
 from typing import Any
 
 import history_store
+import kline_service
 import price_service
 import price_store
 from collectors import get_announcements, get_news
@@ -183,7 +184,7 @@ def load_trusted_bars(code: str, start: str | None = None, end: str | None = Non
 
 
 def stock_detail(code: str, start: str | None = None, end: str | None = None,
-                 refresh: bool = False) -> dict[str, Any]:
+                 refresh: bool = False, period: str = "day") -> dict[str, Any]:
     """个股详情：前复权 K 线（现算）+ 消息面 + 入池轨迹，必要时先同步。
 
     K 线读取前会比对按股指纹；一旦发现数据被改动过，**直接全量重抓该股并整体替换**
@@ -211,9 +212,16 @@ def stock_detail(code: str, start: str | None = None, end: str | None = None,
     except Exception:
         bars_raw = []
 
+    # 周线 / 月线：**读取时现算**（日线是唯一落库口径），复权之后再合样。
+    # 合样走 kline_service——与指标 / 筹码同一份实现，保证三处看到的是同一根 K 线。
+    if period != "day":
+        bars = kline_service.resample(bars, period)
+        bars_raw = kline_service.resample(bars_raw, period)
+
     return {
         "code": code,
         "adjust": "qfq",
+        "period": period,
         "bars": bars,
         "bars_raw": bars_raw,
         "untrusted": bool(untrusted),

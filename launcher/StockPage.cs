@@ -35,6 +35,9 @@ namespace StockPool
         private int _stockRange = 250;                     // 0 = 全部
         private string _stockAdjust = "qfq";               // qfq 前复权 / raw 不复权
         private readonly Dictionary<Button, string> _stockAdjustMap = new Dictionary<Button, string>();
+        private readonly Dictionary<Button, string> _stockPeriodMap = new Dictionary<Button, string>();
+        private string _stockPeriod = "day";                  // K线周期：day / week / month
+        private int _stockRangeIdx = 1;                       // 范围档位：0=近6月 1=近1年 2=全部（-1=滚轮自定义）
         private DataGridView _stockTimeline;                // 入池 / 出池记录
         private TableLayoutPanel _stockEvents;              // 消息面时间轴
         private System.Collections.ArrayList _stockEventData = new System.Collections.ArrayList();
@@ -118,17 +121,14 @@ namespace StockPool
             root.Controls.Add(BuildStockHistoryPanel(), 0, 0);
 
             // ---- 标题 ----
+            // 原先这里还有一行「前复权/不复权日K…｜K线页：滚轮缩放 · 拖动平移」的说明，
+            // 已按需求移除：内容早已过时（现在有周/月周期与键盘操作），
+            // 且省下的高度归 K 线（标题行是 AutoSize）。
             var head = Stack();
             var title = Lbl("📊 个股分析");
             title.Font = new Font("Microsoft YaHei UI", 14f, FontStyle.Bold);
             title.Margin = new Padding(0, 0, 0, 2);
             AddRow(head, Row(title));
-
-            var sub = Mute(Lbl("前复权/不复权日K（MA5/10/20/60）+ 成交量红绿 + 入池出池轨迹 + 消息面时间轴｜数据来源：GET /api/history/stock/{code}｜K线页：滚轮缩放 · 拖动平移"));
-            sub.AutoSize = false;
-            sub.Width = 760;
-            sub.Height = 20;
-            AddRow(head, Row(sub));
             mainCol.Controls.Add(head, 0, 0);
 
             // ---- 查询工具区（始终可见，不随二级页滚动）----
@@ -148,8 +148,11 @@ namespace StockPool
             AddRow(b0, Row(_stockHint));
 
             // 范围按钮 + 刷新 + 状态
+            // 「范围」按**时间**定义（近6月 / 近1年 / 全部），存的是档位而非根数——
+            // 换周期后根数要跟着变：日线近1年≈250根，周线≈52根，月线≈12根。
+            // 若直接存根数，周线下按「近1年」会画出 5 年，标签就骗人了。
             var rangeLabels = new string[] { "近6月", "近1年", "全部" };
-            var rangeVals = new int[] { 120, 250, 0 };
+            var rangeVals = new int[] { 0, 1, 2 };
             for (int i = 0; i < rangeVals.Length; i++)
             {
                 int r = rangeVals[i];
@@ -167,13 +170,8 @@ namespace StockPool
                 int captured = r;
                 btn.Click += delegate
                 {
-                    _stockRange = captured;
-                    StockSetRangeActive();
-                    if (_stockKline != null)
-                    {
-                        _stockKline.SetRange(_stockRange);
-                        _stockKline.FocusForKeys();      // 点完按钮焦点还给图表，方向键接着用
-                    }
+                    _stockRangeIdx = captured;
+                    StockApplyRange();
                     if (_stockCurrent != null) StockLoadChip(_stockCurrent);   // 窗口变了，筹码重新算
                 };
                 _stockRangeMap[btn] = r;
@@ -213,9 +211,35 @@ namespace StockPool
                 _stockAdjustMap[btn] = a;
             }
 
-            // 范围 + 复权 + 刷新同处一行（复权按钮位于范围之后）
+            // ---- 周期（日 / 周 / 月）----
+            // 周线 / 月线由后端在读取时把日线合样（日线是唯一落库口径），
+            // 指标与筹码也必须按同一周期重算，否则周线蜡烛会配上日线 MA。
+            var periodLabels = new string[] { "日线", "周线", "月线" };
+            var periodVals = new string[] { "day", "week", "month" };
+            for (int pi = 0; pi < periodVals.Length; pi++)
+            {
+                string pv = periodVals[pi];
+                var btn = new Button();
+                btn.Text = periodLabels[pi];
+                btn.Tag = "stock-period";
+                btn.AutoSize = false;
+                btn.Height = 26;
+                btn.Width = Math.Max(52, TextRenderer.MeasureText(periodLabels[pi], Font).Width + 18);
+                btn.FlatStyle = FlatStyle.Flat;
+                btn.FlatAppearance.BorderSize = 0;
+                btn.Font = new Font("Microsoft YaHei UI", 9f);
+                btn.TabStop = false;
+                btn.Margin = new Padding(0, 0, 8, 0);
+                string cap = pv;
+                btn.Click += delegate { StockSetPeriod(cap); };
+                _stockPeriodMap[btn] = pv;
+            }
+
+            // 范围 + 周期 + 复权 + 刷新同处一行
             var rangeRow = Row(Mute(Lbl("范围")));
             foreach (Button b in _stockRangeMap.Keys) rangeRow.Controls.Add(b);
+            rangeRow.Controls.Add(Mute(Lbl("周期")));
+            foreach (Button b in _stockPeriodMap.Keys) rangeRow.Controls.Add(b);
             rangeRow.Controls.Add(Mute(Lbl("复权")));
             foreach (Button b in _stockAdjustMap.Keys) rangeRow.Controls.Add(b);
             rangeRow.Controls.Add(_stockRefresh);
@@ -285,6 +309,7 @@ namespace StockPool
             _stockKline.OnRangeChanged = delegate (int r)
             {
                 _stockRange = r;
+                _stockRangeIdx = -1;                  // 滚轮自定义根数：范围按钮取消高亮
                 StockSetRangeActive();
                 ScheduleChipReload();     // 滚轮缩放：防抖后重算（帧窗口 = 新的可见根数）
             };
@@ -466,8 +491,9 @@ namespace StockPool
                 }
             };
 
-            StockSetRangeActive();
+            StockApplyRange();
             StockSetAdjustActive();
+            StockSetPeriodActive();
 
             // 历史查看记录：从 stockanaly-data 加载并渲染左侧导航
             StockLoadHistoryFile();
@@ -606,7 +632,8 @@ namespace StockPool
             {
                 try
                 {
-                    string url = "http://127.0.0.1:8000/api/history/stock/" + code + "?refresh=" + (refresh ? "true" : "false");
+                    string url = "http://127.0.0.1:8000/api/history/stock/" + code + "?refresh=" + (refresh ? "true" : "false")
+                           + "&period=" + (string.IsNullOrEmpty(_stockPeriod) ? "day" : _stockPeriod);
                     string resp = VRequest(url, null);
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
                     Invoke((Action)delegate
@@ -711,7 +738,12 @@ namespace StockPool
                         it["params"] = new Dictionary<string, object>();
                         items.Add(it);
                     }
-                    var req = new Dictionary<string, object> { { "code", code }, { "items", items } };
+                    var req = new Dictionary<string, object>
+                    {
+                        { "code", code },
+                        { "items", items },
+                        { "period", string.IsNullOrEmpty(_stockPeriod) ? "day" : _stockPeriod },
+                    };
                     string json = new JavaScriptSerializer().Serialize(req);
                     string body;
                     if (!PostJson("http://127.0.0.1:8000/api/indicators/batch", json, 20000, out body) || string.IsNullOrEmpty(body))
@@ -856,6 +888,7 @@ namespace StockPool
                        + "&bins=80";
             if (!string.IsNullOrEmpty(_stockChipFormulaId))
                 url += "&formula=" + Uri.EscapeDataString(_stockChipFormulaId);
+            url += "&period=" + (string.IsNullOrEmpty(_stockPeriod) ? "day" : _stockPeriod);
             System.Threading.Tasks.Task.Run(delegate
             {
                 try
@@ -1132,10 +1165,14 @@ namespace StockPool
                 }
             }
 
+            _stockKline.Period = _stockPeriod;      // 图例显示 日K / 周K / 月K
             _stockKline.SetData(bars, barsRaw, marks);
             // SetData 不重置可见根数，这里按当前选中的「范围」按钮同步一次：
             // 否则按钮高亮与图表实际根数会不一致，筹码帧窗口也会跟着对不上光标。
             _stockKline.SetRange(_stockRange);
+            // 指标随周期重算（周线要配周线 MA，不能沿用日线序列）；
+            // 换股票 / 刷新 / 切周期都会走到这里，顺带也避免了指标残留上一只票。
+            if (_stockCurrent != null) StockLoadIndicators(_stockCurrent);
             StockRenderTimeline(spanList);
             StockRenderEvents(events);
 
@@ -1826,10 +1863,32 @@ namespace StockPool
         {
             foreach (KeyValuePair<Button, int> kv in _stockRangeMap)
             {
-                bool act = kv.Value == _stockRange;
+                bool act = kv.Value == _stockRangeIdx;      // 比的是档位，不是根数
                 kv.Key.BackColor = act ? Color.FromArgb(64, 120, 192) : _cPanel;
                 kv.Key.ForeColor = act ? Color.White : _cSub;
                 kv.Key.Invalidate();
+            }
+        }
+
+        /// <summary>「范围」档位 → 当前周期下的根数（档位 2 = 全部 → 0 根，即不限）。</summary>
+        private int StockRangeBars()
+        {
+            if (_stockRangeIdx == 2) return 0;
+            bool half = _stockRangeIdx == 0;                // 近6月 : 近1年
+            if (_stockPeriod == "week") return half ? 26 : 52;
+            if (_stockPeriod == "month") return half ? 6 : 12;
+            return half ? 120 : 250;
+        }
+
+        /// <summary>范围档位或周期变化后重算实际根数并应用到图表。</summary>
+        private void StockApplyRange()
+        {
+            _stockRange = StockRangeBars();
+            StockSetRangeActive();
+            if (_stockKline != null)
+            {
+                _stockKline.SetRange(_stockRange);
+                _stockKline.FocusForKeys();                 // 点完按钮焦点还给图表，方向键接着用
             }
         }
 
@@ -1842,6 +1901,32 @@ namespace StockPool
                 kv.Key.ForeColor = act ? Color.White : _cSub;
                 kv.Key.Invalidate();
             }
+        }
+
+        private void StockSetPeriodActive()
+        {
+            foreach (KeyValuePair<Button, string> kv in _stockPeriodMap)
+            {
+                bool act = kv.Value == _stockPeriod;
+                kv.Key.BackColor = act ? Color.FromArgb(64, 120, 192) : _cPanel;
+                kv.Key.ForeColor = act ? Color.White : _cSub;
+                kv.Key.Invalidate();
+            }
+        }
+
+        /// <summary>切换 K 线周期（日 / 周 / 月）：K线、指标、筹码三处都要用同一周期重算，
+        /// 否则周线蜡烛会配上日线 MA（MA5 变 5 日）或日线筹码。</summary>
+        private void StockSetPeriod(string period)
+        {
+            if (_stockPeriod == period) return;
+            _stockPeriod = period;
+            StockSetPeriodActive();
+            if (_stockCurrent != null)
+            {
+                StockLoadHistory(_stockCurrent, false);   // 会顺带重算指标（见 StockRenderHistory）
+                StockLoadChip(_stockCurrent);
+            }
+            if (_stockKline != null) _stockKline.FocusForKeys();
         }
 
         // ---- 历史查看记录（左侧可折叠导航，持久化到 stockanaly-data）----
@@ -2332,6 +2417,7 @@ namespace StockPool
             private int _dragStartOffset = 0;
             private readonly ToolTip _tip = new ToolTip();
             private int _hoverIndex = -1;
+            public string Period = "day";                      // K 线周期（图例显示 日K / 周K / 月K）
             public Action<int> OnRangeChanged;                 // 缩放改变范围时通知外部刷新高亮
             /// <summary>光标所在 K 线的日期（移出时保留最后一次）——右侧筹码窗口据此切换到那一天。</summary>
             public Action<string> OnHoverDate;
@@ -3008,16 +3094,8 @@ namespace StockPool
                 }
 
                 DrawLegend(g, text, 0);
-
-                // 缩放 / 平移提示（右下角，淡色）
-                Color hint = dark ? Color.FromArgb(120, 128, 140) : Color.FromArgb(150, 156, 168);
-                using (var hb = new SolidBrush(hint))
-                using (var fmt = new StringFormat { Alignment = StringAlignment.Far })
-                {
-                    g.DrawString("滚轮缩放 · 拖动平移 · " + (_adjust == "raw" ? "不复权" : "前复权"),
-                        new Font("Microsoft YaHei UI", 8.5f), hb,
-                        new RectangleF(0, bottomMost + 1, Width - 4, BottomPad), fmt);
-                }
+                // 右下角的「滚轮缩放 · 拖动平移 · 前复权」提示已按需求移除；
+                // 周期 / 复权状态看工具栏按钮的高亮即可（图例里也标了 日K / 周K / 月K）。
             }
 
             private void DrawLegend(Graphics g, Color text, int dummy)
@@ -3026,7 +3104,9 @@ namespace StockPool
                 int y = 4;
                 using (var b = new SolidBrush(text))
                 {
-                    g.DrawString("日K", Font, b, x, y); x += 34;
+                    // 周期写进图例：周线下这里就是「周K」，MA5 也是 5 周均线，别让人误读
+                    string label = (Period == "week") ? "周K" : (Period == "month") ? "月K" : "日K";
+                    g.DrawString(label, Font, b, x, y); x += 34;
                     string[] names = new string[] { "MA5", "MA10", "MA20", "MA60" };
                     for (int i = 0; i < names.Length; i++)
                     {

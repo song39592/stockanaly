@@ -32,6 +32,8 @@ backend_fastapi/chip_formulas/
    （`indicators.data` / `price_service`）的文件。
 2. **公式实现文件禁止直连外部**：不得 `import price_store` / `akshare` / 读文件 / 发请求。
    实际上公式**通常不需要取数**——输入全在 `ctx` 里，公式只管「筹码怎么摊、怎么衰减」。
+   `core/data.py` 取数时也不自己合样，而是经 `indicators.data` → `kline_service`
+   （全项目唯一的「取数 + 周期合样」出口），因此筹码与 K 线、指标用的是同一根 K 线。
 3. **不自行归一化**：返回**相对**筹码量（非负即可），core 统一按行归一化到 100%。
 4. **逐日演进、逐日留档**：返回 `(交易日数, 分箱数)` **矩阵**，第 i 行即「第 i 日收盘时的
    筹码分布」。光标回溯就是按日期取一行，因此**不能只返回最后一天**。
@@ -39,6 +41,14 @@ backend_fastapi/chip_formulas/
    公式不得自行改 bin——否则各帧之间无法比较。
 
 ---
+
+### 周期（day / week / month）
+
+`compute(..., period=)` 与 `core/data.load_input(..., period=)` 都带周期：
+周线的一根 = 一周的成交量合计 + 一周高低区间，因此
+**换手率（成交量 ÷ 流通股本）自然就是周换手率**，衰减按周期步进，公式无需感知周期。
+必须在**复权之后**再合样（先 `load_bars(adjust=...)` 再 resample），
+否则除权当周的 OHLC 会跨价格台阶。
 
 ## 3. 公式契约
 
@@ -93,6 +103,7 @@ def tri_decay(ctx: ChipContext, decay: float = 1.0) -> np.ndarray:
 | 字段 | 说明 |
 |---|---|
 | `formula` | {id, name, params} 实际生效的公式与参数 |
+| `period` | K 线周期 day / week / month（与 K 线展示一致） |
 | `bars` / `warmup_bars` | 输出帧数 / 预热根数（预热不输出） |
 | `bins[]` | {lo, hi, price, pct} 最新一天的筹码分布（价格轴在此） |
 | `frames` | {dates[], bins, pct[][], stats[]} **逐日快照**，三者一一对应 |

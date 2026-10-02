@@ -24,9 +24,11 @@ import dataclasses as dc
 import datetime as dt
 from functools import lru_cache
 
+import kline_service
 import numpy as np
 import pandas as pd
-import price_store
+import price_store          # 仅用于读股本（share_capital），K 线本身走 kline_service
+from periods import normalize
 
 _MIN_ROWS = 2  # 少于此行数视为数据不足，技术指标无法计算
 _OHLCV = ("open", "high", "low", "close", "volume")
@@ -41,23 +43,28 @@ def _norm_date(d) -> str | None:
 
 
 @lru_cache(maxsize=256)
-def _load(code: str, start: str | None, end: str | None, adjust: str) -> pd.DataFrame | None:
-    """缓存层：同一 (code, 区间, 口径) 只解析一次。
+def _load(code: str, start: str | None, end: str | None, adjust: str,
+          period: str = "day") -> pd.DataFrame | None:
+    """缓存层：同一 (code, 区间, 口径, 周期) 只解析一次。
+
+    ⚠️ 取数与周期合样**不在本文件做**——统一走 `kline_service.get_bars`，
+    保证「用户看到的 K 线」与「指标计算的输入」是同一个序列（详见 kline_service 文档）。
+    本文件的缓存只是为了避免重复裁剪列。
 
     返回 None 表示无数据；否则返回索引为 date、列为 OHLCV 的 DataFrame。
     """
-    rows = price_store.load_bars(code, adjust=adjust, start=start, end=end)
-    if not rows:
+    df = kline_service.get_bars(code, start=start, end=end, adjust=adjust,
+                                period=period)
+    if df is None or df.empty:
         return None
-    df = pd.DataFrame(rows)
-    df = df.rename(columns={"trade_date": "date"}).set_index("date").sort_index()
     # amount 一并带出：get_vwap（成交均价）需要它；get_ohlcv 仍只暴露 OHLCV 五列。
     cols = [c for c in ("open", "high", "low", "close", "volume", "amount") if c in df.columns]
     return df[cols]
 
 
 def get_ohlcv(code: str, start: str | dt.date | None = None,
-              end: str | dt.date | None = None, adjust: str = "qfq") -> pd.DataFrame:
+              end: str | dt.date | None = None, adjust: str = "qfq",
+              period: str = "day") -> pd.DataFrame:
     """获取某只股票的行情序列（指标包唯一取数函数）。
 
     参数：
@@ -65,6 +72,10 @@ def get_ohlcv(code: str, start: str | dt.date | None = None,
       start   起始日（含），缺省取全部
       end     结束日（含），缺省取全部
       adjust  复权口径，技术指标默认 "qfq"（前复权）；回测用 "hfq" 需调用方显式传入
+      period  K 线周期 day / week / month（周线 / 月线读取时现算，不落库）
+
+    ⚠️ 周期必须与 K 线展示的周期一致：周线蜡烛要配周线 MA（MA5 = 5 周），
+    拿日线指标去对齐周线日期是错的。
 
     返回：
       DataFrame，索引为日期字符串，列 open/high/low/close/volume，升序。
@@ -72,15 +83,16 @@ def get_ohlcv(code: str, start: str | dt.date | None = None,
     异常：
       RuntimeError  数据不足或无数据时抛出，由调用方（compute）转成接口错误。
     """
-    df = _load(code, _norm_date(start), _norm_date(end), adjust)
+    df = _load(code, _norm_date(start), _norm_date(end), adjust, normalize(period))
     if df is None or len(df) < _MIN_ROWS:
         raise RuntimeError(f"行情数据不足: {code} (adjust={adjust})")
     return df[[c for c in _OHLCV if c in df.columns]]
 
 
-def _raw(code: str, start=None, end=None, adjust: str = "qfq") -> pd.DataFrame:
+def _raw(code: str, start=None, end=None, adjust: str = "qfq",
+         period: str = "day") -> pd.DataFrame:
     """带 amount 的完整行情（内部用），校验同 get_ohlcv。"""
-    df = _load(code, _norm_date(start), _norm_date(end), adjust)
+    df = _load(code, _norm_date(start), _norm_date(end), adjust, normalize(period))
     if df is None or len(df) < _MIN_ROWS:
         raise RuntimeError(f"行情数据不足: {code} (adjust={adjust})")
     return df
@@ -108,13 +120,16 @@ def get_float_shares(code: str, date: str | None = None,
     raise RuntimeError(f"缺少流通股本: {code}（腾讯行情未返回市值，稍后重试）")
 
 
-def get_turnover(code: str, start=None, end=None, adjust: str = "qfq") -> pd.Series:
+def get_turnover(code: str, start=None, end=None, adjust: str = "qfq",
+                 period: str = "day") -> pd.Series:
     """换手率序列（**小数**：0.0123 = 1.23%），索引同 get_ohlcv。
 
     口径：成交量(手) × 100 ÷ 流通股本(股)，并按 [0,1] 截断
     （极端行情 / 股本变动会让比值失真，>1 表示当天理论上换手一遍以上）。
+    周线 / 月线的 volume 是整周期合计，因此得到的就是**周期换手率**——
+    与「周期成交量 ÷ 流通股本」一致，不需额外处理。
     """
-    df = _raw(code, start, end, adjust)
+    df = _raw(code, start, end, adjust, period=period)
     shares = get_float_shares(code, str(df.index[-1])[:10])
     if not shares or shares <= 0:
         raise RuntimeError(f"流通股本无效: {code}")
@@ -122,12 +137,13 @@ def get_turnover(code: str, start=None, end=None, adjust: str = "qfq") -> pd.Ser
     return series.clip(lower=0.0, upper=1.0)
 
 
-def get_vwap(code: str, start=None, end=None, adjust: str = "qfq") -> pd.Series:
-    """当日成交均价（元/股）：成交额 ÷ 成交量。
+def get_vwap(code: str, start=None, end=None, adjust: str = "qfq",
+             period: str = "day") -> pd.Series:
+    """当日（或当期）成交均价（元/股）：成交额 ÷ 成交量。
 
     成交额缺失或为 0 时回落到经典近似 (H+L+C)/3（筹码分布用它做三角形分布的峰值位）。
     """
-    df = _raw(code, start, end, adjust)
+    df = _raw(code, start, end, adjust, period=period)
     vol = df["volume"].astype(float) * 100.0          # 手 → 股
     if "amount" in df.columns:
         amount = pd.to_numeric(df["amount"], errors="coerce")

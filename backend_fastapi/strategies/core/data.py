@@ -7,6 +7,12 @@
     不得自行读库、读文件或调 akshare / 网络。
   * 每个策略自己决定拉哪些字段（fields），满足「各策略数据不同」。
 
+K 线本身**不经本文件直连存储**，而是走 `kline_service.get_bars()`——全项目唯一的
+「取数 + 周期合样」出口（与个股页 K 线、指标、筹码共用同一份实现）。
+回测**固定日线**：`stats.py` 的年化与夏普按 **252 交易日/年**折算（见其中 `252.0`），
+若换成周 / 月序列，这两个指标会静默算错；真要做周期回测，必须先改 stats 的年化口径，
+并重新定义「T+1 成交」「持仓天数」等语义，故此处不开放 period。
+
 load_bars 支持批量取数并按 fields 切片，且按 (code, start, end, adjust) **逐标的缓存**
 底层全量 OHLCV；「回测预检」「策略拉数」「统计拉数」多次调用（即使字段不同、code 集合不同）
 都只触发一次真实取数，不会重复读库/读文件。
@@ -17,8 +23,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from indicators.data import get_ohlcv as _get_ohlcv
+import kline_service
 import price_store
+
+# 对外只暴露 OHLCV：保持与原先（经 indicators.data.get_ohlcv）一致的列集合，
+# 避免 amount / turnover 等列混进策略的 DataFrame 改变既有行为。
+_BAR_COLUMNS = ("open", "high", "low", "close", "volume")
+_MIN_ROWS = 2          # 少于 2 根无法算信号 / 回测，视为数据不足
 
 
 # (code, start, end, adjust) -> DataFrame | None（逐标的缓存全量 OHLCV）
@@ -52,9 +63,12 @@ def load_bars(codes, start: str | None = None, end: str | None = None,
         df = _PER_CACHE.get(key)
         if df is None and key not in _PER_CACHE:
             try:
-                d = _get_ohlcv(code, start, end, adjust).copy()
+                # 统一的 K 线出口（回测固定日线，原因见模块 docstring）
+                d = kline_service.get_bars(code, start=start, end=end, adjust=adjust,
+                                           period="day").copy()
+                d = d[[c for c in _BAR_COLUMNS if c in d.columns]]
                 d.index = [str(x)[:10] for x in d.index]
-                df = d if len(d) else None
+                df = d if len(d) >= _MIN_ROWS else None
             except Exception:
                 df = None
             _PER_CACHE[key] = df
