@@ -19,6 +19,7 @@ from typing import Any
 import akshare as ak
 
 import price_store
+import share_service
 from market_service import _ak
 
 # 落盘口径：**只存不复权原始价这一份**。
@@ -367,6 +368,47 @@ def sync_dividends(code: str) -> dict[str, Any]:
         })
     count = price_store.upsert_dividends(code, rows, source="新浪")
     return {"count": count, "source": "新浪"}
+
+
+SHARE_CAPITAL_TTL_DAYS = 30     # 股本平时不变（解禁 / 增发 / 送转才变），TTL 内直接复用
+
+
+def sync_share_capital(code: str, force: bool = False) -> dict[str, Any]:
+    """采集流通股本并落盘（**换手率与筹码分布依赖它**）。
+
+    本地通达信日线没有股本，取数走 `share_service`（腾讯行情市值 ÷ 现价反推）。
+    股本只在解禁 / 增发 / 送转时变动，因此默认 TTL 内直接复用库里的值，
+    需要补救时传 force=True。
+    """
+    today = dt.date.today().isoformat()
+    existing = price_store.list_share_capital(code)
+    if not force and existing:
+        latest = existing[-1]
+        try:
+            age = (dt.date.today() - dt.date.fromisoformat(str(latest["as_of"])[:10])).days
+        except ValueError:
+            age = SHARE_CAPITAL_TTL_DAYS          # 日期异常：当作过期，重新采
+        if 0 <= age < SHARE_CAPITAL_TTL_DAYS:
+            return {"ok": True, "cached": True, "as_of": latest["as_of"],
+                    "float_shares": latest["float_shares"],
+                    "total_shares": latest["total_shares"],
+                    "source": latest.get("source", "")}
+
+    errors: list[str] = []
+    info = share_service.fetch_share_capital(code, errors)
+    if not info.get("float_shares") and not info.get("total_shares"):
+        return {"ok": False, "cached": False, "errors": errors}
+    count = price_store.upsert_share_capital(
+        code,
+        [{"as_of": today, "float_shares": info.get("float_shares"),
+          "total_shares": info.get("total_shares")}],
+        source=info.get("source", ""),
+    )
+    return {"ok": True, "cached": False, "count": count, "as_of": today,
+            "float_shares": info.get("float_shares"),
+            "total_shares": info.get("total_shares"),
+            "price": info.get("price"), "name": info.get("name"),
+            "source": info.get("source", ""), "errors": errors}
 
 
 def sync_reference(code: str, force: bool = False) -> dict[str, Any]:

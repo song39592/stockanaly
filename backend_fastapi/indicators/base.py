@@ -133,6 +133,9 @@ def compute(code: str, indicator_id: str, params: dict | None = None) -> dict:
     df = data.get_ohlcv(code)                 # 唯一取数点
     if df is None or df.empty:
         raise RuntimeError(f"无行情数据: {code}")
+    # 指标函数只收 df，拿不到代码；这里挂在 df.attrs 上供需要按代码再取数的
+    # 指标使用（如筹码类指标要经 data.get_chip_frames(code) 拿分布矩阵）。
+    df.attrs["code"] = code
 
     result = meta.func(df, **(params or {}))
     dates = [str(d)[:10] for d in df.index]

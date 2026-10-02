@@ -28,6 +28,11 @@ namespace StockPool
         private Label _stockName, _stockHint, _stockStatus, _stockValStatus;
         private FlowLayoutPanel _stockKpi;                 // 在榜统计 KPI
         private KLineChart _stockKline;
+        private ChipPanel _stockChip;                      // K 线右侧的筹码分布窗口
+        private ComboBox _stockChipFormula;                // 筹码公式下拉（后端 /api/chip/dist/formulas 枚举）
+        private string _stockChipFormulaId = null;         // 当前选中的公式 id（null = 后端默认）
+        private bool _chipFormulaInit = false;             // 填充下拉时抑制 SelectedIndexChanged
+        private System.Windows.Forms.Timer _chipTimer;     // 滚轮缩放的防抖重算
         private int _stockRange = 250;                     // 0 = 全部
         private string _stockAdjust = "qfq";               // qfq 前复权 / raw 不复权
         private readonly Dictionary<Button, string> _stockAdjustMap = new Dictionary<Button, string>();
@@ -165,7 +170,12 @@ namespace StockPool
                 {
                     _stockRange = captured;
                     StockSetRangeActive();
-                    if (_stockKline != null) _stockKline.SetRange(_stockRange);
+                    if (_stockKline != null)
+                    {
+                        _stockKline.SetRange(_stockRange);
+                        _stockKline.FocusForKeys();      // 点完按钮焦点还给图表，方向键接着用
+                    }
+                    if (_stockCurrent != null) StockLoadChip(_stockCurrent);   // 窗口变了，筹码重新算
                 };
                 _stockRangeMap[btn] = r;
             }
@@ -194,7 +204,12 @@ namespace StockPool
                 {
                     _stockAdjust = cap;
                     StockSetAdjustActive();
-                    if (_stockKline != null) _stockKline.SetAdjust(_stockAdjust);
+                    if (_stockKline != null)
+                    {
+                        _stockKline.SetAdjust(_stockAdjust);
+                        _stockKline.FocusForKeys();
+                    }
+                    if (_stockCurrent != null) StockLoadChip(_stockCurrent);   // 价格口径变了，筹码跟着变
                 };
                 _stockAdjustMap[btn] = a;
             }
@@ -206,6 +221,7 @@ namespace StockPool
             foreach (Button b in _stockAdjustMap.Keys) rangeRow.Controls.Add(b);
             rangeRow.Controls.Add(_stockRefresh);
             rangeRow.Controls.Add(_stockStatus);
+            rangeRow.Controls.Add(Mute(Lbl("  ↑↓ 缩放 · ←→ 移动光标")));
             AddRow(b0, rangeRow);
             mainCol.Controls.Add(g0, 0, 1);
 
@@ -233,9 +249,10 @@ namespace StockPool
             var kLayout = new TableLayoutPanel();
             kLayout.Dock = DockStyle.Fill;
             kLayout.Margin = new Padding(0);
-            kLayout.ColumnCount = 1;
+            kLayout.ColumnCount = 2;
             kLayout.RowCount = 2;
-            kLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            kLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));   // K 线
+            kLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 178f));  // 右侧筹码分布窗口
             kLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // 概况 + 同步状态
             kLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));  // 图表撑满
             klinePage.Controls.Add(kLayout);
@@ -262,10 +279,49 @@ namespace StockPool
             _stockKline.Dock = DockStyle.Fill;
             _stockKline.Tag = "kline";
             _stockKline.TabStop = true;
-            _stockKline.OnRangeChanged = delegate (int r) { _stockRange = r; StockSetRangeActive(); };
+            _stockKline.OnRangeChanged = delegate (int r)
+            {
+                _stockRange = r;
+                StockSetRangeActive();
+                ScheduleChipReload();     // 滚轮缩放：防抖后重算（帧窗口 = 新的可见根数）
+            };
             _stockKline.BackColorChanged += delegate { _stockKline.Invalidate(); };
+
+            // 筹码分布窗口：与 K 线等高并列在右侧，价格轴与 K 线主图严格对齐
+            _stockChip = new ChipPanel();
+            _stockChip.Dock = DockStyle.Fill;
+            _stockChip.Owner = _stockKline;
+            // 光标跟随：光标在 K 线上左右移动 → 筹码窗口切到那一天的分布
+            _stockKline.OnHoverDate = delegate (string d) { if (_stockChip != null) _stockChip.SetCursorDate(d); };
+            _stockKline.PriceAxisChanged += delegate { if (_stockChip != null) _stockChip.Invalidate(); };
+            _stockChip.BackColorChanged += delegate { _stockChip.Invalidate(); };
+
+            // 公式下拉放在右侧列的**第 0 行**：它绝不能压在筹码窗口上——
+            // 筹码窗口必须与 K 线同顶同高，价格轴才对得齐（差几像素峰位就偏了）。
+            var chipHead = new Panel();
+            chipHead.Dock = DockStyle.Fill;
+            chipHead.Margin = new Padding(0);
+            chipHead.Padding = new Padding(0);
+            _stockChipFormula = new ComboBox();
+            _stockChipFormula.DropDownStyle = ComboBoxStyle.DropDownList;
+            _stockChipFormula.Dock = DockStyle.Top;
+            _stockChipFormula.Width = 170;
+            _stockChipFormula.TabStop = false;
+            _stockChipFormula.Visible = false;             // 只有 ≥2 个公式才值得选
+            _stockChipFormula.SelectedIndexChanged += delegate
+            {
+                if (_chipFormulaInit) return;
+                var it = _stockChipFormula.SelectedItem as ChipFormulaItem;
+                if (it == null) return;
+                _stockChipFormulaId = it.Id;
+                if (_stockCurrent != null) StockLoadChip(_stockCurrent);
+            };
+            chipHead.Controls.Add(_stockChipFormula);
+
             kLayout.Controls.Add(kTop, 0, 0);              // 概况 + 同步状态
+            kLayout.Controls.Add(chipHead, 1, 0);          // 筹码公式下拉
             kLayout.Controls.Add(_stockKline, 0, 1);       // 图表占满剩余高度
+            kLayout.Controls.Add(_stockChip, 1, 1);        // 右侧筹码分布窗口
             StockAddSubTab("K线", klinePage);
 
             // ---- 二级页 ② 记录 · 消息 ----
@@ -460,6 +516,8 @@ namespace StockPool
             Skin(page);                 // 懒挂载的页首次显示前按当前主题上色
             page.Invalidate(true);
             SkinStockSubTabs();
+            // 切到 K线 页就把焦点交给图表，↑↓ 缩放 / ←→ 移光标立刻可用
+            if (index == 0 && _stockKline != null) _stockKline.FocusForKeys();
         }
 
         /// <summary>二级标签配色（跟随主题）：选中用卡片色，未选中用窗口底色。</summary>
@@ -498,6 +556,8 @@ namespace StockPool
             StockAddHistory(code, null);   // 记录查看历史（名称稍后补全）
             StockLoadName(code);
             StockLoadHistory(code, false);
+            StockLoadChipFormulas();   // 每次打开同步公式清单（后端可能刚加过公式）
+            StockLoadChip(code);
             StockLoadValuation(code);
             StockLoadSaolei(code);
             StockLoadAi(code);
@@ -570,6 +630,8 @@ namespace StockPool
             _stockStatus.Tag = "bad";
             _stockStatus.ForeColor = Color.FromArgb(208, 57, 59);
             _stockKline.SetData(new List<KBar>(), new List<KBar>(), new List<KMark>());
+            // 右侧筹码窗口同步清空，避免还留着上一只股票的分布
+            if (_stockChip != null) _stockChip.SetStatus("筹码未加载", false);
         }
 
         // ---- 副图指标（lower 面板）：勾选 → 后端计算 → 按日期对齐 → 叠加到 K 线下方 ----
@@ -709,6 +771,233 @@ namespace StockPool
                 }
                 catch { }
             });
+        }
+
+        // ---- 筹码分布（K 线右侧窗口）----
+        // 与指标体系的「按日期对齐的序列」不同，筹码分布是「按价位分布的直方图」，
+        // 因此不走指标面板，单独向 /api/chip/dist 取数、单独渲染。
+        // ---- 筹码公式下拉：后端 /api/chip/dist/formulas 枚举 ----
+        // 公式是「一个文件一个公式、文件名即 id」，新增公式无需改前端，这里自动列出。
+        private void StockLoadChipFormulas()
+        {
+            if (_stockChipFormula == null) return;
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    string body;
+                    if (!GetText("http://127.0.0.1:8000/api/chip/dist/formulas", 15000, out body)
+                        || string.IsNullOrEmpty(body))
+                        return;
+                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body);
+                    var items = VArr(VSafe(j, "items"));
+                    var list = new List<ChipFormulaItem>();
+                    if (items != null)
+                    {
+                        foreach (Dictionary<string, object> it in items)
+                        {
+                            string fid = VStr(VSafe(it, "id"));
+                            if (string.IsNullOrEmpty(fid)) continue;
+                            list.Add(new ChipFormulaItem
+                            {
+                                Id = fid,
+                                Name = VStr(VSafe(it, "name")) ?? fid,
+                            });
+                        }
+                    }
+                    string def = VStr(VSafe(j, "default"));
+                    Invoke((Action)delegate { StockRenderChipFormulas(list, def); });
+                }
+                catch { }
+            });
+        }
+
+        private void StockRenderChipFormulas(List<ChipFormulaItem> list, string def)
+        {
+            if (_stockChipFormula == null || list == null || list.Count == 0) return;
+            _stockChipFormula.Visible = list.Count > 1;     // 单公式时保持界面干净
+            int sel = 0;
+            for (int i = 0; i < list.Count; i++)
+            {
+                if (!string.IsNullOrEmpty(def) && list[i].Id == def) { sel = i; break; }
+            }
+            _chipFormulaInit = true;
+            _stockChipFormula.Items.Clear();
+            foreach (ChipFormulaItem it in list) _stockChipFormula.Items.Add(it);
+            if (_stockChipFormula.Items.Count > 0) _stockChipFormula.SelectedIndex = sel;
+            _chipFormulaInit = false;
+        }
+
+        /// <summary>滚轮缩放会连续改变可见根数，防抖后再重算筹码，避免每滚一格就发一次请求。</summary>
+        private void ScheduleChipReload()
+        {
+            if (_chipTimer == null)
+            {
+                _chipTimer = new System.Windows.Forms.Timer();
+                _chipTimer.Interval = 400;
+                _chipTimer.Tick += delegate
+                {
+                    _chipTimer.Stop();
+                    if (_stockCurrent != null) StockLoadChip(_stockCurrent);
+                };
+            }
+            _chipTimer.Stop();
+            _chipTimer.Start();
+        }
+
+        private void StockLoadChip(string code)
+        {
+            if (string.IsNullOrEmpty(code) || _stockChip == null) return;
+            int round = _stockRound;
+            _stockChip.SetStatus("筹码计算中…", false);
+            string adjust = string.IsNullOrEmpty(_stockAdjust) ? "qfq" : _stockAdjust;
+            string url = "http://127.0.0.1:8000/api/chip/dist?code=" + code
+                       + "&adjust=" + adjust
+                       + "&days=" + (_stockRange > 0 ? _stockRange.ToString() : "0")
+                       + "&bins=80";
+            if (!string.IsNullOrEmpty(_stockChipFormulaId))
+                url += "&formula=" + Uri.EscapeDataString(_stockChipFormulaId);
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    string body;
+                    if (!GetText(url, 30000, out body) || string.IsNullOrEmpty(body))
+                    {
+                        Invoke((Action)delegate
+                        {
+                            if (round == _stockRound) _stockChip.SetStatus("筹码接口无响应", true);
+                        });
+                        return;
+                    }
+                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body);
+                    object okv;
+                    bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+                    if (!ok)
+                    {
+                        string emsg = VStr(VSafe(j, "error"));
+                        if (string.IsNullOrEmpty(emsg)) emsg = "筹码数据不可用";
+                        string cap = emsg;
+                        Invoke((Action)delegate
+                        {
+                            if (round == _stockRound) _stockChip.SetStatus(cap, true);
+                        });
+                        return;
+                    }
+                    // 解析放工作线程：逐日快照可达上千帧 × 80 个分箱，不能卡 UI
+                    var bins = StockParseChipBins(j);
+                    var dates = new List<string>();
+                    var frames = new List<double[]>();
+                    var fstats = new List<ChipStats>();
+                    StockParseChipFrames(j, bins, dates, frames, fstats);
+                    // 口径提示：锁仓修正依赖前十大流通股东数据，当前未接入（衰减系数固定 1.0）
+                    object lockObj;
+                    bool lockup = (j.TryGetValue("lockup_applied", out lockObj) && lockObj is bool && (bool)lockObj);
+                    string note = lockup ? "已做锁仓修正" : "未做锁仓修正";
+                    Invoke((Action)delegate
+                    {
+                        if (round != _stockRound) return;
+                        _stockChip.SetData(bins, dates, frames, fstats, note);
+                        // 重算后若光标仍停在 K 线上，立刻回到光标那一天
+                        if (_stockKline != null) _stockChip.SetCursorDate(_stockKline.CursorDate);
+                    });
+                }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        Invoke((Action)delegate
+                        {
+                            if (round == _stockRound) _stockChip.SetStatus("筹码加载失败：" + ex.Message, true);
+                        });
+                    }
+                    catch (Exception) { }
+                }
+            });
+        }
+
+        private static List<ChipBin> StockParseChipBins(Dictionary<string, object> j)
+        {
+            var bins = new List<ChipBin>();
+            var arr = VArr(VSafe(j, "bins"));
+            if (arr == null) return bins;
+            foreach (Dictionary<string, object> d in arr)
+            {
+                var b = new ChipBin();
+                b.Lo = VNum(VSafe(d, "lo")) ?? 0;
+                b.Hi = VNum(VSafe(d, "hi")) ?? 0;
+                b.Price = VNum(VSafe(d, "price")) ?? 0;
+                b.Pct = VNum(VSafe(d, "pct")) ?? 0;
+                bins.Add(b);
+            }
+            return bins;
+        }
+
+        /// <summary>
+        /// 解析逐日快照 frames：dates[i] / pct[i] / stats[i] 一一对应，
+        /// 光标左右移动时前端只切索引，不再回服务端。
+        /// 后端没给 frames（老版本 / 异常）时，用最后一帧兜底成单帧，不至于开天窗。
+        /// </summary>
+        private static void StockParseChipFrames(Dictionary<string, object> j, List<ChipBin> bins,
+            List<string> dates, List<double[]> frames, List<ChipStats> fstats)
+        {
+            var frObj = VSafe(j, "frames") as Dictionary<string, object>;
+            if (frObj != null)
+            {
+                var dArr = VArr(VSafe(frObj, "dates"));
+                if (dArr != null)
+                    foreach (object o in dArr) dates.Add(Convert.ToString(o));
+
+                var pArr = VArr(VSafe(frObj, "pct"));
+                if (pArr != null)
+                {
+                    foreach (object row in pArr)
+                    {
+                        var rl = row as System.Collections.ArrayList;
+                        if (rl == null) continue;
+                        var vals = new double[rl.Count];
+                        for (int k = 0; k < rl.Count; k++) vals[k] = VNum(rl[k]) ?? 0;
+                        frames.Add(vals);
+                    }
+                }
+
+                var sArr = VArr(VSafe(frObj, "stats"));
+                if (sArr != null)
+                {
+                    foreach (object row in sArr)
+                    {
+                        var d = row as Dictionary<string, object>;
+                        var s = new ChipStats();
+                        if (d != null)
+                        {
+                            s.Close = VNum(VSafe(d, "close")) ?? 0;
+                            s.AvgCost = VNum(VSafe(d, "avg_cost"));
+                            s.PeakPrice = VNum(VSafe(d, "peak_price"));
+                            s.ProfitRatio = VNum(VSafe(d, "profit_ratio"));
+                            s.Scr90 = VNum(VSafe(d, "scr90"));
+                        }
+                        fstats.Add(s);
+                    }
+                }
+            }
+            if (frames.Count == 0 && bins.Count > 0)
+            {   // 兜底：单帧（最新一天）
+                var vals = new double[bins.Count];
+                for (int i = 0; i < bins.Count; i++) vals[i] = bins[i].Pct;
+                frames.Add(vals);
+                dates.Add(VStr(VSafe(j, "as_of")));
+                var s = new ChipStats();
+                var sObj = VSafe(j, "stats") as Dictionary<string, object>;
+                if (sObj != null)
+                {
+                    s.Close = VNum(VSafe(j, "last_close")) ?? 0;
+                    s.AvgCost = VNum(VSafe(sObj, "avg_cost"));
+                    s.PeakPrice = VNum(VSafe(sObj, "peak_price"));
+                    s.ProfitRatio = VNum(VSafe(sObj, "profit_ratio"));
+                    s.Scr90 = VNum(VSafe(sObj, "scr90"));
+                }
+                fstats.Add(s);
+            }
         }
 
         // 把后端返回的指标序列按 K 线日期对齐为等长数组（缺失填 NaN）
@@ -1810,6 +2099,236 @@ namespace StockPool
             public List<ChartSeries> Series = new List<ChartSeries>();
         }
 
+        /// <summary>筹码分布的一根价格柱（后端 bins[] 的一项）。</summary>
+        private sealed class ChipBin
+        {
+            public double Lo;
+            public double Hi;
+            public double Price;
+            public double Pct;          // 占比（%，全部合计 100）
+        }
+
+        /// <summary>筹码公式下拉项：显示名 + 后端 id。</summary>
+        private sealed class ChipFormulaItem
+        {
+            public string Id;
+            public string Name;
+            public override string ToString() { return Name ?? Id; }
+        }
+
+        /// <summary>筹码分布统计（后端 stats）。字段可空：后端算不出时为 null。</summary>
+        private sealed class ChipStats
+        {
+            public double? AvgCost;
+            public double? PeakPrice;
+            public double? ProfitRatio;
+            public double? Scr90;
+            public double Close;            // 该帧当日的收盘价（获利/套牢的分界）
+        }
+
+        /// <summary>
+        /// 筹码分布窗口：位于 K 线**右侧**，横轴是筹码占比、纵轴是价格（与 K 线价格轴对齐）。
+        /// 与指标体系（按日期的序列）不同，这里是「某个时点上各价位堆了多少筹码」的直方图，
+        /// 故单独成一个窗口渲染，不走 KLineChart 的副图面板。
+        /// 数据来自 GET /api/chip/dist（换手率衰减 + 三角形分布，见 chip_dist_service.py）。
+        /// </summary>
+        private sealed class ChipPanel : Control
+        {
+            private const int LeftPad = 6;
+            private const int RightPad = 8;
+            private const int GridCount = 5;        // 与 K 线一致的横向网格数，便于对齐
+
+            public KLineChart Owner;                // 取价格轴几何（与 K 线对齐用）
+            private List<ChipBin> _bins = new List<ChipBin>();          // 价格轴（各分箱的价格区间）
+            private List<string> _dates = new List<string>();           // 逐日快照的日期
+            private List<double[]> _frames = new List<double[]>();      // 逐日快照的占比（与 _bins 同序）
+            private List<ChipStats> _frameStats = new List<ChipStats>();
+            private Dictionary<string, int> _dateIdx = new Dictionary<string, int>();
+            private int _frame = -1;                // 当前显示的帧（默认最新）
+            private string _status = "待加载";
+            private string _note = "";              // 口径提示（如锁仓未修正）
+            private bool _failed = false;
+
+            public ChipPanel()
+            {
+                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
+                    | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+                DoubleBuffered = true;
+                Width = 172;
+            }
+
+            /// <summary>装入计算结果。dates / frames / frameStats 三者一一对应（逐日快照）。</summary>
+            public void SetData(List<ChipBin> bins, List<string> dates,
+                                List<double[]> frames, List<ChipStats> frameStats, string note)
+            {
+                _bins = bins ?? new List<ChipBin>();
+                _dates = dates ?? new List<string>();
+                _frames = frames ?? new List<double[]>();
+                _frameStats = frameStats ?? new List<ChipStats>();
+                _dateIdx = new Dictionary<string, int>();
+                for (int i = 0; i < _dates.Count; i++)
+                {
+                    if (!_dateIdx.ContainsKey(_dates[i])) _dateIdx[_dates[i]] = i;
+                }
+                _note = note ?? "";
+                _status = "";
+                _failed = false;
+                _frame = _frames.Count - 1;          // 默认显示最新一天
+                Invalidate();
+            }
+
+            /// <summary>
+            /// 光标跟随：切到光标所在交易日那一帧。日期不在快照区间内时保持原帧不动
+            /// （例如滚轮缩小后光标落到更早的日期——等防抖重算完成后即可覆盖）。
+            /// </summary>
+            public void SetCursorDate(string date)
+            {
+                if (string.IsNullOrEmpty(date) || _dateIdx.Count == 0) return;
+                int idx;
+                if (!_dateIdx.TryGetValue(date, out idx)) return;
+                if (idx == _frame) return;
+                _frame = idx;
+                Invalidate();
+            }
+
+            /// <summary>加载中 / 失败提示。</summary>
+            public void SetStatus(string status, bool failed)
+            {
+                _bins = new List<ChipBin>();
+                _dates = new List<string>();
+                _frames = new List<double[]>();
+                _frameStats = new List<ChipStats>();
+                _dateIdx = new Dictionary<string, int>();
+                _frame = -1;
+                _status = status ?? "";
+                _failed = failed;
+                Invalidate();
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                base.OnPaint(e);
+                var g = e.Graphics;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                bool dark = (BackColor.R + BackColor.G + BackColor.B) < 200;
+                Color grid = dark ? Color.FromArgb(54, 58, 68) : Color.FromArgb(222, 224, 228);
+                Color text = ForeColor;
+                using (var bg = new SolidBrush(BackColor))
+                    g.FillRectangle(bg, 0, 0, Width, Height);
+                using (var tb = new SolidBrush(text))
+                using (var titleFont = new Font(Font, FontStyle.Bold))
+                {
+                    g.DrawString("筹码分布", titleFont, tb, 2, 2);
+                    // 标题右侧标出当前帧的日期：光标回溯时才知道看的是哪一天
+                    if (_frame >= 0 && _frame < _dates.Count)
+                    {
+                        using (var fmtR = new StringFormat { Alignment = StringAlignment.Far })
+                            g.DrawString(_dates[_frame], Font, tb, Width - RightPad, 3, fmtR);
+                    }
+                    if (_bins.Count == 0 || _frames.Count == 0)
+                    {
+                        using (var mb = new SolidBrush(_failed ? Color.FromArgb(208, 57, 59) : text))
+                        using (var fmt = new StringFormat { Alignment = StringAlignment.Near })
+                            g.DrawString(_status, Font, mb,
+                                new RectangleF(2, 22, Width - 4, Height - 24), fmt);
+                        return;
+                    }
+
+                    // 价格轴：优先与 K 线完全一致（同一 lo/hi 映射到同一纵向区间）
+                    double lo = 0, hi = 1;
+                    int top = 20, bottom = Math.Max(30, Height - 18);
+                    bool aligned = (Owner != null)
+                        && Owner.TryGetPriceAxis(out lo, out hi, out top, out bottom);
+                    if (!aligned)
+                    {   // K 线还没画过（或已清空）：退回按筹码自身的价格范围铺满
+                        lo = double.MaxValue; hi = double.MinValue;
+                        foreach (ChipBin b in _bins) { if (b.Lo < lo) lo = b.Lo; if (b.Hi > hi) hi = b.Hi; }
+                        if (hi <= lo) hi = lo + 1;
+                        top = 20; bottom = Math.Max(30, Height - 18);
+                    }
+                    int plotH = Math.Max(10, bottom - top);
+                    int plotW = Math.Max(10, Width - LeftPad - RightPad);
+                    double span = hi - lo;
+                    if (span <= 0) span = 1;
+                    Func<double, double> yOf = p => bottom - (p - lo) / span * plotH;
+
+                    using (var pen = new Pen(grid))
+                    {
+                        for (int i = 0; i <= GridCount; i++)
+                        {
+                            double p = lo + span * i / GridCount;
+                            g.DrawLine(pen, LeftPad - 3, (int)yOf(p), Width - RightPad, (int)yOf(p));
+                        }
+                    }
+
+                    // 当前帧：光标回溯时取光标所在交易日那一帧
+                    if (_frame < 0 || _frame >= _frames.Count) _frame = _frames.Count - 1;
+                    double[] pct = _frames[_frame];
+                    ChipStats st = (_frame >= 0 && _frame < _frameStats.Count) ? _frameStats[_frame] : null;
+                    double refClose = (st != null) ? st.Close : 0;   // 获利/套牢以**该日**收盘价为界
+
+                    // 筹码柱：成本低于当日收盘 = 获利盘（暖色），高于 = 套牢盘（冷色）
+                    double maxPct = 0;
+                    for (int i = 0; i < pct.Length; i++) if (pct[i] > maxPct) maxPct = pct[i];
+                    if (maxPct <= 0) maxPct = 1;
+                    Color profit = dark ? Color.FromArgb(228, 96, 84) : Color.FromArgb(216, 74, 62);
+                    Color locked = dark ? Color.FromArgb(72, 152, 214) : Color.FromArgb(52, 132, 194);
+                    for (int i = 0; i < pct.Length && i < _bins.Count; i++)
+                    {
+                        if (pct[i] <= 0) continue;
+                        ChipBin b = _bins[i];
+                        if (b.Hi < lo || b.Lo > hi) continue;       // 价格轴之外的分箱不画（会盖住统计区）
+                        int y1 = (int)yOf(b.Hi);
+                        int y0 = (int)yOf(b.Lo);
+                        if (y0 <= y1) y0 = y1 + 1;
+                        int w = Math.Max(1, (int)Math.Round(pct[i] / maxPct * plotW));
+                        using (var br = new SolidBrush(b.Price <= refClose ? profit : locked))
+                            g.FillRectangle(br, LeftPad, y1, w, y0 - y1);
+                    }
+
+                    // 当日收盘 / 平均成本参考线
+                    using (var penClose = new Pen(Color.FromArgb(240, 170, 60)))
+                    {
+                        penClose.DashStyle = DashStyle.Dash;
+                        int yc = (int)yOf(refClose);
+                        if (yc >= top && yc <= bottom) g.DrawLine(penClose, LeftPad - 3, yc, Width - RightPad, yc);
+                    }
+                    if (st != null && st.AvgCost != null)
+                    {
+                        using (var penAvg = new Pen(Color.FromArgb(150, 150, 160)))
+                        {
+                            penAvg.DashStyle = DashStyle.Dot;
+                            int ya = (int)yOf(st.AvgCost.Value);
+                            if (ya >= top && ya <= bottom) g.DrawLine(penAvg, LeftPad - 3, ya, Width - RightPad, ya);
+                        }
+                    }
+
+                    // 统计区（价格区之下）：平均成本 / 获利比例 / 峰位 / 集中度
+                    var lines = new List<string>();
+                    if (st != null)
+                    {
+                        if (st.AvgCost != null) lines.Add("平均成本 " + st.AvgCost.Value.ToString("F2"));
+                        if (st.ProfitRatio != null) lines.Add("获利比例 " + st.ProfitRatio.Value.ToString("F1") + "%");
+                        if (st.PeakPrice != null) lines.Add("峰位价 " + st.PeakPrice.Value.ToString("F2"));
+                        if (st.Scr90 != null) lines.Add("集中度90 " + (st.Scr90.Value * 100).ToString("F1"));
+                    }
+                    lines.Add("收盘 " + refClose.ToString("F2"));
+                    if (!string.IsNullOrEmpty(_note)) lines.Add(_note);
+                    float y = bottom + 6;
+                    foreach (string s in lines)
+                    {
+                        using (var b2 = new SolidBrush(s == _note && !string.IsNullOrEmpty(_note)
+                            ? Color.FromArgb(150, 158, 172) : text))
+                        {
+                            g.DrawString(s, Font, b2, 2, y);
+                        }
+                        y += 15;
+                        if (y > Height - 2) break;
+                    }
+                }
+            }
+        }
+
         private sealed class KLineChart : Control
         {
             private const int LeftPad = 54;
@@ -1834,6 +2353,42 @@ namespace StockPool
             private readonly ToolTip _tip = new ToolTip();
             private int _hoverIndex = -1;
             public Action<int> OnRangeChanged;                 // 缩放改变范围时通知外部刷新高亮
+            /// <summary>光标所在 K 线的日期（移出时保留最后一次）——右侧筹码窗口据此切换到那一天。</summary>
+            public Action<string> OnHoverDate;
+            private string _hoverDate = null;
+
+            /// <summary>最近一次光标所在的交易日；移出图表不清空，便于重算后回到原处。</summary>
+            public string CursorDate { get { return _hoverDate; } }
+
+            // 价格轴几何（每次 OnPaint 记录）：右侧「筹码分布」窗口按同一价格轴对齐，
+            // 使筹码峰的高度位置与 K 线的价格坐标严格对应。
+            private double _axisLo, _axisHi;
+            private int _axisTop, _axisBottom;
+            private bool _axisReady;
+            public event Action PriceAxisChanged;
+
+            /// <summary>取当前价格轴：[lo, hi] 映射到纵向 [top, bottom]；无数据时返回 false。</summary>
+            public bool TryGetPriceAxis(out double lo, out double hi, out int top, out int bottom)
+            {
+                lo = _axisLo; hi = _axisHi; top = _axisTop; bottom = _axisBottom;
+                return _axisReady;
+            }
+
+            private void PublishAxis(double lo, double hi, int top, int bottom)
+            {
+                bool changed = !_axisReady || Math.Abs(_axisLo - lo) > 1e-9
+                    || Math.Abs(_axisHi - hi) > 1e-9 || _axisTop != top || _axisBottom != bottom;
+                _axisLo = lo; _axisHi = hi; _axisTop = top; _axisBottom = bottom;
+                _axisReady = true;
+                if (changed && PriceAxisChanged != null) PriceAxisChanged();
+            }
+
+            private void ClearAxis()
+            {
+                bool changed = _axisReady;
+                _axisReady = false;
+                if (changed && PriceAxisChanged != null) PriceAxisChanged();
+            }
 
             private static readonly int[] MaPeriods = new int[] { 5, 10, 20, 60 };
             private static readonly Color[] MaColors = new Color[] {
@@ -1951,9 +2506,14 @@ namespace StockPool
             protected override void OnMouseEnter(EventArgs e)
             {
                 base.OnMouseEnter(e);
+                FocusForKeys();
+            }
+
+            /// <summary>聚焦图表以便接收**滚轮缩放与方向键**；但外层 AutoScroll 容器会顺手把图表
+            /// 滚入视口，导致上方查询区被顶出屏幕——聚焦后把滚动位置还原回去。</summary>
+            public void FocusForKeys()
+            {
                 if (!this.TabStop || this.Focused) return;
-                // 聚焦图表以便接收滚轮（缩放）；但外层 AutoScroll 容器会顺手把图表
-                // 滚入视口，导致上方查询区被顶出屏幕——聚焦后把滚动位置还原回去。
                 ScrollableControl host = FindScrollHost();
                 Point saved = host != null ? host.AutoScrollPosition : Point.Empty;
                 this.Focus();
@@ -1998,38 +2558,110 @@ namespace StockPool
                 if (idx >= n) idx = n - 1;
                 _hoverIndex = idx;
                 Invalidate();
-                var vis = VisibleBars();
-                if (idx < vis.Count)
-                {
-                    KBar b = vis[idx];
-                    var sb = new StringBuilder();
-                    sb.Append(b.Date);
-                    sb.Append("  开 ").Append(b.O.ToString("F2"));
-                    sb.Append("  收 ").Append(b.C.ToString("F2"));
-                    sb.Append("  高 ").Append(b.H.ToString("F2"));
-                    sb.Append("  低 ").Append(b.L.ToString("F2"));
-                    sb.Append("  量 ").Append(VolumeText(b.V));
-                    foreach (KMark mk in _marks)
-                    {
-                        if (mk.Date == b.Date) sb.Append("  [").Append(mk.Text).Append("]");
-                    }
-                    _tip.Show(sb.ToString(), this, e.X, e.Y + 16);
+                PublishHoverDate();
+                ShowHoverTip(e.X, e.Y);
+            }
+
+            // ---- 键盘：↑↓ 缩放、←→ 移动光标（与鼠标滚轮 / 悬停同一套实现）----
+
+            protected override void OnPreviewKeyDown(PreviewKeyDownEventArgs e)
+            {
+                base.OnPreviewKeyDown(e);
+                // 方向键默认被容器当成「移动焦点」吞掉，这里声明由图表自己处理
+                if (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down
+                    || e.KeyCode == Keys.Left || e.KeyCode == Keys.Right)
+                    e.IsInputKey = true;
+            }
+
+            protected override void OnKeyDown(KeyEventArgs e)
+            {
+                base.OnKeyDown(e);
+                if (_bars.Count == 0) return;
+                if (e.KeyCode == Keys.Up) { Zoom(-20); e.Handled = true; e.SuppressKeyPress = true; }
+                else if (e.KeyCode == Keys.Down) { Zoom(20); e.Handled = true; e.SuppressKeyPress = true; }
+                else if (e.KeyCode == Keys.Left) { MoveCursor(-1); e.Handled = true; e.SuppressKeyPress = true; }
+                else if (e.KeyCode == Keys.Right) { MoveCursor(1); e.Handled = true; e.SuppressKeyPress = true; }
+            }
+
+            /// <summary>缩放：step&lt;0 放大（更少根），step&gt;0 缩小（更多根）。滚轮与 ↑↓ 共用。</summary>
+            private void Zoom(int step)
+            {
+                int total = _bars.Count;
+                if (total == 0) return;
+                int cur = _range > 0 ? _range : total;
+                int next = Math.Max(20, Math.Min(total, cur + step));
+                _range = (next >= total) ? 0 : next;
+                _offset = Math.Max(0, Math.Min(_offset, total - VisibleCount()));
+                int n = VisibleCount();
+                if (_hoverIndex >= n) _hoverIndex = n - 1;      // 缩小后光标可能越界
+                Invalidate();
+                if (OnRangeChanged != null) OnRangeChanged(_range);
+            }
+
+            /// <summary>光标左右移动一根；走到可视区边缘时**自动平移窗口**（与行情软件一致）。</summary>
+            private void MoveCursor(int delta)
+            {
+                int n = VisibleCount();
+                if (n <= 0) return;
+                int total = _bars.Count;
+                if (_hoverIndex < 0) _hoverIndex = n - 1;        // 首次按键从最新一根起步
+                int next = _hoverIndex + delta;
+                if (next < 0)
+                {   // 已在最左：把窗口往早期挪，露出更老的 K 线
+                    if (_offset < total - n) _offset = Math.Min(_offset + 1, total - n);
+                    next = 0;
                 }
+                else if (next >= n)
+                {   // 已在最右：把窗口往最新挪
+                    if (_offset > 0) _offset -= 1;
+                    next = n - 1;
+                }
+                _hoverIndex = next;
+                Invalidate();
+                PublishHoverDate();
+                ShowHoverTip();
+            }
+
+            /// <summary>把光标所在交易日广播出去（右侧筹码窗口据此切换）。</summary>
+            private void PublishHoverDate()
+            {
+                var vis = VisibleBars();
+                int idx = _hoverIndex;
+                if (idx < 0 || idx >= vis.Count) return;
+                _hoverDate = vis[idx].Date;
+                if (OnHoverDate != null) OnHoverDate(_hoverDate);
+            }
+
+            /// <summary>在光标处显示 OHLC 浮窗。键盘调用时没有鼠标坐标，改用光标对应的 x。</summary>
+            private void ShowHoverTip(int mouseX = -1, int mouseY = -1)
+            {
+                var vis = VisibleBars();
+                int idx = _hoverIndex;
+                if (idx < 0 || idx >= vis.Count) { _tip.Hide(this); return; }
+                KBar b = vis[idx];
+                var sb = new StringBuilder();
+                sb.Append(b.Date);
+                sb.Append("  开 ").Append(b.O.ToString("F2"));
+                sb.Append("  收 ").Append(b.C.ToString("F2"));
+                sb.Append("  高 ").Append(b.H.ToString("F2"));
+                sb.Append("  低 ").Append(b.L.ToString("F2"));
+                sb.Append("  量 ").Append(VolumeText(b.V));
+                foreach (KMark mk in _marks)
+                {
+                    if (mk.Date == b.Date) sb.Append("  [").Append(mk.Text).Append("]");
+                }
+                int n = VisibleCount();
+                int plotW = Math.Max(20, Width - LeftPad - RightPad);
+                int x = mouseX >= 0 ? mouseX
+                    : (int)(LeftPad + (double)plotW / Math.Max(1, n) * (idx + 0.5));
+                int y = mouseY >= 0 ? mouseY + 16 : 18;
+                _tip.Show(sb.ToString(), this, x, y);
             }
 
             protected override void OnMouseWheel(MouseEventArgs e)
             {
                 base.OnMouseWheel(e);
-                int total = _bars.Count;
-                if (total == 0) return;
-                int cur = _range > 0 ? _range : total;
-                int step = e.Delta > 0 ? -20 : 20;   // 上滚放大（更少根），下滚缩小
-                int next = Math.Max(20, Math.Min(total, cur + step));
-                int newRange = (next >= total) ? 0 : next;
-                _range = newRange;
-                _offset = Math.Max(0, Math.Min(_offset, total - VisibleCount()));
-                Invalidate();
-                if (OnRangeChanged != null) OnRangeChanged(_range);
+                Zoom(e.Delta > 0 ? -20 : 20);   // 上滚放大（更少根），下滚缩小
             }
 
             protected override void OnMouseLeave(EventArgs e)
@@ -2085,6 +2717,7 @@ namespace StockPool
                 var vis = VisibleBars();
                 if (vis.Count == 0)
                 {
+                    ClearAxis();
                     DrawLegend(g, text, -1);
                     using (var b = new SolidBrush(text))
                     using (var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
@@ -2141,6 +2774,7 @@ namespace StockPool
                 if (pmax <= pmin) pmax = pmin + 1;
                 double pad = (pmax - pmin) * 0.04;
                 pmin -= pad; pmax += pad;
+                PublishAxis(pmin, pmax, plotTop, plotBottom);   // 供右侧筹码窗口对齐
 
                 double maxVol = 0;
                 foreach (KBar b in vis) if (b.V > maxVol) maxVol = b.V;
