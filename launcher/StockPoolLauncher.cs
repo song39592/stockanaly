@@ -2281,7 +2281,13 @@ namespace StockPool
             _backend = new ServiceItem();
             _backend.Name = "后端";
             _backend.Exe = py;
-            _backend.Args = "-m uvicorn main:app --host 127.0.0.1 --port 8000";
+            // --log-config：把 uvicorn 的启动横幅从 stderr 改到 stdout。
+            // 启动器按输出流打标签（stderr → [err]），而这些横幅是 INFO，
+            // 不打这行就会每次启动都显示成 [err] INFO: ... 看着像报错。
+            // 真正的告警 / 异常仍写 stderr，仍会带 [err]（那是对的）。
+            _backend.Args = "-m uvicorn main:app --host 127.0.0.1 --port 8000"
+                          + " --log-config \""
+                          + Path.Combine(_root, "backend_fastapi", "uvicorn_logging.json") + "\"";
             _backend.WorkDir = Path.Combine(_root, "backend_fastapi");
             _backend.HealthUrl = "http://127.0.0.1:8000/health";
 

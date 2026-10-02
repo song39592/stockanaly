@@ -21,5 +21,9 @@ if not defined BACKEND_PY (
   pause
   exit /b 1
 )
-"%BACKEND_PY%" -m uvicorn main:app --host 127.0.0.1 --port 8000
+rem 日志配置：把 uvicorn 的启动横幅从 stderr 改到 stdout（详见 uvicorn_logging.json），
+rem 否则会被打成 [err] INFO: ... 看着像报错。文件缺失则退回默认配置。
+set "LOG_ARG="
+if exist "%~dp0uvicorn_logging.json" set "LOG_ARG=--log-config "%~dp0uvicorn_logging.json""
+"%BACKEND_PY%" -m uvicorn main:app --host 127.0.0.1 --port 8000 %LOG_ARG%
 pause
