@@ -6,6 +6,16 @@
 
 ### 新增
 
+- **后端启动日志不再把 uvicorn 的启动横幅标成 `[err]`**：新增
+  `backend_fastapi/uvicorn_logging.json`，经 `--log-config` 传给 uvicorn，把默认日志器的
+  输出流从 stderr 改成 stdout（访问日志本来就在 stdout）。启动器按**输出流**打标签，
+  而 uvicorn 默认把启动横幅写 stderr，于是每次启动都显示 `[err] INFO: ...` 像报错。
+  ⚠️ 该 JSON **必须纯 ASCII 无 BOM**：uvicorn 用 `json.load(file)` 读它且**不指定编码**，
+  在中文 Windows 上按 GBK 解码，含中文会直接让后端启动崩溃（实测踩到）。
+  真正的告警 / 异常仍写 stderr、仍带 `[err]`——那是对的。
+  启动器、`run_backend.bat`、`start_backend.bat` 三处均已接上，且都做了文件存在性判断
+  （文件缺失则退回 uvicorn 默认配置，不会因此启动失败）。
+
 - **K线周期选项：日线 / 周线 / 月线**（工具栏新增「周期」三按钮）。
   - 日线是**唯一落库口径**，周 / 月由新增的 `periods.py` **读取时现算**（不另存一份，
     与「不存 qfq_factor」同理）：按自然周 / 自然月合样，日期取组内最后一个交易日，
