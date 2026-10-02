@@ -3,6 +3,7 @@
 
 各业务模块的接口按功能拆分到独立的 *_routes.py，数据采集与计算在对应的 *_service.py：
     chip_routes.py     筹码体系 · SCR 选股
+    chip_dist_routes.py 筹码体系 · 筹码分布（筹码峰）
     market_routes.py   盘面及板块分析
     mentor_routes.py   大佬策略实验室
     stock_routes.py    个股调研与股票估值
@@ -66,6 +67,7 @@ ROUTE_MODULES = (
     ("股票池历史 · K线与消息", "history_routes"),
     ("历史数据下载", "download_routes"),
     ("筹码体系 · SCR 选股", "chip_routes"),
+    ("筹码体系 · 筹码分布", "chip_dist_routes"),
     ("盘面及板块分析", "market_routes"),
     ("大佬策略实验室", "mentor_routes"),
     ("个股调研与股票估值", "stock_routes"),

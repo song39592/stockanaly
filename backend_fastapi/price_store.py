@@ -221,6 +221,28 @@ def verify_digest(conn, code: str) -> dict:
     }
 
 
+# 股本（流通 / 总）：换手率 = 成交量 ÷ 流通股本，筹码分布与衰减计算依赖它。
+# 本地通达信日线只有 OHLCV，没有股本，故需单独接一路数据源（见 share_service）。
+# 以 as_of（生效日）为键存成序列：当前只采到「最新值」，将来若接入股本变迁
+# （解禁 / 增发 / 送转）可按同样结构补历史节点，读取端无需改动。
+_SHARE_CAPITAL_TABLE = """
+CREATE TABLE IF NOT EXISTS share_capital (
+  code TEXT NOT NULL,
+  as_of TEXT NOT NULL,
+  float_shares REAL,
+  total_shares REAL,
+  source TEXT NOT NULL DEFAULT '',
+  fetched_at TEXT NOT NULL,
+  PRIMARY KEY(code, as_of)
+) WITHOUT ROWID;
+"""
+
+
+def _ensure_share_table(conn) -> None:
+    """幂等建股本表：老库在 `init_db` 之前就已存在，读写前都要能自愈。"""
+    conn.execute(_SHARE_CAPITAL_TABLE)
+
+
 def init_db() -> None:
     """建齐股价相关表：当前年份的日 K 分片 + 因子库。"""
     with db.connect(db.bars_db(dt.date.today().year)) as conn:
@@ -239,6 +261,7 @@ def init_db() -> None:
         ) WITHOUT ROWID;
         -- 除权除息明细：审计因子、对拍口径、计算税后真实持仓成本。
         -- 送股 / 转增 / 派息均为「每 10 股」口径（与数据源一致）。
+        """ + _SHARE_CAPITAL_TABLE + """
         CREATE TABLE IF NOT EXISTS dividends (
           code TEXT NOT NULL,
           ex_date TEXT NOT NULL,
@@ -531,6 +554,68 @@ def list_dividends(code: str) -> list[dict[str, Any]]:
             "SELECT * FROM dividends WHERE code=? ORDER BY ex_date DESC", (code,)
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+# --------------------------------------------------------------------------- #
+# 股本（流通 / 总）—— 换手率与筹码分布的基础数据
+# --------------------------------------------------------------------------- #
+def upsert_share_capital(code: str, rows: list[dict[str, Any]], source: str = "") -> int:
+    """写入股本记录；`as_of` 为生效日（该日及之后有效）。单位：**股**。"""
+    fetched_at = db.now_iso()
+    payload = [
+        (code, item["as_of"], item.get("float_shares"), item.get("total_shares"),
+         source, fetched_at)
+        for item in rows
+        if item.get("as_of") and (item.get("float_shares") or item.get("total_shares"))
+    ]
+    if not payload:
+        return 0
+    with db.connect(db.FACTORS_DB) as conn:
+        _ensure_share_table(conn)
+        conn.executemany("""INSERT OR REPLACE INTO share_capital(
+          code,as_of,float_shares,total_shares,source,fetched_at) VALUES(?,?,?,?,?,?)""",
+            payload)
+    return len(payload)
+
+
+def list_share_capital(code: str) -> list[dict[str, Any]]:
+    """按生效日**升序**返回股本序列（便于对交易日做前向填充）。"""
+    with db.connect(db.FACTORS_DB) as conn:
+        _ensure_share_table(conn)
+        rows = conn.execute(
+            "SELECT * FROM share_capital WHERE code=? ORDER BY as_of", (code,)
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def float_shares_at(code: str, date: str | None = None) -> float | None:
+    """取 `date` 当日生效的流通股本（股）。
+
+    优先「生效日 ≤ date」的最后一条；若查不到（历史日期早于最早一条记录），
+    回退到「生效日 > date」的最早一条——当前只采到「最新」这一个节点，
+    历史股本（解禁 / 增发前）未知，只能用最近的已知值近似；将来接入股本变迁
+    补上历史节点后，第一条查询即可命中，回退自动失效。
+    date 缺省则取最新一条；完全无记录返回 None（调用方据此决定是否去采集）。
+    """
+    with db.connect(db.FACTORS_DB) as conn:
+        _ensure_share_table(conn)
+        if date:
+            day = str(date)[:10]
+            row = conn.execute(
+                "SELECT float_shares FROM share_capital WHERE code=? AND as_of<=? "
+                "ORDER BY as_of DESC LIMIT 1", (code, day),
+            ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT float_shares FROM share_capital WHERE code=? AND as_of>? "
+                    "ORDER BY as_of ASC LIMIT 1", (code, day),
+                ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT float_shares FROM share_capital WHERE code=? "
+                "ORDER BY as_of DESC LIMIT 1", (code,),
+            ).fetchone()
+    return None if row is None else row["float_shares"]
 
 
 # --------------------------------------------------------------------------- #

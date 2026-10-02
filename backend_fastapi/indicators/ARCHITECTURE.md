@@ -55,6 +55,18 @@ backend_fastapi/indicators/
 - 内部 `_load(...)` 带 `lru_cache`，同一 `(code, 区间, 口径)` 只解析一次，指标常反复取同一段数据时可显著提速。
 - 若指标需要成交额/换手率等额外列，只在 `data.py` 扩展，实现文件无需改动。
 
+**已扩展的三项（筹码分布用，非指标序列）**：
+
+| 函数 | 返回 | 说明 |
+|---|---|---|
+| `get_float_shares(code, date=None)` | float | 流通股本（股）。库里没有就经 `price_service.sync_share_capital` 现采一次（腾讯行情市值 ÷ 现价）。 |
+| `get_turnover(code, start, end, adjust)` | Series | 换手率（小数 0~1）= 成交量(手)×100 ÷ 流通股本，按 [0,1] 截断。 |
+| `get_vwap(code, start, end, adjust)` | Series | 当日成交均价 = 成交额 ÷ 成交量；缺失回落 (H+L+C)/3。 |
+
+> 背景：本地通达信日线没有流通股本（`tdx_reader` 的 `turnover` 一律留空），
+> 换手率算不出来；筹码分布的衰减完全由换手率驱动，故单独接了 `share_service`
+> 这一路数据源，落库在 `price_store.share_capital`（按生效日存序列）。
+
 ---
 
 ## 5. 指标注册机制 `base.py`
@@ -97,6 +109,8 @@ def ma(df: pd.DataFrame, periods=None) -> dict:
 
 ### 指标函数约定
 - 入参 `df` 由 `compute()` 经 `data.get_ohlcv` 提供（绝不自行取数）。
+- `df.attrs["code"]` 带当前股票代码（由 `compute()` 挂上）。需要「按代码再取一份数据」
+  的指标（如筹码类）用 `data.code_of(df)` 取，**不得**为此改函数签名。
 - 返回 `dict`：`{"series": [series_line(...), series_bar(...), ...]}`。
 - 每条 Series **必须沿用 `df` 的 date 索引**（直接基于 `df` 计算即可），
   **不得裁掉前段索引**；不足周期的位点用 `NaN` 表示（pandas 滚动/移位自然产生）。
@@ -247,7 +261,30 @@ rightPanel:  Series[]            // 右侧并列面板
 
 ---
 
-## 11. 与现有架构的关系
+## 11. 与筹码公式包（`chip_formulas/`）的分工
+
+筹码分布本身**不是指标**：它输出「按**价格**分箱的直方图」，横轴不是时间，
+与 §6 的日期序列契约不通用，故单独成包（见 `chip_formulas/ARCHITECTURE.md`）。
+但它派生出的**按日期的延伸量**是指标，放在本目录：
+
+| 指标文件 | panel | 说明 |
+|---|---|---|
+| `chip_cost.py` | `main` | 平均成本 + 峰位价（价格量纲，叠加主图） |
+| `chip_profit.py` | `lower` | 获利比例%（以**当日**收盘为界，不含未来信息） |
+| `chip_scr.py` | `lower` | 集中度 90 / 70（越小越集中） |
+| `turnover.py` | `none` | 换手率%：能算、能枚举、**不显示**（供导出 / 内部复用） |
+
+矩阵 / 价格轴 / 流通股本是**非序列**的中间量，留在该包，**不进指标体系**。
+
+延伸指标经 `data.chip_rows_of(df, formula)` 取矩阵，不重复计算
+（同一 `(code, formula, days, bins, adjust)` 只算一次，见 `data.get_chip_frames` 的缓存）。
+`formula` 参数的选项由 `registry.list_indicators()` 运行时从公式注册表填充。
+
+> ⚠️ 依赖方向是单向的：`chip_formulas.core.data` 依赖本包的 `data`（取行情 / 换手率 / 均价）；
+> 本包要让指标拿到矩阵，只能在 `data.py` / `registry.py` 的**函数内延迟 import** 那个包
+> （模块级互导会形成环）。指标实现文件不得 import 它。
+
+## 12. 与现有架构的关系
 
 - `price_store.py` 是底层存储层（SQLite 分片，提供 `load_bars` 等）。本包**不碰存储**，
   只通过 `data.py` 这一个窄接口取数。
