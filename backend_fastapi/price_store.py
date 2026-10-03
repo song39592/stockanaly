@@ -349,6 +349,41 @@ def _digest_is_broken(conn, code: str) -> bool:
     return not verify_digest(conn, code)["ok"]
 
 
+def repair_digests(dry_run: bool = True) -> dict:
+    """把「指纹与数据不一致」的记录按当前数据重算为新基线。
+
+    背景：某次批量增量同步（`source='腾讯证券'`）写完数据后没刷指纹，导致大量
+    (代码, 年份分片) 的指纹停在旧行数 / 旧内容，`load_bars` 一路抛 `UntrustedDataError`。
+    这些数据出自项目自己的可信管道（腾讯行情），**非外部篡改**，故可用
+    「当前数据 = 新基线」的方式修复，而不必逐票重抓（5500+ 只不现实）。
+
+    覆盖三类失配：缺指纹、行数不一致、内容指纹不一致；算法版本落后也一并重算升级。
+    `dry_run=True` 只统计、不落库（默认），`False` 才逐个 `refresh_digest`。
+
+    返回 `{dry_run, count, by_year, items:[{code,year,reason}], updated:[...]}`。
+    """
+    affected: list[dict[str, Any]] = []
+    updated: list[dict[str, Any]] = []
+    by_year: dict[int, int] = {}
+    for year in _shard_years():
+        with db.connect(db.bars_db(year)) as conn:
+            codes = [r["code"] for r in conn.execute(
+                "SELECT DISTINCT code FROM daily_bars ORDER BY code")]
+            for code in codes:
+                chk = verify_digest(conn, code)
+                if chk["ok"]:
+                    continue
+                affected.append({"code": code, "year": year,
+                                 "reason": chk.get("reason") or "指纹不一致"})
+                by_year[year] = by_year.get(year, 0) + 1
+                if not dry_run:
+                    res = refresh_digest(conn, code)
+                    updated.append({"code": code, "year": year,
+                                    "rows": res.get("rows", 0)})
+    return {"dry_run": dry_run, "count": len(affected), "by_year": by_year,
+            "items": affected, "updated": updated}
+
+
 def upsert_bars(code: str, bars: list[dict[str, Any]], adjust: str = "raw",
                 source: str = "") -> int:
     """写入日 K：按年份分组，路由到对应的分片库（主键保证同口径同日覆盖）。
