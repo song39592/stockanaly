@@ -50,6 +50,22 @@ namespace StockPool
         private FlowLayoutPanel _stMetricCards;
         private PictureBox _stEquityBox;
         private DataGridView _stPerStockGrid;
+        private List<Dictionary<string, object>> _stPerStockData;   // 原始 per_stock（展开渲染用）
+        private readonly HashSet<string> _stExpanded = new HashSet<string>();   // 已展开的代码
+        private readonly Dictionary<string, System.Collections.IList> _stDetailCache =
+            new Dictionary<string, System.Collections.IList>();     // 已拉取的逐笔明细（code → trades）
+        private string _stResultId;                                 // 后端回测上下文句柄（明细按需拉取）
+
+        // ④ 近期策略成果（最近 N 个交易日回测）
+        private NumericUpDown _stRecentDays;
+        private Label _stRecentStatus;
+        private FlowLayoutPanel _stRecentCards;
+        private DataGridView _stRecentGrid;
+
+        // ⑤ 当前策略推荐（买入 / 卖出 / 持股）
+        private Label _stRecoStatus;
+        private FlowLayoutPanel _stRecoCards;
+        private DataGridView _stBuyGrid, _stSellGrid, _stHoldGrid;
         private List<string> _stEqDates;
         private List<double?> _stEq;
         private List<double?> _stEqBench;
@@ -118,6 +134,8 @@ namespace StockPool
             StAddSubPage("策略选择与编辑", StBuildSelect);
             StAddSubPage("回测范围", StBuildScope);
             StAddSubPage("回测结果", StBuildResult);
+            StAddSubPage("近期策略成果", StBuildRecent);
+            StAddSubPage("当前策略推荐", StBuildReco);
 
             StSubSelect(0);
             return p;
@@ -438,19 +456,351 @@ namespace StockPool
             AddRow(stack, chartHost);
 
             TableLayoutPanel bg;
-            var g = Group("个股明细（按区间收益降序，最多 50）", out bg);
+            var g = Group("个股明细（按区间收益降序 · 点击行展开逐笔交易）", out bg);
             _stPerStockGrid = new DataGridView();
             _stPerStockGrid.AllowUserToAddRows = false;
             _stPerStockGrid.ReadOnly = true;
             _stPerStockGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-            _stPerStockGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-            _stPerStockGrid.Height = 220;
+            _stPerStockGrid.RowTemplate.Height = 24;
+            // 列宽随内容自适应（含表头），表格自身仍随窗口拉满
+            _stPerStockGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.DisplayedCells;
+            _stPerStockGrid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+            _stPerStockGrid.Height = 260;
             _stPerStockGrid.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
             _stPerStockGrid.Columns.Add("code", "代码");
+            _stPerStockGrid.Columns.Add("name", "名称");
             _stPerStockGrid.Columns.Add("ret", "区间收益");
             _stPerStockGrid.Columns.Add("trades", "交易次数");
+            // 手动插行做「展开明细」，排序会把主行/明细行拆散，直接禁掉
+            foreach (DataGridViewColumn col in _stPerStockGrid.Columns)
+                col.SortMode = DataGridViewColumnSortMode.NotSortable;
+            // 只用点击做展开，不出现选中高亮（点谁都是干净的）
+            _stPerStockGrid.SelectionChanged += delegate { _stPerStockGrid.ClearSelection(); };
+            _stPerStockGrid.CellClick += StPerStockCellClick;
             AddRow(bg, _stPerStockGrid);
             AddRow(stack, g);
+        }
+
+        // ---------------- ④ 近期策略成果 ----------------
+        // 最近 N 个交易日的短窗口回测：区间由后端按本地日历自动定位（window），
+        // 与「回测结果」共用同一套信号与统计口径，只是窗口固定为最近 N 日。
+        private void StBuildRecent(TableLayoutPanel stack)
+        {
+            AddRow(stack, Mute(Lbl("用当前策略在「最近 N 个交易日」上跑一次回测，快速看近期表现；范围 / 资金 / 佣金沿用「回测范围」页的设置。")));
+            _stRecentDays = new NumericUpDown();
+            _stRecentDays.Minimum = 2;
+            _stRecentDays.Maximum = 120;
+            _stRecentDays.Value = 5;
+            _stRecentDays.Width = 70;
+            _stRecentDays.TabStop = false;
+            AddRow(stack, Row(MiniBtn("运行近期回测", delegate { StRunRecent(); }, 120),
+                Lbl("交易日数"), _stRecentDays, _stRecentStatus = Mute(Lbl("尚未运行"))));
+
+            _stRecentCards = StCardRow();
+            AddRow(stack, _stRecentCards);
+
+            TableLayoutPanel bg;
+            var g = Group("个股明细（按区间收益降序）", out bg);
+            _stRecentGrid = StGrid(new[] { "代码", "名称", "区间收益", "交易次数" });
+            AddRow(bg, _stRecentGrid);
+            AddRow(stack, g);
+        }
+
+        private void StRunRecent()
+        {
+            if (_stStrategies == null || _stList.SelectedIndex < 0)
+            {
+                _stRecentStatus.Text = "请先在「策略选择与编辑」里选一个策略";
+                _stRecentStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                return;
+            }
+            var req = StRequest((int)_stRecentDays.Value);
+            _stRecentStatus.Text = "回测中…";
+            _stRecentStatus.ForeColor = _cSub;
+            string body = new JavaScriptSerializer().Serialize(req);
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest", body, 600000);
+                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    Invoke((Action)(() => StRenderRecent(j)));
+                }
+                catch (Exception ex)
+                {
+                    string msg = ex.Message;
+                    Invoke((Action)(() =>
+                    {
+                        _stRecentStatus.Text = "回测失败：" + msg;
+                        _stRecentStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                    }));
+                }
+            });
+        }
+
+        private void StRenderRecent(Dictionary<string, object> j)
+        {
+            object okv;
+            if (j.TryGetValue("ok", out okv) && okv is bool && !(bool)okv)
+            {
+                _stRecentStatus.Text = "回测失败：" + StErrMsg(j);
+                _stRecentStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                return;
+            }
+            var metrics = (Dictionary<string, object>)j["metrics"];
+            _stRecentCards.Controls.Clear();
+            _stRecentCards.Controls.Add(StKpiCard("区间收益", Pct(ToDbl(metrics["total_return"]))));
+            _stRecentCards.Controls.Add(StKpiCard("最大回撤", Pct(ToDbl(metrics["max_drawdown"]))));
+            _stRecentCards.Controls.Add(StKpiCard("胜率", Pct(ToDbl(metrics["win_rate"]))));
+            _stRecentCards.Controls.Add(StKpiCard("交易次数", ToInt(metrics["num_trades"]).ToString()));
+            _stRecentCards.Controls.Add(StKpiCard("参与标的", ToInt(metrics["num_stocks"]).ToString()));
+            Skin(_stRecentCards);
+
+            _stRecentGrid.Rows.Clear();
+            var ps = j["per_stock"] as System.Collections.IList;
+            if (ps != null)
+            {
+                _stRecentGrid.SuspendLayout();
+                foreach (var it in ps)
+                {
+                    var d = it as Dictionary<string, object>;
+                    if (d == null) continue;
+                    _stRecentGrid.Rows.Add(StStr(d["code"], ""), StName(d),
+                        Pct(ToDbl(d["total_return"])), ToInt(d["trades"]).ToString());
+                }
+                _stRecentGrid.ResumeLayout();
+            }
+            StFitGridHeight(_stRecentGrid);
+            _stRecentStatus.Text = "完成（最近 " + (int)_stRecentDays.Value + " 个交易日）";
+            _stRecentStatus.ForeColor = Color.FromArgb(60, 160, 90);
+        }
+
+        // ---------------- ⑤ 当前策略推荐 ----------------
+        // 按最新交易日的信号给出三档建议：买入（今日建仓）/ 卖出（今日清仓）/
+        // 持股（继续持有，含建仓成本与浮盈亏）。
+        private void StBuildReco(TableLayoutPanel stack)
+        {
+            AddRow(stack, Mute(Lbl("按当前策略在**最新交易日**的信号给出操作建议；范围 / 资金 / 佣金沿用「回测范围」页的设置。")));
+            AddRow(stack, Row(MiniBtn("生成当前推荐", delegate { StRunReco(); }, 130),
+                _stRecoStatus = Mute(Lbl("尚未生成"))));
+
+            _stRecoCards = StCardRow();
+            AddRow(stack, _stRecoCards);
+
+            TableLayoutPanel b1;
+            var g1 = Group("买入（今日建仓）", out b1);
+            _stBuyGrid = StGrid(new[] { "代码", "名称", "现价", "建议仓位" });
+            AddRow(b1, _stBuyGrid);
+            AddRow(stack, g1);
+
+            TableLayoutPanel b2;
+            var g2 = Group("卖出（今日清仓）", out b2);
+            _stSellGrid = StGrid(new[] { "代码", "名称", "现价", "原仓位" });
+            AddRow(b2, _stSellGrid);
+            AddRow(stack, g2);
+
+            TableLayoutPanel b3;
+            var g3 = Group("持股（继续持有）", out b3);
+            _stHoldGrid = StGrid(new[] { "代码", "名称", "状态", "成本价", "现价", "建仓日", "仓位", "浮盈亏" });
+            AddRow(b3, _stHoldGrid);
+            AddRow(stack, g3);
+        }
+
+        private void StRunReco()
+        {
+            if (_stStrategies == null || _stList.SelectedIndex < 0)
+            {
+                _stRecoStatus.Text = "请先在「策略选择与编辑」里选一个策略";
+                _stRecoStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                return;
+            }
+            var req = StRequest(0);
+            _stRecoStatus.Text = "计算中…";
+            _stRecoStatus.ForeColor = _cSub;
+            string body = new JavaScriptSerializer().Serialize(req);
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/recommend", body, 600000);
+                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    Invoke((Action)(() => StRenderReco(j)));
+                }
+                catch (Exception ex)
+                {
+                    string msg = ex.Message;
+                    Invoke((Action)(() =>
+                    {
+                        _stRecoStatus.Text = "计算失败：" + msg;
+                        _stRecoStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                    }));
+                }
+            });
+        }
+
+        private void StRenderReco(Dictionary<string, object> j)
+        {
+            object okv;
+            if (j.TryGetValue("ok", out okv) && okv is bool && !(bool)okv)
+            {
+                _stRecoStatus.Text = "计算失败：" + StErrMsg(j);
+                _stRecoStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                return;
+            }
+            var s = (Dictionary<string, object>)j["summary"];
+            _stRecoCards.Controls.Clear();
+            _stRecoCards.Controls.Add(StKpiCard("买入", ToInt(s["buy_count"]) + " 只"));
+            _stRecoCards.Controls.Add(StKpiCard("买入金额", Money(ToDbl(s["buy_amount"]))));
+            _stRecoCards.Controls.Add(StKpiCard("卖出", ToInt(s["sell_count"]) + " 只"));
+            _stRecoCards.Controls.Add(StKpiCard("卖出金额", Money(ToDbl(s["sell_amount"]))));
+            _stRecoCards.Controls.Add(StKpiCard("持股", ToInt(s["hold_count"]) + " 只"));
+            _stRecoCards.Controls.Add(StKpiCard("持股市值", Money(ToDbl(s["hold_amount"]))));
+            _stRecoCards.Controls.Add(StKpiCard("合计浮盈亏", Money(ToDbl(s["hold_pnl"]))));
+            Skin(_stRecoCards);
+
+            StFillRecoGrid(_stBuyGrid, j["buy"], false);
+            StFillRecoGrid(_stSellGrid, j["sell"], false);
+            StFillRecoGrid(_stHoldGrid, j["hold"], true);
+
+            _stRecoStatus.Text = "截至 " + StStr(j["date"], "") + " · 每只资金带 " + Money(ToDbl(j["band"]));
+            _stRecoStatus.ForeColor = Color.FromArgb(60, 160, 90);
+        }
+
+        private void StFillRecoGrid(DataGridView grid, object list, bool hold)
+        {
+            grid.Rows.Clear();
+            var arr = list as System.Collections.IList;
+            if (arr != null)
+            {
+                grid.SuspendLayout();
+                foreach (var it in arr)
+                {
+                    var d = it as Dictionary<string, object>;
+                    if (d == null) continue;
+                    int ri;
+                    if (hold)
+                    {
+                        double pnl = ToDbl(d["pnl"]);
+                        ri = grid.Rows.Add(StStr(d["code"], ""), StName(d), StStr(d["action"], ""),
+                            F2(d["cost_price"]), F2(d["price"]), StStr(d["buy_date"], ""),
+                            Pct(ToDbl(d["weight"])), Money(pnl));
+                        // A 股习惯：红涨绿跌
+                        grid.Rows[ri].Cells[7].Style.ForeColor =
+                            pnl >= 0 ? Color.FromArgb(208, 57, 59) : Color.FromArgb(60, 160, 90);
+                        grid.Rows[ri].Cells[6].Style.ForeColor = _cSub;
+                    }
+                    else
+                    {
+                        ri = grid.Rows.Add(StStr(d["code"], ""), StName(d), F2(d["price"]),
+                            Pct(ToDbl(d["weight"])));
+                    }
+                }
+                grid.ResumeLayout();
+            }
+            StFitGridHeight(grid);
+        }
+
+        // ---------------- 通用小工具 ----------------
+        // 回测 / 推荐共用请求体：策略、范围、资金、佣金都取「回测范围」页的设置。
+        // window>0 时后端直接把区间定位到最近 N 个交易日（近期成果用）。
+        private Dictionary<string, object> StRequest(int window)
+        {
+            var meta = _stStrategies[_stList.SelectedIndex];
+            var codes = _stAll.Checked ? new List<string>() : StParseCodes(_stCodes.Text);
+            return new Dictionary<string, object>
+            {
+                { "strategy_id", StStr(meta["id"], "") },
+                { "params", StReadParams() },
+                { "use_all", _stAll.Checked },
+                { "codes", codes },
+                { "start", StDate(_stStart) },
+                { "end", StDate(_stEnd) },
+                { "window", window > 0 ? (object)window : null },
+                { "initial_capital", (double)_stCapital.Value },
+                { "commission", StNum(_stComm.Text, 0.0003) },
+                { "benchmark", (_stBenchChk.Checked && _stBench.Text.Trim().Length > 0) ? _stBench.Text.Trim() : null },
+            };
+        }
+
+        private static FlowLayoutPanel StCardRow()
+        {
+            var f = new FlowLayoutPanel();
+            f.FlowDirection = FlowDirection.LeftToRight;
+            f.WrapContents = true;
+            f.AutoSize = true;
+            f.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            f.MaximumSize = new Size(900, 0);
+            f.Margin = new Padding(0, 0, 0, 8);
+            return f;
+        }
+
+        // 只读表格：列宽随内容、禁排序、禁选中高亮。
+        // 用 DisplayedCellsExceptHeader 而**不用 Fill**——Fill 会把某一列按比例
+        // 拉满，名称这种短文本列会被撑得很宽（用户反馈「名称这列太长了」）；
+        // 按内容自适应，剩余空白留在表格右侧，视觉更干净。
+        private static DataGridView StGrid(string[] cols)
+        {
+            var g = new DataGridView();
+            g.AllowUserToAddRows = false;
+            g.ReadOnly = true;
+            g.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            g.RowTemplate.Height = 24;
+            g.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.DisplayedCells;
+            g.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+            g.Height = 200;
+            g.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
+            for (int i = 0; i < cols.Length; i++) g.Columns.Add("c" + i, cols[i]);
+            foreach (DataGridViewColumn col in g.Columns)
+                col.SortMode = DataGridViewColumnSortMode.NotSortable;
+            g.SelectionChanged += delegate { g.ClearSelection(); };
+            return g;
+        }
+
+        private static int StFitGridHeight(DataGridView grid)
+        {
+            int rh = grid.RowTemplate.Height > 0 ? grid.RowTemplate.Height : 24;
+            int h = grid.ColumnHeadersHeight + 8 + grid.Rows.Count * rh;
+            grid.Height = Math.Max(160, Math.Min(620, h));
+            // 高度定稿后重算列宽：DisplayedCells* 只按「当时可见的行」量宽度，
+            // 逐行 Add 的中间态会把列算窄（如现价 70.06 被截成 70…），
+            // 必须在最终可见行数下再量一次。
+            StAutoWidth(grid);
+            return grid.Height;
+        }
+
+        private static void StAutoWidth(DataGridView grid)
+        {
+            // 含表头量宽（DisplayedCells 而非 ...ExceptHeader），否则「建议仓位」
+            // 这类比数据宽的表头会被截成「建议仓」
+            grid.AutoResizeColumns(DataGridViewAutoSizeColumnsMode.DisplayedCells);
+        }
+
+        private static string StName(Dictionary<string, object> d)
+        {
+            return (d.ContainsKey("name") && d["name"] != null) ? StStr(d["name"], "") : "—";
+        }
+
+        private static string F2(object v)
+        {
+            return v != null ? ToDbl(v).ToString("F2") : "—";
+        }
+
+        private static string Money(double v)
+        {
+            double a = Math.Abs(v);
+            string s = (a >= 10000) ? a.ToString("N0") : a.ToString("F2");
+            return (v < 0 ? "-¥" : "¥") + s;
+        }
+
+        private static string StErrMsg(Dictionary<string, object> j)
+        {
+            object err;
+            if (j.TryGetValue("error", out err))
+            {
+                var ed = err as Dictionary<string, object>;
+                if (ed != null) return StStr(ed["message"], "");
+            }
+            return "未知错误";
         }
 
         private void StRunBacktest()
@@ -495,7 +845,8 @@ namespace StockPool
             {
                 try
                 {
-                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest", body);
+                    // 全量（5000+ 只）冷缓存也要几十秒，超时放宽到 10 分钟
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest", body, 600000);
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
                     Invoke((Action)(() => StRenderResult(j)));
                 }
@@ -548,35 +899,223 @@ namespace StockPool
             _stEquityBox.Invalidate();
 
             var ps = j["per_stock"] as System.Collections.IList;
-            _stPerStockGrid.Rows.Clear();
+            _stPerStockData = new List<Dictionary<string, object>>();
             if (ps != null)
             {
                 foreach (var it in ps)
                 {
                     var d = it as Dictionary<string, object>;
-                    if (d == null) continue;
-                    _stPerStockGrid.Rows.Add(StStr(d["code"], ""), Pct(ToDbl(d["total_return"])), ToInt(d["trades"]).ToString());
+                    if (d != null) _stPerStockData.Add(d);
                 }
             }
+            _stResultId = StStr(j.ContainsKey("result_id") ? j["result_id"] : null, "");
+            _stExpanded.Clear();          // 新一轮回测结果，展开状态作废
+            _stDetailCache.Clear();       // 明细跟着旧 result_id，一并作废
+            StFillPerStockRows();
 
-            _stResultStatus.Text = "回测完成";
+            object nstk;
+            int doneCount = (metrics.TryGetValue("num_stocks", out nstk)) ? ToInt(nstk) : 0;
+            _stResultStatus.Text = "回测完成（参与统计 " + doneCount + " 只）";
             _stResultStatus.ForeColor = Color.FromArgb(60, 160, 90);
             object errs;
             if (j.TryGetValue("data_errors", out errs))
             {
                 var el = errs as System.Collections.IList;
                 if (el != null && el.Count > 0)
-                    _stResultStatus.Text = "回测完成（" + el.Count + " 只数据缺失/跳过）";
+                    _stResultStatus.Text = "回测完成（参与统计 " + doneCount
+                        + " 只，" + el.Count + " 只数据缺失/跳过）";
             }
-            object sc;
-            if (j.TryGetValue("scope", out sc))
+        }
+
+        // ---------------- 个股明细展开 ----------------
+        // 主行：代码 | 名称 | 区间收益 | 交易次数；点击主行切换展开，逐笔明细
+        // 按 result_id 向后端按需拉取（/backtest/trades），插入主行之下。
+        // 明细不随回测结果下发——全量 5000+ 只的明细 JSON 会到 10MB 级。
+        private void StFillPerStockRows()
+        {
+            _stPerStockGrid.Rows.Clear();
+            if (_stPerStockData == null) return;
+            _stPerStockGrid.SuspendLayout();
+            foreach (var d in _stPerStockData)
             {
-                var sm = sc as Dictionary<string, object>;
-                object smp;
-                if (sm != null && sm.TryGetValue("sampled", out smp) && smp is bool && (bool)smp)
-                    _stResultStatus.Text = "回测完成（全部本地超上限，已随机抽样 "
-                        + ToInt(sm["codes_count"]) + " 只）";
+                string code = StStr(d["code"], "");
+                string name = (d.ContainsKey("name") && d["name"] != null) ? StStr(d["name"], "") : "—";
+                int ri = _stPerStockGrid.Rows.Add("▸ " + code, name,
+                    Pct(ToDbl(d["total_return"])), ToInt(d["trades"]).ToString());
+                var row = _stPerStockGrid.Rows[ri];
+                row.Tag = "main:" + code;
+                // 主行也不吃选中高亮（点击只做展开，界面保持干净）
+                row.DefaultCellStyle.SelectionBackColor = _cPanel;
+                row.DefaultCellStyle.SelectionForeColor = _cText;
             }
+            _stPerStockGrid.ResumeLayout();
+            StAdjustHeight();
+        }
+
+        private static string StMainCode(DataGridViewRow row)
+        {
+            string tag = row.Tag as string;
+            return (tag != null && tag.StartsWith("main:")) ? tag.Substring(5) : null;
+        }
+
+        private void StToggleExpand(int mainIdx)
+        {
+            var grid = _stPerStockGrid;
+            var row = grid.Rows[mainIdx];
+            string code = StMainCode(row);
+            if (code == null) return;
+            if (_stExpanded.Contains(code))
+            {
+                _stExpanded.Remove(code);
+                row.Cells[0].Value = "▸ " + code;
+                // 删除主行之后连续的明细 / 占位行
+                int i = mainIdx + 1;
+                while (i < grid.Rows.Count)
+                {
+                    string t = grid.Rows[i].Tag as string;
+                    if (t == "detail" || (t != null && t.StartsWith("loading:")))
+                        grid.Rows.RemoveAt(i);
+                    else break;
+                }
+            }
+            else
+            {
+                _stExpanded.Add(code);
+                row.Cells[0].Value = "▾ " + code;
+                if (_stDetailCache.ContainsKey(code)) StInsertDetails(mainIdx + 1, code);
+                else StLoadDetails(code);
+            }
+            StAdjustHeight();
+        }
+
+        // 异步拉取逐笔明细；主行下先插「加载中」占位行，回来后原位替换
+        private void StLoadDetails(string code)
+        {
+            string rid = _stResultId;
+            int mainIdx = StFindMainRow(code);
+            if (mainIdx < 0) return;
+            if (string.IsNullOrEmpty(rid))
+            {
+                StDetailFailed(code, "请先运行回测");
+                return;
+            }
+            _stPerStockGrid.Rows.Insert(mainIdx + 1, new object[] { "└", "明细加载中…", "", "" });
+            var prow = _stPerStockGrid.Rows[mainIdx + 1];
+            prow.Tag = "loading:" + code;
+            prow.DefaultCellStyle.ForeColor = _cSub;
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/trades?rid="
+                        + rid + "&code=" + code, null, 30000);
+                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    var trades = (j != null && j.ContainsKey("trades"))
+                        ? j["trades"] as System.Collections.IList : null;
+                    Invoke((Action)delegate { StDetailArrived(code, trades); });
+                }
+                catch (Exception ex)
+                {
+                    string msg = ex.Message;
+                    try { Invoke((Action)delegate { StDetailFailed(code, msg); }); }
+                    catch (Exception) { }
+                }
+            });
+        }
+
+        private int StFindMainRow(string code)
+        {
+            for (int i = 0; i < _stPerStockGrid.Rows.Count; i++)
+                if (StMainCode(_stPerStockGrid.Rows[i]) == code) return i;
+            return -1;
+        }
+
+        private void StDetailArrived(string code, System.Collections.IList trades)
+        {
+            if (trades == null) trades = new System.Collections.ArrayList();
+            _stDetailCache[code] = trades;
+            // 替换占位行；期间已收起 / 表格已重建（找不到占位行）则丢弃
+            for (int i = 0; i < _stPerStockGrid.Rows.Count; i++)
+            {
+                string t = _stPerStockGrid.Rows[i].Tag as string;
+                if (t == "loading:" + code)
+                {
+                    _stPerStockGrid.Rows.RemoveAt(i);
+                    if (_stExpanded.Contains(code)) StInsertDetails(i, code);
+                    break;
+                }
+            }
+            StAdjustHeight();
+        }
+
+        private void StDetailFailed(string code, string msg)
+        {
+            for (int i = 0; i < _stPerStockGrid.Rows.Count; i++)
+            {
+                string t = _stPerStockGrid.Rows[i].Tag as string;
+                if (t == "loading:" + code)
+                {
+                    _stPerStockGrid.Rows[i].SetValues("└", "明细加载失败：" + msg, "", "");
+                    break;
+                }
+            }
+        }
+
+        private void StInsertDetails(int insertAt, string code)
+        {
+            var grid = _stPerStockGrid;
+            System.Collections.IList trades;
+            if (!_stDetailCache.TryGetValue(code, out trades) || trades.Count == 0)
+            {
+                grid.Rows.Insert(insertAt, new object[] { "└", "（无逐笔明细）", "", "" });
+                StStyleDetailRow(grid.Rows[insertAt]);
+                return;
+            }
+            int n = 1;
+            foreach (var t in trades)
+            {
+                var x = t as Dictionary<string, object>;
+                if (x == null) continue;
+                string buyDate = StStr(x["buy_date"], "");
+                string buyPrice = x["buy_price"] != null ? ToDbl(x["buy_price"]).ToString("F2") : "—";
+                bool closed = x["sell_date"] != null;
+                string sellDate = closed ? StStr(x["sell_date"], "") : "未平仓";
+                string sellPrice = x["sell_price"] != null ? ToDbl(x["sell_price"]).ToString("F2") : "—";
+                object retObj;
+                string retTxt = (x.TryGetValue("ret", out retObj) && retObj != null) ? Pct(ToDbl(retObj)) : "—";
+                grid.Rows.Insert(insertAt, new object[] { "└ " + n,
+                    "买 " + buyDate + " @ " + buyPrice,
+                    (closed ? "卖 " : "") + sellDate + (closed ? " @ " + sellPrice : ""),
+                    retTxt });
+                StStyleDetailRow(grid.Rows[insertAt]);
+                insertAt++;
+                n++;
+            }
+        }
+
+        private void StStyleDetailRow(DataGridViewRow row)
+        {
+            row.Tag = "detail";
+            row.DefaultCellStyle.BackColor = _cPanel;
+            row.DefaultCellStyle.ForeColor = _cSub;
+            row.DefaultCellStyle.SelectionBackColor = _cPanel;
+            row.DefaultCellStyle.SelectionForeColor = _cSub;
+        }
+
+        // 表格高度随内容自适应（封顶 620，超出滚动；行少时不少于 240）
+        private void StAdjustHeight()
+        {
+            int rh = _stPerStockGrid.RowTemplate.Height > 0 ? _stPerStockGrid.RowTemplate.Height : 24;
+            int h = _stPerStockGrid.ColumnHeadersHeight + 8 + _stPerStockGrid.Rows.Count * rh;
+            _stPerStockGrid.Height = Math.Max(240, Math.Min(620, h));
+            StAutoWidth(_stPerStockGrid);
+        }
+
+        private void StPerStockCellClick(object sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex < 0) return;
+            if (StMainCode(_stPerStockGrid.Rows[e.RowIndex]) == null) return;
+            StToggleExpand(e.RowIndex);
         }
 
         // ---------------- 净值曲线绘制 ----------------

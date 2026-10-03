@@ -190,7 +190,11 @@ def signals_to_positions(signals: list[Signal],
     out: dict[str, pd.Series] = {}
     for code, close in close_by_code.items():
         idx = [str(d)[:10] for d in close.index]
-        w = pd.Series(0.0, index=idx)
+        # 初值必须是 **NaN 而非 0.0**：ffill 只填 NaN，若用 0 填充则非事件日
+        # 全是实数 0、前向填充失效，持仓被压成「只有信号当天有仓」——
+        # 策略本该持有到卖出信号为止的收益就全丢了（首个事件之前仍由
+        # fillna(0) 兜底为空仓，语义不变）。
+        w = pd.Series(float("nan"), index=idx)
         for s in by_code.get(code, []):
             d = str(s.time)[:10]
             if d in w.index:

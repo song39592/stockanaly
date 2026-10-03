@@ -612,13 +612,13 @@ namespace StockPool
         }
 
         /// <summary>向本机后端发请求：body=null 为 GET，否则 POST(JSON)。返回响应体；HTTP 4xx/5xx 时返回错误体便于显示。</summary>
-        private static string VRequest(string url, string body)
+        private static string VRequest(string url, string body, int timeoutMs = 90000)
         {
             var req = (HttpWebRequest)WebRequest.Create(url);
             req.Proxy = null;                 // 本机直连，绕开系统代理 / 自动发现
             req.KeepAlive = false;
-            req.Timeout = 90000;
-            req.ReadWriteTimeout = 90000;
+            req.Timeout = timeoutMs;
+            req.ReadWriteTimeout = timeoutMs;
             req.Method = (body == null) ? "GET" : "POST";
             if (body != null)
             {
