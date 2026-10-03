@@ -58,6 +58,7 @@ class BacktestRequest(BaseModel):
     use_all: bool = False        # True → 股票池 = 本地全部已下载股票
     start: Optional[str] = None
     end: Optional[str] = None
+    window: Optional[int] = None   # 最近 N 个交易日（给了则覆盖 start/end，用于「近期成果」）
     initial_capital: float = 100000.0
     commission: float = 0.0003   # 单边佣金比例（如 0.0003 = 万三）
     benchmark: Optional[str] = None
@@ -76,9 +77,30 @@ def do_backtest(req: BacktestRequest):
     if req.use_all:
         codes = sdata.list_universe_codes()
     try:
+        # window 交给编排层处理（取数会额外向前预热，只统计最近 N 日）
         return backtest.run_backtest(
             req.strategy_id, req.params, codes, req.start, req.end,
-            req.initial_capital, req.commission, req.benchmark,
+            req.initial_capital, req.commission, req.benchmark, req.window,
+        )
+    except (KeyError, ValueError, RuntimeError) as exc:
+        code = _CODE_ERR[type(exc)]
+        return JSONResponse(status_code=400,
+                            content={"ok": False, "error": {"code": code, "message": str(exc)}})
+
+
+@router.post("/recommend")
+def do_recommend(req: BacktestRequest):
+    """当前策略推荐：按最新一日信号给出买入 / 卖出 / 持股三档建议。
+
+    入参与 /backtest 一致（window 除外，本接口不用于短窗口回测）。
+    """
+    codes = [str(c).strip() for c in (req.codes or []) if str(c).strip()]
+    if req.use_all:
+        codes = sdata.list_universe_codes()
+    try:
+        return backtest.run_recommend(
+            req.strategy_id, req.params, codes, req.start, req.end,
+            req.initial_capital, req.commission,
         )
     except (KeyError, ValueError, RuntimeError) as exc:
         code = _CODE_ERR[type(exc)]

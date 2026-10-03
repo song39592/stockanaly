@@ -89,7 +89,8 @@ def trade_detail(pos: pd.Series, close: pd.Series,
 
 def compute(positions_by_code: dict, close_by_code: dict, *,
             initial_capital: float = 100000.0, commission: float = 0.0003,
-            benchmark_close: pd.Series | None = None) -> dict:
+            benchmark_close: pd.Series | None = None,
+            tail: int | None = None) -> dict:
     """按目标仓位序列 + 收盘价序列，统计组合净值与指标。
 
     参数：
@@ -98,6 +99,8 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
       initial_capital    初始资金
       commission         单边佣金比例（如 0.0003 = 万三）
       benchmark_close    基准收盘价序列（可选，用于对比净值）
+      tail               只统计**最后 N 个交易日**（用于「最近 5 日」这类短窗口：
+                         传入的序列更长，是为让策略指标预热，但不计入净值/指标）
     """
     srets: dict[str, pd.Series] = {}
     per_stock: list[dict] = []
@@ -112,6 +115,10 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
         w_prev = w.shift(1).fillna(0.0)                       # 次日生效
         turnover = w_prev.diff().abs().fillna(w_prev.abs())   # 建/平仓换手
         sret = w_prev * ret - turnover * commission
+        if tail and len(sret) > tail:
+            # 短窗口（如「最近 5 个交易日」）：预热段只用于算指标，不进入统计
+            sret = sret.iloc[-tail:]
+            turnover = turnover.iloc[-tail:]
         trades = int((turnover > 1e-12).sum())
         srets[code] = sret
         total_trades += trades
@@ -130,6 +137,9 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
     # 各标的缺失交易日 reindex 后按 0 收益补——与「等权资金带、未建仓为现金」
     # 的组合口径天然一致。
     common = pd.Index(sorted(set().union(*[s.index for s in srets.values()])))
+    if tail and len(common) > tail:
+        # 停牌票会让并集日历多出几天，短窗口下严格截到 N 日
+        common = common[-tail:]
     if len(common) < 2:
         raise RuntimeError("对齐后的共同交易日不足，无法统计")
 

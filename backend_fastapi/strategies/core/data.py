@@ -98,3 +98,20 @@ def load_bars(codes, start: str | None = None, end: str | None = None,
 def list_universe_codes() -> list[str]:
     """列出本地已下载（有日 K）的全部股票代码，供「回测范围」选股票池。"""
     return sorted(price_store.code_latest_dates("raw").keys())
+
+
+def recent_trading_days(n: int = 5) -> list[str]:
+    """本地最新的 N 个交易日日期（升序），用于「近期策略成果」这类短窗口回测。
+
+    交易日是**全市场统一**的，任取一只票的日历即可；优先用大盘代表票，
+    本地没有时退回股票池里任意一只。
+    """
+    refs = ["000001", "600000", "600519", "000300"] + list_universe_codes()[:10]
+    for code in refs:
+        try:
+            df = kline_service.get_bars(code, period="day", adjust="raw")
+        except Exception:                        # noqa: BLE001 - 换下一只做日历
+            continue
+        if df is not None and len(df) >= n:
+            return [str(x)[:10] for x in df.index[-n:]]
+    return []
