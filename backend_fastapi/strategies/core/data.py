@@ -21,6 +21,8 @@ load_bars 支持批量取数并按 fields 切片，且按 (code, start, end, adj
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pandas as pd
 
 import kline_service
@@ -34,6 +36,9 @@ _MIN_ROWS = 2          # 少于 2 根无法算信号 / 回测，视为数据不�
 
 # (code, start, end, adjust) -> DataFrame | None（逐标的缓存全量 OHLCV）
 _PER_CACHE: dict = {}
+
+
+_IO_WORKERS = 6   # 并行读库线程数：SQLite WAL + 每线程独立连接，纯读安全
 
 
 def load_bars(codes, start: str | None = None, end: str | None = None,
@@ -58,20 +63,32 @@ def load_bars(codes, start: str | None = None, end: str | None = None,
     cols = [c for c in (fields or []) if c]
     out: dict[str, pd.DataFrame] = {}
 
+    # 只取未命中的：全量回测（5000+ 只）冷缓存时串行读库要几分钟，
+    # 这里用线程池并行读——db.connect 每次新建独立 SQLite 连接（WAL），
+    # 线程间无共享连接，安全。命中缓存的直接用，不进线程池。
+    def _fetch(code: str):
+        try:
+            # 统一的 K 线出口（回测固定日线，原因见模块 docstring）
+            d = kline_service.get_bars(code, start=start, end=end, adjust=adjust,
+                                       period="day").copy()
+            d = d[[c for c in _BAR_COLUMNS if c in d.columns]]
+            d.index = [str(x)[:10] for x in d.index]
+            return d if len(d) >= _MIN_ROWS else None
+        except Exception:                    # noqa: BLE001 - 单只失败不拖垮整批
+            return None
+
+    missing = [(c, (c, start, end, adjust)) for c in codes
+               if (c, start, end, adjust) not in _PER_CACHE]
+    if len(missing) > 1:
+        with ThreadPoolExecutor(max_workers=_IO_WORKERS) as ex:
+            for (code, key), df in zip(missing, ex.map(_fetch, [m[0] for m in missing])):
+                _PER_CACHE[key] = df
+    elif missing:
+        code, key = missing[0]
+        _PER_CACHE[key] = _fetch(code)
+
     for code in codes:
-        key = (code, start, end, adjust)
-        df = _PER_CACHE.get(key)
-        if df is None and key not in _PER_CACHE:
-            try:
-                # 统一的 K 线出口（回测固定日线，原因见模块 docstring）
-                d = kline_service.get_bars(code, start=start, end=end, adjust=adjust,
-                                           period="day").copy()
-                d = d[[c for c in _BAR_COLUMNS if c in d.columns]]
-                d.index = [str(x)[:10] for x in d.index]
-                df = d if len(d) >= _MIN_ROWS else None
-            except Exception:
-                df = None
-            _PER_CACHE[key] = df
+        df = _PER_CACHE.get((code, start, end, adjust))
         if df is None:
             continue
         out[code] = df[[c for c in cols if c in df.columns]] if cols else df

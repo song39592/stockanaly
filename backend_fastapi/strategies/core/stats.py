@@ -40,6 +40,53 @@ def _native(series: pd.Series):
     return out
 
 
+def trade_detail(pos: pd.Series, close: pd.Series,
+                 raw_close: pd.Series | None = None) -> list[dict]:
+    """从目标仓位序列提取逐笔「一买一卖」明细，供前端展开查看。
+
+    仓位口径与收益统计一致：w_t 在 t 日收盘生成、次日承担收益，成交价即
+    「w 首次变化那一天的收盘价」（见模块 docstring 的 T+1 语义）。
+    价格展示优先用 **原始收盘**（未复权，用户看得懂），收益一律用
+    后复权序列计算（消除除权跳空的假盈亏）。未平仓段 sell 为 null。
+
+    返回 [{buy_date, buy_price, sell_date, sell_price, ret}, ...]（时间升序）。
+    """
+    w = pos.reindex(close.index).fillna(0.0).astype(float)
+    price = raw_close if raw_close is not None and len(raw_close) else close
+
+    def _num(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return None if math.isnan(f) else round(f, 3)
+
+    def _price(i: int):
+        p = _num(price.iloc[i]) if i < len(price) else None
+        return p if p is not None else _num(close.iloc[i])
+
+    out: list[dict] = []
+    open_i: int | None = None
+    for i in range(len(w)):
+        cur = float(w.iloc[i])
+        if cur > 0.0 and open_i is None:
+            open_i = i
+        elif cur <= 0.0 and open_i is not None:
+            ret = float(close.iloc[i] / close.iloc[open_i] - 1.0)
+            out.append({
+                "buy_date": str(w.index[open_i])[:10], "buy_price": _price(open_i),
+                "sell_date": str(w.index[i])[:10], "sell_price": _price(i),
+                "ret": round(ret, 4),
+            })
+            open_i = None
+    if open_i is not None:
+        out.append({
+            "buy_date": str(w.index[open_i])[:10], "buy_price": _price(open_i),
+            "sell_date": None, "sell_price": None, "ret": None,
+        })
+    return out
+
+
 def compute(positions_by_code: dict, close_by_code: dict, *,
             initial_capital: float = 100000.0, commission: float = 0.0003,
             benchmark_close: pd.Series | None = None) -> dict:
@@ -78,11 +125,11 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
     if not srets:
         raise RuntimeError("没有可统计的标的")
 
-    # 对齐到共同交易日（取交集），保证组合口径一致。
-    common = None
-    for s in srets.values():
-        common = s.index if common is None else common.intersection(s.index)
-    common = common.sort_values()
+    # 对齐到「主日历」：全量回测（5000+ 只）时交集会被次新股压到只剩几天
+    # （一只 9 月底上市的票只含几个交易日，一交集全组合就没了），故取并集，
+    # 各标的缺失交易日 reindex 后按 0 收益补——与「等权资金带、未建仓为现金」
+    # 的组合口径天然一致。
+    common = pd.Index(sorted(set().union(*[s.index for s in srets.values()])))
     if len(common) < 2:
         raise RuntimeError("对齐后的共同交易日不足，无法统计")
 

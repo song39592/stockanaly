@@ -6,6 +6,7 @@
     GET  /codes          本地已下载股票代码列表（供「回测范围」选股票池）
     POST /backtest       运行回测：{"strategy_id","params","codes","use_all",
                                     "start","end","initial_capital","commission","benchmark"}
+    GET  /backtest/trades  逐笔明细：?rid=<result_id>&code=<代码>（回测后按需展开）
 
 错误统一返回 {"ok": False, "error": {"code", "message"}}（HTTP 400）。
 """
@@ -78,9 +79,22 @@ def do_backtest(req: BacktestRequest):
         return backtest.run_backtest(
             req.strategy_id, req.params, codes, req.start, req.end,
             req.initial_capital, req.commission, req.benchmark,
-            allow_sample=req.use_all,   # 「全部本地」超上限时自动抽样，不直接报错
         )
     except (KeyError, ValueError, RuntimeError) as exc:
         code = _CODE_ERR[type(exc)]
         return JSONResponse(status_code=400,
                             content={"ok": False, "error": {"code": code, "message": str(exc)}})
+
+
+@router.get("/backtest/trades")
+def do_backtest_trades(rid: str, code: str):
+    """单只股票的逐笔交易明细（前端展开个股行时按需调用）。
+
+    价格为原始收盘（未复权）、收益为后复权口径；rid 对应最近一次回测，
+    过期返回 400（前端提示重跑）。
+    """
+    try:
+        return {"ok": True, "code": code, "trades": backtest.trades_for(rid, code)}
+    except ValueError as exc:
+        return JSONResponse(status_code=400,
+                            content={"ok": False, "error": {"code": "EXPIRED", "message": str(exc)}})
