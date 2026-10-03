@@ -301,6 +301,43 @@ def stock_quote(code: str):
         raise HTTPException(status_code=500, detail=f"名称查询失败：{e}")
 
 
+@router.get("/profile")
+def stock_profile_endpoint(code: str):
+    """个股基本信息：行业 / 总市值 / 流通市值 / 前十大股东 / 上次涨停 / 历史最大连板。
+
+    分块取数、分块失败（哪路数据挂了只写进 errors，不影响其余块），见 stock_profile.py。
+    """
+    if not re.fullmatch(r"\d{6}", code or ""):
+        raise HTTPException(status_code=400, detail="股票代码必须是6位数字")
+    try:
+        import stock_profile
+        return stock_profile.profile(code)
+    except Exception as e:                    # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"基本信息加载失败：{e}")
+
+
+@router.get("/boards")
+def stock_boards_endpoint(code: str, refresh: bool = False):
+    """个股所属板块：行业（≈通达信 HYBLOCK）/ 概念（GNBLOCK）/ 地域（DYBLOCK）。
+
+    每类内按成分股数量**升序**（成分越少越「专属」，第一个即最相关板块）。
+    索引来自新浪板块体系（~340 板块成分股预计算落库，见 board_service.py）；
+    索引未建 / 过期时本接口**后台**触发重建并立即返回 syncing=True，不阻塞请求。
+    """
+    if not re.fullmatch(r"\d{6}", code or ""):
+        raise HTTPException(status_code=400, detail="股票代码必须是6位数字")
+    try:
+        import board_service
+        sync_info = board_service.sync_boards(force=refresh)
+        out = board_service.boards_of(code)
+        out["sync_started"] = sync_info.get("started", False)
+        if sync_info.get("error"):
+            out["error"] = sync_info["error"]
+        return out
+    except Exception as e:                    # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"板块查询失败：{e}")
+
+
 # --------------------------------------------------------------------------- #
 # 通达信「扫雷宝」风险清单 + 个股亮点
 #

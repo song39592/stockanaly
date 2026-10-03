@@ -38,6 +38,16 @@ namespace StockPool
         private readonly Dictionary<Button, string> _stockPeriodMap = new Dictionary<Button, string>();
         private string _stockPeriod = "day";                  // K线周期：day / week / month
         private int _stockRangeIdx = 1;                       // 范围档位：0=近6月 1=近1年 2=全部（-1=滚轮自定义）
+        private Label _stockBasicStatus;                      // 基本信息状态行
+        private FlowLayoutPanel _stockBasicKpi;               // 行业 / 市值 / 股本 KPI
+        private FlowLayoutPanel _stockBasicLimitKpi;          // 涨停 / 连板 KPI
+        private Label _stockBasicBus;                         // 主营业务
+        private DataGridView _stockBasicHolders;              // 前十大股东表
+        private Label _stockBlocks;                           // 基本信息页 · 所属板块（行业行）
+        private Label _stockCptBlocks;                        // 所属板块（概念行）
+        private Label _stockRgnBlocks;                        // 所属板块（地域行）
+        private System.Windows.Forms.Timer _boardsTimer;      // 板块索引重建后的重试
+        private int _stockBasicRound = 0;
         private DataGridView _stockTimeline;                // 入池 / 出池记录
         private TableLayoutPanel _stockEvents;              // 消息面时间轴
         private System.Collections.ArrayList _stockEventData = new System.Collections.ArrayList();
@@ -348,7 +358,51 @@ namespace StockPool
             kLayout.Controls.Add(_stockChip, 1, 1);        // 右侧筹码分布窗口
             StockAddSubTab("K线", klinePage);
 
-            // ---- 二级页 ② 记录 · 消息 ----
+            // ---- 二级页 ② 基本信息：行业 / 市值 / 前十大股东 / 涨停与连板（/api/stock/profile）----
+            var basicPage = new Panel();
+            basicPage.AutoScroll = true;
+            var basicStack = Stack();
+
+            TableLayoutPanel bb;
+            var gb = Group("公司概况", out bb);
+            _stockBasicStatus = Mute(Lbl("打开个股后自动加载"));
+            _stockBasicKpi = VKpiRow();
+            _stockBasicBus = Mute(Lbl(""));
+            AddRow(bb, Row(_stockBasicStatus));
+            AddRow(bb, _stockBasicKpi);
+            AddRow(bb, _stockBasicBus);
+            AddRow(basicStack, gb);
+
+            // 所属板块（通达信 HYBLOCK/GNBLOCK/DYBLOCK 风格）：行业黄 / 概念绿 / 地域青，
+            // 每类第一个（成分股最少的「最相关」板块）加 ★。数据来自 /api/stock/boards。
+            TableLayoutPanel bk;
+            var gbk = Group("所属板块（行业 / 概念 / 地域）", out bk);
+            _stockBlocks = BoardLine(Color.FromArgb(150, 158, 172));
+            _stockBlocks.Text = "板块标注加载中…";
+            _stockCptBlocks = BoardLine(Color.FromArgb(130, 210, 140));
+            _stockRgnBlocks = BoardLine(Color.FromArgb(110, 190, 220));
+            AddRow(bk, _stockBlocks);
+            AddRow(bk, _stockCptBlocks);
+            AddRow(bk, _stockRgnBlocks);
+            AddRow(basicStack, gbk);
+
+            TableLayoutPanel bl;
+            var gl = Group("涨停与连板（本地日线现算）", out bl);
+            _stockBasicLimitKpi = VKpiRow();
+            AddRow(bl, _stockBasicLimitKpi);
+            AddRow(basicStack, gl);
+
+            TableLayoutPanel bh;
+            var gh = Group("前十大股东", out bh);
+            _stockBasicHolders = MktGrid(230, false,
+                new string[] { "名次", "股东名称", "股份类型", "持股数", "占总股本", "增减", "变动" });
+            AddRow(bh, _stockBasicHolders);
+            AddRow(basicStack, gh);
+
+            basicPage.Controls.Add(basicStack);
+            StockAddSubTab("基本信息", basicPage);
+
+            // ---- 二级页 ③ 记录 · 消息 ----
             var recPage = new Panel();
             recPage.AutoScroll = true;
             var recStack = Stack();
@@ -583,6 +637,8 @@ namespace StockPool
             StockLoadHistory(code, false);
             StockLoadChipFormulas();   // 每次打开同步公式清单（后端可能刚加过公式）
             StockLoadChip(code);
+            StockLoadBasic(code);      // 基本信息（行业 / 市值 / 前十大股东 / 涨停连板）
+            StockLoadBoards(code);     // K 线上方板块标注（行业/概念/地域）
             StockLoadValuation(code);
             StockLoadSaolei(code);
             StockLoadAi(code);
@@ -807,6 +863,270 @@ namespace StockPool
         // ---- 筹码分布（K 线右侧窗口）----
         // 与指标体系的「按日期对齐的序列」不同，筹码分布是「按价位分布的直方图」，
         // 因此不走指标面板，单独向 /api/chip/dist 取数、单独渲染。
+        // ---- 所属板块（基本信息页，通达信 HYBLOCK/GNBLOCK/DYBLOCK 风格）----
+        // 数据来自 /api/stock/boards：新浪板块体系预计算索引（行业 / 概念 / 地域），
+        // 每类内按成分股数量升序——成分越少越「专属」，第一个即最相关板块（加 ★）。
+        // 用 Label 而非 FlowLayoutPanel：后者的 AutoSize 首选高度在表格里测量不稳，
+        // 会把 Group 撑出一大块空白；Label + MaximumSize 限宽换行的高度计算是可靠的。
+        private Label BoardLine(Color color)
+        {
+            var l = new Label();
+            l.AutoSize = true;
+            l.MaximumSize = new Size(960, 0);       // 超宽自动换行
+            l.ForeColor = color;
+            l.Margin = new Padding(0, 1, 0, 3);
+            l.TabStop = false;
+            return l;
+        }
+
+        private void StockLoadBoards(string code)
+        {
+            StockLoadBoards(code, false);
+        }
+
+        private void StockLoadBoards(string code, bool refresh)
+        {
+            if (string.IsNullOrEmpty(code) || _stockBlocks == null) return;
+            int round = _stockRound;
+            string url = "http://127.0.0.1:8000/api/stock/boards?code=" + code
+                       + (refresh ? "&refresh=1" : "");
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    string resp = VRequest(url, null);
+                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    Invoke((Action)delegate { if (round == _stockRound) StockRenderBoards(j); });
+                }
+                catch (Exception)
+                {
+                    try
+                    {
+                        Invoke((Action)delegate
+                        {
+                            if (round != _stockRound || _stockBlocks == null) return;
+                            _stockBlocks.Text = "板块标注不可用";
+                            _stockBlocks.ForeColor = Color.FromArgb(150, 158, 172);
+                        });
+                    }
+                    catch (Exception) { }
+                }
+            });
+        }
+
+        /// <summary>索引正在后台重建时，隔几秒重查一次直到建好（重建约 1 分钟）。</summary>
+        private void ScheduleBoardsRetry()
+        {
+            if (_boardsTimer == null)
+            {
+                _boardsTimer = new System.Windows.Forms.Timer();
+                _boardsTimer.Interval = 6000;
+                _boardsTimer.Tick += delegate
+                {
+                    _boardsTimer.Stop();
+                    if (_stockCurrent != null) StockLoadBoards(_stockCurrent);
+                };
+            }
+            _boardsTimer.Stop();
+            _boardsTimer.Start();
+        }
+
+        private void StockRenderBoards(Dictionary<string, object> j)
+        {
+            if (_stockBlocks == null) return;
+            Color muted = Color.FromArgb(150, 158, 172);
+            _stockCptBlocks.Text = "";
+            _stockRgnBlocks.Text = "";
+            object okv;
+            bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+            if (!ok)
+            {
+                string emsg = VStr(VSafe(j, "detail"));
+                _stockBlocks.Text = string.IsNullOrEmpty(emsg) ? "板块标注不可用" : emsg;
+                _stockBlocks.ForeColor = muted;
+                return;
+            }
+
+            // 索引还没建好：提示 + 定时重查（后台重建约 1 分钟，重建完成前先不强求）
+            bool syncing = false;
+            object syv;
+            if (j.TryGetValue("syncing", out syv) && syv is bool) syncing = (bool)syv;
+            var boardsObj = VSafe(j, "boards") as Dictionary<string, object>;
+            bool empty = (boardsObj == null
+                          || VArr(VSafe(boardsObj, "industry")) == null
+                          || VArr(VSafe(boardsObj, "industry")).Count == 0);
+            if (empty)
+            {
+                if (syncing)
+                {
+                    _stockBlocks.Text = "板块索引建立中（约 1 分钟）…";
+                    _stockBlocks.ForeColor = Color.FromArgb(240, 170, 60);
+                    ScheduleBoardsRetry();
+                    return;
+                }
+                _stockBlocks.Text = "板块索引未建立，点此 ↻ 重建索引";
+                _stockBlocks.ForeColor = Color.FromArgb(110, 190, 220);
+                _stockBlocks.Cursor = Cursors.Hand;
+                _stockBlocks.Click -= StockRebuildBoards;      // 防重复挂接
+                _stockBlocks.Click += StockRebuildBoards;
+                return;
+            }
+            _stockBlocks.Cursor = Cursors.Default;
+
+            // 通达信配色：行业黄 / 概念绿 / 地域青；最相关（成分股最少）加 ★
+            _stockBlocks.Text = BoardLineText("行业：", VArr(VSafe(boardsObj, "industry")), 6);
+            _stockBlocks.ForeColor = Color.FromArgb(240, 200, 80);
+            _stockCptBlocks.Text = BoardLineText("概念：", VArr(VSafe(boardsObj, "concept")), 12);
+            _stockCptBlocks.ForeColor = Color.FromArgb(130, 210, 140);
+            _stockRgnBlocks.Text = BoardLineText("地域：", VArr(VSafe(boardsObj, "region")), 3);
+            _stockRgnBlocks.ForeColor = Color.FromArgb(110, 190, 220);
+        }
+
+        private void StockRebuildBoards(object sender, EventArgs e)
+        {
+            if (_stockCurrent != null) StockLoadBoards(_stockCurrent, true);
+        }
+
+        /// <summary>拼一行「标题： ★最相关 其余…」。板块很多时截断，超出部分显示省略。</summary>
+        private static string BoardLineText(string title, System.Collections.ArrayList items, int maxShow)
+        {
+            if (items == null || items.Count == 0) return "";
+            var names = new List<string>();
+            int n = Math.Min(items.Count, maxShow);
+            for (int i = 0; i < n; i++)
+            {
+                var d = items[i] as Dictionary<string, object>;
+                if (d == null) continue;
+                string name = Convert.ToString(VSafe(d, "board"));
+                if (string.IsNullOrEmpty(name)) continue;
+                names.Add((i == 0 && items.Count > 1 ? "★" : "") + name);
+            }
+            if (names.Count == 0) return "";
+            string extra = items.Count > n ? ("  …共" + items.Count) : "";
+            return title + string.Join("  ", names.ToArray()) + extra;
+        }
+
+        // ---- 基本信息（/api/stock/profile）：行业 / 市值 / 前十大股东 / 涨停与连板 ----
+        private void StockLoadBasic(string code)
+        {
+            if (string.IsNullOrEmpty(code) || _stockBasicKpi == null) return;
+            int round = ++_stockBasicRound;
+            _stockBasicStatus.Text = "正在加载基本信息…";
+            _stockBasicStatus.Tag = "muted";
+            _stockBasicStatus.ForeColor = Color.FromArgb(150, 158, 172);
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    string resp = VRequest("http://127.0.0.1:8000/api/stock/profile?code=" + code, null);
+                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    Invoke((Action)delegate { if (round == _stockBasicRound) StockRenderBasic(j); });
+                }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        Invoke((Action)delegate
+                        {
+                            if (round == _stockBasicRound)
+                            {
+                                _stockBasicStatus.Text = "加载失败：" + ex.Message;
+                                _stockBasicStatus.Tag = "bad";
+                                _stockBasicStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                            }
+                        });
+                    }
+                    catch (Exception) { }
+                }
+            });
+        }
+
+        private static string FmtYi(object o)
+        {
+            double? v = VNum(o);
+            return v == null ? "—" : v.Value.ToString("F2") + " 亿";
+        }
+
+        private static string FmtShares(object o)
+        {
+            double? v = VNum(o);
+            if (v == null) return "—";
+            if (v >= 1e8) return (v.Value / 1e8).ToString("F2") + " 亿股";
+            if (v >= 1e4) return (v.Value / 1e4).ToString("F2") + " 万股";
+            return v.Value.ToString("F0") + " 股";
+        }
+
+        private void StockRenderBasic(Dictionary<string, object> j)
+        {
+            if (_stockBasicKpi == null) return;
+            _stockBasicKpi.Controls.Clear();
+            _stockBasicLimitKpi.Controls.Clear();
+            _stockBasicHolders.Rows.Clear();
+
+            object okv;
+            bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+            if (!ok)
+            {
+                string emsg = VStr(VSafe(j, "detail"));
+                if (string.IsNullOrEmpty(emsg)) emsg = "加载失败";
+                _stockBasicStatus.Text = emsg;
+                _stockBasicStatus.Tag = "bad";
+                _stockBasicStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                return;
+            }
+
+            string industry = VStr(VSafe(j, "industry"));
+            AddKpi(_stockBasicKpi, "所属行业", string.IsNullOrEmpty(industry) ? "—" : industry,
+                "上市 " + (string.IsNullOrEmpty(VStr(VSafe(j, "listing_date"))) ? "—" : VStr(VSafe(j, "listing_date"))));
+            AddKpi(_stockBasicKpi, "总市值", FmtYi(VSafe(j, "total_mv_yi")),
+                "总股本 " + FmtShares(VSafe(j, "total_shares")));
+            AddKpi(_stockBasicKpi, "流通市值", FmtYi(VSafe(j, "float_mv_yi")),
+                "流通股本 " + FmtShares(VSafe(j, "float_shares")));
+
+            string bus = VStr(VSafe(j, "main_business"));
+            _stockBasicBus.Text = string.IsNullOrEmpty(bus) ? "" : ("主营业务：" + bus);
+
+            var lu = VSafe(j, "limit_up") as Dictionary<string, object>;
+            if (lu != null)
+            {
+                double? lpct = VNum(VSafe(j, "limit_pct"));
+                string last = VStr(VSafe(lu, "last_date"));
+                string range = "";
+                var rArr = VArr(VSafe(lu, "max_range"));
+                if (rArr != null && rArr.Count >= 2) range = VStr(rArr[0]) + " ~ " + VStr(rArr[1]);
+                AddKpi(_stockBasicLimitKpi, "上次涨停", string.IsNullOrEmpty(last) ? "—" : last,
+                    lpct != null ? ("涨跌幅限制 " + lpct.Value + "%") : "");
+                AddKpi(_stockBasicLimitKpi, "历史最大连板",
+                    (VNum(VSafe(lu, "max_streak")) ?? 0) + " 板",
+                    string.IsNullOrEmpty(range) ? "" : range);
+                AddKpi(_stockBasicLimitKpi, "涨停次数",
+                    (VNum(VSafe(lu, "total")) ?? 0).ToString(), "历史累计");
+            }
+
+            var holders = VArr(VSafe(j, "holders"));
+            if (holders != null)
+            {
+                foreach (Dictionary<string, object> h in holders)
+                {
+                    double? pct = VNum(VSafe(h, "pct"));
+                    _stockBasicHolders.Rows.Add(
+                        VStr(VSafe(h, "rank")),
+                        VStr(VSafe(h, "name")),
+                        VStr(VSafe(h, "share_type")),
+                        FmtShares(VSafe(h, "shares")),
+                        pct == null ? "—" : pct.Value.ToString("F2") + "%",
+                        VStr(VSafe(h, "change")),
+                        VStr(VSafe(h, "change_ratio")));
+                }
+            }
+
+            var errs = VArr(VSafe(j, "errors"));
+            bool hasErr = errs != null && errs.Count > 0;
+            _stockBasicStatus.Text = hasErr ? ("部分数据不可用：" + JoinErrs(errs)) : "加载完成";
+            _stockBasicStatus.Tag = "muted";
+            _stockBasicStatus.ForeColor = hasErr ? Color.FromArgb(201, 133, 0) : Color.FromArgb(150, 158, 172);
+        }
+
         // ---- 筹码公式下拉：后端 /api/chip/dist/formulas 枚举 ----
         // 公式是「一个文件一个公式、文件名即 id」，新增公式无需改前端，这里自动列出。
         private void StockLoadChipFormulas()
