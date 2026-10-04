@@ -30,7 +30,7 @@ namespace StockPool
         private FlowLayoutPanel _mktLuKpi;                           // ④ KPI 卡片
         private TableLayoutPanel _mktLuRows;                         // ④ 连板结构列表行
         private TableLayoutPanel _mktLuPromoRows;                    // ④ 晋级率列表行
-        private DataGridView _mktLuStocks;                           // ④ 涨停明细（表格）
+        private StockGrid _mktLuStocks;                              // ④ 涨停明细（表格）
         private List<Dictionary<string, object>> _mktLuAll;          // 涨停明细原始数据（供板块筛选复用）
         private Label _mktLuCaption;                                 // 涨停明细标题（含计数）
         private Button _mktLuFold;                                   // 折叠 / 展开
@@ -42,7 +42,7 @@ namespace StockPool
         private ComboBox _mktBlFilter, _mktDtFilter;
         private Label _mktBlCaption, _mktDtCaption;
         private Button _mktBlFold, _mktDtFold;
-        private DataGridView _mktBlasted, _mktLimitDown;             // ⑤ 炸板 / 跌停（表格）
+        private StockGrid _mktBlasted, _mktLimitDown;                // ⑤ 炸板 / 跌停（表格）
 
         // ⑥ AI 分析（调 /api/market/ai-analysis，复用同一个 LLM_API_KEY）
         private Label _mktAiStatus;
@@ -332,8 +332,18 @@ namespace StockPool
             _mktLuFilter.Width = 170;
             _mktLuFilter.DropDownStyle = ComboBoxStyle.DropDownList;
             _mktLuFilter.SelectedIndexChanged += delegate { MktApplyFilter(_mktLuFilter, _mktLuInds, _mktLuStocks, _mktLuAll, _mktLuCaption, "涨停明细", MktLimitUpRow); };
-            _mktLuStocks = MktGrid(240, true, new string[] { "代码", "名称", "连板", "行业", "涨幅", "封板资金", "换手", "首封", "涨停统计" });
-            MktWireStockJump(_mktLuStocks);
+            _mktLuStocks = NewGrid(new List<GridColumn> {
+                new GridColumn("代码") { IsCode = true, Jump = true },
+                NameColumn(),
+                new GridColumn("连板", "boards", true),
+                new GridColumn("行业"),
+                new GridColumn("涨幅", "pct", true),
+                new GridColumn("封板资金", "fund", true),
+                new GridColumn("换手", "turn", true),
+                new GridColumn("首封", "first_time"),
+                new GridColumn("涨停统计", "stat"),
+            });
+            _mktLuStocks.SetSortable(true);
             AddRow(b4, Row(_mktLuCaption, _mktLuFold, Lbl("板块"), _mktLuFilter, MktCopyBtn(_mktLuStocks)));
             AddRow(b4, _mktLuStocks);
             AddRow(stack, g4);
@@ -349,8 +359,16 @@ namespace StockPool
             _mktBlFilter.Width = 170;
             _mktBlFilter.DropDownStyle = ComboBoxStyle.DropDownList;
             _mktBlFilter.SelectedIndexChanged += delegate { MktApplyFilter(_mktBlFilter, _mktBlInds, _mktBlasted, _mktBlAll, _mktBlCaption, "炸板股", MktBlastRow); };
-            _mktBlasted = MktGrid(200, true, new string[] { "代码", "名称", "涨跌幅", "回撤", "振幅", "炸板次数", "行业" });
-            MktWireStockJump(_mktBlasted);
+            _mktBlasted = NewGrid(new List<GridColumn> {
+                new GridColumn("代码") { IsCode = true, Jump = true },
+                NameColumn(),
+                new GridColumn("涨跌幅", "pct", true),
+                new GridColumn("回撤", "drawdown", true),
+                new GridColumn("振幅", "amplitude", true),
+                new GridColumn("炸板次数", "times", true),
+                new GridColumn("行业"),
+            });
+            _mktBlasted.SetSortable(true);
             AddRow(b5, Row(_mktBlCaption, _mktBlFold, Lbl("板块"), _mktBlFilter, MktCopyBtn(_mktBlasted)));
             AddRow(b5, _mktBlasted);
 
@@ -361,74 +379,21 @@ namespace StockPool
             _mktDtFilter.Width = 170;
             _mktDtFilter.DropDownStyle = ComboBoxStyle.DropDownList;
             _mktDtFilter.SelectedIndexChanged += delegate { MktApplyFilter(_mktDtFilter, _mktDtInds, _mktLimitDown, _mktDtAll, _mktDtCaption, "跌停股", MktDownRow); };
-            _mktLimitDown = MktGrid(180, true, new string[] { "代码", "名称", "涨跌幅", "连续跌停", "开板次数", "行业" });
-            MktWireStockJump(_mktLimitDown);
+            _mktLimitDown = NewGrid(new List<GridColumn> {
+                new GridColumn("代码") { IsCode = true, Jump = true },
+                NameColumn(),
+                new GridColumn("涨跌幅", "pct", true),
+                new GridColumn("连续跌停", "days", true),
+                new GridColumn("开板次数", "times", true),
+                new GridColumn("行业"),
+            });
+            _mktLimitDown.SetSortable(true);
             AddRow(b5, Row(_mktDtCaption, _mktDtFold, Lbl("板块"), _mktDtFilter, MktCopyBtn(_mktLimitDown)));
             AddRow(b5, _mktLimitDown);
             AddRow(stack, g5);
         }
 
         // ---------------- 通用控件 ----------------
-
-        /// <summary>统一风格的只读数据表：宽度撑满、高度固定、可选点击表头排序（只用于需要列对齐的明细）。</summary>
-        private static DataGridView MktGrid(int height, bool sortable, string[] cols)
-        {
-            var g = new DataGridView();
-            g.Dock = DockStyle.Top;
-            g.Height = height;
-            g.ReadOnly = true;
-            g.AllowUserToAddRows = false;
-            g.AllowUserToDeleteRows = false;
-            g.RowHeadersVisible = false;
-            g.BorderStyle = BorderStyle.None;
-            g.Tag = "grid";
-            g.ScrollBars = ScrollBars.None;   // 不自带滚动条：高度按内容撑开，由页面统一滚动
-            g.TabStop = false;                                       // 不接收焦点，避免点选出现选中态
-            g.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-            g.SelectionChanged += delegate { if (g.SelectedRows.Count > 0 || g.SelectedCells.Count > 0) g.ClearSelection(); };   // 选中即清空，表格整体不可被选择
-            g.MultiSelect = false;
-            g.AllowUserToResizeColumns = false;                      // 禁止在客户端拖动调整列宽
-            g.AllowUserToResizeRows = false;                         // 禁止调整行高
-            g.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-            g.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;   // 自动适配高度，且禁止拖动调整（不出现可拖拽的线）
-            foreach (string cn in cols)
-            {
-                var col = new DataGridViewTextBoxColumn();
-                col.HeaderText = cn;
-                col.Name = cn;
-                col.SortMode = sortable ? DataGridViewColumnSortMode.Automatic : DataGridViewColumnSortMode.NotSortable;
-                g.Columns.Add(col);
-            }
-            return g;
-        }
-
-        /// <summary>给明细表挂上「点击代码 / 名称跳转个股分析」的交互（手型光标 + 单元格点击）。</summary>
-        private void MktWireStockJump(DataGridView g)
-        {
-            g.CellClick += MktJumpToStock;
-            g.CellMouseMove += (s, ev) =>
-            {
-                var gg = (DataGridView)s;
-                bool onKey = ev.RowIndex >= 0 &&
-                    (gg.Columns[ev.ColumnIndex].Name == "代码" || gg.Columns[ev.ColumnIndex].Name == "名称");
-                gg.Cursor = onKey ? Cursors.Hand : Cursors.Default;
-            };
-        }
-
-        /// <summary>连板 / 炸板 / 跌停表格点代码或名称：切到「个股分析」并按该代码打开。</summary>
-        private void MktJumpToStock(object sender, DataGridViewCellEventArgs e)
-        {
-            if (e.RowIndex < 0) return;
-            var g = (DataGridView)sender;
-            if (e.RowIndex >= g.Rows.Count) return;
-            var r = g.Rows[e.RowIndex];
-            var code = r.Cells["代码"].Value as string;
-            if (string.IsNullOrWhiteSpace(code) || code.Length != 6) return;
-            foreach (char c in code) if (c < '0' || c > '9') return;
-            _stockCode.Text = code;
-            SelectTab(_stockTabIndex);   // 切到「个股分析」页（会触发 StockOnEnter 重绘）
-            StockOpen();                 // 按代码打开，写入查看历史
-        }
 
         /// <summary>生成「复制表格」按钮：点击将表格（含表头）以 TSV 写入剪贴板，并短暂反馈结果。</summary>
         private static Button MktCopyBtn(DataGridView g)
@@ -492,14 +457,7 @@ namespace StockPool
             return false;
         }
 
-        /// <summary>把表格高度撑到内容高度，避免出现表格内部滚动条（嵌套滚动）。</summary>
-        private static void MktFit(DataGridView g)
-        {
-            int h = g.ColumnHeadersHeight + 4;
-            foreach (DataGridViewRow r in g.Rows) h += r.Height;
-            g.Height = h + 4;
-            g.ScrollBars = ScrollBars.None;
-        }
+        // 高度自适应由 `StockGrid.Fit`（GridKit.cs）统一提供，不再各页各写一份。
 
         /// <summary>一行「名称 …… 值」（列表行，比表格轻）。</summary>
         private static Panel MktRow(string name, string value)
@@ -1097,7 +1055,7 @@ namespace StockPool
         }
 
         /// <summary>按板块筛选渲染一张表，并更新标题计数。</summary>
-        private static void MktApplyFilter(ComboBox cb, List<string> inds, DataGridView g,
+        private static void MktApplyFilter(ComboBox cb, List<string> inds, StockGrid g,
             List<Dictionary<string, object>> all, Label caption, string title, MktFillRow fill)
         {
             if (all == null) return;
@@ -1114,7 +1072,7 @@ namespace StockPool
                 fill(g, s);
                 n++;
             }
-            MktFit(g);
+            g.Fit(160, 620);
 
             int total = all.Count;
             caption.Text = isAll ? (title + "（共 " + total + " 只）")

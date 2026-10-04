@@ -34,7 +34,7 @@ namespace StockPool
         }
 
         private int _scrTabIndex = -1;
-        private DataGridView _scrGrid;
+        private StockGrid _scrGrid;
         private ComboBox _scrView;
         private Label _scrStatus;
         private Label _scrInfo;
@@ -66,6 +66,7 @@ namespace StockPool
             head.Controls.Add(Lbl("SCR90 周级三档"));
             head.Controls.Add(MiniBtn("刷新本周", delegate { ScrRefresh(false); }, 92));
             head.Controls.Add(MiniBtn("强制重算", delegate { ScrRefresh(true); }, 92));
+            head.Controls.Add(MiniBtn("重取名称", delegate { ScrFillNames(); }, 92));
             _scrStatus = Mute(Lbl("尚未加载"));
             head.Controls.Add(_scrStatus);
             root.Controls.Add(head);
@@ -92,10 +93,18 @@ namespace StockPool
             _scrInfo.MaximumSize = new Size(820, 0);
             root.Controls.Add(_scrInfo);
 
-            _scrGrid = ScrGrid(new[] { "#", "代码", "名称", "SCR90", "收盘", "涨幅%",
-                                       "在榜周数", "最近在榜" });
+            _scrGrid = NewGrid(new List<GridColumn> {
+                new GridColumn("#", "rank", true),
+                new GridColumn("代码", "code") { IsCode = true, Jump = true },
+                NameColumn(),
+                new GridColumn("SCR90", "scr90", true),
+                new GridColumn("收盘", "close", true),
+                new GridColumn("涨幅%", "chg", true),
+                new GridColumn("在榜周数", "weeks_on", true),
+                new GridColumn("最近在榜", "last_week"),
+            });
+            _scrGrid.Dock = DockStyle.None;         // 本页是流式布局，宽度显式给
             _scrGrid.Width = 900;
-            _scrGrid.Height = 560;
             root.Controls.Add(_scrGrid);
 
             _scrTimer = new Timer();
@@ -134,6 +143,29 @@ namespace StockPool
                     }
                     ScrSetStatus("已在后台计算，自动刷新中…", true);
                     _scrTimer.Start();
+                });
+            });
+        }
+
+        /// <summary>名称与榜单计算解耦：算完后名称若没取到，单独补一次即可，不必重跑十几分钟。</summary>
+        private void ScrFillNames()
+        {
+            if (_scrBusy) return;
+            _scrBusy = true;
+            ScrSetStatus("正在重取股票名称…", true);
+            Task.Run(delegate
+            {
+                string body;
+                bool ok = PostJson("http://127.0.0.1:8000/api/chip/rank/names", "{}", 120000, out body);
+                Invoke((Action)delegate
+                {
+                    _scrBusy = false;
+                    if (!ok)
+                    {
+                        ScrSetStatus("重取名称失败：" + ScrErr(body), true);
+                        return;
+                    }
+                    ScrLoadResult();
                 });
             });
         }
@@ -211,10 +243,12 @@ namespace StockPool
             double up = ScrTierCount(j, "up");
             double down = ScrTierCount(j, "down");
             double weeks = ScrNum(ScrParams(j), "weeks");
+            string nameTip = ScrNum(j, "names_resolved") > 0 ? ""
+                           : "　⚠ 名称未取到，点「重取名称」补上";
             ScrSetStatus(string.Format("本周 {0} | 全市场 {1} 只，成功 {2} | "
-                + "连续{3}周在榜 {4} 只；上涨离榜 {5} 只；下跌离榜 {6} 只 | 更新 {7}",
+                + "连续{3}周在榜 {4} 只；上涨离榜 {5} 只；下跌离榜 {6} 只 | 更新 {7}{8}",
                 ScrStr(j, "week"), ScrNum(j, "total"), ScrNum(j, "computed"),
-                weeks, stay, up, down, ScrStr(j, "computed_at")), false);
+                weeks, stay, up, down, ScrStr(j, "computed_at"), nameTip), false);
 
             double launch = ScrNum(ScrParams(j), "launch_threshold");
             double chg = ScrNum(ScrParams(j), "chg_days");
@@ -237,7 +271,7 @@ namespace StockPool
             else
                 items = ScrTierItems(_scrPayload, it.Key);
 
-            var rows = new List<DataGridViewRow>();
+            var data = new List<string[]>();
             int no = 0;
             if (items != null)
             {
@@ -248,42 +282,18 @@ namespace StockPool
                     if (name.Length == 0) name = "—";
                     object chgObj = VSafe(d, "chg");
                     string chg = (chgObj == null) ? "—" : (ScrNum(d, "chg").ToString("F2") + "%");
-                    var row = new DataGridViewRow();
-                    row.CreateCells(_scrGrid,
-                        no.ToString(),
-                        VStr(VSafe(d, "code")),
-                        name,
-                        ScrNum(d, "scr90").ToString("F4"),
-                        VSafe(d, "close") == null ? "—" : ScrNum(d, "close").ToString("F2"),
-                        chg,
-                        ScrNum(d, "weeks_on").ToString("F0"),
-                        VStr(VSafe(d, "last_week")));
-                    rows.Add(row);
+                    string close = VSafe(d, "close") == null ? "—" : ScrNum(d, "close").ToString("F2");
+                    data.Add(new[] {
+                        no.ToString(), VStr(VSafe(d, "code")), name,
+                        ScrNum(d, "scr90").ToString("F4"), close, chg,
+                        ScrNum(d, "weeks_on").ToString("F0"), VStr(VSafe(d, "last_week")) });
                 }
             }
-            _scrGrid.Rows.Clear();
-            foreach (DataGridViewRow r in rows) _scrGrid.Rows.Add(r);
-            if (_scrGrid.Columns.Count > 0) _scrGrid.AutoResizeColumns(
-                DataGridViewAutoSizeColumnsMode.DisplayedCells);
+            _scrGrid.SetRows(data);
+            _scrGrid.Fit(200, 560);
         }
 
         // ---- 小工具 ----
-
-        private static DataGridView ScrGrid(string[] cols)
-        {
-            var g = new DataGridView();
-            g.AllowUserToAddRows = false;
-            g.ReadOnly = true;
-            g.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-            g.RowTemplate.Height = 24;
-            g.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.DisplayedCells;
-            g.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
-            for (int i = 0; i < cols.Length; i++) g.Columns.Add("c" + i, cols[i]);
-            foreach (DataGridViewColumn c in g.Columns)
-                c.SortMode = DataGridViewColumnSortMode.NotSortable;
-            g.SelectionChanged += delegate { g.ClearSelection(); };
-            return g;
-        }
 
         private void ScrSetStatus(string text, bool failed)
         {

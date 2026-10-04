@@ -49,7 +49,7 @@ namespace StockPool
         private Label _stResultHeader, _stResultStatus;
         private FlowLayoutPanel _stMetricCards;
         private PictureBox _stEquityBox;
-        private DataGridView _stPerStockGrid;
+        private StockGrid _stPerStockGrid;
         private List<Dictionary<string, object>> _stPerStockData;   // 原始 per_stock（展开渲染用）
         private readonly HashSet<string> _stExpanded = new HashSet<string>();   // 已展开的代码
         private readonly Dictionary<string, System.Collections.IList> _stDetailCache =
@@ -60,12 +60,12 @@ namespace StockPool
         private NumericUpDown _stRecentDays;
         private Label _stRecentStatus;
         private FlowLayoutPanel _stRecentCards;
-        private DataGridView _stRecentGrid;
+        private StockGrid _stRecentGrid;
 
         // ⑤ 当前策略推荐（买入 / 卖出 / 持股）
         private Label _stRecoStatus;
         private FlowLayoutPanel _stRecoCards;
-        private DataGridView _stBuyGrid, _stSellGrid, _stHoldGrid;
+        private StockGrid _stBuyGrid, _stSellGrid, _stHoldGrid;
         private List<string> _stEqDates;
         private List<double?> _stEq;
         private List<double?> _stEqBench;
@@ -457,25 +457,14 @@ namespace StockPool
 
             TableLayoutPanel bg;
             var g = Group("个股明细（按区间收益降序 · 点击行展开逐笔交易）", out bg);
-            _stPerStockGrid = new DataGridView();
-            _stPerStockGrid.AllowUserToAddRows = false;
-            _stPerStockGrid.ReadOnly = true;
-            _stPerStockGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-            _stPerStockGrid.RowTemplate.Height = 24;
-            // 列宽随内容自适应（含表头），表格自身仍随窗口拉满
-            _stPerStockGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.DisplayedCells;
-            _stPerStockGrid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
-            _stPerStockGrid.Height = 260;
-            _stPerStockGrid.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
-            _stPerStockGrid.Columns.Add("code", "代码");
-            _stPerStockGrid.Columns.Add("name", "名称");
-            _stPerStockGrid.Columns.Add("ret", "区间收益");
-            _stPerStockGrid.Columns.Add("trades", "交易次数");
-            // 手动插行做「展开明细」，排序会把主行/明细行拆散，直接禁掉
-            foreach (DataGridViewColumn col in _stPerStockGrid.Columns)
-                col.SortMode = DataGridViewColumnSortMode.NotSortable;
-            // 只用点击做展开，不出现选中高亮（点谁都是干净的）
-            _stPerStockGrid.SelectionChanged += delegate { _stPerStockGrid.ClearSelection(); };
+            // 不设 Jump：本表点击是「展开逐笔交易」，不是跳详情页（见 StPerStockCellClick）
+            _stPerStockGrid = NewGrid(new List<GridColumn> {
+                new GridColumn("代码", "code"),
+                new GridColumn("名称", "name") { MinWidth = 92 },
+                new GridColumn("区间收益", "ret", true),
+                new GridColumn("交易次数", "trades", true),
+            });
+            StPlaceGrid(_stPerStockGrid);
             _stPerStockGrid.CellClick += StPerStockCellClick;
             AddRow(bg, _stPerStockGrid);
             AddRow(stack, g);
@@ -501,7 +490,13 @@ namespace StockPool
 
             TableLayoutPanel bg;
             var g = Group("个股明细（按区间收益降序）", out bg);
-            _stRecentGrid = StGrid(new[] { "代码", "名称", "区间收益", "交易次数" });
+            _stRecentGrid = NewGrid(new List<GridColumn> {
+                new GridColumn("代码", "code") { IsCode = true, Jump = true },
+                NameColumn(),
+                new GridColumn("区间收益", "ret", true),
+                new GridColumn("交易次数", "trades", true),
+            });
+            StPlaceGrid(_stRecentGrid);
             AddRow(bg, _stRecentGrid);
             AddRow(stack, g);
         }
@@ -570,7 +565,7 @@ namespace StockPool
                 }
                 _stRecentGrid.ResumeLayout();
             }
-            StFitGridHeight(_stRecentGrid);
+            _stRecentGrid.Fit();
             _stRecentStatus.Text = "完成（最近 " + (int)_stRecentDays.Value + " 个交易日）";
             _stRecentStatus.ForeColor = Color.FromArgb(60, 160, 90);
         }
@@ -589,19 +584,41 @@ namespace StockPool
 
             TableLayoutPanel b1;
             var g1 = Group("买入（今日建仓）", out b1);
-            _stBuyGrid = StGrid(new[] { "代码", "名称", "现价", "建议仓位" });
+            _stBuyGrid = NewGrid(new List<GridColumn> {
+                new GridColumn("代码", "code") { IsCode = true, Jump = true },
+                NameColumn(),
+                new GridColumn("现价", "price", true),
+                new GridColumn("建议仓位", "weight", true),
+            });
+            StPlaceGrid(_stBuyGrid);
             AddRow(b1, _stBuyGrid);
             AddRow(stack, g1);
 
             TableLayoutPanel b2;
             var g2 = Group("卖出（今日清仓）", out b2);
-            _stSellGrid = StGrid(new[] { "代码", "名称", "现价", "原仓位" });
+            _stSellGrid = NewGrid(new List<GridColumn> {
+                new GridColumn("代码", "code") { IsCode = true, Jump = true },
+                NameColumn(),
+                new GridColumn("现价", "price", true),
+                new GridColumn("原仓位", "weight", true),
+            });
+            StPlaceGrid(_stSellGrid);
             AddRow(b2, _stSellGrid);
             AddRow(stack, g2);
 
             TableLayoutPanel b3;
             var g3 = Group("持股（继续持有）", out b3);
-            _stHoldGrid = StGrid(new[] { "代码", "名称", "状态", "成本价", "现价", "建仓日", "仓位", "浮盈亏" });
+            _stHoldGrid = NewGrid(new List<GridColumn> {
+                new GridColumn("代码", "code") { IsCode = true, Jump = true },
+                NameColumn(),
+                new GridColumn("状态", "action"),
+                new GridColumn("成本价", "cost_price", true),
+                new GridColumn("现价", "price", true),
+                new GridColumn("建仓日", "buy_date"),
+                new GridColumn("仓位", "weight", true),
+                new GridColumn("浮盈亏", "pnl", true),
+            });
+            StPlaceGrid(_stHoldGrid);
             AddRow(b3, _stHoldGrid);
             AddRow(stack, g3);
         }
@@ -666,7 +683,7 @@ namespace StockPool
             _stRecoStatus.ForeColor = Color.FromArgb(60, 160, 90);
         }
 
-        private void StFillRecoGrid(DataGridView grid, object list, bool hold)
+        private void StFillRecoGrid(StockGrid grid, object list, bool hold)
         {
             grid.Rows.Clear();
             var arr = list as System.Collections.IList;
@@ -697,7 +714,7 @@ namespace StockPool
                 }
                 grid.ResumeLayout();
             }
-            StFitGridHeight(grid);
+            grid.Fit();
         }
 
         // ---------------- 通用小工具 ----------------
@@ -738,41 +755,14 @@ namespace StockPool
         // 用 DisplayedCellsExceptHeader 而**不用 Fill**——Fill 会把某一列按比例
         // 拉满，名称这种短文本列会被撑得很宽（用户反馈「名称这列太长了」）；
         // 按内容自适应，剩余空白留在表格右侧，视觉更干净。
-        private static DataGridView StGrid(string[] cols)
+        /// <summary>
+        /// 表格本体由 `NewGrid`（GridKit.cs）统一创建：外观 / 只读 / 禁选中 / 自适应都在控件里。
+        /// 这里只补「放进本页流式布局」的摆放方式（本页用 Anchor，不让 Dock 抢布局）。
+        /// </summary>
+        private static void StPlaceGrid(StockGrid g)
         {
-            var g = new DataGridView();
-            g.AllowUserToAddRows = false;
-            g.ReadOnly = true;
-            g.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-            g.RowTemplate.Height = 24;
-            g.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.DisplayedCells;
-            g.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
-            g.Height = 200;
+            g.Dock = DockStyle.None;
             g.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
-            for (int i = 0; i < cols.Length; i++) g.Columns.Add("c" + i, cols[i]);
-            foreach (DataGridViewColumn col in g.Columns)
-                col.SortMode = DataGridViewColumnSortMode.NotSortable;
-            g.SelectionChanged += delegate { g.ClearSelection(); };
-            return g;
-        }
-
-        private static int StFitGridHeight(DataGridView grid)
-        {
-            int rh = grid.RowTemplate.Height > 0 ? grid.RowTemplate.Height : 24;
-            int h = grid.ColumnHeadersHeight + 8 + grid.Rows.Count * rh;
-            grid.Height = Math.Max(160, Math.Min(620, h));
-            // 高度定稿后重算列宽：DisplayedCells* 只按「当时可见的行」量宽度，
-            // 逐行 Add 的中间态会把列算窄（如现价 70.06 被截成 70…），
-            // 必须在最终可见行数下再量一次。
-            StAutoWidth(grid);
-            return grid.Height;
-        }
-
-        private static void StAutoWidth(DataGridView grid)
-        {
-            // 含表头量宽（DisplayedCells 而非 ...ExceptHeader），否则「建议仓位」
-            // 这类比数据宽的表头会被截成「建议仓」
-            grid.AutoResizeColumns(DataGridViewAutoSizeColumnsMode.DisplayedCells);
         }
 
         private static string StName(Dictionary<string, object> d)
@@ -949,7 +939,7 @@ namespace StockPool
                 row.DefaultCellStyle.SelectionForeColor = _cText;
             }
             _stPerStockGrid.ResumeLayout();
-            StAdjustHeight();
+            _stPerStockGrid.Fit(240, 620);
         }
 
         private static string StMainCode(DataGridViewRow row)
@@ -985,7 +975,7 @@ namespace StockPool
                 if (_stDetailCache.ContainsKey(code)) StInsertDetails(mainIdx + 1, code);
                 else StLoadDetails(code);
             }
-            StAdjustHeight();
+            _stPerStockGrid.Fit(240, 620);
         }
 
         // 异步拉取逐笔明细；主行下先插「加载中」占位行，回来后原位替换
@@ -1045,7 +1035,7 @@ namespace StockPool
                     break;
                 }
             }
-            StAdjustHeight();
+            _stPerStockGrid.Fit(240, 620);
         }
 
         private void StDetailFailed(string code, string msg)
@@ -1100,15 +1090,6 @@ namespace StockPool
             row.DefaultCellStyle.ForeColor = _cSub;
             row.DefaultCellStyle.SelectionBackColor = _cPanel;
             row.DefaultCellStyle.SelectionForeColor = _cSub;
-        }
-
-        // 表格高度随内容自适应（封顶 620，超出滚动；行少时不少于 240）
-        private void StAdjustHeight()
-        {
-            int rh = _stPerStockGrid.RowTemplate.Height > 0 ? _stPerStockGrid.RowTemplate.Height : 24;
-            int h = _stPerStockGrid.ColumnHeadersHeight + 8 + _stPerStockGrid.Rows.Count * rh;
-            _stPerStockGrid.Height = Math.Max(240, Math.Min(620, h));
-            StAutoWidth(_stPerStockGrid);
         }
 
         private void StPerStockCellClick(object sender, DataGridViewCellEventArgs e)

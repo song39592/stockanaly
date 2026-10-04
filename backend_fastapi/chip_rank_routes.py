@@ -39,6 +39,17 @@ def chip_rank_result(limit: int = Query(svc.DEFAULT_TOP, ge=1, le=2000,
     return body
 
 
+@router.post("/names")
+def chip_rank_fill_names():
+    """给本周已算好的结果**单独补齐名称**（一次外部查询，不必重跑重型计算）。
+
+    榜单计算时名称取不到（网络抖动等）会留空，用这个接口补一次即可。
+    """
+    body = svc.fill_names()
+    body["ok"] = body.get("ok", True)
+    return body
+
+
 @router.post("/refresh")
 def chip_rank_refresh(
         force: bool = False,
