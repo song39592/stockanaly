@@ -54,7 +54,15 @@ def _safe_compute(code: str, id: str, params, period: str = "day") -> dict:
 
 @router.get("")
 def list_indicators():
-    """指标清单：每项含 id / name / category / panel / params。"""
+    """指标清单：每项含 id / name / category / panel / params。
+
+    顺带在后台预热全市场截面面板（RPS 等横截面指标需要），不阻塞本次响应：
+    前端进入个股页会先拉本清单，等用户勾选 RPS 时面板通常已就绪，避免首帧超时。
+    """
+    try:
+        indicators.data.warm()
+    except Exception:                    # noqa: BLE001 - 预热失败不应影响清单
+        pass
     return indicators.list_indicators()
 
 

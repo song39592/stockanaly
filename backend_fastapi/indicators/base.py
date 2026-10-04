@@ -140,6 +140,9 @@ def compute(code: str, indicator_id: str, params: dict | None = None,
     # 指标函数只收 df，拿不到代码；这里挂在 df.attrs 上供需要按代码再取数的
     # 指标使用（如筹码类指标要经 data.get_chip_frames(code) 拿分布矩阵）。
     df.attrs["code"] = code
+    # 周期也挂上：横截面类指标（如 RPS）要按同一周期取「全市场」数据，
+    # 否则周线蜡烛会配上日线的 RPS（详见 data.period_of）。
+    df.attrs["period"] = period
 
     result = meta.func(df, **(params or {}))
     dates = [str(d)[:10] for d in df.index]
