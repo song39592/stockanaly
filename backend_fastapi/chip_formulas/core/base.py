@@ -59,6 +59,8 @@ class ChipContext:
     p_lo: float               # 价格轴下界（= edges[0]）
     p_hi: float               # 价格轴上界（= edges[-1]）
     adjust: str = "qfq"
+    lockup_ratio: float = 0.0     # 锁仓占流通股比例 r（前十大流通股东 占流通股比例 > 5%）
+    lockup_factor: float = 1.0    # 换手放大系数 1/(1-r)；公式按需使用，1.0 = 未修正
 
     @property
     def days(self) -> int:
@@ -196,6 +198,8 @@ class ChipResult:
     formula_id: str
     formula_name: str
     params: dict
+    lockup_ratio: float = 0.0
+    lockup_factor: float = 1.0
 
 
 def compute_matrix(code: str, formula_id: str | None = None, params: dict | None = None,
@@ -224,6 +228,8 @@ def compute_matrix(code: str, formula_id: str | None = None, params: dict | None
         volume=inp.volume, turnover=inp.turnover, vwap=inp.vwap,
         float_shares=inp.float_shares, edges=inp.edges, centers=inp.centers,
         p_lo=float(inp.edges[0]), p_hi=float(inp.edges[-1]), adjust=inp.adjust,
+        lockup_ratio=float(getattr(inp, "lockup_ratio", 0.0)),
+        lockup_factor=float(getattr(inp, "lockup_factor", 1.0)),
     )
     matrix = _normalize_rows(_as_matrix(meta.func(ctx, **kwargs), ctx.days, ctx.bins))
 
@@ -234,6 +240,7 @@ def compute_matrix(code: str, formula_id: str | None = None, params: dict | None
         float_shares=inp.float_shares, warm=inp.warm, adjust=inp.adjust,
         period=inp.period,
         formula_id=meta.id, formula_name=meta.name, params=kwargs,
+        lockup_ratio=ctx.lockup_ratio, lockup_factor=ctx.lockup_factor,
     )
 
 
@@ -273,7 +280,9 @@ def compute(code: str, formula_id: str | None = None, params: dict | None = None
         "bars": int(win),                       # 输出帧数（= K 线可见根数）
         "warmup_bars": int(res.warm),           # 只用于养熟筹码状态、不输出的更早期 K 线
         "bins_count": int(len(res.centers)),
-        "lockup_applied": abs(float(res.params.get("lockup_decay", 1.0)) - 1.0) > 1e-9,
+        "lockup_applied": abs(float(res.lockup_factor) - 1.0) > 1e-9,
+        "lockup_ratio": round(float(res.lockup_ratio), 6),      # 锁仓占流通股比例（小数）
+        "lockup_factor": round(float(res.lockup_factor), 6),    # 换手放大系数 1/(1-r)
         "float_shares": res.float_shares,
         "avg_turnover": round(float(np.mean(res.turnover)), 6),
         "last_close": round(last_close, 4),

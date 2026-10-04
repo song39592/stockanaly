@@ -187,6 +187,80 @@ def top_holders(code: str) -> dict:
     return {"period": None, "items": [], "error": "未取到十大股东数据"}
 
 
+def free_top_holders(code: str) -> dict:
+    """前十大**流通**股东（含「占总流通股本持股比例」，锁仓修正需要它）。
+
+    与 `top_holders` 的区别在于比例口径：`top_holders` 是「十大股东」按**总股本**的
+    比例，这里是「十大流通股东」按**流通股本**的比例——正是筹码锁仓修正要用的口径
+    （对应通达信 / 东财「十大流通股东」页的「占流通股比例」列）。
+    """
+    symbol = price_service.market_symbol(code)
+    for period in _report_periods():
+        try:
+            df = _ak(ak.stock_gdfx_free_top_10_em, symbol=symbol, date=period, timeout=20)
+        except Exception:
+            continue
+        if df is None or getattr(df, "empty", True):
+            continue
+        items: list[dict] = []
+        for _, row in df.iterrows():
+            items.append({
+                "rank": _json_safe(row.get("名次")),
+                "name": _json_safe(row.get("股东名称")),
+                "nature": _json_safe(row.get("股东性质")),
+                "share_type": _json_safe(row.get("股份类型")),
+                "shares": _json_safe(row.get("持股数")),
+                "pct": _json_safe(row.get("占总流通股本持股比例")),
+                "change": _json_safe(row.get("增减")),
+                "change_ratio": _json_safe(row.get("变动比率")),
+            })
+        if items:
+            return {"period": period, "items": items, "error": None}
+    return {"period": None, "items": [], "error": "未取到十大流通股东数据"}
+
+
+def lockup_ratio(code: str, min_pct: float = 5.0) -> dict:
+    """锁仓占流通股比例 r 与修正系数 1/(1-r)（供筹码峰衰减使用）。
+
+    阈值 5% 取**举牌线**（要约收购 / 权益变动披露界限）：持股超过 5% 的股东受减持规则
+    约束、属长期持有人，其筹码不进入日常流通，故不计入可自由流通部分。
+    存在非流通筹码 → 同样的成交量只能在剩余自由筹码内部倒手 → 实际换手更快，
+    故把名义换手率放大 1/(1-r) 倍（>1，衰减加快，符合预期）。
+
+    口径对齐「扣除前十大流通股东超 5% 的即可」：
+        r = Σ(前十大流通股东中「占流通股比例 > min_pct」者的占比) / 100
+        系数 = 1 / (1 - r)        # 例：15.00% + 9.35% → 1/(1-24.35%) = 1.32
+
+    返回 {period, ratio(小数), factor, holders(被计入户明细), error}。
+    取数失败不缓存（下次可重试），成功缓存 TTL 6 小时（股东数据一季度才变）。
+    """
+    key = f"lockup:{code}:{min_pct}"
+
+    def produce() -> dict:
+        src = free_top_holders(code)
+        items = src.get("items") or []
+        locked = [it for it in items
+                  if it.get("pct") is not None and float(it["pct"]) > float(min_pct)]
+        ratio = sum(float(it["pct"]) for it in locked) / 100.0
+        ratio = min(max(ratio, 0.0), 0.95)          # 防御：≥95% 无意义，且 1-r 不能为 0
+        return {
+            "period": src.get("period"),
+            "ratio": ratio,
+            "factor": (1.0 / (1.0 - ratio)) if ratio > 0 else 1.0,
+            "holders": [{"name": it.get("name"), "pct": it.get("pct")} for it in locked],
+            "error": src.get("error"),
+        }
+
+    now = time.time()
+    hit = _CACHE.get(key)
+    if hit is not None and now - hit[0] < _TTL:
+        return hit[1]
+    result = produce()
+    if not result.get("error"):                     # 失败不缓存，留待下次重试
+        _CACHE[key] = (now, result)
+    return result
+
+
 def company_info(code: str) -> dict:
     """行业 / 上市时间 / 主营业务。
 
