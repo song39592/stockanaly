@@ -1260,10 +1260,17 @@ namespace StockPool
                     var frames = new List<double[]>();
                     var fstats = new List<ChipStats>();
                     StockParseChipFrames(j, bins, dates, frames, fstats);
-                    // 口径提示：锁仓修正依赖前十大流通股东数据，当前未接入（衰减系数固定 1.0）
+                    // 口径提示：锁仓修正 = 前十大流通股东「占流通股比例 > 5%」合计 r，
+                    // 换手率按 1/(1-r) 放大（对齐通达信 / 东财口径，见 chip_formulas/tri_decay.py）。
                     object lockObj;
                     bool lockup = (j.TryGetValue("lockup_applied", out lockObj) && lockObj is bool && (bool)lockObj);
-                    string note = lockup ? "已做锁仓修正" : "未做锁仓修正";
+                    string note = "未做锁仓修正";
+                    if (lockup)
+                    {
+                        double lr = ChipNum(j, "lockup_ratio");
+                        double lf = ChipNum(j, "lockup_factor");
+                        note = string.Format("已做锁仓修正（占流通股 {0:F1}%，系数 {1:F3}）", lr * 100.0, lf);
+                    }
                     Invoke((Action)delegate
                     {
                         if (round != _stockRound) return;
@@ -1429,6 +1436,17 @@ namespace StockPool
             s.HasHi = true;
             s.HiThreshold = RpsHiThreshold;
             s.HiColor = RpsHiRed;
+        }
+
+        /// <summary>从筹码接口响应里取一个数值字段（缺省 0；兼容 double / decimal）。</summary>
+        private static double ChipNum(Dictionary<string, object> j, string key)
+        {
+            object v;
+            if (j != null && j.TryGetValue(key, out v) && v != null)
+            {
+                try { return Convert.ToDouble(v); } catch (Exception) { }
+            }
+            return 0.0;
         }
 
         private static Color LineColor(string name)
@@ -2702,23 +2720,50 @@ namespace StockPool
                     ChipStats st = (_frame >= 0 && _frame < _frameStats.Count) ? _frameStats[_frame] : null;
                     double refClose = (st != null) ? st.Close : 0;   // 获利/套牢以**该日**收盘价为界
 
-                    // 筹码柱：成本低于当日收盘 = 获利盘（暖色），高于 = 套牢盘（冷色）
+                    // 筹码分布：成本低于当日收盘 = 获利盘（暖色），高于 = 套牢盘（冷色）
+                    // 画面形状画成**三角形分布**：每个分箱取其占比换算的宽度与中心价，
+                    // 相邻分箱的顶点**直线相连**成峰形轮廓（不再是一格格的方块阶梯）。
+                    // 占比为 0 的分箱也参与连线（宽度 0），这样峰与峰之间的谷能真正归零。
                     double maxPct = 0;
                     for (int i = 0; i < pct.Length; i++) if (pct[i] > maxPct) maxPct = pct[i];
                     if (maxPct <= 0) maxPct = 1;
                     Color profit = dark ? Color.FromArgb(228, 96, 84) : Color.FromArgb(216, 74, 62);
                     Color locked = dark ? Color.FromArgb(72, 152, 214) : Color.FromArgb(52, 132, 194);
+
+                    // 先收集价格轴内各分箱的「顶点」：(左侧轴 + 占比宽度, 该箱中心价)
+                    var idxs = new List<int>();
+                    var ws = new List<int>();
+                    var ys = new List<int>();
+                    var profs = new List<bool>();
                     for (int i = 0; i < pct.Length && i < _bins.Count; i++)
                     {
-                        if (pct[i] <= 0) continue;
                         ChipBin b = _bins[i];
                         if (b.Hi < lo || b.Lo > hi) continue;       // 价格轴之外的分箱不画（会盖住统计区）
-                        int y1 = (int)yOf(b.Hi);
-                        int y0 = (int)yOf(b.Lo);
-                        if (y0 <= y1) y0 = y1 + 1;
-                        int w = Math.Max(1, (int)Math.Round(pct[i] / maxPct * plotW));
-                        using (var br = new SolidBrush(b.Price <= refClose ? profit : locked))
-                            g.FillRectangle(br, LeftPad, y1, w, y0 - y1);
+                        int w = (int)Math.Round(pct[i] / maxPct * plotW);
+                        if (w < 0) w = 0;
+                        if (w > plotW) w = plotW;
+                        int yc = (int)yOf(b.Price);
+                        if (yc < top) yc = top;
+                        if (yc > bottom) yc = bottom;
+                        idxs.Add(i); ws.Add(w); ys.Add(yc); profs.Add(b.Price <= refClose);
+                    }
+                    // 逐段成面：连续且同色的一段连成一个多边形，避免逐个填充产生接缝。
+                    // 配色按价格相对收盘价单调划分，故实际最多两段（获利段 / 套牢段）。
+                    int k2 = 0;
+                    while (k2 < idxs.Count)
+                    {
+                        bool isProfit = profs[k2];
+                        int j = k2;
+                        while (j + 1 < idxs.Count && profs[j + 1] == isProfit
+                               && idxs[j + 1] == idxs[j] + 1) j++;
+                        var poly = new List<Point>();
+                        poly.Add(new Point(LeftPad, ys[k2]));            // 左轴上端点
+                        for (int t = k2; t <= j; t++)                    // 峰形外轮廓
+                            poly.Add(new Point(LeftPad + ws[t], ys[t]));
+                        poly.Add(new Point(LeftPad, ys[j]));             // 左轴下端点，闭合
+                        using (var br = new SolidBrush(isProfit ? profit : locked))
+                            g.FillPolygon(br, poly.ToArray());
+                        k2 = j + 1;
                     }
 
                     // 当日收盘 / 平均成本参考线
@@ -2736,6 +2781,25 @@ namespace StockPool
                             int ya = (int)yOf(st.AvgCost.Value);
                             if (ya >= top && ya <= bottom) g.DrawLine(penAvg, LeftPad - 3, ya, Width - RightPad, ya);
                         }
+                    }
+
+                    // 横坐标刻度：横轴满宽 = 最高峰占比，四等分画短刻度。
+                    // 只标最高峰那一处的百分比（= 满刻度值），其余不标以免小面板被数字挤满。
+                    if (plotH > 30)
+                    {
+                        using (var penTick = new Pen(grid))
+                        {
+                            for (int t = 0; t <= 4; t++)
+                            {
+                                int xt = LeftPad + (int)Math.Round(plotW * t / 4.0);
+                                g.DrawLine(penTick, xt, bottom, xt, bottom + 3);
+                            }
+                        }
+                        // 标签贴着横轴、右对齐（图形只到 Width-RightPad，不会压住最右侧一格）
+                        using (var fmtTick = new StringFormat { Alignment = StringAlignment.Far })
+                        using (var bTick = new SolidBrush(Color.FromArgb(150, 158, 172)))
+                            g.DrawString(maxPct.ToString("F2") + "%", Font, bTick,
+                                         Width - RightPad, bottom - 14, fmtTick);
                     }
 
                     // 统计区（价格区之下）：平均成本 / 获利比例 / 峰位 / 集中度

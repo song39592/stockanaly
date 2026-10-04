@@ -29,7 +29,7 @@ backend_fastapi/chip_formulas/
 ## 2. 核心约束（⚠️ 最重要）
 
 1. **唯一数据入口**：`core/data.py` 是包内**唯一**允许 import 外部取数模块
-   （`indicators.data` / `price_service`）的文件。
+   （`indicators.data` / `price_service` / `stock_profile`）的文件。
 2. **公式实现文件禁止直连外部**：不得 `import price_store` / `akshare` / 读文件 / 发请求。
    实际上公式**通常不需要取数**——输入全在 `ctx` 里，公式只管「筹码怎么摊、怎么衰减」。
    `core/data.py` 取数时也不自己合样，而是经 `indicators.data` → `kline_service`
@@ -67,7 +67,8 @@ def tri_decay(ctx: ChipContext, decay: float = 1.0) -> np.ndarray:
 
 - 首参必须是 `ctx`（`ChipContext`）；其余参数**都要有默认值**且与 `ParamSpec` 一一对应。
 - `ChipContext` 字段：`dates / open / high / low / close / volume(手) / turnover(小数) /
-  vwap(当日均价) / float_shares(股) / edges / centers / p_lo / p_hi / adjust`。
+  vwap(当日均价) / float_shares(股) / edges / centers / p_lo / p_hi / adjust /
+  lockup_ratio(锁仓占流通股比例 r) / lockup_factor(换手放大系数 1/(1-r))`。
 - 返回值：二维 `np.ndarray`，形状严格等于 `(ctx.days, ctx.bins)`，元素有限且非负。
 
 ### 迭代区间 = 窗口 + 预热（core 负责，公式无感）
@@ -108,7 +109,8 @@ def tri_decay(ctx: ChipContext, decay: float = 1.0) -> np.ndarray:
 | `bins[]` | {lo, hi, price, pct} 最新一天的筹码分布（价格轴在此） |
 | `frames` | {dates[], bins, pct[][], stats[]} **逐日快照**，三者一一对应 |
 | `stats` | 最新一天的统计：avg_cost / peak_price / profit_ratio / scr90 / close |
-| `lockup_applied` | 锁仓修正是否已启用（当前固定 false） |
+| `lockup_applied` | 锁仓修正是否已启用（前十大流通股东「占流通股比例 > 5%」时自动为 true） |
+| `lockup_ratio` / `lockup_factor` | 锁仓占流通股比例 r / 换手放大系数 1/(1-r) |
 
 > `frames.pct[i]` 与 `bins` 共用同一价格轴；前端光标左右移动只切索引，不再回服务端。
 

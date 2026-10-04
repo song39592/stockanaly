@@ -45,6 +45,29 @@ class ChipInput:
     warm: int                   # 预热根数（只用于养状态，不输出）
     adjust: str
     period: str = "day"         # K 线周期（与 K 线展示一致）
+    lockup_ratio: float = 0.0   # 锁仓占比 r（前十大流通股东 占流通股比例 > 5% 合计）
+    lockup_factor: float = 1.0  # 衰减修正系数 1/(1-r)，1.0 = 未修正 / 取数失败
+
+
+def _lockup_of(code: str) -> tuple[float, float]:
+    """锁仓比例 r 与换手放大系数 1/(1-r)，取自前十大**流通**股东（见 stock_profile）。
+
+    真实换手发生在**可自由流通**的筹码上，锁定部分（大股东 / 战投等不参与日常交易）
+    不随换手衰减，故把换手率放大 1/(1-r) 倍，等价于「扣除非流通筹码后再算衰减」
+    （口径对齐图片：15.00%+9.35% → 1/(1-24.35%)=1.32）。
+
+    **失败一律回退 (0.0, 1.0)**：股东数据是外部网络取数，任何异常都不该拖垮筹码主流程。
+    """
+    try:
+        import stock_profile
+        info = stock_profile.lockup_ratio(code, 5.0)
+        r = float(info.get("ratio") or 0.0)
+        f = float(info.get("factor") or 1.0)
+        if 0.0 <= r < 1.0 and 1.0 <= f <= 20.0:
+            return r, f
+    except Exception:                                   # noqa: BLE001 - 取数失败不致命
+        pass
+    return 0.0, 1.0
 
 
 def load_input(code: str, start: str | None = None, end: str | None = None,
@@ -70,6 +93,7 @@ def load_input(code: str, start: str | None = None, end: str | None = None,
     vwap = ind_data.get_vwap(code, start, end, adjust=adjust,
                              period=period).reindex(df.index)
     float_shares = ind_data.get_float_shares(code, str(df.index[-1])[:10])
+    lockup_ratio, lockup_factor = _lockup_of(code)
 
     low = df["low"].astype(float).to_numpy()
     high = df["high"].astype(float).to_numpy()
@@ -98,6 +122,8 @@ def load_input(code: str, start: str | None = None, end: str | None = None,
         warm=warm,
         adjust=adjust,
         period=period,
+        lockup_ratio=lockup_ratio,
+        lockup_factor=lockup_factor,
     )
 
 
