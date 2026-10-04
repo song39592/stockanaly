@@ -2,13 +2,16 @@
 """RPS 相对价格强度策略（动量 / 相对强度）。
 
 RPS（Relative Price Strength，相对价格强度）衡量一只股票在最近 N 个交易日的
-区间涨幅，在全部股票中的相对排名百分比：
+区间涨幅，在全部股票中的相对排名百分比。本实现严格对齐「陶博士 / 通达信」的
+RPS 公式设置方法（参考 https://zhuanlan.zhihu.com/p/1975584996946383784）：
 
-    RPS_i = (个股 N 日涨幅排名 - 1) / (参与排名股票数 - 1) × 100
+    EXTRS  = (C - REF(C, N)) / REF(C, N)          # N 日区间涨幅
+    RPS    = 百分比排名(EXTRS) × 100               # 横截面百分比排名，0–100
 
-RPS = 100 表示该股涨幅最强（全市场前 1%），RPS = 0 表示最弱。该指标源自欧奈尔
-（William O'Neil）的「相对强度」思路，在 A 股由「陶博士」体系发扬，常取
-RPS50 / RPS120 / RPS250。本实现参考其口径：横截面排名 + 后复权价算涨幅。
+其中「百分比排名」即：在某交易日，全市场所有有数据标的中，涨幅不弱于该股的
+数量 ÷ 总数（pandas `rank(pct=True)` 等价口径），再 ×100。通达信里该值先
+×1000 存入扩展数据、显示时 ÷10，结果同样是 0–100。RPS = 100 表示该股涨幅最强
+（跑赢全市场），RPS = 0 最弱；常取 RPS50 / RPS120 / RPS250，高亮阈值 M = 90。
 
 本策略把 RPS 当作「强势选股」指标使用：
     * 当某股 RPS 上穿「买入阈值」（默认 90，即进入全市场前 10% 强势）时买入；
@@ -62,15 +65,13 @@ def rps(ctx, n: int = 120, buy_threshold: float = 90.0,
     if panel.empty:
         return []
 
-    # 每个标的的 N 日涨幅：现价 / N 日前价格 - 1。
+    # 每个标的的 N 日涨幅 EXTRS = (C - REF(C, N)) / REF(C, N)。
     prev = panel.shift(n)
     ret = panel / prev - 1.0
 
-    # 横截面排名：同一行（同一交易日）对所有有数据的标的排名，1=最弱、N=最强。
-    # 参与排名数不足 2 只时排名无意义，RPS 自然为 NaN（(rank-1)/(count-1) 分母为 0）。
-    ranked = ret.rank(axis=1, method="average")
-    counts = ret.notna().sum(axis=1)
-    rps_panel = (ranked - 1.0).div(counts - 1.0, axis=0).mul(100.0)
+    # 横截面百分比排名（对齐通达信「扩展数据→百分比排名」）：同一行（同一交易日）
+    # 对所有有数据的标的按 EXTRS 排名，结果 0–1，×100 即 RPS。缺失值不参与排名。
+    rps_panel = ret.rank(axis=1, pct=True).mul(100.0)
 
     signals: list[Signal] = []
     for code in panel.columns:
