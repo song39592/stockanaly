@@ -8,8 +8,11 @@
 
 三档（沿用 chip_service 的命名与阈值语义）：
     第一档 磨主峰     最新一期在榜 ∩ 连续 WEEKS 期全勤
-    第三档 启动型离榜 曾入选但最新一期离榜，且区间涨幅 ≥ LAUNCH_THRESHOLD（**上涨离开**）
-    第二档 向下破位   曾入选但最新一期离榜，涨幅未达阈值（**下跌离开**）
+    第三档 启动型离榜 **上一期在榜、本期才离榜**，且区间涨幅 ≥ LAUNCH_THRESHOLD（**上涨离开**）
+    第二档 向下破位   **上一期在榜、本期才离榜**，涨幅未达阈值（**下跌离开**）
+
+离榜用**严格口径**（上一期在榜、本期不在）而不是「曾入选但最新不在」：
+后者会把两三周前就走了的票一直留在榜里，越攒越多、淹没了真正「本周离开」的那几只。
 
 为什么能算历史各期（关键）：
     筹码矩阵是**因果**的 —— 第 i 帧只由第 0..i 天的换手与价格推出，
@@ -239,10 +242,11 @@ def _worker(week: dt.date, weeks: list[dt.date], codes: list[str], top_n: int,
         # 第一档：在最新一期，且连续 WEEKS 期全勤
         stay = [item(c, v) for c, v in snapshots[0]
                 if len(on_weeks.get(c, [])) == len(weeks)]
-        # 离榜：曾入选但最新一期不在榜 → 按涨幅分「上涨离开 / 下跌离开」
+        # 离榜（严格口径）：**上一期在榜、本期才走** → 按涨幅分「上涨离开 / 下跌离开」
         left_up: list[dict] = []
         left_down: list[dict] = []
-        for code, weeks_on in on_weeks.items():
+        prev_codes = [c for c, _v in snapshots[1]] if len(snapshots) > 1 else []
+        for code in prev_codes:
             if code in latest_set:
                 continue
             v = scr_panel.loc[:, code].dropna()
@@ -276,10 +280,10 @@ def _worker(week: dt.date, weeks: list[dt.date], codes: list[str], top_n: int,
                 "stay": {"key": "tier1", "name": f"连续{len(weeks)}周在榜 · 磨主峰",
                          "desc": "最新一期在榜且各期全勤", "count": len(stay), "items": stay},
                 "up": {"key": "tier3", "name": "上涨离榜 · 启动型",
-                       "desc": f"最新一期离榜，且近 {chg_days} 个交易日涨幅 ≥ {launch}%",
+                       "desc": f"上一期在榜、本期离榜，且近 {chg_days} 个交易日涨幅 ≥ {launch}%",
                        "count": len(left_up), "items": left_up},
                 "down": {"key": "tier2", "name": "下跌离榜 · 破位",
-                         "desc": f"最新一期离榜，涨幅未达 {launch}%",
+                         "desc": f"上一期在榜、本期离榜，涨幅未达 {launch}%",
                          "count": len(left_down), "items": left_down},
             },
         }
