@@ -26,6 +26,14 @@ from periods import normalize
 # （实测首帧 90% 集中度 0.009、获利比例 0.88%），故迭代区间在窗口之前再取等长的一段。
 WARMUP_RATIO = 1.0
 
+# 取数链路里藏着两个**联网兜底**（单只票无感，全市场批量会致命）：
+#   · 锁仓比例 → stock_profile → akshare 东财
+#   · 库里没有流通股本 → get_float_shares(auto_sync) → 腾讯行情现采
+# 全市场几千只逐一打到外部接口会被拖垮 / 触发限流，故提供**按次**的 offline 开关：
+# offline=True 时锁仓系数一律取 1.0（不做修正）、缺流通股本直接抛 RuntimeError
+# （调用方标注「数据不足」），全程不联网。
+# 按次而非全局：后台跑批量榜时，交互式的单票请求仍走联网口径拿到完整锁仓修正。
+
 
 @dc.dataclass
 class ChipInput:
@@ -72,11 +80,15 @@ def _lockup_of(code: str) -> tuple[float, float]:
 
 def load_input(code: str, start: str | None = None, end: str | None = None,
                adjust: str = "qfq", days: int | None = None,
-               bins: int = 80, period: str = "day") -> ChipInput:
+               bins: int = 80, period: str = "day",
+               offline: bool = False) -> ChipInput:
     """取一段行情并装配成公式输入。
 
     `period` 与 K 线周期一致：周线的一根 = 一周的成交量合计 + 一周的高低区间，
     换手率（成交量 ÷ 流通股本）自然就是**周换手率**，衰减按周期步进，无需另算。
+
+    `offline=True` 用于全市场批量：**不联网**（锁仓系数取 1.0、缺流通股本即抛错），
+    详见模块开关处的说明。
 
     异常：RuntimeError 行情不足 / 缺流通股本（由路由层转成业务性失败）。
     """
@@ -92,8 +104,10 @@ def load_input(code: str, start: str | None = None, end: str | None = None,
     turnover = turnover.reindex(df.index).fillna(0.0)
     vwap = ind_data.get_vwap(code, start, end, adjust=adjust,
                              period=period).reindex(df.index)
-    float_shares = ind_data.get_float_shares(code, str(df.index[-1])[:10])
-    lockup_ratio, lockup_factor = _lockup_of(code)
+    last_date = str(df.index[-1])[:10]
+    # offline：缺股本不再走腾讯行情现采，直接抛错由调用方标注「数据不足」
+    float_shares = ind_data.get_float_shares(code, last_date, auto_sync=not offline)
+    lockup_ratio, lockup_factor = (0.0, 1.0) if offline else _lockup_of(code)
 
     low = df["low"].astype(float).to_numpy()
     high = df["high"].astype(float).to_numpy()

@@ -205,11 +205,14 @@ class ChipResult:
 def compute_matrix(code: str, formula_id: str | None = None, params: dict | None = None,
                    start: str | None = None, end: str | None = None,
                    adjust: str = "qfq", days: int | None = None,
-                   bins: int = DEFAULT_BINS, period: str = "day") -> ChipResult:
+                   bins: int = DEFAULT_BINS, period: str = "day",
+                   offline: bool = False) -> ChipResult:
     """按指定公式算出**筹码矩阵**（不含 HTTP 响应包装）。
 
     指标侧的延伸量（获利比例 / 平均成本 / 集中度）复用这一份结果，
     避免同一只票被重复计算多遍。
+
+    `offline=True`：透传给 `data.load_input`，批量场景不联网（见那里的说明）。
 
     异常：
       KeyError      公式 id 不存在（调用方应转成 400）
@@ -222,7 +225,8 @@ def compute_matrix(code: str, formula_id: str | None = None, params: dict | None
 
     bins = int(bins) if bins and int(bins) > 1 else DEFAULT_BINS
     kwargs = _fill_params(meta, params)
-    inp = data.load_input(code, start, end, adjust, days, bins, period=period)
+    inp = data.load_input(code, start, end, adjust, days, bins, period=period,
+                          offline=offline)
     ctx = ChipContext(
         dates=inp.dates, open=inp.open, high=inp.high, low=inp.low, close=inp.close,
         volume=inp.volume, turnover=inp.turnover, vwap=inp.vwap,
