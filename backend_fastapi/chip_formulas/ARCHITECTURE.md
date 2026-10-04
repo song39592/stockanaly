@@ -40,6 +40,14 @@ backend_fastapi/chip_formulas/
 5. 价格轴（edges / centers）由 core 统一构造，覆盖**整个迭代区间**（含预热段），
    公式不得自行改 bin——否则各帧之间无法比较。
 
+### 批量离线计算（`offline=True`）
+
+全市场做榜一类场景要连跑几千只，`load_input` / `compute_matrix` 提供 `offline=True`：
+届时**不联网** —— 锁仓系数一律取 1.0（不做修正）、库里没有流通股本直接抛
+`RuntimeError`，由调用方标注「数据不足」（见 `chip_rank_service.py`）。
+之所以是**按次传参**而非全局开关：后台跑批量榜时，交互式的单票请求仍走联网口径、
+能正常拿到锁仓修正，不会被批量任务拖累成「没有修正」的结果。
+
 ---
 
 ### 周期（day / week / month）

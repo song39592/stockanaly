@@ -68,6 +68,7 @@ ROUTE_MODULES = (
     ("历史数据下载", "download_routes"),
     ("筹码体系 · SCR 选股", "chip_routes"),
     ("筹码体系 · 筹码分布", "chip_dist_routes"),
+    ("筹码体系 · SCR90 周榜", "chip_rank_routes"),
     ("盘面及板块分析", "market_routes"),
     ("大佬策略实验室", "mentor_routes"),
     ("个股调研与股票估值", "stock_routes"),

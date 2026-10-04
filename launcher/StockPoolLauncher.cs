@@ -3,7 +3,7 @@
 //
 // 职责：
 //   1) 内嵌拉起 FastAPI 后端（:8000）与 dsh AI 服务（:3080），不再依赖 .bat；
-//   2) 一个窗口装下所有页（RPS 体系 / 筹码体系 / 分析工具 / 运行日志 / 设置 / 服务控制台），
+//   2) 一个窗口装下所有页（RPS 体系 / 分析工具 / 运行日志 / 设置 / 服务控制台），
 //      业务网页用 Edge/Chrome 应用模式开成独立窗口（没有地址栏、没有标签页），重复点只切到最前；
 //   3) 托盘常驻、状态灯轮询、退出时收尾子进程。
 //
@@ -557,7 +557,7 @@ namespace StockPool
             root.Controls.Add(_tabBody, 0, 2);
 
             BuildRpsPage();
-            BuildChipPage();
+            BuildScr90Page();             // SCR90 周榜（本地全市场算集中度，按周更新）
             BuildToolPage();
             BuildValuationPage();
             BuildMarketPage();
@@ -730,6 +730,7 @@ namespace StockPool
             if (index == _stockTabIndex) StockOnEnter();
             if (index == _stTabIndex) StOnEnter();
             if (index == _dlTabIndex) DlOnEnter();     // 进入下载页接着上次的任务刷新进度
+            if (index == _scrTabIndex) ScrOnEnter();   // 进入 SCR90 周榜页拉本周结果
         }
 
         /// <summary>标签行配色：选中用卡片色 + 蓝色下划线，未选中用窗口底色。</summary>
@@ -847,7 +848,7 @@ namespace StockPool
             AddRow(body3, Row(
                 MiniBtn("接口文档", delegate { WebWindow.Show("接口文档", "http://127.0.0.1:8000/docs"); }, 100),
                 MiniBtn("关闭所有网页窗口", delegate { WebWindow.CloseAll(); }, 140)));
-            var tip = Lbl("说明：RPS 体系、筹码体系、分析工具三个标签页各有一个 / 几个入口按钮，点开是自己的窗口"
+            var tip = Lbl("说明：RPS 体系、分析工具两个标签页各有一个 / 几个入口按钮，点开是自己的窗口"
                         + "（没有地址栏、没有标签页）；重复点同一个按钮只会把已开着的窗口切到最前。");
             Mute(tip);
             tip.AutoSize = false;
@@ -1025,7 +1026,6 @@ namespace StockPool
                 c.ForeColor = _cLogText;
                 // 说明框里已插入的文字不会跟着 ForeColor 走，用新配色重写一遍
                 if (tag == "doc-rps") FillRpsDoc((RichTextBox)c);
-                else if (tag == "doc-chip") FillChipDoc((RichTextBox)c);
                 else if (tag == "doc-ai") FillAiDoc((RichTextBox)c, (c == _mktAiBox ? _mktAiMarkdown : _stockAiMarkdown));
             }
             else if (c is DataGridView)
@@ -1169,107 +1169,6 @@ namespace StockPool
                 rt.SelectionFont = normal;
                 rt.SelectionColor = rt.ForeColor;
                 rt.AppendText(bodies[i] + Environment.NewLine + Environment.NewLine);
-            }
-            rt.SelectionStart = 0;
-            rt.SelectionLength = 0;
-        }
-
-        /// <summary>筹码体系：整页放使用说明（说明区自己滚动），底部固定一个「进入系统」按钮。</summary>
-        private Panel BuildChipPage()
-        {
-            var p = NewPage("筹码体系");
-            p.AutoScroll = false;
-
-            var root = new TableLayoutPanel();
-            root.Dock = DockStyle.Fill;
-            root.Margin = new Padding(0);
-            root.Padding = new Padding(0);
-            root.ColumnCount = 1;
-            root.RowCount = 3;
-            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
-            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            p.Controls.Add(root);
-
-            var head = Lbl("筹码体系在网页版「SCR 选股 · 筹码」里，下面是这个页面的使用说明。");
-            Mute(head);
-            head.Margin = new Padding(0, 0, 0, 6);
-            root.Controls.Add(head, 0, 0);
-
-            var doc = new RichTextBox();
-            doc.Tag = "doc-chip";
-            doc.ReadOnly = true;
-            doc.BorderStyle = BorderStyle.None;
-            doc.Dock = DockStyle.Fill;
-            doc.ScrollBars = RichTextBoxScrollBars.Vertical;
-            doc.Font = new Font("Microsoft YaHei UI", 9.5f);
-            doc.Margin = new Padding(0, 0, 0, 10);
-            FillChipDoc(doc);
-            root.Controls.Add(doc, 0, 1);
-
-            var enter = MiniBtn("进入系统", delegate { OpenWebPage("chip-scr.html", "SCR 选股 · 筹码体系"); }, 180);
-            enter.Height = 34;
-            enter.Font = new Font("Microsoft YaHei UI", 10.5f);
-            var hint = Lbl("点按钮打开独立窗口（没有地址栏、没有标签页），重复点只会切到已开着的窗口。");
-            Mute(hint);
-            root.Controls.Add(Row(enter, hint), 0, 2);
-
-            return p;
-        }
-
-        /// <summary>把筹码体系的使用说明写进说明框；换肤时会被再调一次，用新配色重排一遍。</summary>
-        private static void FillChipDoc(RichTextBox rt)
-        {
-            // "#" 开头 = 小节标题，"-" 开头 = 列点，其余为正文段落
-            var lines = new string[] {
-                "#一、数据来源",
-                "-通达信 → 用指标 SCR 做条件选股（SCR 后 100）→ 导出「临时条件股YYYYMMDD.xls」→ 按周导入本系统。",
-                "-每周一份、需覆盖最近 5 周：周一~周四及周五收盘前（15:00）最新一期为上一周，周五收盘后及周末为本周；缺少任一期会直接报错并列出缺口。",
-                "-导出文件多为 GBK 文本表格（扩展名虽是 .xls），本系统已兼容 GBK 文本 / Excel / CSV 三种格式。",
-                "#二、选股逻辑",
-                "SCR 后 100 表示筹码集中度极低：换手低迷、流动性匮乏、股价窄幅小幅波动。该形态通常说明筹码已高度集中在少数账户手中，高控盘特征明显，多处于吸筹磨底期——主力在低位缓慢收集筹码、尚未拉动股价。",
-                "#三、需人工排除的情形（形态相似，性质相反）",
-                "-高位平台出货：股价已在相对高位横盘派发，同样表现为低波动，但方向与吸筹相反。",
-                "-大规模回购：回购注销或库存股导致筹码数据失真，并非主力主动吸筹。",
-                "-指数配置：因指数成分股调整而被动持有，缺少主动控盘意图。",
-                "#四、三档含义",
-                "-第一档·磨主峰：最新一期在榜 ∩ 连续 N 期全勤 ∩ 流通市值区间内 ∩ PE > 0。持续留在低集中度池中，最贴合「吸筹磨底」特征。",
-                "-第二档·向下破位离榜：曾入选但最新一期已离榜，区间涨幅未达启动阈值。该形态存在两个相反的演化方向，本系统公式目前无法识别：向上——筹码最高峰锁定、价格企稳，为启动前的深度洗盘，第一预期为回拉主峰价，若后续继续强势突破，则大概率进入主升；向下——下方筹码持续堆积、支撑失守，则为真正的破位下行。风险提示：下方筹码堆积时千万不能过早介入，须等价格企稳、回拉主峰价确认后再评估；形态相似但方向相反，务必结合筹码结构与量能人工判断。",
-                "-第三档·启动型离榜：离榜且区间涨幅达到阈值（默认 30 日涨幅 ≥ 10%）。疑似吸筹完成并启动，可跟踪后续回踩机会。",
-                "#五、使用建议",
-                "-本页输出的是形态候选池，不等于买入信号，请结合基本面、行业景气与大盘环境二次判断。",
-                "-阈值（连续全勤期数 / 最少在榜期数 / 流通市值区间 / 启动阈值）可在「展开阈值」中调整，改完点「刷新计算」生效。",
-                "-三档表格支持点档位标题折叠、点表头排序，便于按市值 / PE / 涨幅快速筛查。",
-                "-本页结果由公开数据与固定规则推演，仅供研究参考，不构成任何投资建议。"
-            };
-            if (_docFont == null) _docFont = new Font("Microsoft YaHei UI", 9.5f);
-            if (_docBold == null) _docBold = new Font(_docFont, FontStyle.Bold);
-            var normal = _docFont;
-
-            rt.Clear();
-            rt.SelectionFont = normal;
-            rt.SelectionColor = rt.ForeColor;
-            var first = true;
-            foreach (var raw in lines)
-            {
-                bool isHead = raw.Length > 0 && raw[0] == '#';
-                rt.SelectionFont = isHead ? _docBold : normal;
-                rt.SelectionColor = rt.ForeColor;
-                if (isHead)
-                {
-                    if (!first) rt.AppendText(Environment.NewLine);
-                    rt.AppendText(raw.Substring(1) + Environment.NewLine);
-                }
-                else if (raw.Length > 0 && raw[0] == '-')
-                {
-                    rt.AppendText("· " + raw.Substring(1) + Environment.NewLine);
-                }
-                else
-                {
-                    rt.AppendText(raw + Environment.NewLine + Environment.NewLine);
-                }
-                first = false;
             }
             rt.SelectionStart = 0;
             rt.SelectionLength = 0;

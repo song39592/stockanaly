@@ -152,7 +152,7 @@ namespace StockPool
             _stockName = Mute(Lbl(""));
             AddRow(b0, Row(Lbl("代码"), _stockCode, _stockOpen, _stockName));
 
-            _stockHint = Mute(Lbl("输入 6 位代码后点「打开」，或从「筹码体系 / SCR 选股」进入；数据来自本机后端 /api/history/stock/{code}"));
+            _stockHint = Mute(Lbl("输入 6 位代码后点「打开」；数据来自本机后端 /api/history/stock/{code}"));
             _stockHint.AutoSize = true;
             _stockHint.MaximumSize = new Size(740, 0);
             AddRow(b0, Row(_stockHint));
