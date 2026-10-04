@@ -23,7 +23,7 @@ namespace StockPool
         private Button _vCalc, _vToggle;
         private TableLayoutPanel _vParams;
         private FlowLayoutPanel _vKpiRow1, _vKpiRow2;
-        private DataGridView _vGrid;
+        private StockGrid _vGrid;
         private ComboBox _vScenario;
         private RichTextBox _vSteps;
         private Dictionary<string, object> _vLast;
@@ -196,29 +196,17 @@ namespace StockPool
 
         private void InitVGrid()
         {
-            _vGrid = new DataGridView();
-            _vGrid.Dock = DockStyle.Top;
-            _vGrid.Height = 170;
-            _vGrid.ReadOnly = true;
-            _vGrid.AllowUserToAddRows = false;
-            _vGrid.AllowUserToDeleteRows = false;
-            _vGrid.RowHeadersVisible = false;
-            _vGrid.BorderStyle = BorderStyle.None;
-            _vGrid.Tag = "grid";
-            _vGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-            _vGrid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
-
-            string[] cols = new string[] { "情景", "增长率", "每股价值", "股价/价值", "判断", "预测价", "收益率" };
-            foreach (string cn in cols)
-            {
-                var col = new DataGridViewTextBoxColumn();
-                col.HeaderText = cn;
-                col.SortMode = DataGridViewColumnSortMode.NotSortable;
-                col.DefaultCellStyle.Alignment = (cn == "情景" || cn == "判断")
-                    ? DataGridViewContentAlignment.MiddleLeft
-                    : DataGridViewContentAlignment.MiddleRight;
-                _vGrid.Columns.Add(col);
-            }
+            // 表格由 NewGrid（GridKit.cs）统一创建；本表沿用 Fill 撑满（列少、需要铺满宽度），
+            // 仅「情景」「判断」两列左对齐，其余数字列右对齐。
+            _vGrid = NewGrid(new List<GridColumn> {
+                new GridColumn("情景", "label"),
+                new GridColumn("增长率", "growth", true) { Size = DataGridViewAutoSizeColumnMode.Fill },
+                new GridColumn("每股价值", "value_per_share", true) { Size = DataGridViewAutoSizeColumnMode.Fill },
+                new GridColumn("股价/价值", "undervalued_ratio", true) { Size = DataGridViewAutoSizeColumnMode.Fill },
+                new GridColumn("判断", "verdict") { Size = DataGridViewAutoSizeColumnMode.Fill },
+                new GridColumn("预测价", "target_price", true) { Size = DataGridViewAutoSizeColumnMode.Fill },
+                new GridColumn("收益率", "return_rate", true) { Size = DataGridViewAutoSizeColumnMode.Fill },
+            });
         }
 
         /// <summary>一张 KPI 卡片（换肤时按 tag="kpi" 上卡片底色）。</summary>
@@ -524,6 +512,7 @@ namespace StockPool
                 }
                 if (_vScenario.Items.Count > 0) _vScenario.SelectedIndex = 0;
             }
+            _vGrid.Fit(120, 300);
 
             _vNote.Text = "怎么读：「股价 / 价值」小于 1 表示低估、大于 1 表示高估（按 <0.9 低估、0.9~1.1 合理、>1.1 高估划分）；"
                 + "三档增长率：乐观 = 机构预测复合增速 × 1.5、中性 = 机构预测复合增速、悲观固定 5%；未提供机构预测时兜底 25% / 10% / 5%。模型结果为估算，不构成投资建议。";

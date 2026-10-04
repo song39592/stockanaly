@@ -187,6 +187,11 @@ def _worker(week: dt.date, weeks: list[dt.date], codes: list[str], top_n: int,
     scr: dict[str, pd.Series] = {}
     close: dict[str, pd.Series] = {}
     try:
+        # 名称**先取**：只有一次网络请求（约 11~25s），放在重型计算之前 ——
+        # 之后 6 线程跑满 CPU 时再取，akshare 很容易超时，而 _load_names 是
+        # 「拿不到就算了」的静默降级，结果就是一整列名称全空、还查不出原因。
+        # 失败也不影响榜单：随后可经 POST /api/chip/rank/names 单独补齐（不必重算）。
+        names = _load_names(codes)
         with ThreadPoolExecutor(max_workers=IO_WORKERS) as pool:
             futures = {pool.submit(_compute_one, c, fetch_start, None,
                                    "qfq", bins): c for c in codes}
@@ -210,7 +215,6 @@ def _worker(week: dt.date, weeks: list[dt.date], codes: list[str], top_n: int,
                     _STATE["done"] += 1
 
         scr_panel = _panel(scr)
-        names = _load_names(sorted(scr.keys()))
 
         # 各期榜单（由新到旧），并记录每只票「在榜了哪几期」
         snapshots: list[list[tuple]] = []                # 每期 [(code, scr90)]
@@ -271,6 +275,8 @@ def _worker(week: dt.date, weeks: list[dt.date], codes: list[str], top_n: int,
             "skipped": len(skipped),
             "skipped_reasons": reasons,
             "skipped_sample": dict(list(skipped.items())[:20]),
+            # 名称取到几条（0 = 没取到，可点「重取名称」单独补齐，不必重算）
+            "names_resolved": sum(1 for r in rows if r["name"]),
             "lockup": False,            # 批量不联网 → 未做锁仓修正，口径透明
             "formula": chip_formulas.base.DEFAULT_FORMULA_ID,
             "elapsed": round(time.time() - started, 1),
@@ -388,3 +394,46 @@ def result(limit: int | None = None) -> dict:
     payload["current"] = (payload.get("current") or [])[:limit]
     payload["state"] = "ready"
     return payload
+
+
+def fill_names() -> dict:
+    """给**已落盘**的本周结果补齐名称，不必重跑十几分钟的重型计算。
+
+    名称只是一次外部查询（akshare 全市场表，进程内缓存 24h）。把它与计算解耦后：
+    榜单先出来，名称取不到也只影响一列显示，随时补一次即可。
+    """
+    week = _week_nodes(1)[0]
+    path = _result_path(week)
+    if not os.path.exists(path):
+        return {"ok": False, "week": week.strftime("%Y-%m-%d"),
+                "error": "本周尚未计算，请先点「刷新本周」"}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception as exc:                             # noqa: BLE001
+        return {"ok": False, "week": week.strftime("%Y-%m-%d"),
+                "error": f"结果缓存损坏：{type(exc).__name__}: {exc}"}
+
+    groups = [payload.get("current") or []]
+    for tier in (payload.get("tiers") or {}).values():
+        groups.append(tier.get("items") or [])
+    codes = sorted({it.get("code") for g in groups for it in g if it.get("code")})
+    names = _load_names(codes)
+
+    resolved = 0
+    for g in groups:
+        for it in g:
+            nm = names.get(it.get("code")) or ""
+            if nm:
+                resolved += 1
+            it["name"] = nm
+    payload["names_resolved"] = resolved
+
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+    except Exception as exc:                             # noqa: BLE001
+        return {"ok": False, "week": week.strftime("%Y-%m-%d"),
+                "error": f"写回失败：{type(exc).__name__}: {exc}"}
+    return {"ok": True, "week": week.strftime("%Y-%m-%d"),
+            "total": len(codes), "names_resolved": resolved}
