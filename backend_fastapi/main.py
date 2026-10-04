@@ -177,6 +177,14 @@ except instance_lock.AlreadyRunningError as exc:
 _init_stores()
 _mount_routes()
 
+# 后台预热 RPS 等横截面指标需要的「全市场日 K 面板」：约 15 秒，放后台线程，
+# 不阻塞 /health 与页面打开；等用户首次勾选 RPS 时面板通常已就绪，避免首帧卡顿。
+try:
+    import indicators.data as _ind_data
+    _ind_data.warm("day")
+except Exception:                        # noqa: BLE001 - 预热失败不影响正常启动
+    pass
+
 
 @app.get("/health")
 def health():

@@ -43,6 +43,8 @@ import datetime as dt
 import re
 from typing import Any
 
+import pandas as pd
+
 import crypto
 import db
 
@@ -868,3 +870,62 @@ def load_bars(code: str, adjust: str = "qfq", start: str | None = None,
                for key in ("open", "high", "low", "close")},
         })
     return out
+
+
+# --------------------------------------------------------------------------- #
+# 横截面（全市场）批量读取 —— 供 RPS 等「同一交易日全市场排名」的指标使用
+# --------------------------------------------------------------------------- #
+def load_market_close(adjust: str = "raw", start: str | None = None,
+                      codes: list[str] | None = None) -> pd.DataFrame:
+    """一次性读取**全市场**收盘价，返回宽表（索引 trade_date，列=code）。
+
+    为什么单独开这个入口：横截面类需求（如 RPS 相对强度 = 同一交易日在全市场的
+    涨幅排名）需要「全部标的 × 全部交易日」的价格。逐只走 load_bars 会把「按股
+    指纹校验」的开销放大到数千次（实测全市场 ~10 分钟），这里改为**按年份分片
+    整片查询一次**、且只取 close 单列（实测 ~15 秒）。
+
+    ⚠️ 与 load_bars 的关键差异（务必知晓）：
+      * **不做按股指纹校验**：整片查询拿不到按股摘要；这里只取一列 close 做横截面
+        排序，属只读、低风险用途。需要严格校验的消费方仍必须走 load_bars。
+      * 返回**原始价**（store 口径），不在此处复权；需要复权请在调用方按
+        `load_all_factors()` 的因子自行缩放（见 indicators.data 的 RPS 面板）。
+    """
+    store_adjust = _store_adjust(adjust)
+    years = _shard_years()
+    if start:
+        years = [y for y in years if y >= _year_of(start)]
+
+    frames: list[pd.DataFrame] = []
+    for year in years:
+        sql = "SELECT code, trade_date, close FROM daily_bars WHERE adjust=?"
+        params: list[Any] = [store_adjust]
+        if start:
+            sql += " AND trade_date>=?"
+            params.append(str(start)[:10])
+        with db.connect(db.bars_db(year)) as conn:
+            rows = conn.execute(sql, params).fetchall()
+        if not rows:
+            continue
+        df = pd.DataFrame(rows, columns=["code", "trade_date", "close"])
+        # 逐分片 pivot 后按行拼接：避免把 600 万行长表一次性 concat 进内存
+        frames.append(df.pivot(index="trade_date", columns="code", values="close"))
+
+    if not frames:
+        return pd.DataFrame()
+    panel = pd.concat(frames, axis=0)
+    panel.index = [str(d)[:10] for d in panel.index]
+    panel = panel.sort_index()
+    if codes is not None:
+        keep = [c for c in codes if c in panel.columns]
+        panel = panel[keep]
+    return panel
+
+
+def load_all_factors() -> list[dict[str, Any]]:
+    """读取全部**后复权因子**（code / ex_date / hfq_factor，按 code、ex_date 升序）。
+
+    因子库行数很少（全市场约 6~7 万行），供横截面批量复权一次性取用。
+    """
+    with db.connect(db.FACTORS_DB) as conn:
+        return [dict(row) for row in conn.execute(
+            "SELECT code, ex_date, hfq_factor FROM adjust_factors ORDER BY code, ex_date")]

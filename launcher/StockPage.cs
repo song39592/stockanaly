@@ -25,7 +25,7 @@ namespace StockPool
         private int _stockTabIndex = -1;
         private TextBox _stockCode;
         private Button _stockOpen, _stockRefresh;
-        private Label _stockName, _stockHint, _stockStatus, _stockValStatus;
+        private Label _stockName, _stockHint, _stockStatus, _stockValStatus, _stockIndStatus;
         private KLineChart _stockKline;
         private ChipPanel _stockChip;                      // K 线右侧的筹码分布窗口
         private ComboBox _stockChipFormula;                // 筹码公式下拉（后端 /api/chip/dist/formulas 枚举）
@@ -188,6 +188,7 @@ namespace StockPool
             }
             _stockRefresh = MiniBtn("↻ 更新行情/消息", delegate { if (_stockCurrent != null) StockLoadHistory(_stockCurrent, true); }, 140);
             _stockStatus = Mute(Lbl("待加载"));
+            _stockIndStatus = Mute(Lbl(""));
 
             // 复权切换（前复权 / 不复权）——先建按钮，再与「范围」并入同一行
             var adjustLabels = new string[] { "前复权", "不复权" };
@@ -254,6 +255,7 @@ namespace StockPool
             foreach (Button b in _stockAdjustMap.Keys) rangeRow.Controls.Add(b);
             rangeRow.Controls.Add(_stockRefresh);
             rangeRow.Controls.Add(_stockStatus);
+            rangeRow.Controls.Add(_stockIndStatus);
             rangeRow.Controls.Add(Mute(Lbl("  ↑↓ 缩放 · ←→ 移动光标")));
             AddRow(b0, rangeRow);
             mainCol.Controls.Add(g0, 0, 1);
@@ -775,12 +777,23 @@ namespace StockPool
         {
             if (_stockIndicators.Count == 0)
             {
+                if (_stockIndStatus != null) _stockIndStatus.Text = "";
                 if (_stockKline != null)
                 {
                     _stockKline.SetIndicators(new List<LowerPanel>());
                     _stockKline.SetMainIndicators(new List<ChartSeries>());
                 }
                 return;
+            }
+            // 计算前先给个提示：RPS 这类横截面指标首次要预热「全市场日 K 面板」，可能要十几秒；
+            // 没有这行的话，勾选后界面毫无动静，用户会以为指标没出来。
+            if (_stockIndStatus != null)
+            {
+                bool slow = _stockIndicators.Contains("rps");
+                _stockIndStatus.Text = slow
+                    ? "指标计算中…（RPS 首次约 15 秒预热全市场）"
+                    : "指标计算中…";
+                _stockIndStatus.Tag = "muted";
             }
             System.Threading.Tasks.Task.Run(delegate
             {
@@ -802,7 +815,7 @@ namespace StockPool
                     };
                     string json = new JavaScriptSerializer().Serialize(req);
                     string body;
-                    if (!PostJson("http://127.0.0.1:8000/api/indicators/batch", json, 20000, out body) || string.IsNullOrEmpty(body))
+                    if (!PostJson("http://127.0.0.1:8000/api/indicators/batch", json, 120000, out body) || string.IsNullOrEmpty(body))
                         return;
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body);
                     var itemsResp = VArr(VSafe(j, "items"));
@@ -828,7 +841,9 @@ namespace StockPool
                                     string kind = VStr(VSafe(s, "kind"));
                                     var dArr = VArr(VSafe(s, "data"));
                                     var data = AlignSeries(dates, VSafe(s, "dates"), dArr);
-                                    mainSeries.Add(new ChartSeries { Name = sname, Kind = kind, Data = data, Color = LineColor(sname) });
+                                    var cs = new ChartSeries { Name = sname, Kind = kind, Data = data };
+                                    ApplySeriesStyle(cs);
+                                    mainSeries.Add(cs);
                                 }
                             }
                             else
@@ -841,7 +856,9 @@ namespace StockPool
                                     string kind = VStr(VSafe(s, "kind"));
                                     var dArr = VArr(VSafe(s, "data"));
                                     var data = AlignSeries(dates, VSafe(s, "dates"), dArr);
-                                    lp.Series.Add(new ChartSeries { Name = sname, Kind = kind, Data = data, Color = LineColor(sname) });
+                                    var cs = new ChartSeries { Name = sname, Kind = kind, Data = data };
+                                    ApplySeriesStyle(cs);
+                                    lp.Series.Add(cs);
                                 }
                                 panels.Add(lp);
                             }
@@ -854,9 +871,10 @@ namespace StockPool
                             _stockKline.SetIndicators(panels);
                             _stockKline.SetMainIndicators(mainSeries);
                         }
+                        if (_stockIndStatus != null) _stockIndStatus.Text = "";
                     });
                 }
-                catch { }
+                catch { if (_stockIndStatus != null) _stockIndStatus.Text = ""; }
             });
         }
 
@@ -1385,6 +1403,32 @@ namespace StockPool
                 }
             }
             return data;
+        }
+
+        // RPS 副图高亮阈值 M：本项目约定 M = 90（RPS ≥ 90 = 全市场前 10% 强势）。
+        private const double RpsHiThreshold = 90.0;
+        private static readonly Color RpsHiRed = Color.FromArgb(239, 83, 80);
+
+        /// <summary>
+        /// 按通达信 RPS 副图公式给序列配色：120 绿 / 250 白 / 50 黄 / 20 灰 / 10 浅青，
+        /// 并开启「数值 ≥ M(90) 转红」高亮；其余指标沿用 <see cref="LineColor"/>。
+        /// 对齐公式：RPS120:...,COLORGREEN; IF(RPS120&gt;=M,RPS120,DRAWNULL),COLORRED;
+        /// </summary>
+        private static void ApplySeriesStyle(ChartSeries s)
+        {
+            switch (s.Name)
+            {
+                case "RPS120": s.Color = Color.FromArgb(63, 185, 80);   break;   // COLORGREEN
+                case "RPS250": s.Color = Color.FromArgb(238, 242, 248); break;   // COLORWHITE
+                case "RPS50": s.Color = Color.FromArgb(240, 200, 60);  break;    // COLORYELLOW
+                case "RPS20": s.Color = Color.FromArgb(150, 158, 172); break;    // COLORGRAY
+                case "RPS10": s.Color = Color.FromArgb(120, 220, 220); break;    // COLORLICYAN
+                default: s.Color = LineColor(s.Name); return;
+            }
+            s.Width = 2f;                       // LINETHICK2
+            s.HasHi = true;
+            s.HiThreshold = RpsHiThreshold;
+            s.HiColor = RpsHiRed;
         }
 
         private static Color LineColor(string name)
@@ -2474,6 +2518,12 @@ namespace StockPool
             public string Kind;          // "line" | "bar"
             public List<double> Data;    // 与 K 线等长（按日期对齐），NaN 表示缺失
             public Color Color;
+            public float Width = 1.4f;   // 线宽（通达信 LINETHICK2 → 2f）
+            // 「阈值以上转红」高亮：对齐通达信 RPS 副图里的
+            // IF(RPS>=M, RPS, DRAWNULL), COLORRED；只在相邻两点都 ≥ 阈值时整段画红。
+            public bool HasHi;
+            public double HiThreshold;
+            public Color HiColor;
         }
 
         private sealed class LowerPanel
@@ -3333,7 +3383,7 @@ namespace StockPool
                         }
                         else
                         {
-                            using (var pen = new Pen(s.Color, 1.4f))
+                            using (var pen = new Pen(s.Color, s.Width))
                             {
                                 bool penUp = false;
                                 for (int i = 0; i < n; i++)
@@ -3344,7 +3394,14 @@ namespace StockPool
                                     if (double.IsNaN(v)) { penUp = false; continue; }
                                     int x = (int)xOf(i);
                                     int y = (int)yInd(v);
-                                    if (penUp) g.DrawLine(pen, (int)xOf(i - 1), (int)yInd(s.Data[wstart + i - 1]), x, y);
+                                    if (penUp)
+                                    {
+                                        double pv = s.Data[wstart + i - 1];
+                                        // 对齐 IF(RPS>=M,RPS,DRAWNULL),COLORRED：相邻两点都在阈值之上才整段转红
+                                        pen.Color = (s.HasHi && pv >= s.HiThreshold && v >= s.HiThreshold)
+                                            ? s.HiColor : s.Color;
+                                        g.DrawLine(pen, (int)xOf(i - 1), (int)yInd(pv), x, y);
+                                    }
                                     penUp = true;
                                 }
                             }
@@ -3356,7 +3413,7 @@ namespace StockPool
                         g.DrawString(panel.Title, Font, b, lx, ly); lx += 44;
                         foreach (ChartSeries s in panel.Series)
                         {
-                            using (var pen = new Pen(s.Color, 2f)) g.DrawLine(pen, lx, ly + 7, lx + 14, ly + 7);
+                            using (var pen = new Pen(s.Color, Math.Max(2f, s.Width))) g.DrawLine(pen, lx, ly + 7, lx + 14, ly + 7);
                             g.DrawString(s.Name, Font, b, lx + 18, ly); lx += 58;
                         }
                     }

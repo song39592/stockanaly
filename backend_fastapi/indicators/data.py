@@ -22,13 +22,15 @@ from __future__ import annotations
 
 import dataclasses as dc
 import datetime as dt
+import threading
+from bisect import bisect_left
 from functools import lru_cache
 
 import kline_service
 import numpy as np
 import pandas as pd
 import price_store          # 仅用于读股本（share_capital），K 线本身走 kline_service
-from periods import normalize
+from periods import bucket_key, normalize
 
 _MIN_ROWS = 2  # 少于此行数视为数据不足，技术指标无法计算
 _OHLCV = ("open", "high", "low", "close", "volume")
@@ -226,7 +228,145 @@ def chip_rows_of(df: pd.DataFrame, formula_id: str | None = None,
     return rows, frames
 
 
+# --------------------------------------------------------------------------- #
+# 横截面指标数据：全市场收盘价面板（供 RPS 相对强度等复用）
+# --------------------------------------------------------------------------- #
+# 与「逐只 get_ohlcv」不同，RPS 需要**同一交易日全市场**的价格截面来排名，
+# 因此单独维护一份「全市场宽表」：
+#   索引 = 交易日（YYYY-MM-DD），列 = 代码，值 = 后复权收盘价。
+# 面板构建较重（~15 秒读全市场 + 复权），故构建一次后常驻内存，跨请求复用；
+# 前端进入个股页会先拉指标清单，届时后台线程预热（见 warm），避免首帧卡住。
+_RPS_PANEL_YEARS = 6          # 面板回看年数：限制内存；RPS 排名只用近年
+# 可重入锁：构建「周 / 月」面板时会复用已缓存的「日」面板（同一线程再次进入）
+_MARKET_LOCK = threading.RLock()
+_MARKET_PANEL: dict[str, pd.DataFrame] = {}      # period -> 宽表
+_MARKET_WARMING: set[str] = set()
+
+
+def period_of(df: pd.DataFrame) -> str:
+    """取 df 对应的 K 线周期（由 base.compute 挂在 df.attrs 上）。"""
+    return normalize(str(df.attrs.get("period") or "day"))
+
+
+def _apply_hfq(panel: pd.DataFrame) -> pd.DataFrame:
+    """把原始收盘价宽表按**后复权因子**缩放（只影响价格，用于跨除权的收益比较）。
+
+    与 load_bars 的 hfq 口径一致：某交易日的因子 = ex_date ≤ 该日的**最近一条**因子；
+    早于首条因子的事件前保持原始价（与 load_bars 的 adjusted=False 分支一致）。
+    因子库很小（全市场约 6~7 万行），逐事件对「ex_date 起的该列」赋值即可。
+    """
+    if panel is None or panel.empty:
+        return panel if panel is not None else pd.DataFrame()
+    factors = price_store.load_all_factors()
+    if not factors:
+        return panel
+
+    col_of = {c: j for j, c in enumerate(panel.columns)}
+    idx = [str(d)[:10] for d in panel.index]
+    base = panel.to_numpy(dtype="float64", copy=True)
+    adj = base.copy()
+    for row in factors:                       # 已按 code, ex_date 升序
+        j = col_of.get(row["code"])
+        if j is None:
+            continue
+        fac = row["hfq_factor"]
+        if fac is None:
+            continue
+        pos = bisect_left(idx, str(row["ex_date"])[:10])
+        if pos < len(idx):
+            adj[pos:, j] = base[pos:, j] * float(fac)
+    return pd.DataFrame(adj, index=panel.index, columns=panel.columns)
+
+
+def _resample_panel(panel: pd.DataFrame, period: str) -> pd.DataFrame:
+    """把日线宽表合样到周 / 月：每桶取**最后一个交易日**那一行（口径同 periods.resample_bars）。"""
+    if panel.empty or period == "day":
+        return panel
+    labels = [str(d)[:10] for d in panel.index]
+    keys = [bucket_key(d, period) for d in labels]
+    keep = [i for i in range(len(keys)) if i == len(keys) - 1 or keys[i + 1] != keys[i]]
+    sub = panel.iloc[keep]
+    sub.index = [labels[i] for i in keep]
+    return sub
+
+
+def _build_market_panel(period: str) -> pd.DataFrame:
+    # 周 / 月面板直接由已缓存的「日」面板合样得到，避免重复读全市场 + 复权。
+    if period == "day":
+        start = (dt.date.today() - dt.timedelta(days=365 * _RPS_PANEL_YEARS)).strftime("%Y-%m-%d")
+        raw = price_store.load_market_close("raw", start=start)
+        return _apply_hfq(raw)
+    return _resample_panel(_market_panel("day"), period)
+
+
+def _market_panel(period: str = "day") -> pd.DataFrame:
+    """取（并按需构建）全市场收盘价面板，带进程内缓存 + 并发保护。"""
+    key = normalize(period)
+    panel = _MARKET_PANEL.get(key)
+    if panel is not None:
+        return panel
+    with _MARKET_LOCK:
+        panel = _MARKET_PANEL.get(key)
+        if panel is None:
+            panel = _build_market_panel(key)
+            _MARKET_PANEL[key] = panel
+        return panel
+
+
+def warm(period: str = "day") -> None:
+    """后台预热全市场面板（不阻塞调用方）；已在缓存或正在构建则直接返回。"""
+    key = normalize(period)
+    if key in _MARKET_PANEL or key in _MARKET_WARMING:
+        return
+    _MARKET_WARMING.add(key)
+
+    def _run():
+        try:
+            _market_panel(key)
+        except Exception:                      # noqa: BLE001 - 预热失败不影响正常请求
+            pass
+        finally:
+            _MARKET_WARMING.discard(key)
+
+    threading.Thread(target=_run, name=f"market-panel-{key}", daemon=True).start()
+
+
+def get_rps(code: str, periods, dates, period: str = "day") -> dict:
+    """某只股票在多个周期的 **RPS（相对价格强度，0~100）**，对齐到 `dates`。
+
+    RPS = 该股 N 日涨幅在全市场的**百分比排名** ×100（陶博士 / 通达信口径）：
+        EXTRS = close / close.shift(N) - 1     # N 日区间涨幅（后复权）
+        RPS   = rank(EXTRS, 全市场, 升序, pct=True) × 100
+    返回 {N: pd.Series(index=dates)}；数据不足 / 未上市处为 NaN。
+    """
+    panel = _market_panel(period)
+    target = [str(d)[:10] for d in dates]
+    if panel is None or panel.empty:
+        raise RuntimeError("全市场横截面数据不可用（本地暂无日 K 数据）")
+    if code not in panel.columns:
+        raise RuntimeError(f"全市场横截面数据缺少 {code}")
+
+    present = [d for d in target if d in panel.index]
+    out: dict[int, pd.Series] = {}
+    if not present:                            # 该股日期与本地面板无交集
+        for n in periods:
+            out[int(n)] = pd.Series(np.nan, index=target, dtype="float64")
+        return out
+
+    sub = panel.loc[present]                   # 只算目标票涉及的交易日，降低排名开销
+    for n in periods:
+        n = int(n)
+        if n <= 0:
+            continue
+        ret = sub / panel.shift(n).loc[present] - 1.0
+        rps = ret.rank(axis=1, pct=True).mul(100.0)[code]
+        out[n] = rps.reindex(target)
+    return out
+
+
 def clear_cache() -> None:
     """测试或切换数据源后清空取数缓存。"""
     _load.cache_clear()
     _chip_frames.cache_clear()
+    with _MARKET_LOCK:
+        _MARKET_PANEL.clear()
