@@ -182,18 +182,6 @@ namespace StockPool
             return tb;
         }
 
-        private static FlowLayoutPanel VKpiRow()
-        {
-            var f = new FlowLayoutPanel();
-            f.FlowDirection = FlowDirection.LeftToRight;
-            f.WrapContents = false;
-            f.AutoSize = true;
-            f.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            f.Margin = new Padding(0, 0, 0, 6);
-            f.Padding = new Padding(0);
-            return f;
-        }
-
         private void InitVGrid()
         {
             // 表格由 NewGrid（GridKit.cs）统一创建；本表沿用 Fill 撑满（列少、需要铺满宽度），
@@ -207,42 +195,6 @@ namespace StockPool
                 new GridColumn("预测价", "target_price", true) { Size = DataGridViewAutoSizeColumnMode.Fill },
                 new GridColumn("收益率", "return_rate", true) { Size = DataGridViewAutoSizeColumnMode.Fill },
             });
-        }
-
-        /// <summary>一张 KPI 卡片（换肤时按 tag="kpi" 上卡片底色）。</summary>
-        private static void AddKpi(FlowLayoutPanel row, string l, string v, string s)
-        {
-            var card = new Panel();
-            card.Tag = "kpi";
-            card.Width = 230;
-            card.Height = 66;
-            card.Margin = new Padding(0, 0, 8, 0);
-            card.Padding = new Padding(0);
-
-            var l1 = new Label();
-            l1.Text = l;
-            l1.AutoSize = true;
-            l1.Location = new Point(10, 7);
-            l1.Tag = "muted";
-
-            var v1 = new Label();
-            v1.Text = v;
-            v1.Font = new Font("Consolas", 12.5f);
-            v1.AutoSize = true;
-            v1.Location = new Point(10, 23);
-            v1.MaximumSize = new Size(212, 0);
-
-            var s1 = new Label();
-            s1.Text = s;
-            s1.AutoSize = true;
-            s1.Location = new Point(10, 46);
-            s1.MaximumSize = new Size(212, 0);
-            s1.Tag = "muted";
-
-            card.Controls.Add(l1);
-            card.Controls.Add(v1);
-            card.Controls.Add(s1);
-            row.Controls.Add(card);
         }
 
         private void ValuationToggleParams()

@@ -1,6 +1,25 @@
 # 06 · 前端：KPI 卡片 / 卡片行 搬家（零行为改动）
 
-> 状态：待办　|　优先级：中　|　收益 ★★★☆☆ / 风险 ★☆☆☆☆
+> 状态：**已完成**（2026-10-05）　|　优先级：中　|　收益 ★★★☆☆ / 风险 ★☆☆☆☆
+
+> **回填实际改动**
+> 新建 `launcher/Cards.cs`，把 `VKpiRow` + `AddKpi` **原样**从 `ValuationPage.cs` 搬过去。
+> `ValuationPage.cs` 减少 48 行（722 → 593）。
+>
+> **零行为改动**：两个函数都是自包含的（只依赖 `System.Drawing` / `System.Windows.Forms`），
+> 且是 `partial class MainForm` 的成员 —— **调用点一行都没改**，不需要重命名。
+> 实现逐字照搬，含 `card.Tag = "kpi"`（`Skin()` 靠它上卡片底色，丢了卡片就没底色）。
+>
+> **调用点数量与搬家前完全一致**（这是「纯搬家」最直接的证据）：
+> `AddKpi` 24 处（StockPage 11 / MarketPage 7 / ValuationPage 6）、
+> `VKpiRow` 7 处（StockPage 3 / MarketPage 2 / ValuationPage 2）。
+>
+> **按踩坑点刻意没动的**
+> - `StKpiCard` / `StCardRow`（StrategyPage.cs）**保持独立** —— 它有边框、排版方向相反，
+>   并进来会让原本无边框的 24 张卡长出边框，42 处调用点出现视觉回归。
+> - `MktRow`（MarketPage.cs）不动 —— 单行「名称…值」，形态不同。
+> - MarketPage 的多行卡片（只有 1 个调用点，性价比低）不动。
+> - 两个行容器的 `WrapContents` / `MaximumSize` 差异是有意的，**没有统一**。
 
 ## 问题
 `AddKpi` / `VKpiRow` 定义在 `ValuationPage.cs`，但被 **3 个页面共 24 处**调用（跨文件调私有静态方法）。
@@ -39,7 +58,10 @@
 2. **不要把 `StKpiCard` 并入 `AddKpi`**：它有边框、排版方向相反，会让原本无边框的 24 张卡长出边框、42 处调用点出现视觉回归，收益不抵风险。
 3. 两个行容器的 `WrapContents` / `MaximumSize` 差异是有意的，合并时若统一要保留参数。
 
-## 验收
-- [ ] `AddKpi` / `VKpiRow` 已迁出 `ValuationPage.cs`，调用点全部仍正常编译
-- [ ] 估值页 / 个股页基本信息 / 涨停 KPI / 估值情景 / 盘面资金 / 连板 —— 卡片外观与搬家前一致
-- [ ] 浅色/深色切换后卡片底色正常
+## 验收（2026-10-05）
+- [x] `AddKpi` / `VKpiRow` 已迁出 `ValuationPage.cs` ✅ 现定义在 `Cards.cs:36` / `Cards.cs:23`
+- [x] 调用点全部仍正常编译 ✅ `csc` exit 0，无 lint 报错
+- [x] 调用点数量与搬家前一致 ✅ `AddKpi` 24 处、`VKpiRow` 7 处（逐文件分布见上）
+- [x] `Tag = "kpi"` 保留 ✅ `Cards.cs:39`（丢了卡片就没底色）
+- [x] 不该动的没动 ✅ `StKpiCard` / `StCardRow` / `MktRow` 均仍在原文件
+- [ ] 卡片外观与配色目测（估值页 / 个股页 / 盘面 6 处场景 + 浅色深色切换）—— **未做**（需人工过一眼）

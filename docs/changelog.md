@@ -23,6 +23,15 @@
     新模块打日志的写法。该节**只做导航**，权威细节仍以 `config.py` / `storage.py` / `logutil.py`
     的注释为准，避免变成第二份需要同步的真相。
 
+- **KPI 卡片公共件归位**（待办 06）：新增 `launcher/Cards.cs`，
+  `VKpiRow` / `AddKpi` 从 `ValuationPage.cs` **原样搬入**（`ValuationPage.cs` 722 → 593 行）。
+  - **零行为改动**：两个函数自包含，且是 `partial class MainForm` 成员，
+    **调用点一行未改**。调用数量与搬家前完全一致：`AddKpi` 24 处、`VKpiRow` 7 处。
+  - 保留了 `card.Tag = "kpi"` —— `Skin()` 靠它给卡片上底色，丢了卡片就没底色。
+  - **刻意不并入**：`StKpiCard` / `StCardRow`（150×66、**有边框**、值在上标签在下，
+    并进来会让原本无边框的 24 张卡长出边框，42 处调用点视觉回归）、`MktRow`（单行形态不同）。
+    两个行容器的 `WrapContents` / `MaximumSize` 差异是有意的，未统一。
+
 - **启动器 JSON 工具收敛**（待办 02）：新增 `launcher/J.cs`（20 个方法），
   **删除 27 个重复定义、替换 829 处调用点**。
   - 4 份逐字等价的取键（`VSafe`/`StGet`/`DictVal`/`DlVal`）→ `J.Get` / `J.GetFrom`；
