@@ -1,3 +1,6 @@
+# 依赖**声明**文件：只写直接依赖，不锁版本（便于升级）
+# 精确版本 + 全部传递依赖见 requirements.lock.txt（pip freeze 生成，用于复现环境）
+# 两者都要提交（属「依赖声明与锁文件」类，不是构建缓存）
 fastapi
 uvicorn
 akshare
