@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 import config
 import crypto
+import dumplog
 import integrity
 import storage
 
@@ -100,6 +101,25 @@ def llm_key_seal():
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error"))
     return result
+
+
+@router.post("/dump")
+def dump_diagnostics():
+    """一键导出诊断包到 `<data>/logs/dump-<时间戳>.zip`，返回路径与大小。
+
+    包内只有日志末尾、数据目录与完整性状态、模块挂载错误、**脱敏**后的配置、
+    依赖清单与周榜状态 —— **不含任何密钥，也不含数据库文件**（`stock_history.db` /
+    `bars/` 合计约 2 GB，只记录路径与体积）。
+
+    打包前会做一次密钥模式扫描；命中则**拒绝生成整个包**并返回 500 说明命中位置
+    （宁可导不出来，也不能把密钥带出去）。
+
+    用 POST 而非 GET：这是会**创建文件**的副作用操作，不该由 GET 触发。
+    """
+    try:
+        return dumplog.build()
+    except dumplog.SecretLeakError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 class RebuildRequest(BaseModel):

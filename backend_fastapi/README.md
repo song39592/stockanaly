@@ -332,6 +332,8 @@ GET  /api/history/download/tdx/status       通达信目录检测
   `logging.config.dictConfig()`，其配置不动 root 且带 `disable_existing_loggers: false`；
   自建具名 logger 并设 `propagate=False` 才不会被冲掉。**别改成直接配 root。**
 - **日志不可写时降级为只写 stderr**，绝不让日志拖垮启动。
+- **排障导出**：`POST /api/system/dump` 一键打包诊断信息到 `logs/dump-<时间戳>.zip`
+  （含日志末尾与**脱敏**配置）。打包前会做密钥扫描，命中即拒绝生成 —— 详见 `dumplog.py`。
 
 ### 5. 新模块要打日志时怎么写
 
