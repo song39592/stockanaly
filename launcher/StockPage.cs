@@ -682,14 +682,14 @@ namespace StockPool
                         bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
                         if (ok && j.ContainsKey("name"))
                         {
-                            double? pr = VNum(VSafe(j, "price"));
-                            string nm = VStr(VSafe(j, "name"));
+                            double? pr = J.NumOrNull(J.Get(j, "price"));
+                            string nm = J.Str(J.Get(j, "name"));
                             _stockName.Text = nm + (pr != null ? "  " + pr.Value.ToString("F2") + " 元" : "");
                             StockAddHistory(code, nm);   // 补全历史记录中的名称
                         }
                         else
                         {
-                            _stockName.Text = VStr(VSafe(j, "error"));
+                            _stockName.Text = J.Str(J.Get(j, "error"));
                         }
                     });
                 }
@@ -763,7 +763,7 @@ namespace StockPool
                     {
                         foreach (Dictionary<string, object> it in list)
                         {
-                            string panel = VStr(VSafe(it, "panel"));
+                            string panel = J.Str(J.Get(it, "panel"));
                             if (panel == "none") continue;                   // 不显示类型：不进勾选列表
                             string grp = (panel == "main") ? "主图" : "副图";
                             if (!groups.ContainsKey(grp)) groups[grp] = new List<Dictionary<string, object>>();
@@ -785,8 +785,8 @@ namespace StockPool
                 _stockIndFlow.Controls.Add(Lbl(kv.Key + "："));
                 foreach (var it in kv.Value)
                 {
-                    string id = VStr(VSafe(it, "id"));
-                    string name = VStr(VSafe(it, "name"));
+                    string id = J.Str(J.Get(it, "id"));
+                    string name = J.Str(J.Get(it, "name"));
                     var cb = Check(name, _stockIndicators.Contains(id));
                     cb.CheckedChanged += delegate { StockSetIndicator(id, cb.Checked); };
                     _stockIndFlow.Controls.Add(cb);
@@ -839,7 +839,7 @@ namespace StockPool
                     if (!PostJson("http://127.0.0.1:8000/api/indicators/batch", json, 120000, out body) || string.IsNullOrEmpty(body))
                         return;
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body);
-                    var itemsResp = VArr(VSafe(j, "items"));
+                    var itemsResp = J.Arr(J.Get(j, "items"));
                     var dates = (_stockKline != null) ? _stockKline.GetDates() : new List<string>();
                     var panels = new List<LowerPanel>();
                     var mainSeries = new List<ChartSeries>();
@@ -847,21 +847,21 @@ namespace StockPool
                     {
                         foreach (Dictionary<string, object> it in itemsResp)
                         {
-                            string id = VStr(VSafe(it, "id"));
-                            string name = VStr(VSafe(it, "name"));
-                            string panel = VStr(VSafe(it, "panel"));
-                            if (VSafe(it, "error") != null) continue;
-                            var sArr = VArr(VSafe(it, "series"));
+                            string id = J.Str(J.Get(it, "id"));
+                            string name = J.Str(J.Get(it, "name"));
+                            string panel = J.Str(J.Get(it, "panel"));
+                            if (J.Get(it, "error") != null) continue;
+                            var sArr = J.Arr(J.Get(it, "series"));
                             if (sArr == null) continue;
                             if (panel == "main")
                             {
                                 // 主图叠加：序列直接叠加到价格轴
                                 foreach (Dictionary<string, object> s in sArr)
                                 {
-                                    string sname = VStr(VSafe(s, "name"));
-                                    string kind = VStr(VSafe(s, "kind"));
-                                    var dArr = VArr(VSafe(s, "data"));
-                                    var data = AlignSeries(dates, VSafe(s, "dates"), dArr);
+                                    string sname = J.Str(J.Get(s, "name"));
+                                    string kind = J.Str(J.Get(s, "kind"));
+                                    var dArr = J.Arr(J.Get(s, "data"));
+                                    var data = AlignSeries(dates, J.Get(s, "dates"), dArr);
                                     var cs = new ChartSeries { Name = sname, Kind = kind, Data = data };
                                     ApplySeriesStyle(cs);
                                     mainSeries.Add(cs);
@@ -873,10 +873,10 @@ namespace StockPool
                                 var lp = new LowerPanel { Id = id, Title = name, Weight = 1, Series = new List<ChartSeries>() };
                                 foreach (Dictionary<string, object> s in sArr)
                                 {
-                                    string sname = VStr(VSafe(s, "name"));
-                                    string kind = VStr(VSafe(s, "kind"));
-                                    var dArr = VArr(VSafe(s, "data"));
-                                    var data = AlignSeries(dates, VSafe(s, "dates"), dArr);
+                                    string sname = J.Str(J.Get(s, "name"));
+                                    string kind = J.Str(J.Get(s, "kind"));
+                                    var dArr = J.Arr(J.Get(s, "data"));
+                                    var data = AlignSeries(dates, J.Get(s, "dates"), dArr);
                                     var cs = new ChartSeries { Name = sname, Kind = kind, Data = data };
                                     ApplySeriesStyle(cs);
                                     lp.Series.Add(cs);
@@ -980,7 +980,7 @@ namespace StockPool
             bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
             if (!ok)
             {
-                string emsg = VStr(VSafe(j, "detail"));
+                string emsg = J.Str(J.Get(j, "detail"));
                 _stockBlocks.Text = string.IsNullOrEmpty(emsg) ? "板块标注不可用" : emsg;
                 _stockBlocks.ForeColor = muted;
                 return;
@@ -990,10 +990,10 @@ namespace StockPool
             bool syncing = false;
             object syv;
             if (j.TryGetValue("syncing", out syv) && syv is bool) syncing = (bool)syv;
-            var boardsObj = VSafe(j, "boards") as Dictionary<string, object>;
+            var boardsObj = J.Get(j, "boards") as Dictionary<string, object>;
             bool empty = (boardsObj == null
-                          || VArr(VSafe(boardsObj, "industry")) == null
-                          || VArr(VSafe(boardsObj, "industry")).Count == 0);
+                          || J.Arr(J.Get(boardsObj, "industry")) == null
+                          || J.Arr(J.Get(boardsObj, "industry")).Count == 0);
             if (empty)
             {
                 if (syncing)
@@ -1013,11 +1013,11 @@ namespace StockPool
             _stockBlocks.Cursor = Cursors.Default;
 
             // 通达信配色：行业黄 / 概念绿 / 地域青；最相关（成分股最少）加 ★
-            _stockBlocks.Text = BoardLineText("行业：", VArr(VSafe(boardsObj, "industry")), 6);
+            _stockBlocks.Text = BoardLineText("行业：", J.Arr(J.Get(boardsObj, "industry")), 6);
             _stockBlocks.ForeColor = C.RpsYellowLight;
-            _stockCptBlocks.Text = BoardLineText("概念：", VArr(VSafe(boardsObj, "concept")), 12);
+            _stockCptBlocks.Text = BoardLineText("概念：", J.Arr(J.Get(boardsObj, "concept")), 12);
             _stockCptBlocks.ForeColor = C.UpSoft;
-            _stockRgnBlocks.Text = BoardLineText("地域：", VArr(VSafe(boardsObj, "region")), 3);
+            _stockRgnBlocks.Text = BoardLineText("地域：", J.Arr(J.Get(boardsObj, "region")), 3);
             _stockRgnBlocks.ForeColor = C.LineCyan;
         }
 
@@ -1036,7 +1036,7 @@ namespace StockPool
             {
                 var d = items[i] as Dictionary<string, object>;
                 if (d == null) continue;
-                string name = Convert.ToString(VSafe(d, "board"));
+                string name = Convert.ToString(J.Get(d, "board"));
                 if (string.IsNullOrEmpty(name)) continue;
                 names.Add((i == 0 && items.Count > 1 ? "★" : "") + name);
             }
@@ -1080,15 +1080,9 @@ namespace StockPool
             });
         }
 
-        private static string FmtYi(object o)
-        {
-            double? v = VNum(o);
-            return v == null ? "—" : v.Value.ToString("F2") + " 亿";
-        }
-
         private static string FmtShares(object o)
         {
-            double? v = VNum(o);
+            double? v = J.NumOrNull(o);
             if (v == null) return "—";
             if (v >= 1e8) return (v.Value / 1e8).ToString("F2") + " 亿股";
             if (v >= 1e4) return (v.Value / 1e4).ToString("F2") + " 万股";
@@ -1106,7 +1100,7 @@ namespace StockPool
             bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
             if (!ok)
             {
-                string emsg = VStr(VSafe(j, "detail"));
+                string emsg = J.Str(J.Get(j, "detail"));
                 if (string.IsNullOrEmpty(emsg)) emsg = "加载失败";
                 _stockBasicStatus.Text = emsg;
                 _stockBasicStatus.Tag = "bad";
@@ -1114,53 +1108,53 @@ namespace StockPool
                 return;
             }
 
-            string industry = VStr(VSafe(j, "industry"));
+            string industry = J.Str(J.Get(j, "industry"));
             AddKpi(_stockBasicKpi, "所属行业", string.IsNullOrEmpty(industry) ? "—" : industry,
-                "上市 " + (string.IsNullOrEmpty(VStr(VSafe(j, "listing_date"))) ? "—" : VStr(VSafe(j, "listing_date"))));
-            AddKpi(_stockBasicKpi, "总市值", FmtYi(VSafe(j, "total_mv_yi")),
-                "总股本 " + FmtShares(VSafe(j, "total_shares")));
-            AddKpi(_stockBasicKpi, "流通市值", FmtYi(VSafe(j, "float_mv_yi")),
-                "流通股本 " + FmtShares(VSafe(j, "float_shares")));
+                "上市 " + (string.IsNullOrEmpty(J.Str(J.Get(j, "listing_date"))) ? "—" : J.Str(J.Get(j, "listing_date"))));
+            AddKpi(_stockBasicKpi, "总市值", J.Yi(J.Get(j, "total_mv_yi")),
+                "总股本 " + FmtShares(J.Get(j, "total_shares")));
+            AddKpi(_stockBasicKpi, "流通市值", J.Yi(J.Get(j, "float_mv_yi")),
+                "流通股本 " + FmtShares(J.Get(j, "float_shares")));
 
-            string bus = VStr(VSafe(j, "main_business"));
+            string bus = J.Str(J.Get(j, "main_business"));
             _stockBasicBus.Text = string.IsNullOrEmpty(bus) ? "" : ("主营业务：" + bus);
 
-            var lu = VSafe(j, "limit_up") as Dictionary<string, object>;
+            var lu = J.Get(j, "limit_up") as Dictionary<string, object>;
             if (lu != null)
             {
-                double? lpct = VNum(VSafe(j, "limit_pct"));
-                string last = VStr(VSafe(lu, "last_date"));
+                double? lpct = J.NumOrNull(J.Get(j, "limit_pct"));
+                string last = J.Str(J.Get(lu, "last_date"));
                 string range = "";
-                var rArr = VArr(VSafe(lu, "max_range"));
-                if (rArr != null && rArr.Count >= 2) range = VStr(rArr[0]) + " ~ " + VStr(rArr[1]);
+                var rArr = J.Arr(J.Get(lu, "max_range"));
+                if (rArr != null && rArr.Count >= 2) range = J.Str(rArr[0]) + " ~ " + J.Str(rArr[1]);
                 AddKpi(_stockBasicLimitKpi, "上次涨停", string.IsNullOrEmpty(last) ? "—" : last,
                     lpct != null ? ("涨跌幅限制 " + lpct.Value + "%") : "");
                 AddKpi(_stockBasicLimitKpi, "历史最大连板",
-                    (VNum(VSafe(lu, "max_streak")) ?? 0) + " 板",
+                    (J.NumOrNull(J.Get(lu, "max_streak")) ?? 0) + " 板",
                     string.IsNullOrEmpty(range) ? "" : range);
                 AddKpi(_stockBasicLimitKpi, "涨停次数",
-                    (VNum(VSafe(lu, "total")) ?? 0).ToString(), "历史累计");
+                    (J.NumOrNull(J.Get(lu, "total")) ?? 0).ToString(), "历史累计");
             }
 
-            var holders = VArr(VSafe(j, "holders"));
+            var holders = J.Arr(J.Get(j, "holders"));
             if (holders != null)
             {
                 foreach (Dictionary<string, object> h in holders)
                 {
-                    double? pct = VNum(VSafe(h, "pct"));
+                    double? pct = J.NumOrNull(J.Get(h, "pct"));
                     _stockBasicHolders.Rows.Add(
-                        VStr(VSafe(h, "rank")),
-                        VStr(VSafe(h, "name")),
-                        VStr(VSafe(h, "share_type")),
-                        FmtShares(VSafe(h, "shares")),
+                        J.Str(J.Get(h, "rank")),
+                        J.Str(J.Get(h, "name")),
+                        J.Str(J.Get(h, "share_type")),
+                        FmtShares(J.Get(h, "shares")),
                         pct == null ? "—" : pct.Value.ToString("F2") + "%",
-                        VStr(VSafe(h, "change")),
-                        VStr(VSafe(h, "change_ratio")));
+                        J.Str(J.Get(h, "change")),
+                        J.Str(J.Get(h, "change_ratio")));
                 }
                 _stockBasicHolders.Fit(200, 620);
             }
 
-            var errs = VArr(VSafe(j, "errors"));
+            var errs = J.Arr(J.Get(j, "errors"));
             bool hasErr = errs != null && errs.Count > 0;
             _stockBasicStatus.Text = hasErr ? ("部分数据不可用：" + JoinErrs(errs)) : "加载完成";
             _stockBasicStatus.Tag = "muted";
@@ -1181,22 +1175,22 @@ namespace StockPool
                         || string.IsNullOrEmpty(body))
                         return;
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body);
-                    var items = VArr(VSafe(j, "items"));
+                    var items = J.Arr(J.Get(j, "items"));
                     var list = new List<ChipFormulaItem>();
                     if (items != null)
                     {
                         foreach (Dictionary<string, object> it in items)
                         {
-                            string fid = VStr(VSafe(it, "id"));
+                            string fid = J.Str(J.Get(it, "id"));
                             if (string.IsNullOrEmpty(fid)) continue;
                             list.Add(new ChipFormulaItem
                             {
                                 Id = fid,
-                                Name = VStr(VSafe(it, "name")) ?? fid,
+                                Name = J.Str(J.Get(it, "name")) ?? fid,
                             });
                         }
                     }
-                    string def = VStr(VSafe(j, "default"));
+                    string def = J.Str(J.Get(j, "default"));
                     Invoke((Action)delegate { StockRenderChipFormulas(list, def); });
                 }
                 catch { }
@@ -1267,7 +1261,7 @@ namespace StockPool
                     bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
                     if (!ok)
                     {
-                        string emsg = VStr(VSafe(j, "error"));
+                        string emsg = J.Str(J.Get(j, "error"));
                         if (string.IsNullOrEmpty(emsg)) emsg = "筹码数据不可用";
                         string cap = emsg;
                         Invoke((Action)delegate
@@ -1289,8 +1283,8 @@ namespace StockPool
                     string note = "未做锁仓修正";
                     if (lockup)
                     {
-                        double lr = ChipNum(j, "lockup_ratio");
-                        double lf = ChipNum(j, "lockup_factor");
+                        double lr = J.NumAt(j, "lockup_ratio");
+                        double lf = J.NumAt(j, "lockup_factor");
                         note = string.Format("已做锁仓修正（占流通股 {0:F1}%，系数 {1:F3}）", lr * 100.0, lf);
                     }
                     Invoke((Action)delegate
@@ -1318,15 +1312,15 @@ namespace StockPool
         private static List<ChipBin> StockParseChipBins(Dictionary<string, object> j)
         {
             var bins = new List<ChipBin>();
-            var arr = VArr(VSafe(j, "bins"));
+            var arr = J.Arr(J.Get(j, "bins"));
             if (arr == null) return bins;
             foreach (Dictionary<string, object> d in arr)
             {
                 var b = new ChipBin();
-                b.Lo = VNum(VSafe(d, "lo")) ?? 0;
-                b.Hi = VNum(VSafe(d, "hi")) ?? 0;
-                b.Price = VNum(VSafe(d, "price")) ?? 0;
-                b.Pct = VNum(VSafe(d, "pct")) ?? 0;
+                b.Lo = J.NumOrNull(J.Get(d, "lo")) ?? 0;
+                b.Hi = J.NumOrNull(J.Get(d, "hi")) ?? 0;
+                b.Price = J.NumOrNull(J.Get(d, "price")) ?? 0;
+                b.Pct = J.NumOrNull(J.Get(d, "pct")) ?? 0;
                 bins.Add(b);
             }
             return bins;
@@ -1340,14 +1334,14 @@ namespace StockPool
         private static void StockParseChipFrames(Dictionary<string, object> j, List<ChipBin> bins,
             List<string> dates, List<double[]> frames, List<ChipStats> fstats)
         {
-            var frObj = VSafe(j, "frames") as Dictionary<string, object>;
+            var frObj = J.Get(j, "frames") as Dictionary<string, object>;
             if (frObj != null)
             {
-                var dArr = VArr(VSafe(frObj, "dates"));
+                var dArr = J.Arr(J.Get(frObj, "dates"));
                 if (dArr != null)
                     foreach (object o in dArr) dates.Add(Convert.ToString(o));
 
-                var pArr = VArr(VSafe(frObj, "pct"));
+                var pArr = J.Arr(J.Get(frObj, "pct"));
                 if (pArr != null)
                 {
                     foreach (object row in pArr)
@@ -1355,12 +1349,12 @@ namespace StockPool
                         var rl = row as System.Collections.ArrayList;
                         if (rl == null) continue;
                         var vals = new double[rl.Count];
-                        for (int k = 0; k < rl.Count; k++) vals[k] = VNum(rl[k]) ?? 0;
+                        for (int k = 0; k < rl.Count; k++) vals[k] = J.NumOrNull(rl[k]) ?? 0;
                         frames.Add(vals);
                     }
                 }
 
-                var sArr = VArr(VSafe(frObj, "stats"));
+                var sArr = J.Arr(J.Get(frObj, "stats"));
                 if (sArr != null)
                 {
                     foreach (object row in sArr)
@@ -1369,11 +1363,11 @@ namespace StockPool
                         var s = new ChipStats();
                         if (d != null)
                         {
-                            s.Close = VNum(VSafe(d, "close")) ?? 0;
-                            s.AvgCost = VNum(VSafe(d, "avg_cost"));
-                            s.PeakPrice = VNum(VSafe(d, "peak_price"));
-                            s.ProfitRatio = VNum(VSafe(d, "profit_ratio"));
-                            s.Scr90 = VNum(VSafe(d, "scr90"));
+                            s.Close = J.NumOrNull(J.Get(d, "close")) ?? 0;
+                            s.AvgCost = J.NumOrNull(J.Get(d, "avg_cost"));
+                            s.PeakPrice = J.NumOrNull(J.Get(d, "peak_price"));
+                            s.ProfitRatio = J.NumOrNull(J.Get(d, "profit_ratio"));
+                            s.Scr90 = J.NumOrNull(J.Get(d, "scr90"));
                         }
                         fstats.Add(s);
                     }
@@ -1384,16 +1378,16 @@ namespace StockPool
                 var vals = new double[bins.Count];
                 for (int i = 0; i < bins.Count; i++) vals[i] = bins[i].Pct;
                 frames.Add(vals);
-                dates.Add(VStr(VSafe(j, "as_of")));
+                dates.Add(J.Str(J.Get(j, "as_of")));
                 var s = new ChipStats();
-                var sObj = VSafe(j, "stats") as Dictionary<string, object>;
+                var sObj = J.Get(j, "stats") as Dictionary<string, object>;
                 if (sObj != null)
                 {
-                    s.Close = VNum(VSafe(j, "last_close")) ?? 0;
-                    s.AvgCost = VNum(VSafe(sObj, "avg_cost"));
-                    s.PeakPrice = VNum(VSafe(sObj, "peak_price"));
-                    s.ProfitRatio = VNum(VSafe(sObj, "profit_ratio"));
-                    s.Scr90 = VNum(VSafe(sObj, "scr90"));
+                    s.Close = J.NumOrNull(J.Get(j, "last_close")) ?? 0;
+                    s.AvgCost = J.NumOrNull(J.Get(sObj, "avg_cost"));
+                    s.PeakPrice = J.NumOrNull(J.Get(sObj, "peak_price"));
+                    s.ProfitRatio = J.NumOrNull(J.Get(sObj, "profit_ratio"));
+                    s.Scr90 = J.NumOrNull(J.Get(sObj, "scr90"));
                 }
                 fstats.Add(s);
             }
@@ -1460,17 +1454,6 @@ namespace StockPool
             s.HiColor = RpsHiRed;
         }
 
-        /// <summary>从筹码接口响应里取一个数值字段（缺省 0；兼容 double / decimal）。</summary>
-        private static double ChipNum(Dictionary<string, object> j, string key)
-        {
-            object v;
-            if (j != null && j.TryGetValue(key, out v) && v != null)
-            {
-                try { return Convert.ToDouble(v); } catch (Exception) { }
-            }
-            return 0.0;
-        }
-
         private static Color LineColor(string name)
         {
             if (name != null)
@@ -1487,8 +1470,8 @@ namespace StockPool
             bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
             if (!ok)
             {
-                string emsg = VStr(VSafe(j, "detail"));
-                if (emsg == "") emsg = VStr(VSafe(j, "error"));
+                string emsg = J.Str(J.Get(j, "detail"));
+                if (emsg == "") emsg = J.Str(J.Get(j, "error"));
                 if (emsg == "") emsg = "加载失败";
                 StockFail(emsg);
                 return;
@@ -1496,48 +1479,48 @@ namespace StockPool
 
             // K 线（前复权）
             var bars = new List<KBar>();
-            var arr = VArr(VSafe(j, "bars"));
+            var arr = J.Arr(J.Get(j, "bars"));
             if (arr != null)
             {
                 foreach (Dictionary<string, object> d in arr)
                 {
                     var b = new KBar();
-                    b.Date = VStr(VSafe(d, "trade_date"));
-                    b.O = VNum(VSafe(d, "open")) ?? 0;
-                    b.C = VNum(VSafe(d, "close")) ?? 0;
-                    b.L = VNum(VSafe(d, "low")) ?? 0;
-                    b.H = VNum(VSafe(d, "high")) ?? 0;
-                    b.V = VNum(VSafe(d, "volume")) ?? 0;
+                    b.Date = J.Str(J.Get(d, "trade_date"));
+                    b.O = J.NumOrNull(J.Get(d, "open")) ?? 0;
+                    b.C = J.NumOrNull(J.Get(d, "close")) ?? 0;
+                    b.L = J.NumOrNull(J.Get(d, "low")) ?? 0;
+                    b.H = J.NumOrNull(J.Get(d, "high")) ?? 0;
+                    b.V = J.NumOrNull(J.Get(d, "volume")) ?? 0;
                     bars.Add(b);
                 }
             }
 
             // K 线（不复权原始价）
             var barsRaw = new List<KBar>();
-            var arrRaw = VArr(VSafe(j, "bars_raw"));
+            var arrRaw = J.Arr(J.Get(j, "bars_raw"));
             if (arrRaw != null)
             {
                 foreach (Dictionary<string, object> d in arrRaw)
                 {
                     var b = new KBar();
-                    b.Date = VStr(VSafe(d, "trade_date"));
-                    b.O = VNum(VSafe(d, "open")) ?? 0;
-                    b.C = VNum(VSafe(d, "close")) ?? 0;
-                    b.L = VNum(VSafe(d, "low")) ?? 0;
-                    b.H = VNum(VSafe(d, "high")) ?? 0;
-                    b.V = VNum(VSafe(d, "volume")) ?? 0;
+                    b.Date = J.Str(J.Get(d, "trade_date"));
+                    b.O = J.NumOrNull(J.Get(d, "open")) ?? 0;
+                    b.C = J.NumOrNull(J.Get(d, "close")) ?? 0;
+                    b.L = J.NumOrNull(J.Get(d, "low")) ?? 0;
+                    b.H = J.NumOrNull(J.Get(d, "high")) ?? 0;
+                    b.V = J.NumOrNull(J.Get(d, "volume")) ?? 0;
                     barsRaw.Add(b);
                 }
             }
 
             // 入池/出池轨迹
-            var pool = VMap(VSafe(j, "pool"));
-            var spans = VArr(pool != null ? VSafe(pool, "spans") : null);
+            var pool = J.Map(J.Get(j, "pool"));
+            var spans = J.Arr(pool != null ? J.Get(pool, "spans") : null);
             var spanList = new List<Dictionary<string, object>>();
             if (spans != null) foreach (Dictionary<string, object> s in spans) spanList.Add(s);
 
             // 消息面
-            var events = VArr(VSafe(j, "events"));
+            var events = J.Arr(J.Get(j, "events"));
 
             // 标记（入池/出池/事件）只取落在 K 线上的日期
             var dateSet = new HashSet<string>();
@@ -1545,14 +1528,14 @@ namespace StockPool
             var marks = new List<KMark>();
             foreach (Dictionary<string, object> s in spanList)
             {
-                string st = VStr(VSafe(s, "start"));
+                string st = J.Str(J.Get(s, "start"));
                 if (dateSet.Contains(st))
                     marks.Add(new KMark { Date = st, Kind = "in", Color = C.Up, Text = "入" });
-                object openv = VSafe(s, "open");
+                object openv = J.Get(s, "open");
                 bool open = (openv is bool) && (bool)openv;
                 if (!open)
                 {
-                    string en = VStr(VSafe(s, "end"));
+                    string en = J.Str(J.Get(s, "end"));
                     if (dateSet.Contains(en))
                         marks.Add(new KMark { Date = en, Kind = "out", Color = C.FlatWarm, Text = "出" });
                 }
@@ -1561,9 +1544,9 @@ namespace StockPool
             {
                 foreach (Dictionary<string, object> ev in events)
                 {
-                    string dt = VStr(VSafe(ev, "published_at"));
+                    string dt = J.Str(J.Get(ev, "published_at"));
                     if (!dateSet.Contains(dt)) continue;
-                    string kind = VStr(VSafe(ev, "kind"));
+                    string kind = J.Str(J.Get(ev, "kind"));
                     Color c = kind == "announcement" ? C.Warn : C.LineDea;
                     marks.Add(new KMark { Date = dt, Kind = "event", Color = c, Text = kind == "announcement" ? "告" : "闻" });
                 }
@@ -1582,8 +1565,8 @@ namespace StockPool
 
             // 状态：「更新至 …」栏与「前复权日K · …」统计文字已按需求移除，
             // 仅当有同步失败时在状态位提示，否则清空。
-            var sync = VMap(VSafe(j, "sync"));
-            var syncErrs = VArr(sync != null ? VSafe(sync, "errors") : null);
+            var sync = J.Map(J.Get(j, "sync"));
+            var syncErrs = J.Arr(sync != null ? J.Get(sync, "errors") : null);
             string errs = (syncErrs != null && syncErrs.Count > 0) ? "；部分失败：" + JoinErrs(syncErrs) : "";
             if (errs.Length > 0)
             {
@@ -1600,7 +1583,7 @@ namespace StockPool
         private static string JoinErrs(System.Collections.ArrayList list)
         {
             var parts = new List<string>();
-            foreach (object o in list) parts.Add(VStr(o));
+            foreach (object o in list) parts.Add(J.Str(o));
             return string.Join("；", parts.ToArray());
         }
 
@@ -1617,12 +1600,12 @@ namespace StockPool
             for (int i = spans.Count - 1; i >= 0; i--)
             {
                 Dictionary<string, object> s = spans[i];
-                object openv = VSafe(s, "open");
+                object openv = J.Get(s, "open");
                 bool open = (openv is bool) && (bool)openv;
-                string end = open ? "至今" : VStr(VSafe(s, "end"));
-                int days = MktInt(VSafe(s, "days"));
+                string end = open ? "至今" : J.Str(J.Get(s, "end"));
+                int days = MktInt(J.Get(s, "days"));
                 int row = _stockTimeline.Rows.Add(
-                    VStr(VSafe(s, "start")), end, days + " 天", open ? "在榜" : "已出池");
+                    J.Str(J.Get(s, "start")), end, days + " 天", open ? "在榜" : "已出池");
                 _stockTimeline.Rows[row].Cells[2].Style.ForeColor = days >= 7 ? C.Up
                     : (days >= 3 ? C.WarnMid : C.Flat);
                 _stockTimeline.Rows[row].Cells[3].Style.ForeColor = open ? C.Up : C.Flat;
@@ -1658,16 +1641,16 @@ namespace StockPool
             panel.Margin = new Padding(0, 0, 0, 10);
             panel.Padding = new Padding(0);
 
-            string kind = VStr(VSafe(ev, "kind"));
-            string meta = VStr(VSafe(ev, "published_at")) + " · "
-                + (kind == "announcement" ? "公告" : "新闻") + " · " + VStr(VSafe(ev, "source"));
+            string kind = J.Str(J.Get(ev, "kind"));
+            string meta = J.Str(J.Get(ev, "published_at")) + " · "
+                + (kind == "announcement" ? "公告" : "新闻") + " · " + J.Str(J.Get(ev, "source"));
             var m = Mute(Lbl(meta));
             m.Dock = DockStyle.Top;
             m.Margin = new Padding(0, 0, 0, 2);
             panel.Controls.Add(m);
 
-            string url = VStr(VSafe(ev, "source_url"));
-            string title = VStr(VSafe(ev, "title"));
+            string url = J.Str(J.Get(ev, "source_url"));
+            string title = J.Str(J.Get(ev, "title"));
             bool goodUrl = Uri.IsWellFormedUriString(url, UriKind.Absolute);
             var t = goodUrl ? (Control)new LinkLabel() : (Control)new Label();
             t.Text = title;
@@ -1689,7 +1672,7 @@ namespace StockPool
             }
             panel.Controls.Add(t);
 
-            string summary = VStr(VSafe(ev, "summary"));
+            string summary = J.Str(J.Get(ev, "summary"));
             if (summary != "")
             {
                 var sm = Mute(Lbl(summary));
@@ -1733,11 +1716,11 @@ namespace StockPool
         {
             _stockSaoleiList.Controls.Clear();
 
-            int total = VIntOf(VSafe(j, "total"));
-            int risk = VIntOf(VSafe(j, "risk"));
-            int safe = VIntOf(VSafe(j, "safe"));
-            string date = VStr(VSafe(j, "date"));
-            var cats = VArr(VSafe(j, "categories"));
+            int total = VIntOf(J.Get(j, "total"));
+            int risk = VIntOf(J.Get(j, "risk"));
+            int safe = VIntOf(J.Get(j, "safe"));
+            string date = J.Str(J.Get(j, "date"));
+            var cats = J.Arr(J.Get(j, "categories"));
 
             _stockSaoleiStatus.Text = "总检查 " + total + " 项 · 风险项 " + risk + " 项 · 安全项 " + safe + " 项"
                 + (date != "" ? "（数据日期 " + date + "）" : "");
@@ -1762,9 +1745,9 @@ namespace StockPool
                 for (int c = 0; c < cats.Count; c++)
                 {
                     grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-                    var cat = VMap(cats[c]);
+                    var cat = J.Map(cats[c]);
                     if (cat == null) continue;
-                    var blk = SaoleiCategory(VStr(VSafe(cat, "name")), VArr(VSafe(cat, "items")));
+                    var blk = SaoleiCategory(J.Str(J.Get(cat, "name")), J.Arr(J.Get(cat, "items")));
                     blk.Margin = new Padding(0, 0, 18, 0);
                     grid.Controls.Add(blk, c, 0);
                 }
@@ -1776,7 +1759,7 @@ namespace StockPool
             }
 
             // ---- 个股亮点（辅）----
-            var arr = VArr(VSafe(j, "highlights"));
+            var arr = J.Arr(J.Get(j, "highlights"));
             int n = arr == null ? 0 : arr.Count;
             var head = Lbl("个股亮点" + (n > 0 ? "（" + n + " 项）" : ""));
             head.Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold);
@@ -1791,10 +1774,10 @@ namespace StockPool
 
             for (int i = 0; i < n; i++)
             {
-                var ev = VMap(arr[i]);
+                var ev = J.Map(arr[i]);
                 if (ev == null) continue;
-                string name = VStr(VSafe(ev, "name"));
-                string desc = VStr(VSafe(ev, "desc"));
+                string name = J.Str(J.Get(ev, "name"));
+                string desc = J.Str(J.Get(ev, "desc"));
 
                 var panel = new Panel();
                 panel.AutoSize = true;
@@ -1830,7 +1813,7 @@ namespace StockPool
             {
                 foreach (object o in items)
                 {
-                    var m = VMap(o);
+                    var m = J.Map(o);
                     if (m != null) ok.Add(m);
                 }
             }
@@ -1868,8 +1851,8 @@ namespace StockPool
             {
                 for (int i = 0; i < ok.Count; i++)
                 {
-                    bool trig = VStr(VSafe(ok[i], "trig")) == "1";
-                    var nm = Lbl(VStr(VSafe(ok[i], "name")));
+                    bool trig = J.Str(J.Get(ok[i], "trig")) == "1";
+                    var nm = Lbl(J.Str(J.Get(ok[i], "name")));
                     nm.Margin = new Padding(0, 0, 12, 3);
                     var st = Lbl(trig ? "有" : "无");
                     st.Margin = new Padding(0, 0, 0, 3);
@@ -1896,7 +1879,7 @@ namespace StockPool
         private static int VIntOf(object o)
         {
             int v;
-            return int.TryParse(VStr(o), out v) ? v : 0;
+            return int.TryParse(J.Str(o), out v) ? v : 0;
         }
 
         private void StockSaoleiFail(string msg)
@@ -1948,45 +1931,45 @@ namespace StockPool
             bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
             if (!ok)
             {
-                string emsg = VStr(VSafe(j, "error"));
-                if (emsg == "") emsg = VStr(VSafe(j, "detail"));
+                string emsg = J.Str(J.Get(j, "error"));
+                if (emsg == "") emsg = J.Str(J.Get(j, "detail"));
                 if (emsg == "") emsg = "计算失败";
                 _stockValStatus.Text = emsg;
                 _stockValStatus.ForeColor = C.UpErr;
                 return;
             }
 
-            var m = VMap(VSafe(j, "market"));
-            var f = VMap(VSafe(j, "finance"));
-            var g = VMap(VSafe(j, "growth"));
-            var a = VMap(VSafe(j, "assumptions"));
+            var m = J.Map(J.Get(j, "market"));
+            var f = J.Map(J.Get(j, "finance"));
+            var g = J.Map(J.Get(j, "growth"));
+            var a = J.Map(J.Get(j, "assumptions"));
 
-            AddKpi(_stockValKpi, "股票", VStr(VSafe(j, "name")), VStr(VSafe(j, "code")));
-            AddKpi(_stockValKpi, "当前股价", VFmt(VNum(VSafe(m, "price"))) + " 元", VStr(VSafe(m, "price_source")));
-            AddKpi(_stockValKpi, "期初净利润", VFmt(VNum(VSafe(f, "net_profit_base"))) + " 亿", VStr(VSafe(f, "indicator")));
-            double? cagr = VNum(VSafe(g, "cagr"));
+            AddKpi(_stockValKpi, "股票", J.Str(J.Get(j, "name")), J.Str(J.Get(j, "code")));
+            AddKpi(_stockValKpi, "当前股价", J.Fmt(J.NumOrNull(J.Get(m, "price"))) + " 元", J.Str(J.Get(m, "price_source")));
+            AddKpi(_stockValKpi, "期初净利润", J.Fmt(J.NumOrNull(J.Get(f, "net_profit_base"))) + " 亿", J.Str(J.Get(f, "indicator")));
+            double? cagr = J.NumOrNull(J.Get(g, "cagr"));
             object cons;
             bool fromC = (g != null && g.TryGetValue("from_consensus", out cons) && cons is bool && (bool)cons);
-            AddKpi(_stockValKpi, "复合增长率", cagr != null ? VFmtPct(cagr) : "走兜底",
+            AddKpi(_stockValKpi, "复合增长率", cagr != null ? J.Pct100(cagr) : "走兜底",
                 fromC ? "机构预测" : "按模板兜底");
-            AddKpi(_stockValKpi, "贴现率", VRate(VNum(VSafe(a, "discount_rate"))), "两段法 DCF");
+            AddKpi(_stockValKpi, "贴现率", J.Pct100Plain(J.NumOrNull(J.Get(a, "discount_rate"))), "两段法 DCF");
 
-            var scenarios = VArr(VSafe(j, "scenarios"));
+            var scenarios = J.Arr(J.Get(j, "scenarios"));
             if (scenarios != null)
             {
                 foreach (Dictionary<string, object> s in scenarios)
                 {
-                    string verdict = VStr(VSafe(s, "verdict"));
+                    string verdict = J.Str(J.Get(s, "verdict"));
                     string cls = (verdict == "低估" || verdict == "高估") ? verdict : "合理";
-                    double? rr = VNum(VSafe(s, "return_rate"));
+                    double? rr = J.NumOrNull(J.Get(s, "return_rate"));
                     int row = _stockValGrid.Rows.Add(
-                        VStr(VSafe(s, "label")),
-                        VFmtPct(VNum(VSafe(s, "growth"))),
-                        VFmt(VNum(VSafe(s, "value_per_share"))) + " 元",
-                        VFmt(VNum(VSafe(s, "undervalued_ratio")), 4),
+                        J.Str(J.Get(s, "label")),
+                        J.Pct100(J.NumOrNull(J.Get(s, "growth"))),
+                        J.Fmt(J.NumOrNull(J.Get(s, "value_per_share"))) + " 元",
+                        J.Fmt(J.NumOrNull(J.Get(s, "undervalued_ratio")), 4),
                         cls,
-                        VFmt(VNum(VSafe(s, "target_price"))) + " 元",
-                        VFmtPct(rr));
+                        J.Fmt(J.NumOrNull(J.Get(s, "target_price"))) + " 元",
+                        J.Pct100(rr));
                     _stockValGrid.Rows[row].Cells[4].Style.ForeColor = verdict == "低估" ? C.Down
                         : (verdict == "高估" ? C.Up : C.Flat);
                     if (rr != null)
@@ -1995,7 +1978,7 @@ namespace StockPool
             }
             _stockValGrid.Fit(150, 620);
 
-            _stockValStatus.Text = VStr(VSafe(j, "name")) + "（" + VStr(VSafe(j, "code")) + "）已计算";
+            _stockValStatus.Text = J.Str(J.Get(j, "name")) + "（" + J.Str(J.Get(j, "code")) + "）已计算";
             _stockValStatus.Tag = "muted";
             _stockValStatus.ForeColor = C.DownDeep;
         }
@@ -2121,8 +2104,8 @@ namespace StockPool
             bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
             if (!ok)
             {
-                string emsg = VStr(VSafe(j, "error"));
-                if (emsg == "") emsg = VStr(VSafe(j, "detail"));
+                string emsg = J.Str(J.Get(j, "error"));
+                if (emsg == "") emsg = J.Str(J.Get(j, "detail"));
                 if (emsg == "") emsg = "分析失败";
                 _stockAiStatus.Text = emsg;
                 _stockAiStatus.ForeColor = C.UpErr;
@@ -2130,14 +2113,14 @@ namespace StockPool
                 FillAiDoc(_stockAiBox, _stockAiMarkdown);
                 return;
             }
-            string md = VStr(VSafe(j, "markdown"));
+            string md = J.Str(J.Get(j, "markdown"));
             _stockAiMarkdown = md;
             object cached;
             bool isCached = (j.TryGetValue("cached", out cached) && cached is bool && (bool)cached);
-            string asOf = VStr(VSafe(j, "data_as_of"));
-            string d = VStr(VSafe(j, "depth"));
-            string h = VStr(VSafe(j, "horizon"));
-            var fobj = VSafe(j, "focus") as System.Collections.ArrayList;
+            string asOf = J.Str(J.Get(j, "data_as_of"));
+            string d = J.Str(J.Get(j, "depth"));
+            string h = J.Str(J.Get(j, "horizon"));
+            var fobj = J.Get(j, "focus") as System.Collections.ArrayList;
             string f = "";
             if (fobj != null)
             {
@@ -2465,8 +2448,8 @@ namespace StockPool
                         foreach (Dictionary<string, object> d in arr)
                         {
                             var it = new StockHistoryItem();
-                            it.Code = VStr(VSafe(d, "code"));
-                            it.Name = VStr(VSafe(d, "name"));
+                            it.Code = J.Str(J.Get(d, "code"));
+                            it.Name = J.Str(J.Get(d, "name"));
                             object ts;
                             if (d.TryGetValue("ts", out ts) && ts != null)
                             {

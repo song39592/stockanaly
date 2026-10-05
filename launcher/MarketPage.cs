@@ -588,14 +588,14 @@ namespace StockPool
         private void MktRenderGlobal(Dictionary<string, object> j)
         {
             _mktGlobalCards.Controls.Clear();
-            var groups = VArr(VSafe(j, "groups"));
+            var groups = J.Arr(J.Get(j, "groups"));
             int n = 0;
             if (groups != null)
             {
                 foreach (Dictionary<string, object> g in groups)
                 {
-                    string gname = VStr(VSafe(g, "name"));
-                    var items = VArr(VSafe(g, "items"));
+                    string gname = J.Str(J.Get(g, "name"));
+                    var items = J.Arr(J.Get(g, "items"));
                     if (items == null) continue;
 
                     var card = new Panel();
@@ -608,14 +608,14 @@ namespace StockPool
 
                     foreach (Dictionary<string, object> it in items)
                     {
-                        string session = VStr(VSafe(it, "session"));
+                        string session = J.Str(J.Get(it, "session"));
                         string mark = session == "open" ? " 交易中" : (session == "closed" ? " 休市" : "");
-                        double? pct = VNum(VSafe(it, "pct"));
+                        double? pct = J.NumOrNull(J.Get(it, "pct"));
                         var row = new Panel { Height = 22, Dock = DockStyle.Top };
-                        var pv = new Label { Text = MktPct(pct), Dock = DockStyle.Right, Width = 76, AutoSize = false, TextAlign = ContentAlignment.MiddleRight };
+                        var pv = new Label { Text = J.PctRaw(pct), Dock = DockStyle.Right, Width = 76, AutoSize = false, TextAlign = ContentAlignment.MiddleRight };
                         MktDir(pv, pct);
-                        var vv = new Label { Text = VFmt(VNum(VSafe(it, "value"))), Dock = DockStyle.Right, Width = 82, AutoSize = false, TextAlign = ContentAlignment.MiddleRight };
-                        var nv = new Label { Text = VStr(VSafe(it, "name")) + mark, Dock = DockStyle.Fill, AutoSize = false, TextAlign = ContentAlignment.MiddleLeft };
+                        var vv = new Label { Text = J.Fmt(J.NumOrNull(J.Get(it, "value"))), Dock = DockStyle.Right, Width = 82, AutoSize = false, TextAlign = ContentAlignment.MiddleRight };
+                        var nv = new Label { Text = J.Str(J.Get(it, "name")) + mark, Dock = DockStyle.Fill, AutoSize = false, TextAlign = ContentAlignment.MiddleLeft };
                         row.Controls.Add(pv);
                         row.Controls.Add(vv);
                         row.Controls.Add(nv);
@@ -627,42 +627,42 @@ namespace StockPool
                 }
             }
 
-            bool hist = (VSafe(j, "historical") is bool) && (bool)VSafe(j, "historical");
-            _mktGlobalStatus.Text = (hist ? VStr(VSafe(j, "trade_date")) + " 收盘" : VStr(VSafe(j, "as_of"))) + "（" + n + " 项）";
+            bool hist = (J.Get(j, "historical") is bool) && (bool)J.Get(j, "historical");
+            _mktGlobalStatus.Text = (hist ? J.Str(J.Get(j, "trade_date")) + " 收盘" : J.Str(J.Get(j, "as_of"))) + "（" + n + " 项）";
         }
 
         // ---------------- ② 大盘资金 ----------------
         private void MktRenderCapital(Dictionary<string, object> j)
         {
             _mktCapKpi.Controls.Clear();
-            var mf = VMap(VSafe(j, "main_flow"));
-            var t = VMap(VSafe(j, "turnover"));
-            var ad = VMap(VSafe(j, "adv_dec"));
+            var mf = J.Map(J.Get(j, "main_flow"));
+            var t = J.Map(J.Get(j, "turnover"));
+            var ad = J.Map(J.Get(j, "adv_dec"));
 
-            string src = mf != null ? VStr(VSafe(mf, "source")) : "";
+            string src = mf != null ? J.Str(J.Get(mf, "source")) : "";
             if (src == "") src = "东方财富";
             double? bigNet = null;
             if (mf != null)
             {
-                bigNet = VNum(VSafe(mf, "super_net"));
-                if (bigNet == null) bigNet = VNum(VSafe(mf, "big_net"));
+                bigNet = J.NumOrNull(J.Get(mf, "super_net"));
+                if (bigNet == null) bigNet = J.NumOrNull(J.Get(mf, "big_net"));
             }
-            double? mainNet = mf != null ? VNum(VSafe(mf, "main_net")) : null;
+            double? mainNet = mf != null ? J.NumOrNull(J.Get(mf, "main_net")) : null;
 
-            AddKpi(_mktCapKpi, "沪深主力净流入", MktYi(mainNet),
-                mf != null ? (VNum(VSafe(mf, "main_pct")) != null ? "净占比 " + MktPct(VNum(VSafe(mf, "main_pct"))) : "个股资金流汇总（近似口径）") : "资金流数据源暂不可用");
-            AddKpi(_mktCapKpi, "特大单（超大单）", MktYi(bigNet),
-                mf != null ? "方向：" + VStr(VSafe(mf, "super_direction")) : "—");
-            AddKpi(_mktCapKpi, "数据口径", src, mf != null ? "数据日 " + VStr(VSafe(mf, "date")) : "—");
-            AddKpi(_mktCapKpi, "两市成交额", (t != null && VNum(VSafe(t, "total")) != null) ? VFmt(VNum(VSafe(t, "total"))) + " 亿" : "—",
+            AddKpi(_mktCapKpi, "沪深主力净流入", J.YiSigned(mainNet),
+                mf != null ? (J.NumOrNull(J.Get(mf, "main_pct")) != null ? "净占比 " + J.PctRaw(J.NumOrNull(J.Get(mf, "main_pct"))) : "个股资金流汇总（近似口径）") : "资金流数据源暂不可用");
+            AddKpi(_mktCapKpi, "特大单（超大单）", J.YiSigned(bigNet),
+                mf != null ? "方向：" + J.Str(J.Get(mf, "super_direction")) : "—");
+            AddKpi(_mktCapKpi, "数据口径", src, mf != null ? "数据日 " + J.Str(J.Get(mf, "date")) : "—");
+            AddKpi(_mktCapKpi, "两市成交额", (t != null && J.NumOrNull(J.Get(t, "total")) != null) ? J.Fmt(J.NumOrNull(J.Get(t, "total"))) + " 亿" : "—",
                 MktTurnoverDetail(t));
 
             _mktCapRows.Controls.Clear();
             if (ad != null)
             {
-                int up = MktInt(VSafe(ad, "up"));
-                int down = MktInt(VSafe(ad, "down"));
-                int flat = MktInt(VSafe(ad, "flat"));
+                int up = MktInt(J.Get(ad, "up"));
+                int down = MktInt(J.Get(ad, "down"));
+                int flat = MktInt(J.Get(ad, "flat"));
                 int total = up + down + flat;
                 if (total <= 0) total = 1;
 
@@ -673,46 +673,46 @@ namespace StockPool
                 _mktCapRatio.SetSegments(segs);
 
                 AddRow(_mktCapRows, MktRow("上涨占比", (up * 100.0 / total).ToString("F1") + "%"));
-                AddRow(_mktCapRows, MktRow("涨停 / 跌停", MktText(VSafe(ad, "limit_up")) + " / " + MktText(VSafe(ad, "limit_down"))));
-                if (VSafe(ad, "suspend") != null) AddRow(_mktCapRows, MktRow("停牌家数", MktText(VSafe(ad, "suspend"))));
+                AddRow(_mktCapRows, MktRow("涨停 / 跌停", MktText(J.Get(ad, "limit_up")) + " / " + MktText(J.Get(ad, "limit_down"))));
+                if (J.Get(ad, "suspend") != null) AddRow(_mktCapRows, MktRow("停牌家数", MktText(J.Get(ad, "suspend"))));
             }
             else
             {
                 _mktCapRatio.SetSegments(null);
             }
 
-            bool hist = (VSafe(j, "historical") is bool) && (bool)VSafe(j, "historical");
-            _mktCapStatus.Text = hist ? VStr(VSafe(j, "trade_date")) + " 数据" : VStr(VSafe(j, "as_of"));
+            bool hist = (J.Get(j, "historical") is bool) && (bool)J.Get(j, "historical");
+            _mktCapStatus.Text = hist ? J.Str(J.Get(j, "trade_date")) + " 数据" : J.Str(J.Get(j, "as_of"));
         }
 
         private static string MktTurnoverDetail(Dictionary<string, object> t)
         {
             if (t == null) return "—";
-            var items = VArr(VSafe(t, "items"));
+            var items = J.Arr(J.Get(t, "items"));
             if (items == null || items.Count == 0) return "—";
             var parts = new List<string>();
             foreach (Dictionary<string, object> it in items)
-                parts.Add(VStr(VSafe(it, "name")) + " " + VFmt(VNum(VSafe(it, "amount")), 0) + "亿");
+                parts.Add(J.Str(J.Get(it, "name")) + " " + J.Fmt(J.NumOrNull(J.Get(it, "amount")), 0) + "亿");
             return string.Join(" · ", parts.ToArray());
         }
 
         // ---------------- ③ 板块β ----------------
         private void MktRenderSectors(Dictionary<string, object> j)
         {
-            var ind = VMap(VSafe(j, "industry"));
-            var con = VMap(VSafe(j, "concept"));
-            var sw = VMap(VSafe(j, "sw_first"));
+            var ind = J.Map(J.Get(j, "industry"));
+            var con = J.Map(J.Get(j, "concept"));
+            var sw = J.Map(J.Get(j, "sw_first"));
 
             _mktIndBars.SetItems(MktFlowItems(ind));
             _mktConBars.SetItems(MktFlowItems(con));
-            _mktSwTopBars.SetItems(MktPctItems(sw != null ? VArr(VSafe(sw, "top")) : null));
-            _mktSwBotBars.SetItems(MktPctItems(sw != null ? VArr(VSafe(sw, "bottom")) : null));
+            _mktSwTopBars.SetItems(MktPctItems(sw != null ? J.Arr(J.Get(sw, "top")) : null));
+            _mktSwBotBars.SetItems(MktPctItems(sw != null ? J.Arr(J.Get(sw, "bottom")) : null));
 
-            bool hist = (VSafe(j, "historical") is bool) && (bool)VSafe(j, "historical");
-            string st = hist ? VStr(VSafe(j, "trade_date")) + " 收盘" : VStr(VSafe(j, "as_of"));
-            var errs = VArr(VSafe(j, "errors"));
+            bool hist = (J.Get(j, "historical") is bool) && (bool)J.Get(j, "historical");
+            string st = hist ? J.Str(J.Get(j, "trade_date")) + " 收盘" : J.Str(J.Get(j, "as_of"));
+            var errs = J.Arr(J.Get(j, "errors"));
             if (errs != null && errs.Count > 0)
-                st += "（" + VStr(errs[0]) + "）";     // 说明原因，别让用户只看到「无数据」
+                st += "（" + J.Str(errs[0]) + "）";     // 说明原因，别让用户只看到「无数据」
             _mktSectorStatus.Text = st;
         }
 
@@ -722,22 +722,22 @@ namespace StockPool
             var rows = new List<Dictionary<string, object>>();
             if (block != null)
             {
-                var inArr = VArr(VSafe(block, "top_in"));
-                var outArr = VArr(VSafe(block, "top_out"));
+                var inArr = J.Arr(J.Get(block, "top_in"));
+                var outArr = J.Arr(J.Get(block, "top_out"));
                 if (inArr != null) foreach (Dictionary<string, object> x in inArr) rows.Add(x);
                 if (outArr != null) foreach (Dictionary<string, object> x in outArr) rows.Add(x);
             }
             rows.Sort(delegate(Dictionary<string, object> a, Dictionary<string, object> b)
             {
-                double va = VNum(VSafe(a, "net")) ?? 0;
-                double vb = VNum(VSafe(b, "net")) ?? 0;
+                double va = J.NumOrNull(J.Get(a, "net")) ?? 0;
+                double vb = J.NumOrNull(J.Get(b, "net")) ?? 0;
                 return va.CompareTo(vb);
             });
             var items = new List<MktBars.Item>();
             foreach (Dictionary<string, object> x in rows)
             {
-                double? net = VNum(VSafe(x, "net"));
-                items.Add(MktBarItem(VStr(VSafe(x, "name")), net ?? 0, VFmt(net)));
+                double? net = J.NumOrNull(J.Get(x, "net"));
+                items.Add(MktBarItem(J.Str(J.Get(x, "name")), net ?? 0, J.Fmt(net)));
             }
             return items;
         }
@@ -748,8 +748,8 @@ namespace StockPool
             if (list == null) return items;
             foreach (Dictionary<string, object> x in list)
             {
-                double? pct = VNum(VSafe(x, "pct"));
-                items.Add(MktBarItem(VStr(VSafe(x, "name")), pct ?? 0, MktPct(pct)));
+                double? pct = J.NumOrNull(J.Get(x, "pct"));
+                items.Add(MktBarItem(J.Str(J.Get(x, "name")), pct ?? 0, J.PctRaw(pct)));
             }
             return items;
         }
@@ -822,7 +822,7 @@ namespace StockPool
                                 Invoke((Action)delegate { MktRenderMktAi(j); });
                                 return;
                             }
-                            string stage = VStr(VSafe(j, "stage"));
+                            string stage = J.Str(J.Get(j, "stage"));
                             if (stage == "") return;
                             if (stage == "AI 生成")
                             {
@@ -840,7 +840,7 @@ namespace StockPool
                             got++;
                             int n = got;
                             object cv; bool cached = (j.TryGetValue("cached", out cv) && cv is bool && (bool)cv);
-                            var errs = VArr(VSafe(j, "errors"));
+                            var errs = J.Arr(J.Get(j, "errors"));
                             string msg = "✓ " + stage + (cached ? "（复用缓存）" : "（已拉取）");
                             if (errs != null && errs.Count > 0) msg += "  ⚠ " + errs.Count + " 项数据源告警";
                             Invoke((Action)delegate
@@ -937,8 +937,8 @@ namespace StockPool
             bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
             if (!ok)
             {
-                string emsg = VStr(VSafe(j, "error"));
-                if (emsg == "") emsg = VStr(VSafe(j, "detail"));
+                string emsg = J.Str(J.Get(j, "error"));
+                if (emsg == "") emsg = J.Str(J.Get(j, "detail"));
                 if (emsg == "") emsg = "分析失败";
                 _mktAiStatus.Text = emsg;
                 _mktAiStatus.ForeColor = C.UpErr;
@@ -946,10 +946,10 @@ namespace StockPool
                 FillAiDoc(_mktAiBox, "");
                 return;
             }
-            _mktAiMarkdown = VStr(VSafe(j, "markdown"));
+            _mktAiMarkdown = J.Str(J.Get(j, "markdown"));
             object cached;
             bool isCached = (j.TryGetValue("cached", out cached) && cached is bool && (bool)cached);
-            string asOf = VStr(VSafe(j, "data_as_of"));
+            string asOf = J.Str(J.Get(j, "data_as_of"));
             _mktAiStatus.Text = (isCached ? "（缓存）" : "已生成") + (asOf != "" ? " 数据截至 " + asOf : "");
             _mktAiStatus.Tag = "muted";
             _mktAiStatus.ForeColor = C.DownDeep;
@@ -968,40 +968,40 @@ namespace StockPool
             bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
             if (!ok)
             {
-                _mktLuStatus.Text = VStr(VSafe(j, "trade_date")) + " 未获取到涨停池数据";
+                _mktLuStatus.Text = J.Str(J.Get(j, "trade_date")) + " 未获取到涨停池数据";
                 _mktLuStatus.ForeColor = C.UpErr;
                 return;
             }
 
-            var structure = VArr(VSafe(j, "structure"));
-            var promo = VArr(VSafe(j, "promotion"));
-            var stocks = VArr(VSafe(j, "stocks"));
+            var structure = J.Arr(J.Get(j, "structure"));
+            var promo = J.Arr(J.Get(j, "promotion"));
+            var stocks = J.Arr(J.Get(j, "stocks"));
 
             int ge2 = 0, first = 0;
             if (structure != null)
             {
                 foreach (Dictionary<string, object> s in structure)
                 {
-                    int level = MktInt(VSafe(s, "level"));
-                    int count = MktInt(VSafe(s, "count"));
+                    int level = MktInt(J.Get(s, "level"));
+                    int count = MktInt(J.Get(s, "count"));
                     AddRow(_mktLuRows, MktRow(level + " 板", count + " 家"));
                     if (level >= 2) ge2 += count;
                     if (level == 1) first = count;
                 }
             }
 
-            AddKpi(_mktLuKpi, "今日涨停家数", MktText(VSafe(j, "total")), "数据日 " + VStr(VSafe(j, "trade_date")));
-            AddKpi(_mktLuKpi, "最高连板", MktText(VSafe(j, "max_level")) + " 板", "结构：" + MktStructureText(structure));
+            AddKpi(_mktLuKpi, "今日涨停家数", MktText(J.Get(j, "total")), "数据日 " + J.Str(J.Get(j, "trade_date")));
+            AddKpi(_mktLuKpi, "最高连板", MktText(J.Get(j, "max_level")) + " 板", "结构：" + MktStructureText(structure));
             AddKpi(_mktLuKpi, "连板梯队（≥2 板）", ge2.ToString(), "首板 " + first + " 家");
 
             if (promo != null)
             {
                 foreach (Dictionary<string, object> p in promo)
                 {
-                    int from = MktInt(VSafe(p, "from"));
-                    double? rate = VNum(VSafe(p, "rate"));
+                    int from = MktInt(J.Get(p, "from"));
+                    double? rate = J.NumOrNull(J.Get(p, "rate"));
                     AddRow(_mktLuPromoRows, MktRow(from + " 板 → " + (from + 1) + " 板",
-                        MktText(VSafe(p, "total")) + " → " + MktText(VSafe(p, "promoted"))
+                        MktText(J.Get(p, "total")) + " → " + MktText(J.Get(p, "promoted"))
                         + "（" + (rate != null ? rate.Value.ToString("F1") + "%" : "—") + "）"));
                 }
             }
@@ -1015,7 +1015,7 @@ namespace StockPool
             MktFillFilterBox(_mktLuFilter, _mktLuInds, _mktLuAll);
             MktApplyFilter(_mktLuFilter, _mktLuInds, _mktLuStocks, _mktLuAll, _mktLuCaption, "涨停明细", MktLimitUpRow);
 
-            _mktLuStatus.Text = VStr(VSafe(j, "trade_date")) + "（涨停 " + MktText(VSafe(j, "total")) + " 家）";
+            _mktLuStatus.Text = J.Str(J.Get(j, "trade_date")) + "（涨停 " + MktText(J.Get(j, "total")) + " 家）";
         }
 
         /// <summary>
@@ -1035,7 +1035,7 @@ namespace StockPool
             {
                 foreach (Dictionary<string, object> s in all)
                 {
-                    string ind = VStr(VSafe(s, "industry"));
+                    string ind = J.Str(J.Get(s, "industry"));
                     if (ind == "" || ind == "—" || ind == "-" || ind == "--") continue;
                     if (counts.ContainsKey(ind)) counts[ind] = counts[ind] + 1;
                     else counts[ind] = 1;
@@ -1067,7 +1067,7 @@ namespace StockPool
             int n = 0;
             foreach (Dictionary<string, object> s in all)
             {
-                string ind = VStr(VSafe(s, "industry"));
+                string ind = J.Str(J.Get(s, "industry"));
                 if (!isAll && ind != sel) continue;
                 fill(g, s);
                 n++;
@@ -1089,45 +1089,45 @@ namespace StockPool
 
         private static void MktLimitUpRow(DataGridView g, Dictionary<string, object> s)
         {
-            double? pct = VNum(VSafe(s, "pct"));
+            double? pct = J.NumOrNull(J.Get(s, "pct"));
             int row = g.Rows.Add(
-                VStr(VSafe(s, "code")),
-                VStr(VSafe(s, "name")),
-                MktText(VSafe(s, "level")) + " 板",
-                VStr(VSafe(s, "industry")),
-                MktPct(pct),
-                VFmt(VNum(VSafe(s, "seal_fund"))) + " 亿",
-                VFmt(VNum(VSafe(s, "turnover"))) + "%",
-                VStr(VSafe(s, "first_seal")),
-                VStr(VSafe(s, "stat")));
+                J.Str(J.Get(s, "code")),
+                J.Str(J.Get(s, "name")),
+                MktText(J.Get(s, "level")) + " 板",
+                J.Str(J.Get(s, "industry")),
+                J.PctRaw(pct),
+                J.Fmt(J.NumOrNull(J.Get(s, "seal_fund"))) + " 亿",
+                J.Fmt(J.NumOrNull(J.Get(s, "turnover"))) + "%",
+                J.Str(J.Get(s, "first_seal")),
+                J.Str(J.Get(s, "stat")));
             MktColor(g.Rows[row].Cells[4], pct);
         }
 
         private static void MktBlastRow(DataGridView g, Dictionary<string, object> s)
         {
-            double? pct = VNum(VSafe(s, "pct"));
-            double? dd = VNum(VSafe(s, "drawdown"));
+            double? pct = J.NumOrNull(J.Get(s, "pct"));
+            double? dd = J.NumOrNull(J.Get(s, "drawdown"));
             int row = g.Rows.Add(
-                VStr(VSafe(s, "code")),
-                VStr(VSafe(s, "name")),
-                MktPct(pct),
+                J.Str(J.Get(s, "code")),
+                J.Str(J.Get(s, "name")),
+                J.PctRaw(pct),
                 dd != null ? dd.Value.ToString("F2") + "%" : "—",
-                VFmt(VNum(VSafe(s, "amplitude"))) + "%",
-                MktText(VSafe(s, "blasted_times")),
-                VStr(VSafe(s, "industry")));
+                J.Fmt(J.NumOrNull(J.Get(s, "amplitude"))) + "%",
+                MktText(J.Get(s, "blasted_times")),
+                J.Str(J.Get(s, "industry")));
             MktColor(g.Rows[row].Cells[2], pct);
         }
 
         private static void MktDownRow(DataGridView g, Dictionary<string, object> s)
         {
-            double? pct = VNum(VSafe(s, "pct"));
+            double? pct = J.NumOrNull(J.Get(s, "pct"));
             int row = g.Rows.Add(
-                VStr(VSafe(s, "code")),
-                VStr(VSafe(s, "name")),
-                MktPct(pct),
-                MktText(VSafe(s, "continuous")),
-                MktText(VSafe(s, "open_times")),
-                VStr(VSafe(s, "industry")));
+                J.Str(J.Get(s, "code")),
+                J.Str(J.Get(s, "name")),
+                J.PctRaw(pct),
+                MktText(J.Get(s, "continuous")),
+                MktText(J.Get(s, "open_times")),
+                J.Str(J.Get(s, "industry")));
             MktColor(g.Rows[row].Cells[2], pct);
         }
 
@@ -1136,7 +1136,7 @@ namespace StockPool
             if (structure == null || structure.Count == 0) return "—";
             var parts = new List<string>();
             foreach (Dictionary<string, object> s in structure)
-                parts.Add(MktInt(VSafe(s, "level")) + "板×" + MktInt(VSafe(s, "count")));
+                parts.Add(MktInt(J.Get(s, "level")) + "板×" + MktInt(J.Get(s, "count")));
             return string.Join(" · ", parts.ToArray());
         }
 
@@ -1150,13 +1150,13 @@ namespace StockPool
             bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
             if (!ok)
             {
-                _mktBlStatus.Text = VStr(VSafe(j, "trade_date")) + " 未获取到大面股数据";
+                _mktBlStatus.Text = J.Str(J.Get(j, "trade_date")) + " 未获取到大面股数据";
                 _mktBlStatus.ForeColor = C.UpErr;
                 return;
             }
 
-            var blasted = VArr(VSafe(j, "blasted"));
-            var limitDown = VArr(VSafe(j, "limit_down"));
+            var blasted = J.Arr(J.Get(j, "blasted"));
+            var limitDown = J.Arr(J.Get(j, "limit_down"));
 
             _mktBlAll = new List<Dictionary<string, object>>();
             if (blasted != null)
@@ -1174,38 +1174,24 @@ namespace StockPool
             MktFillFilterBox(_mktDtFilter, _mktDtInds, _mktDtAll);
             MktApplyFilter(_mktDtFilter, _mktDtInds, _mktLimitDown, _mktDtAll, _mktDtCaption, "跌停股", MktDownRow);
 
-            _mktBlStatus.Text = VStr(VSafe(j, "trade_date")) + "（炸板 " + (blasted != null ? blasted.Count : 0)
+            _mktBlStatus.Text = J.Str(J.Get(j, "trade_date")) + "（炸板 " + (blasted != null ? blasted.Count : 0)
                 + " 只 · 跌停 " + (limitDown != null ? limitDown.Count : 0) + " 只）";
         }
 
         // ---------------- 小工具 ----------------
         private static int MktInt(object o)
         {
-            double? v = VNum(o);
+            double? v = J.NumOrNull(o);
             if (v == null) return 0;
             return (int)v.Value;
-        }
-
-        /// <summary>盘面接口的涨跌幅本身就是百分数（如 10.02），不能像估值页那样再乘 100。</summary>
-        private static string MktPct(double? v)
-        {
-            if (v == null) return "—";
-            return (v.Value > 0 ? "+" : "") + v.Value.ToString("F2") + "%";
-        }
-
-        /// <summary>带符号的「亿」金额（对应原网页的 fmtYi）。</summary>
-        private static string MktYi(double? v)
-        {
-            if (v == null) return "—";
-            return (v.Value > 0 ? "+" : "") + v.Value.ToString("F2") + " 亿";
         }
 
         private static string MktText(object o)
         {
             if (o == null) return "—";
-            double? v = VNum(o);
+            double? v = J.NumOrNull(o);
             if (v != null) return ((int)v.Value).ToString();
-            string s = VStr(o);
+            string s = J.Str(o);
             return s == "" ? "—" : s;
         }
 

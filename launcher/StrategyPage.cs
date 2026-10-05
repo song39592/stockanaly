@@ -238,7 +238,7 @@ namespace StockPool
         {
             if (_stList.SelectedIndex < 0 || _stStrategies == null) return;
             var meta = _stStrategies[_stList.SelectedIndex];
-            _stDesc.Text = StStr(meta["description"], "（无说明）");
+            _stDesc.Text = J.StrOr(meta["description"], "（无说明）");
             _stParamPanel.Controls.Clear();
             _stParamEditors.Clear();
             object po;
@@ -261,9 +261,9 @@ namespace StockPool
 
         private void StAddParamEditor(Dictionary<string, object> p)
         {
-            string name = StStr(p["name"], "");
-            string type = StStr(p["type"], "float");
-            string label = StStr(p["label"], name);
+            string name = J.StrOr(p["name"], "");
+            string type = J.StrOr(p["type"], "float");
+            string label = J.StrOr(p["label"], name);
             var lbl = Lbl(label);
             lbl.AutoSize = true;
             lbl.Margin = new Padding(0, 4, 6, 0);
@@ -277,8 +277,8 @@ namespace StockPool
                 cb.DropDownStyle = ComboBoxStyle.DropDownList;
                 cb.Width = 120;
                 cb.FlatStyle = FlatStyle.Flat;
-                foreach (var c in ch) cb.Items.Add(StStr(c, ""));
-                object def = StGet(p, "default");
+                foreach (var c in ch) cb.Items.Add(J.StrOr(c, ""));
+                object def = J.Get(p, "default");
                 int idx = cb.Items.IndexOf(def == null ? "" : def.ToString());
                 cb.SelectedIndex = idx >= 0 ? idx : 0;
                 ctrl = cb;
@@ -288,11 +288,11 @@ namespace StockPool
                 var n = new NumericUpDown();
                 n.DecimalPlaces = 0;
                 n.Width = 100;
-                double mn = StNum(p["min"], int.MinValue);
-                double mx = StNum(p["max"], int.MaxValue);
+                double mn = J.NumOr(p["min"], int.MinValue);
+                double mx = J.NumOr(p["max"], int.MaxValue);
                 n.Minimum = (decimal)Math.Max(int.MinValue, mn);
                 n.Maximum = (decimal)Math.Min(int.MaxValue, mx);
-                n.Value = (decimal)Clamp(StNum(p["default"], 0), (double)n.Minimum, (double)n.Maximum);
+                n.Value = (decimal)Clamp(J.NumOr(p["default"], 0), (double)n.Minimum, (double)n.Maximum);
                 ctrl = n;
             }
             else if (type == "float")
@@ -300,18 +300,18 @@ namespace StockPool
                 var n = new NumericUpDown();
                 n.DecimalPlaces = 4;
                 n.Width = 100;
-                double mn = StNum(p["min"], double.MinValue);
-                double mx = StNum(p["max"], double.MaxValue);
+                double mn = J.NumOr(p["min"], double.MinValue);
+                double mx = J.NumOr(p["max"], double.MaxValue);
                 n.Minimum = (decimal)mn;
                 n.Maximum = (decimal)mx;
-                n.Value = (decimal)Clamp(StNum(p["default"], 0), mn, mx);
+                n.Value = (decimal)Clamp(J.NumOr(p["default"], 0), mn, mx);
                 ctrl = n;
             }
             else
             {
                 var tb = new TextBox();
                 tb.Width = 160;
-                object def = StGet(p, "default");
+                object def = J.Get(p, "default");
                 var defList = def as System.Collections.IList;
                 if (def == null) tb.Text = "";
                 else if (defList != null)
@@ -544,11 +544,11 @@ namespace StockPool
             }
             var metrics = (Dictionary<string, object>)j["metrics"];
             _stRecentCards.Controls.Clear();
-            _stRecentCards.Controls.Add(StKpiCard("区间收益", Pct(ToDbl(metrics["total_return"]))));
-            _stRecentCards.Controls.Add(StKpiCard("最大回撤", Pct(ToDbl(metrics["max_drawdown"]))));
-            _stRecentCards.Controls.Add(StKpiCard("胜率", Pct(ToDbl(metrics["win_rate"]))));
-            _stRecentCards.Controls.Add(StKpiCard("交易次数", ToInt(metrics["num_trades"]).ToString()));
-            _stRecentCards.Controls.Add(StKpiCard("参与标的", ToInt(metrics["num_stocks"]).ToString()));
+            _stRecentCards.Controls.Add(StKpiCard("区间收益", J.Pct100Plain(J.Num(metrics["total_return"]))));
+            _stRecentCards.Controls.Add(StKpiCard("最大回撤", J.Pct100Plain(J.Num(metrics["max_drawdown"]))));
+            _stRecentCards.Controls.Add(StKpiCard("胜率", J.Pct100Plain(J.Num(metrics["win_rate"]))));
+            _stRecentCards.Controls.Add(StKpiCard("交易次数", J.Int(metrics["num_trades"]).ToString()));
+            _stRecentCards.Controls.Add(StKpiCard("参与标的", J.Int(metrics["num_stocks"]).ToString()));
             Skin(_stRecentCards);
 
             _stRecentGrid.Rows.Clear();
@@ -560,8 +560,8 @@ namespace StockPool
                 {
                     var d = it as Dictionary<string, object>;
                     if (d == null) continue;
-                    _stRecentGrid.Rows.Add(StStr(d["code"], ""), StName(d),
-                        Pct(ToDbl(d["total_return"])), ToInt(d["trades"]).ToString());
+                    _stRecentGrid.Rows.Add(J.StrOr(d["code"], ""), StName(d),
+                        J.Pct100Plain(J.Num(d["total_return"])), J.Int(d["trades"]).ToString());
                 }
                 _stRecentGrid.ResumeLayout();
             }
@@ -666,20 +666,20 @@ namespace StockPool
             }
             var s = (Dictionary<string, object>)j["summary"];
             _stRecoCards.Controls.Clear();
-            _stRecoCards.Controls.Add(StKpiCard("买入", ToInt(s["buy_count"]) + " 只"));
-            _stRecoCards.Controls.Add(StKpiCard("买入金额", Money(ToDbl(s["buy_amount"]))));
-            _stRecoCards.Controls.Add(StKpiCard("卖出", ToInt(s["sell_count"]) + " 只"));
-            _stRecoCards.Controls.Add(StKpiCard("卖出金额", Money(ToDbl(s["sell_amount"]))));
-            _stRecoCards.Controls.Add(StKpiCard("持股", ToInt(s["hold_count"]) + " 只"));
-            _stRecoCards.Controls.Add(StKpiCard("持股市值", Money(ToDbl(s["hold_amount"]))));
-            _stRecoCards.Controls.Add(StKpiCard("合计浮盈亏", Money(ToDbl(s["hold_pnl"]))));
+            _stRecoCards.Controls.Add(StKpiCard("买入", J.Int(s["buy_count"]) + " 只"));
+            _stRecoCards.Controls.Add(StKpiCard("买入金额", J.Money(J.Num(s["buy_amount"]))));
+            _stRecoCards.Controls.Add(StKpiCard("卖出", J.Int(s["sell_count"]) + " 只"));
+            _stRecoCards.Controls.Add(StKpiCard("卖出金额", J.Money(J.Num(s["sell_amount"]))));
+            _stRecoCards.Controls.Add(StKpiCard("持股", J.Int(s["hold_count"]) + " 只"));
+            _stRecoCards.Controls.Add(StKpiCard("持股市值", J.Money(J.Num(s["hold_amount"]))));
+            _stRecoCards.Controls.Add(StKpiCard("合计浮盈亏", J.Money(J.Num(s["hold_pnl"]))));
             Skin(_stRecoCards);
 
             StFillRecoGrid(_stBuyGrid, j["buy"], false);
             StFillRecoGrid(_stSellGrid, j["sell"], false);
             StFillRecoGrid(_stHoldGrid, j["hold"], true);
 
-            _stRecoStatus.Text = "截至 " + StStr(j["date"], "") + " · 每只资金带 " + Money(ToDbl(j["band"]));
+            _stRecoStatus.Text = "截至 " + J.StrOr(j["date"], "") + " · 每只资金带 " + J.Money(J.Num(j["band"]));
             _stRecoStatus.ForeColor = C.DownSoft;
         }
 
@@ -697,10 +697,10 @@ namespace StockPool
                     int ri;
                     if (hold)
                     {
-                        double pnl = ToDbl(d["pnl"]);
-                        ri = grid.Rows.Add(StStr(d["code"], ""), StName(d), StStr(d["action"], ""),
-                            F2(d["cost_price"]), F2(d["price"]), StStr(d["buy_date"], ""),
-                            Pct(ToDbl(d["weight"])), Money(pnl));
+                        double pnl = J.Num(d["pnl"]);
+                        ri = grid.Rows.Add(J.StrOr(d["code"], ""), StName(d), J.StrOr(d["action"], ""),
+                            J.FmtNum(d["cost_price"]), J.FmtNum(d["price"]), J.StrOr(d["buy_date"], ""),
+                            J.Pct100Plain(J.Num(d["weight"])), J.Money(pnl));
                         // A 股习惯：红涨绿跌
                         grid.Rows[ri].Cells[7].Style.ForeColor =
                             pnl >= 0 ? C.UpErr : C.DownSoft;
@@ -708,8 +708,8 @@ namespace StockPool
                     }
                     else
                     {
-                        ri = grid.Rows.Add(StStr(d["code"], ""), StName(d), F2(d["price"]),
-                            Pct(ToDbl(d["weight"])));
+                        ri = grid.Rows.Add(J.StrOr(d["code"], ""), StName(d), J.FmtNum(d["price"]),
+                            J.Pct100Plain(J.Num(d["weight"])));
                     }
                 }
                 grid.ResumeLayout();
@@ -726,7 +726,7 @@ namespace StockPool
             var codes = _stAll.Checked ? new List<string>() : StParseCodes(_stCodes.Text);
             return new Dictionary<string, object>
             {
-                { "strategy_id", StStr(meta["id"], "") },
+                { "strategy_id", J.StrOr(meta["id"], "") },
                 { "params", StReadParams() },
                 { "use_all", _stAll.Checked },
                 { "codes", codes },
@@ -734,7 +734,7 @@ namespace StockPool
                 { "end", StDate(_stEnd) },
                 { "window", window > 0 ? (object)window : null },
                 { "initial_capital", (double)_stCapital.Value },
-                { "commission", StNum(_stComm.Text, 0.0003) },
+                { "commission", J.NumOr(_stComm.Text, 0.0003) },
                 { "benchmark", (_stBenchChk.Checked && _stBench.Text.Trim().Length > 0) ? _stBench.Text.Trim() : null },
             };
         }
@@ -767,19 +767,7 @@ namespace StockPool
 
         private static string StName(Dictionary<string, object> d)
         {
-            return (d.ContainsKey("name") && d["name"] != null) ? StStr(d["name"], "") : "—";
-        }
-
-        private static string F2(object v)
-        {
-            return v != null ? ToDbl(v).ToString("F2") : "—";
-        }
-
-        private static string Money(double v)
-        {
-            double a = Math.Abs(v);
-            string s = (a >= 10000) ? a.ToString("N0") : a.ToString("F2");
-            return (v < 0 ? "-¥" : "¥") + s;
+            return (d.ContainsKey("name") && d["name"] != null) ? J.StrOr(d["name"], "") : "—";
         }
 
         private static string StErrMsg(Dictionary<string, object> j)
@@ -788,7 +776,7 @@ namespace StockPool
             if (j.TryGetValue("error", out err))
             {
                 var ed = err as Dictionary<string, object>;
-                if (ed != null) return StStr(ed["message"], "");
+                if (ed != null) return J.StrOr(ed["message"], "");
             }
             return "未知错误";
         }
@@ -802,7 +790,7 @@ namespace StockPool
                 return;
             }
             var meta = _stStrategies[_stList.SelectedIndex];
-            string sid = StStr(meta["id"], "");
+            string sid = J.StrOr(meta["id"], "");
             var codes = _stAll.Checked ? new List<string>() : StParseCodes(_stCodes.Text);
             var req = new Dictionary<string, object>
             {
@@ -813,7 +801,7 @@ namespace StockPool
                 { "start", StDate(_stStart) },
                 { "end", StDate(_stEnd) },
                 { "initial_capital", (double)_stCapital.Value },
-                { "commission", StNum(_stComm.Text, 0.0003) },
+                { "commission", J.NumOr(_stComm.Text, 0.0003) },
                 { "benchmark", (_stBenchChk.Checked && _stBench.Text.Trim().Length > 0) ? _stBench.Text.Trim() : null },
             };
 
@@ -823,9 +811,9 @@ namespace StockPool
                 ? "全部本地(" + _stLocalCodeCount + "只)"
                 : "自定义(" + codes.Count + "只)";
             double cap = (double)_stCapital.Value;
-            _stResultHeader.Text = "策略：" + StStr(meta["name"], sid) + " · 范围：" + scope + " "
+            _stResultHeader.Text = "策略：" + J.StrOr(meta["name"], sid) + " · 范围：" + scope + " "
                 + start + "~" + end + " · 初始 " + (cap / 10000).ToString("F1") + "万 · 佣金 "
-                + StNum(_stComm.Text, 0.0003).ToString("P4").Replace(" ", "");
+                + J.NumOr(_stComm.Text, 0.0003).ToString("P4").Replace(" ", "");
 
             _stResultStatus.Text = "回测中…";
             _stResultStatus.ForeColor = _cSub;
@@ -861,7 +849,7 @@ namespace StockPool
                 if (j.TryGetValue("error", out err))
                 {
                     var ed = err as Dictionary<string, object>;
-                    if (ed != null) msg = "回测失败：" + StStr(ed["message"], "");
+                    if (ed != null) msg = "回测失败：" + J.StrOr(ed["message"], "");
                 }
                 _stResultStatus.Text = msg;
                 _stResultStatus.ForeColor = C.UpErr;
@@ -870,15 +858,15 @@ namespace StockPool
 
             var metrics = (Dictionary<string, object>)j["metrics"];
             _stMetricCards.Controls.Clear();
-            _stMetricCards.Controls.Add(StKpiCard("总收益率", Pct(ToDbl(metrics["total_return"]))));
-            _stMetricCards.Controls.Add(StKpiCard("年化收益", Pct(ToDbl(metrics["annual_return"]))));
-            _stMetricCards.Controls.Add(StKpiCard("最大回撤", Pct(ToDbl(metrics["max_drawdown"]))));
-            _stMetricCards.Controls.Add(StKpiCard("夏普比率", ToDbl(metrics["sharpe"]).ToString("F2")));
-            _stMetricCards.Controls.Add(StKpiCard("胜率", Pct(ToDbl(metrics["win_rate"]))));
-            _stMetricCards.Controls.Add(StKpiCard("交易次数", ToInt(metrics["num_trades"]).ToString()));
+            _stMetricCards.Controls.Add(StKpiCard("总收益率", J.Pct100Plain(J.Num(metrics["total_return"]))));
+            _stMetricCards.Controls.Add(StKpiCard("年化收益", J.Pct100Plain(J.Num(metrics["annual_return"]))));
+            _stMetricCards.Controls.Add(StKpiCard("最大回撤", J.Pct100Plain(J.Num(metrics["max_drawdown"]))));
+            _stMetricCards.Controls.Add(StKpiCard("夏普比率", J.Num(metrics["sharpe"]).ToString("F2")));
+            _stMetricCards.Controls.Add(StKpiCard("胜率", J.Pct100Plain(J.Num(metrics["win_rate"]))));
+            _stMetricCards.Controls.Add(StKpiCard("交易次数", J.Int(metrics["num_trades"]).ToString()));
             object bret;
             if (metrics.TryGetValue("benchmark_return", out bret) && bret != null)
-                _stMetricCards.Controls.Add(StKpiCard("基准收益", Pct(ToDbl(bret))));
+                _stMetricCards.Controls.Add(StKpiCard("基准收益", J.Pct100Plain(J.Num(bret))));
             Skin(_stMetricCards);
 
             _stEqDates = ToStringList(j["dates"]);
@@ -898,13 +886,13 @@ namespace StockPool
                     if (d != null) _stPerStockData.Add(d);
                 }
             }
-            _stResultId = StStr(j.ContainsKey("result_id") ? j["result_id"] : null, "");
+            _stResultId = J.StrOr(j.ContainsKey("result_id") ? j["result_id"] : null, "");
             _stExpanded.Clear();          // 新一轮回测结果，展开状态作废
             _stDetailCache.Clear();       // 明细跟着旧 result_id，一并作废
             StFillPerStockRows();
 
             object nstk;
-            int doneCount = (metrics.TryGetValue("num_stocks", out nstk)) ? ToInt(nstk) : 0;
+            int doneCount = (metrics.TryGetValue("num_stocks", out nstk)) ? J.Int(nstk) : 0;
             _stResultStatus.Text = "回测完成（参与统计 " + doneCount + " 只）";
             _stResultStatus.ForeColor = C.DownSoft;
             object errs;
@@ -928,10 +916,10 @@ namespace StockPool
             _stPerStockGrid.SuspendLayout();
             foreach (var d in _stPerStockData)
             {
-                string code = StStr(d["code"], "");
-                string name = (d.ContainsKey("name") && d["name"] != null) ? StStr(d["name"], "") : "—";
+                string code = J.StrOr(d["code"], "");
+                string name = (d.ContainsKey("name") && d["name"] != null) ? J.StrOr(d["name"], "") : "—";
                 int ri = _stPerStockGrid.Rows.Add("▸ " + code, name,
-                    Pct(ToDbl(d["total_return"])), ToInt(d["trades"]).ToString());
+                    J.Pct100Plain(J.Num(d["total_return"])), J.Int(d["trades"]).ToString());
                 var row = _stPerStockGrid.Rows[ri];
                 row.Tag = "main:" + code;
                 // 主行也不吃选中高亮（点击只做展开，界面保持干净）
@@ -1066,13 +1054,13 @@ namespace StockPool
             {
                 var x = t as Dictionary<string, object>;
                 if (x == null) continue;
-                string buyDate = StStr(x["buy_date"], "");
-                string buyPrice = x["buy_price"] != null ? ToDbl(x["buy_price"]).ToString("F2") : "—";
+                string buyDate = J.StrOr(x["buy_date"], "");
+                string buyPrice = x["buy_price"] != null ? J.Num(x["buy_price"]).ToString("F2") : "—";
                 bool closed = x["sell_date"] != null;
-                string sellDate = closed ? StStr(x["sell_date"], "") : "未平仓";
-                string sellPrice = x["sell_price"] != null ? ToDbl(x["sell_price"]).ToString("F2") : "—";
+                string sellDate = closed ? J.StrOr(x["sell_date"], "") : "未平仓";
+                string sellPrice = x["sell_price"] != null ? J.Num(x["sell_price"]).ToString("F2") : "—";
                 object retObj;
-                string retTxt = (x.TryGetValue("ret", out retObj) && retObj != null) ? Pct(ToDbl(retObj)) : "—";
+                string retTxt = (x.TryGetValue("ret", out retObj) && retObj != null) ? J.Pct100Plain(J.Num(retObj)) : "—";
                 grid.Rows.Insert(insertAt, new object[] { "└ " + n,
                     "买 " + buyDate + " @ " + buyPrice,
                     (closed ? "卖 " : "") + sellDate + (closed ? " @ " + sellPrice : ""),
@@ -1187,7 +1175,7 @@ namespace StockPool
                         _stStrategies = list;
                         _stLocalCodeCount = cnt;
                         _stList.Items.Clear();
-                        foreach (var m in list) _stList.Items.Add(StStr(m["name"], StStr(m["id"], "?")));
+                        foreach (var m in list) _stList.Items.Add(J.StrOr(m["name"], J.StrOr(m["id"], "?")));
                         if (_stCodeHint != null) _stCodeHint.Text = "本地共 " + cnt + " 只，填入代码（逗号/空格分隔，最多 800 只）";
                         _stResultStatus.Text = "清单已加载（" + list.Count + " 个策略 / " + cnt + " 只本地股票）";
                         _stResultStatus.ForeColor = _cSub;
@@ -1233,17 +1221,7 @@ namespace StockPool
             return card;
         }
 
-        private static string StStr(object o, string d) { return o == null ? d : o.ToString(); }
-        private static object StGet(Dictionary<string, object> d, string k) { object v; return d.TryGetValue(k, out v) ? v : null; }
-        private static double StNum(object o, double d)
-        {
-            if (o == null) return d;
-            try { return Convert.ToDouble(o); } catch { return d; }
-        }
         private static double Clamp(double v, double lo, double hi) { return Math.Max(lo, Math.Min(hi, v)); }
-        private static int ToInt(object o) { try { return Convert.ToInt32(o); } catch { return 0; } }
-        private static double ToDbl(object o) { try { return Convert.ToDouble(o); } catch { return 0; } }
-        private static string Pct(double v) { return (v * 100).ToString("F2") + "%"; }
         private static string StDate(DateTimePicker p) { return p.Checked ? p.Value.ToString("yyyy-MM-dd") : null; }
         private static List<string> StParseCodes(string text)
         {

@@ -195,11 +195,11 @@ namespace StockPool
 
         private void DlRenderHint(Dictionary<string, object> root)
         {
-            int count = DlInt(DlVal(root, "count"));
-            double est = DlDbl(DlVal(root, "estimated_bytes"));
-            double free = DlDbl(DlVal(root, "free_bytes"));
+            int count = J.Int(J.GetFrom(root, "count"));
+            double est = J.Num(J.GetFrom(root, "estimated_bytes"));
+            double free = J.Num(J.GetFrom(root, "free_bytes"));
             bool ok = true;
-            try { ok = Convert.ToBoolean(DlVal(root, "disk_ok")); }
+            try { ok = Convert.ToBoolean(J.GetFrom(root, "disk_ok")); }
             catch { }
             _dlHint.Text = string.Format("预计 {0} 只 · 约 {1} · 磁盘可用 {2}{3}",
                 count, DlFmtBytes(est), free < 0 ? "未知" : DlFmtBytes(free),
@@ -323,15 +323,15 @@ namespace StockPool
         {
             if (_dlTdxGroup == null || _dlTdxNote == null || _dlTdxBtn == null) return;
             bool valid = false;
-            try { valid = Convert.ToBoolean(DlVal(root, "valid")); }
+            try { valid = Convert.ToBoolean(J.GetFrom(root, "valid")); }
             catch { }
             if (!valid)
             {
                 _dlTdxGroup.Visible = false;
                 return;
             }
-            int codes = DlInt(DlVal(root, "codes"));
-            var sample = Convert.ToString(DlVal(root, "sample") ?? "");
+            int codes = J.Int(J.GetFrom(root, "codes"));
+            var sample = Convert.ToString(J.GetFrom(root, "sample") ?? "");
             _dlTdxNote.Text = string.Format("本机通达信：{0} 只 A 股，数据覆盖 {1}。"
                 + "同步只读取本地文件（秒级、不联网），不补更早的历史。", codes, sample);
             _dlTdxGroup.Visible = true;
@@ -362,17 +362,17 @@ namespace StockPool
 
         private void DlRenderAutoState(Dictionary<string, object> root)
         {
-            int downloaded = DlInt(DlVal(root, "downloaded"));
+            int downloaded = J.Int(J.GetFrom(root, "downloaded"));
             bool eligible = false;
-            try { eligible = Convert.ToBoolean(DlVal(root, "eligible")); }
+            try { eligible = Convert.ToBoolean(J.GetFrom(root, "eligible")); }
             catch { }
 
             _dlSettingsLoading = true;            // 回填控件不算用户操作，别触发保存
             try
             {
-                try { _dlAuto.Checked = Convert.ToBoolean(DlVal(root, "auto_update")); }
+                try { _dlAuto.Checked = Convert.ToBoolean(J.GetFrom(root, "auto_update")); }
                 catch { }
-                try { _dlIdle.Checked = Convert.ToBoolean(DlVal(root, "idle_download")); }
+                try { _dlIdle.Checked = Convert.ToBoolean(J.GetFrom(root, "idle_download")); }
                 catch { }
                 _dlAuto.Enabled = eligible || _dlAuto.Checked;
                 _dlIdle.Enabled = true;
@@ -380,7 +380,7 @@ namespace StockPool
             finally { _dlSettingsLoading = false; }
 
             // 只报「数据更新到哪天」：还差多少只由「自动更新」开关能否点开体现，不再堆提示文字
-            string latest = Convert.ToString(DlVal(root, "latest_date") ?? "");
+            string latest = Convert.ToString(J.GetFrom(root, "latest_date") ?? "");
             if (downloaded == 0) _dlAutoNote.Text = "库里还没有日K数据：先「开始下载」一次。";
             else if (!string.IsNullOrEmpty(latest)) _dlAutoNote.Text = "数据已更新到 " + latest;
             else _dlAutoNote.Text = string.Format("已下载 {0} 只。", downloaded);
@@ -420,7 +420,7 @@ namespace StockPool
                     _dlSavingSettings = false;
                     _dlAuto.Enabled = _dlIdle.Enabled = true;
                     var result = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    var warning = Convert.ToString(DlVal(DlVal(result, "settings"), "scheduling_warning") ?? "");
+                    var warning = Convert.ToString(J.GetFrom(J.GetFrom(result, "settings"), "scheduling_warning") ?? "");
                     if (warning.Length > 0) Msg(warning);
                     DlLoadAutoState(true);
                     if (_dlAuto.Checked || _dlIdle.Checked) DlPickLatestTask();
@@ -440,7 +440,7 @@ namespace StockPool
                 {
                     if (!Probe(DlApi + "/list", 10000, out resp)) return;
                     var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    var tasks = DlVal(root, "tasks") as ArrayList;
+                    var tasks = J.GetFrom(root, "tasks") as ArrayList;
                     if (tasks == null || tasks.Count == 0)
                     {
                         Ui(delegate { _dlTaskId = ""; _dlLastStatus = ""; DlStopPoll(); _dlBar.Value = 0;
@@ -451,12 +451,12 @@ namespace StockPool
                     foreach (var item in tasks)
                     {
                         var candidate = item as Dictionary<string, object>;
-                        var status = Convert.ToString(DlVal(candidate, "status"));
+                        var status = Convert.ToString(J.GetFrom(candidate, "status"));
                         if (status == "running" || status == "queued" || status == "paused")
                         { first = candidate; break; }
                     }
                     if (first == null) return;
-                    var id = Convert.ToString(DlVal(first, "id") ?? "");
+                    var id = Convert.ToString(J.GetFrom(first, "id") ?? "");
                     if (string.IsNullOrEmpty(id)) return;
                     Ui(delegate { _dlTaskId = id; DlRefresh(); DlStartPoll(); });
                 }
@@ -512,37 +512,37 @@ namespace StockPool
 
         private void DlRenderTask(Dictionary<string, object> root)
         {
-            var task = DlDict(DlVal(root, "task"));
+            var task = J.Map(J.GetFrom(root, "task"));
             if (task == null) return;
 
-            var id = Convert.ToString(DlVal(task, "id") ?? "");
+            var id = Convert.ToString(J.GetFrom(task, "id") ?? "");
             if (!string.IsNullOrEmpty(id)) _dlTaskId = id;
-            string status = Convert.ToString(DlVal(task, "status") ?? "");
-            int total = DlInt(DlVal(task, "total"));
-            int completed = DlInt(DlVal(task, "completed"));
-            int failed = DlInt(DlVal(task, "failed"));
-            int remaining = DlInt(DlVal(task, "remaining"));
-            double percent = DlDbl(DlVal(task, "percent"));
+            string status = Convert.ToString(J.GetFrom(task, "status") ?? "");
+            int total = J.Int(J.GetFrom(task, "total"));
+            int completed = J.Int(J.GetFrom(task, "completed"));
+            int failed = J.Int(J.GetFrom(task, "failed"));
+            int remaining = J.Int(J.GetFrom(task, "remaining"));
+            double percent = J.Num(J.GetFrom(task, "percent"));
             _dlLastStatus = status;
             // 来源决定用词：本地通达信是「同步」（读本机文件、不联网），在线才是「下载」
-            var source = Convert.ToString(DlVal(DlVal(task, "options"), "source") ?? "");
+            var source = Convert.ToString(J.GetFrom(J.GetFrom(task, "options"), "source") ?? "");
 
             int value = (int)Math.Round(percent * 10);
             _dlBar.Value = Math.Max(0, Math.Min(_dlBar.Maximum, value));
             _dlStatus.Text = "状态：" + DlStatusText(status, source)
                 + (string.IsNullOrEmpty(_dlTaskId) ? "" : "　任务 " + _dlTaskId);
-            int recent = DlInt(DlVal(task, "phase1_done"));
-            int skipped = DlInt(DlVal(task, "skipped"));
+            int recent = J.Int(J.GetFrom(task, "phase1_done"));
+            int skipped = J.Int(J.GetFrom(task, "skipped"));
             var extra = "";
             if (recent > 0) extra += string.Format("　近期阶段已覆盖 {0} 只", recent);
             if (skipped > 0) extra += string.Format("　跳过 {0} 只（库里已足量）", skipped);
             _dlCount.Text = string.Format("已完成 {0} / 共 {1}　失败 {2}　剩余 {3}　进度 {4:0.0}%{5}",
                                           completed, total, failed, remaining, percent, extra);
-            var failures = DlVal(task, "failures") as ArrayList;
+            var failures = J.GetFrom(task, "failures") as ArrayList;
             var errors = new List<string>();
             if (failures != null)
                 foreach (var failure in failures)
-                    errors.Add(Convert.ToString(DlVal(failure, "code")) + "：" + Convert.ToString(DlVal(failure, "error")));
+                    errors.Add(Convert.ToString(J.GetFrom(failure, "code")) + "：" + Convert.ToString(J.GetFrom(failure, "error")));
             _dlErrors.Text = errors.Count > 0 ? string.Join(Environment.NewLine, errors.ToArray()) : "暂无失败记录。";
             if (status == "completed" && failed > 0) _dlStatus.Text += "（部分失败，请查看原因并重试）";
 
@@ -593,29 +593,5 @@ namespace StockPool
 
         // ---- 取值小工具：JSON 反序列化出来都是 object，统一做安全转换 ----
 
-        private static object DlVal(object container, string key)
-        {
-            var dict = container as Dictionary<string, object>;
-            if (dict == null) return null;
-            object value;
-            return dict.TryGetValue(key, out value) ? value : null;
-        }
-
-        private static Dictionary<string, object> DlDict(object value)
-        {
-            return value as Dictionary<string, object>;
-        }
-
-        private static int DlInt(object value)
-        {
-            try { return Convert.ToInt32(value); }
-            catch { return 0; }
-        }
-
-        private static double DlDbl(object value)
-        {
-            try { return Convert.ToDouble(value, CultureInfo.InvariantCulture); }
-            catch { return 0; }
-        }
     }
 }

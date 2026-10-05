@@ -1652,15 +1652,15 @@ namespace StockPool
                     {
                         if (_tbTdx == null || _lbTdx == null) return;
                         _lastTdxStatus = root;
-                        var configured = Convert.ToString(DictVal(root, "configured") ?? "");
-                        var auto = Convert.ToString(DictVal(root, "auto_detected") ?? "");
+                        var configured = Convert.ToString(J.Get(root, "configured") ?? "");
+                        var auto = Convert.ToString(J.Get(root, "auto_detected") ?? "");
                         bool valid = false;
-                        try { valid = Convert.ToBoolean(DictVal(root, "valid")); }
+                        try { valid = Convert.ToBoolean(J.Get(root, "valid")); }
                         catch { }
                         int codes = 0;
-                        try { codes = Convert.ToInt32(DictVal(root, "codes")); }
+                        try { codes = Convert.ToInt32(J.Get(root, "codes")); }
                         catch { }
-                        var sample = Convert.ToString(DictVal(root, "sample") ?? "");
+                        var sample = Convert.ToString(J.Get(root, "sample") ?? "");
                         if (_tbTdx.Text.Length == 0) _tbTdx.Text = configured.Length > 0 ? configured : auto;
                         if (valid) _lbTdx.Text = string.Format("可用：{0} 只，{1}", codes, sample);
                         else if (auto.Length > 0) _lbTdx.Text = "未配置（检测到 " + auto + "）";
@@ -1678,16 +1678,10 @@ namespace StockPool
         private void DetectTdx()
         {
             if (_lastTdxStatus == null) { RefreshTdx(); return; }
-            var auto = Convert.ToString(DictVal(_lastTdxStatus, "auto_detected") ?? "");
+            var auto = Convert.ToString(J.Get(_lastTdxStatus, "auto_detected") ?? "");
             if (string.IsNullOrEmpty(auto)) { Msg("本机没有检测到通达信目录，请手动浏览选择"); return; }
             _tbTdx.Text = auto;
             SaveTdxPath();
-        }
-
-        private static object DictVal(Dictionary<string, object> dict, string key)
-        {
-            object value;
-            return (dict != null && dict.TryGetValue(key, out value)) ? value : null;
         }
 
         #endregion

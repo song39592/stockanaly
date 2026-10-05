@@ -23,6 +23,22 @@
     新模块打日志的写法。该节**只做导航**，权威细节仍以 `config.py` / `storage.py` / `logutil.py`
     的注释为准，避免变成第二份需要同步的真相。
 
+- **启动器 JSON 工具收敛**（待办 02）：新增 `launcher/J.cs`（20 个方法），
+  **删除 27 个重复定义、替换 829 处调用点**。
+  - 4 份逐字等价的取键（`VSafe`/`StGet`/`DictVal`/`DlVal`）→ `J.Get` / `J.GetFrom`；
+    6 份转 double → `J.NumOrNull` / `J.NumOr` / `J.Num` / `J.NumAt`；
+    3 份转 int → `J.Int`；4 份转 string → `J.Str` / `J.StrOr` / `J.StrAt`；
+    4 份百分比 → 3 个口径函数；金额/亿 → `J.Money` / `J.Yi` / `J.YiSigned`。
+  - `VArr` 也一并搬进 `J.Arr`：它当时住在 `ValuationPage.cs` 却被 4 个文件使用，
+    属于第 26 项说的「公共件住在页面文件里」，纯搬家、逻辑未变。
+  - **三处故意不合并**（合并就是改口径）：`NumOrNull` 的 `null` 语义（估值页靠它显示「—」）、
+    `PctRaw` **不乘 100**（盘面涨跌幅本身已是百分数，乘 100 会静默放大 100 倍）、
+    `VNum` 对 `decimal` 的显式分支（JavaScriptSerializer 会把 JSON 小数解成 decimal）。
+  - 一处有意的口径统一：转 double 统一用 `InvariantCulture`（原先只有下载页这么做；
+    JSON 数字与数字字符串一律以 `.` 作小数点，zh-CN 下行为完全相同）。
+  - 逐文件替换：StockPage 320、MarketPage 206、ValuationPage 132、StrategyPage 88、
+    DownloadPage 45、ChipRankPage 32、StockPoolLauncher 6。`csc` 一次编译通过。
+
 - **启动器色彩常量集中**（待办 01）：新增 `launcher/Palette.cs`（`internal static class C`），
   **31 个语义色常量**，硬编码 `Color.FromArgb(r,g,b)` 从 **171 处降到 37 处**（减少 134）。
   - 覆盖涨/跌、平/灰、警告、主题蓝、副图指标线（RPS / DIF / DEA）、筹码峰深浅七组。

@@ -362,12 +362,12 @@ namespace StockPool
                         bool isOk = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
                         if (isOk && j.ContainsKey("name"))
                         {
-                            double? pr = VNum(VSafe(j, "price"));
-                            _vName.Text = VStr(VSafe(j, "name")) + (pr != null ? "  " + pr.Value.ToString("F2") + " 元" : "");
+                            double? pr = J.NumOrNull(J.Get(j, "price"));
+                            _vName.Text = J.Str(J.Get(j, "name")) + (pr != null ? "  " + pr.Value.ToString("F2") + " 元" : "");
                         }
                         else
                         {
-                            string e2 = VStr(VSafe(j, "error"));
+                            string e2 = J.Str(J.Get(j, "error"));
                             _vName.Text = e2 == "" ? "未找到该代码对应的股票" : e2;
                         }
                     });
@@ -396,16 +396,16 @@ namespace StockPool
                 _vStatusResult.Text = "待补充参数";
                 _vStatusResult.ForeColor = C.WarnDeep;
                 var sb = new StringBuilder();
-                string emsg = VStr(VSafe(j, "error"));
-                if (emsg == "") emsg = VStr(VSafe(j, "detail"));
+                string emsg = J.Str(J.Get(j, "error"));
+                if (emsg == "") emsg = J.Str(J.Get(j, "detail"));
                 if (emsg == "" && !string.IsNullOrEmpty(raw))
                     emsg = raw.Length > 300 ? raw.Substring(0, 300) : raw;
                 if (emsg == "") emsg = "计算失败";
                 sb.AppendLine(emsg);
-                var errs = VArr(VSafe(j, "errors"));
+                var errs = J.Arr(J.Get(j, "errors"));
                 if (errs != null)
                 {
-                    foreach (object e in errs) sb.AppendLine("· " + VStr(e));
+                    foreach (object e in errs) sb.AppendLine("· " + J.Str(e));
                 }
                 _vNote.Text = sb.ToString();
                 _vNote.Height = 48;
@@ -419,38 +419,38 @@ namespace StockPool
 
             _vLast = j;
             _vActive = null;
-            var scenarios = VArr(VSafe(j, "scenarios"));
+            var scenarios = J.Arr(J.Get(j, "scenarios"));
             if (scenarios != null)
             {
                 foreach (Dictionary<string, object> s in scenarios)
                 {
-                    if (_vActive == null) _vActive = VStr(VSafe(s, "key"));
+                    if (_vActive == null) _vActive = J.Str(J.Get(s, "key"));
                 }
             }
             ValuationFillAuto(j);
             ValuationRenderResult(j);
             ValuationRenderSteps();
 
-            var ah = VMap(VSafe(j, "assumptions"));
-            _vHint.Text = "已按 " + VRate(VNum(VSafe(ah, "discount_rate"))) + " 贴现率计算";
+            var ah = J.Map(J.Get(j, "assumptions"));
+            _vHint.Text = "已按 " + J.Pct100Plain(J.NumOrNull(J.Get(ah, "discount_rate"))) + " 贴现率计算";
             _vHint.Tag = "muted";
         }
 
         private void ValuationFillAuto(Dictionary<string, object> j)
         {
-            var m = VMap(VSafe(j, "market"));
-            var f = VMap(VSafe(j, "finance"));
+            var m = J.Map(J.Get(j, "market"));
+            var f = J.Map(J.Get(j, "finance"));
             if (m != null)
             {
-                VFill(_vPrice, VSafe(m, "price"));
-                VFill(_vShares, VSafe(m, "shares"));
+                VFill(_vPrice, J.Get(m, "price"));
+                VFill(_vShares, J.Get(m, "shares"));
             }
-            if (f != null) VFill(_vBase, VSafe(f, "net_profit_base"));
+            if (f != null) VFill(_vBase, J.Get(f, "net_profit_base"));
         }
 
         private void VFill(TextBox tb, object val)
         {
-            double? v = VNum(val);
+            double? v = J.NumOrNull(val);
             if (v == null) return;
             if ((tb.Tag as string) == "auto" || string.IsNullOrWhiteSpace(tb.Text))
             {
@@ -463,52 +463,52 @@ namespace StockPool
 
         private void ValuationRenderResult(Dictionary<string, object> j)
         {
-            var m = VMap(VSafe(j, "market"));
-            var f = VMap(VSafe(j, "finance"));
-            var g = VMap(VSafe(j, "growth"));
-            var a = VMap(VSafe(j, "assumptions"));
+            var m = J.Map(J.Get(j, "market"));
+            var f = J.Map(J.Get(j, "finance"));
+            var g = J.Map(J.Get(j, "growth"));
+            var a = J.Map(J.Get(j, "assumptions"));
 
             _vKpiRow1.Controls.Clear();
             _vKpiRow2.Controls.Clear();
 
-            AddKpi(_vKpiRow1, "股票", VStr(VSafe(j, "name")), VStr(VSafe(j, "code")));
-            AddKpi(_vKpiRow1, "当前股价", VFmt(VNum(VSafe(m, "price"))) + " 元", VStr(VSafe(m, "price_source")));
-            AddKpi(_vKpiRow1, "总股本", VFmt(VNum(VSafe(m, "shares")), 4) + " 亿股", VStr(VSafe(m, "shares_source")));
+            AddKpi(_vKpiRow1, "股票", J.Str(J.Get(j, "name")), J.Str(J.Get(j, "code")));
+            AddKpi(_vKpiRow1, "当前股价", J.Fmt(J.NumOrNull(J.Get(m, "price"))) + " 元", J.Str(J.Get(m, "price_source")));
+            AddKpi(_vKpiRow1, "总股本", J.Fmt(J.NumOrNull(J.Get(m, "shares")), 4) + " 亿股", J.Str(J.Get(m, "shares_source")));
 
-            string np = VStr(VSafe(f, "indicator"));
-            string period = VStr(VSafe(f, "period"));
+            string np = J.Str(J.Get(f, "indicator"));
+            string period = J.Str(J.Get(f, "period"));
             if (period != "") np = (np == "" ? "" : np + " · ") + period;
-            AddKpi(_vKpiRow2, "期初净利润", VFmt(VNum(VSafe(f, "net_profit_base"))) + " 亿", np);
+            AddKpi(_vKpiRow2, "期初净利润", J.Fmt(J.NumOrNull(J.Get(f, "net_profit_base"))) + " 亿", np);
 
-            double? cagr = VNum(VSafe(g, "cagr"));
+            double? cagr = J.NumOrNull(J.Get(g, "cagr"));
             object cons;
             bool fromC = (g != null && g.TryGetValue("from_consensus", out cons) && cons is bool && (bool)cons);
-            AddKpi(_vKpiRow2, "复合增长率（" + VStr(VSafe(f, "forecast_years")) + " 年）",
-                cagr != null ? VFmtPct(cagr) : "走兜底",
-                fromC ? "机构预测 " + VFmt(VNum(VSafe(f, "net_profit_forecast"))) + " 亿" : "未提供机构预测，按模板兜底");
+            AddKpi(_vKpiRow2, "复合增长率（" + J.Str(J.Get(f, "forecast_years")) + " 年）",
+                cagr != null ? J.Pct100(cagr) : "走兜底",
+                fromC ? "机构预测 " + J.Fmt(J.NumOrNull(J.Get(f, "net_profit_forecast"))) + " 亿" : "未提供机构预测，按模板兜底");
 
             AddKpi(_vKpiRow2, "贴现率 / 永续增长",
-                VRate(VNum(VSafe(a, "discount_rate"))) + " / " + VRate(VNum(VSafe(a, "perpetual_growth"))),
-                "前段 " + VStr(VSafe(a, "stage1_years")) + " 年 + 永续");
+                J.Pct100Plain(J.NumOrNull(J.Get(a, "discount_rate"))) + " / " + J.Pct100Plain(J.NumOrNull(J.Get(a, "perpetual_growth"))),
+                "前段 " + J.Str(J.Get(a, "stage1_years")) + " 年 + 永续");
 
             _vGrid.Rows.Clear();
             _vScenario.Items.Clear();
-            var scenarios = VArr(VSafe(j, "scenarios"));
+            var scenarios = J.Arr(J.Get(j, "scenarios"));
             if (scenarios != null)
             {
                 foreach (Dictionary<string, object> s in scenarios)
                 {
-                    _vScenario.Items.Add(VStr(VSafe(s, "key")));
-                    string verdict = VStr(VSafe(s, "verdict"));
+                    _vScenario.Items.Add(J.Str(J.Get(s, "key")));
+                    string verdict = J.Str(J.Get(s, "verdict"));
                     string cls = (verdict == "低估" || verdict == "高估") ? verdict : "合理";
                     _vGrid.Rows.Add(
-                        VStr(VSafe(s, "label")),
-                        VFmtPct(VNum(VSafe(s, "growth"))),
-                        VFmt(VNum(VSafe(s, "value_per_share"))) + " 元",
-                        VFmt(VNum(VSafe(s, "undervalued_ratio")), 4),
+                        J.Str(J.Get(s, "label")),
+                        J.Pct100(J.NumOrNull(J.Get(s, "growth"))),
+                        J.Fmt(J.NumOrNull(J.Get(s, "value_per_share"))) + " 元",
+                        J.Fmt(J.NumOrNull(J.Get(s, "undervalued_ratio")), 4),
                         cls,
-                        VFmt(VNum(VSafe(s, "target_price"))) + " 元",
-                        VFmtPct(VNum(VSafe(s, "return_rate"))));
+                        J.Fmt(J.NumOrNull(J.Get(s, "target_price"))) + " 元",
+                        J.Pct100(J.NumOrNull(J.Get(s, "return_rate"))));
                 }
                 if (_vScenario.Items.Count > 0) _vScenario.SelectedIndex = 0;
             }
@@ -524,7 +524,7 @@ namespace StockPool
                 var first = scenarios[0] as Dictionary<string, object>;
                 if (first != null)
                 {
-                    _vStatusResult.Text = "股价 / 价值 " + VFmt(VNum(VSafe(first, "undervalued_ratio")), 3);
+                    _vStatusResult.Text = "股价 / 价值 " + J.Fmt(J.NumOrNull(J.Get(first, "undervalued_ratio")), 3);
                     _vStatusResult.ForeColor = C.DownDeep;
                 }
             }
@@ -539,48 +539,48 @@ namespace StockPool
                 return;
             }
 
-            var scenarios = VArr(VSafe(_vLast, "scenarios"));
+            var scenarios = J.Arr(J.Get(_vLast, "scenarios"));
             Dictionary<string, object> sel = null;
             if (scenarios != null)
             {
                 foreach (Dictionary<string, object> s in scenarios)
                 {
-                    if (VStr(VSafe(s, "key")) == _vActive) sel = s;
+                    if (J.Str(J.Get(s, "key")) == _vActive) sel = s;
                 }
                 if (sel == null && scenarios.Count > 0) sel = scenarios[0] as Dictionary<string, object>;
             }
             if (sel == null) return;
 
             var sb = new StringBuilder();
-            var g = VMap(VSafe(_vLast, "growth"));
-            var gsteps = VArr(VSafe(g, "steps"));
+            var g = J.Map(J.Get(_vLast, "growth"));
+            var gsteps = J.Arr(J.Get(g, "steps"));
             if (gsteps != null && gsteps.Count > 0)
             {
                 var first = gsteps[0] as Dictionary<string, object>;
                 if (first != null)
                 {
-                    sb.AppendLine("1. " + VStr(VSafe(first, "label")));
-                    sb.AppendLine("   " + VStr(VSafe(first, "formula")));
-                    sb.AppendLine("   " + VStr(VSafe(first, "detail")) + "  =  " + VFmt(VNum(VSafe(first, "value")), 4));
+                    sb.AppendLine("1. " + J.Str(J.Get(first, "label")));
+                    sb.AppendLine("   " + J.Str(J.Get(first, "formula")));
+                    sb.AppendLine("   " + J.Str(J.Get(first, "detail")) + "  =  " + J.Fmt(J.NumOrNull(J.Get(first, "value")), 4));
                 }
             }
             int i = 2;
-            var st = VArr(VSafe(sel, "steps"));
+            var st = J.Arr(J.Get(sel, "steps"));
             if (st != null)
             {
                 foreach (Dictionary<string, object> x in st)
                 {
-                    sb.AppendLine(i + ". " + VStr(VSafe(x, "label")));
-                    sb.AppendLine("   " + VStr(VSafe(x, "formula")));
-                    sb.AppendLine("   " + VStr(VSafe(x, "detail")) + "  =  " + VFmt(VNum(VSafe(x, "value")), 4));
+                    sb.AppendLine(i + ". " + J.Str(J.Get(x, "label")));
+                    sb.AppendLine("   " + J.Str(J.Get(x, "formula")));
+                    sb.AppendLine("   " + J.Str(J.Get(x, "detail")) + "  =  " + J.Fmt(J.NumOrNull(J.Get(x, "value")), 4));
                     i++;
                 }
             }
-            var notes = VArr(VSafe(_vLast, "notes"));
+            var notes = J.Arr(J.Get(_vLast, "notes"));
             if (notes != null && notes.Count > 0)
             {
                 var parts = new List<string>();
-                foreach (object n in notes) parts.Add(VStr(n));
+                foreach (object n in notes) parts.Add(J.Str(n));
                 sb.AppendLine("");
                 sb.AppendLine("说明：" + string.Join("；", parts.ToArray()));
             }
@@ -634,76 +634,6 @@ namespace StockPool
                     return sr.ReadToEnd();
                 }
             }
-        }
-
-        // ---- JSON 取值辅助（后端返回嵌套字典 + 数组）----
-        private static Dictionary<string, object> VMap(object o)
-        {
-            return o as Dictionary<string, object>;
-        }
-
-        private static System.Collections.ArrayList VArr(object o)
-        {
-            if (o == null) return null;
-            if (o is System.Collections.ArrayList) return (System.Collections.ArrayList)o;
-            if (o is object[])
-            {
-                var arr = (object[])o;
-                var al = new System.Collections.ArrayList();
-                foreach (object x in arr) al.Add(x);
-                return al;
-            }
-            return null;
-        }
-
-        private static object VSafe(Dictionary<string, object> d, string k)
-        {
-            if (d == null) return null;
-            object v;
-            if (d.TryGetValue(k, out v)) return v;
-            return null;
-        }
-
-        private static double? VNum(object o)
-        {
-            if (o == null) return null;
-            if (o is double) return (double)o;
-            // JavaScriptSerializer 会把 JSON 小数反序列化成 decimal，必须显式处理
-            if (o is decimal) return Convert.ToDouble(o);
-            if (o is float) return Convert.ToDouble(o);
-            if (o is int) return (int)o;
-            if (o is long) return (long)o;
-            if (o is string)
-            {
-                double dv;
-                if (double.TryParse((string)o, out dv)) return dv;
-            }
-            return null;
-        }
-
-        private static string VStr(object o)
-        {
-            if (o == null) return "";
-            return Convert.ToString(o);
-        }
-
-        private static string VFmt(double? v, int d = 2)
-        {
-            if (v == null) return "—";
-            return v.Value.ToString("F" + d);
-        }
-
-        private static string VFmtPct(double? v)
-        {
-            if (v == null) return "—";
-            return (v.Value > 0 ? "+" : "") + (v.Value * 100).ToString("F2") + "%";
-        }
-
-        /// <summary>不带正负号的百分比（用于贴现率 / 永续增长等口径值）。</summary>
-        private static string VRate(double? v)
-        {
-            if (v == null) return "—";
-            return (v.Value * 100).ToString("F2") + "%";
         }
 
         #endregion

@@ -187,18 +187,18 @@ namespace StockPool
                         ScrSetStatus("读取进度失败：" + ScrErr(body), true);
                         return;
                     }
-                    string st = ScrStr(j, "state");
+                    string st = J.StrAt(j, "state");
                     if (st == "running")
                     {
                         ScrSetStatus(string.Format("计算中 {0}/{1}（{2}%）…",
-                                                   ScrNum(j, "done"), ScrNum(j, "total"),
-                                                   ScrNum(j, "percent").ToString("F1")), true);
+                                                   J.NumAt(j, "done"), J.NumAt(j, "total"),
+                                                   J.NumAt(j, "percent").ToString("F1")), true);
                         return;
                     }
                     _scrTimer.Stop();
                     if (st == "error")
                     {
-                        ScrSetStatus("计算失败：" + ScrStr(j, "error"), true);
+                        ScrSetStatus("计算失败：" + J.StrAt(j, "error"), true);
                         return;
                     }
                     ScrLoadResult();
@@ -225,7 +225,7 @@ namespace StockPool
                     bool ok = j.ContainsKey("ok") && j["ok"] is bool && (bool)j["ok"];
                     if (!ok)
                     {
-                        ScrSetStatus(ScrStr(j, "error"), true);
+                        ScrSetStatus(J.StrAt(j, "error"), true);
                         return;
                     }
                     _scrPayload = j;
@@ -242,21 +242,21 @@ namespace StockPool
             double stay = ScrTierCount(j, "stay");
             double up = ScrTierCount(j, "up");
             double down = ScrTierCount(j, "down");
-            double weeks = ScrNum(ScrParams(j), "weeks");
-            string nameTip = ScrNum(j, "names_resolved") > 0 ? ""
+            double weeks = J.NumAt(ScrParams(j), "weeks");
+            string nameTip = J.NumAt(j, "names_resolved") > 0 ? ""
                            : "　⚠ 名称未取到，点「重取名称」补上";
             ScrSetStatus(string.Format("本周 {0} | 全市场 {1} 只，成功 {2} | "
                 + "连续{3}周在榜 {4} 只；上涨离榜 {5} 只；下跌离榜 {6} 只 | 更新 {7}{8}",
-                ScrStr(j, "week"), ScrNum(j, "total"), ScrNum(j, "computed"),
-                weeks, stay, up, down, ScrStr(j, "computed_at"), nameTip), false);
+                J.StrAt(j, "week"), J.NumAt(j, "total"), J.NumAt(j, "computed"),
+                weeks, stay, up, down, J.StrAt(j, "computed_at"), nameTip), false);
 
-            double launch = ScrNum(ScrParams(j), "launch_threshold");
-            double chg = ScrNum(ScrParams(j), "chg_days");
+            double launch = J.NumAt(ScrParams(j), "launch_threshold");
+            double chg = J.NumAt(ScrParams(j), "chg_days");
             _scrInfo.Text = string.Format(
                 "口径：SCR90=(P95-P5)/(P95+P5)，越小越集中；每期取最小的 {0} 只。"
                 + "离开榜单按近 {1} 个交易日涨幅判定 —— ≥{2}% 为上涨离开（启动型），"
                 + "未达为下跌离开（破位）。批量未做锁仓修正。",
-                ScrNum(ScrParams(j), "top_n"), chg, launch);
+                J.NumAt(ScrParams(j), "top_n"), chg, launch);
         }
 
         private void ScrRender()
@@ -267,7 +267,7 @@ namespace StockPool
 
             ArrayList items;
             if (it.Key == "current")
-                items = VArr(VSafe(_scrPayload, "current"));
+                items = J.Arr(J.Get(_scrPayload, "current"));
             else
                 items = ScrTierItems(_scrPayload, it.Key);
 
@@ -278,15 +278,15 @@ namespace StockPool
                 foreach (Dictionary<string, object> d in items)
                 {
                     no++;
-                    string name = VStr(VSafe(d, "name"));
+                    string name = J.Str(J.Get(d, "name"));
                     if (name.Length == 0) name = "—";
-                    object chgObj = VSafe(d, "chg");
-                    string chg = (chgObj == null) ? "—" : (ScrNum(d, "chg").ToString("F2") + "%");
-                    string close = VSafe(d, "close") == null ? "—" : ScrNum(d, "close").ToString("F2");
+                    object chgObj = J.Get(d, "chg");
+                    string chg = (chgObj == null) ? "—" : (J.NumAt(d, "chg").ToString("F2") + "%");
+                    string close = J.Get(d, "close") == null ? "—" : J.NumAt(d, "close").ToString("F2");
                     data.Add(new[] {
-                        no.ToString(), VStr(VSafe(d, "code")), name,
-                        ScrNum(d, "scr90").ToString("F4"), close, chg,
-                        ScrNum(d, "weeks_on").ToString("F0"), VStr(VSafe(d, "last_week")) });
+                        no.ToString(), J.Str(J.Get(d, "code")), name,
+                        J.NumAt(d, "scr90").ToString("F4"), close, chg,
+                        J.NumAt(d, "weeks_on").ToString("F0"), J.Str(J.Get(d, "last_week")) });
                 }
             }
             _scrGrid.SetRows(data);
@@ -326,13 +326,13 @@ namespace StockPool
         private static double ScrTierCount(Dictionary<string, object> j, string key)
         {
             var t = ScrTier(j, key);
-            return t == null ? 0 : ScrNum(t, "count");
+            return t == null ? 0 : J.NumAt(t, "count");
         }
 
         private static ArrayList ScrTierItems(Dictionary<string, object> j, string key)
         {
             var t = ScrTier(j, key);
-            return t == null ? null : VArr(VSafe(t, "items"));
+            return t == null ? null : J.Arr(J.Get(t, "items"));
         }
 
         private static Dictionary<string, object> ScrJson(string url, int timeoutMs, out string body)
@@ -344,20 +344,6 @@ namespace StockPool
                 return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body);
             }
             catch { return null; }
-        }
-
-        private static string ScrStr(Dictionary<string, object> j, string key)
-        {
-            if (j == null) return "";
-            object v;
-            return j.TryGetValue(key, out v) ? (v == null ? "" : Convert.ToString(v)) : "";
-        }
-
-        private static double ScrNum(Dictionary<string, object> j, string key)
-        {
-            object v;
-            if (j == null || !j.TryGetValue(key, out v) || v == null) return 0;
-            try { return Convert.ToDouble(v); } catch { return 0; }
         }
 
         private static string ScrErr(string body)
