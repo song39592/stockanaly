@@ -314,7 +314,7 @@ namespace StockPool
             {
                 _vHint.Text = "请输入 6 位数字股票代码（如 600519）";
                 _vHint.Tag = "bad";
-                _vHint.ForeColor = Color.FromArgb(208, 57, 59);
+                _vHint.ForeColor = C.UpErr;
                 _vCode.Focus();
                 return;
             }
@@ -394,7 +394,7 @@ namespace StockPool
                 _vKpiRow2.Controls.Clear();
                 _vGrid.Rows.Clear();
                 _vStatusResult.Text = "待补充参数";
-                _vStatusResult.ForeColor = Color.FromArgb(180, 83, 9);
+                _vStatusResult.ForeColor = C.WarnDeep;
                 var sb = new StringBuilder();
                 string emsg = VStr(VSafe(j, "error"));
                 if (emsg == "") emsg = VStr(VSafe(j, "detail"));
@@ -525,7 +525,7 @@ namespace StockPool
                 if (first != null)
                 {
                     _vStatusResult.Text = "股价 / 价值 " + VFmt(VNum(VSafe(first, "undervalued_ratio")), 3);
-                    _vStatusResult.ForeColor = Color.FromArgb(30, 126, 52);
+                    _vStatusResult.ForeColor = C.DownDeep;
                 }
             }
         }
@@ -594,7 +594,7 @@ namespace StockPool
             _vKpiRow2.Controls.Clear();
             _vGrid.Rows.Clear();
             _vStatusResult.Text = "失败";
-            _vStatusResult.ForeColor = Color.FromArgb(208, 57, 59);
+            _vStatusResult.ForeColor = C.UpErr;
             _vNote.Text = msg;
             _vNote.Height = 32;
             _vNote.Visible = true;

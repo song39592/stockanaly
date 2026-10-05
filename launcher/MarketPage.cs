@@ -474,17 +474,17 @@ namespace StockPool
         private static void MktDir(Label lb, double? v)
         {
             lb.Tag = "mkt-dir";
-            if (v == null) { lb.ForeColor = Color.FromArgb(150, 158, 172); return; }
-            lb.ForeColor = v.Value > 0 ? Color.FromArgb(239, 83, 80)
-                : (v.Value < 0 ? Color.FromArgb(63, 185, 80) : Color.FromArgb(150, 158, 172));
+            if (v == null) { lb.ForeColor = C.Flat; return; }
+            lb.ForeColor = v.Value > 0 ? C.Up
+                : (v.Value < 0 ? C.Down : C.Flat);
         }
 
         private static void MktColor(DataGridViewCell cell, double? v)
         {
             if (v == null) return;
-            if (v.Value > 0) cell.Style.ForeColor = Color.FromArgb(239, 83, 80);
-            else if (v.Value < 0) cell.Style.ForeColor = Color.FromArgb(63, 185, 80);
-            else cell.Style.ForeColor = Color.FromArgb(150, 158, 172);
+            if (v.Value > 0) cell.Style.ForeColor = C.Up;
+            else if (v.Value < 0) cell.Style.ForeColor = C.Down;
+            else cell.Style.ForeColor = C.Flat;
         }
 
         private static MktBars.Item MktBarItem(string name, double value, string text)
@@ -560,7 +560,7 @@ namespace StockPool
             if (target != null)
             {
                 target.Text = msg;
-                target.ForeColor = Color.FromArgb(208, 57, 59);
+                target.ForeColor = C.UpErr;
             }
             _mktFailed++;
         }
@@ -667,9 +667,9 @@ namespace StockPool
                 if (total <= 0) total = 1;
 
                 var segs = new List<MktRatioBar.Seg>();
-                segs.Add(new MktRatioBar.Seg { Label = "涨 " + up, Value = up, Color = Color.FromArgb(239, 83, 80) });
-                segs.Add(new MktRatioBar.Seg { Label = "平 " + flat, Value = flat, Color = Color.FromArgb(120, 124, 132) });
-                segs.Add(new MktRatioBar.Seg { Label = "跌 " + down, Value = down, Color = Color.FromArgb(63, 185, 80) });
+                segs.Add(new MktRatioBar.Seg { Label = "涨 " + up, Value = up, Color = C.Up });
+                segs.Add(new MktRatioBar.Seg { Label = "平 " + flat, Value = flat, Color = C.FlatDeep });
+                segs.Add(new MktRatioBar.Seg { Label = "跌 " + down, Value = down, Color = C.Down });
                 _mktCapRatio.SetSegments(segs);
 
                 AddRow(_mktCapRows, MktRow("上涨占比", (up * 100.0 / total).ToString("F1") + "%"));
@@ -788,7 +788,7 @@ namespace StockPool
             {
                 _mktAiStatus.Text = force ? "AI 强制重新分析中…" : "AI 分析中…";
                 _mktAiStatus.Tag = "muted";
-                _mktAiStatus.ForeColor = Color.FromArgb(150, 158, 172);
+                _mktAiStatus.ForeColor = C.Flat;
             }
             _mktAiMarkdown = "";
             if (_mktAiBox != null) _mktAiBox.Clear();
@@ -832,7 +832,7 @@ namespace StockPool
                                     if (_mktAiStatus != null)
                                     {
                                         _mktAiStatus.Text = "AI 生成中…";
-                                        _mktAiStatus.ForeColor = Color.FromArgb(150, 158, 172);
+                                        _mktAiStatus.ForeColor = C.Flat;
                                     }
                                 });
                                 return;
@@ -872,7 +872,7 @@ namespace StockPool
                             if (_mktAiStatus != null)
                             {
                                 _mktAiStatus.Text = "等待后端就绪…（第 " + attempt + " 次重试）";
-                                _mktAiStatus.ForeColor = Color.FromArgb(150, 158, 172);
+                                _mktAiStatus.ForeColor = C.Flat;
                             }
                         });
                     }
@@ -888,7 +888,7 @@ namespace StockPool
             if (_mktAiBox == null) return;
             _mktAiBox.SelectionStart = _mktAiBox.TextLength;
             _mktAiBox.SelectionLength = 0;
-            _mktAiBox.SelectionColor = Color.FromArgb(150, 158, 172);
+            _mktAiBox.SelectionColor = C.Flat;
             _mktAiBox.AppendText(msg + Environment.NewLine);
             _mktAiBox.SelectionStart = _mktAiBox.TextLength;
             _mktAiBox.ScrollToCaret();
@@ -924,7 +924,7 @@ namespace StockPool
             if (_mktAiStatus != null)
             {
                 _mktAiStatus.Text = msg;
-                _mktAiStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                _mktAiStatus.ForeColor = C.UpErr;
             }
             _mktAiMarkdown = "";
             if (_mktAiBox != null) FillAiDoc(_mktAiBox, "");
@@ -941,7 +941,7 @@ namespace StockPool
                 if (emsg == "") emsg = VStr(VSafe(j, "detail"));
                 if (emsg == "") emsg = "分析失败";
                 _mktAiStatus.Text = emsg;
-                _mktAiStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                _mktAiStatus.ForeColor = C.UpErr;
                 _mktAiMarkdown = "";
                 FillAiDoc(_mktAiBox, "");
                 return;
@@ -952,7 +952,7 @@ namespace StockPool
             string asOf = VStr(VSafe(j, "data_as_of"));
             _mktAiStatus.Text = (isCached ? "（缓存）" : "已生成") + (asOf != "" ? " 数据截至 " + asOf : "");
             _mktAiStatus.Tag = "muted";
-            _mktAiStatus.ForeColor = Color.FromArgb(30, 126, 52);
+            _mktAiStatus.ForeColor = C.DownDeep;
             FillAiDoc(_mktAiBox, _mktAiMarkdown);
         }
 
@@ -969,7 +969,7 @@ namespace StockPool
             if (!ok)
             {
                 _mktLuStatus.Text = VStr(VSafe(j, "trade_date")) + " 未获取到涨停池数据";
-                _mktLuStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                _mktLuStatus.ForeColor = C.UpErr;
                 return;
             }
 
@@ -1151,7 +1151,7 @@ namespace StockPool
             if (!ok)
             {
                 _mktBlStatus.Text = VStr(VSafe(j, "trade_date")) + " 未获取到大面股数据";
-                _mktBlStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                _mktBlStatus.ForeColor = C.UpErr;
                 return;
             }
 
@@ -1297,7 +1297,7 @@ namespace StockPool
 
                     Region old = g.Clip;
                     g.SetClip(new Rectangle(barX, 0, barW, Height), System.Drawing.Drawing2D.CombineMode.Replace);
-                    using (var br = new SolidBrush(it.Value >= 0 ? Color.FromArgb(239, 83, 80) : Color.FromArgb(63, 185, 80)))
+                    using (var br = new SolidBrush(it.Value >= 0 ? C.Up : C.Down))
                         g.FillRectangle(br, x, y + 3, len, RowH - 8);
                     g.Clip = old;
 

@@ -825,7 +825,7 @@ namespace StockPool
                 _cBg = Color.FromArgb(30, 32, 38);
                 _cPanel = Color.FromArgb(38, 41, 48);
                 _cText = Color.FromArgb(224, 228, 235);
-                _cSub = Color.FromArgb(150, 158, 172);
+                _cSub = C.Flat;
                 _cInput = Color.FromArgb(45, 49, 57);
                 _cInputText = Color.FromArgb(224, 228, 235);
                 _cHead = Color.FromArgb(24, 26, 32);
@@ -895,7 +895,7 @@ namespace StockPool
             }
             else if (c is Button)
             {
-                c.BackColor = Color.FromArgb(64, 120, 192);
+                c.BackColor = C.Accent;
                 c.ForeColor = Color.White;
             }
             else if (c is Label)
@@ -927,7 +927,7 @@ namespace StockPool
                 dgv.EnableHeadersVisualStyles = false;
                 dgv.BackgroundColor = _cBg;
                 dgv.GridColor = _light ? Color.FromArgb(222, 224, 228) : Color.FromArgb(58, 62, 72);
-                Color sel = Color.FromArgb(64, 120, 192);
+                Color sel = C.Accent;
                 // 单元格样式优先级：Cell > Row > RowsDefault > AlternatingRows > Column > DefaultCellStyle
                 // 只设 DefaultCellStyle 会被上层压制，这里逐层显式设置，保证行底色跟随主题
                 dgv.DefaultCellStyle.BackColor = _cPanel;
@@ -2240,7 +2240,7 @@ namespace StockPool
                 }
                 var ver = JsonValue(body, "api_version");
                 var detail = JsonValue(body, "backend_detail");
-                SetDot(_lbBackendDot, Color.FromArgb(46, 204, 113), "后端 :8000 · 正常");
+                SetDot(_lbBackendDot, C.OkGreen, "后端 :8000 · 正常");
                 if (_lbBackendState != null) _lbBackendState.Text = "状态：运行中" + (_backend.Owned ? "（本程序启动）" : "（其他进程启动）");
                 if (_lbApiVer != null) _lbApiVer.Text = "接口版本 v" + (ver ?? "-");
                 if (_lbBackendDetail != null) _lbBackendDetail.Text = "后端 " + (detail ?? "-");
@@ -2260,7 +2260,7 @@ namespace StockPool
 
             if (aOk)
             {
-                SetDot(_lbAiDot, Color.FromArgb(46, 204, 113), "AI 服务 :3080 · 正常");
+                SetDot(_lbAiDot, C.OkGreen, "AI 服务 :3080 · 正常");
                 if (_lbAiState != null) _lbAiState.Text = "状态：运行中";
             }
             else if (_dsh != null && (_dsh.Alive || _dsh.Starting))

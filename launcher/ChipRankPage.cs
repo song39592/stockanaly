@@ -300,8 +300,8 @@ namespace StockPool
             if (_scrStatus == null) return;
             _scrStatus.Text = text;
             _scrStatus.Tag = "muted";
-            _scrStatus.ForeColor = failed ? Color.FromArgb(201, 133, 0)
-                                          : Color.FromArgb(150, 158, 172);
+            _scrStatus.ForeColor = failed ? C.Warn
+                                          : C.Flat;
         }
 
         private static Dictionary<string, object> ScrParams(Dictionary<string, object> j)

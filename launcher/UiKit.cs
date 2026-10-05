@@ -62,7 +62,7 @@ namespace StockPool
             {
                 if (idx != _tabIndex) return;
                 var btn = (Control)s;
-                using (var pen = new Pen(Color.FromArgb(64, 120, 192), 2f))
+                using (var pen = new Pen(C.Accent, 2f))
                     e.Graphics.DrawLine(pen, 0, btn.Height - 1, btn.Width, btn.Height - 1);
             };
             _tabBtns.Add(b);
@@ -173,7 +173,7 @@ namespace StockPool
             b.Text = text;
             b.Height = 26;
             b.FlatStyle = FlatStyle.Flat;
-            b.BackColor = Color.FromArgb(64, 120, 192);
+            b.BackColor = C.Accent;
             b.ForeColor = Color.White;
             b.FlatAppearance.BorderSize = 0;
             b.AutoSize = (width <= 0);

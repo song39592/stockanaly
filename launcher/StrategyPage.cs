@@ -506,7 +506,7 @@ namespace StockPool
             if (_stStrategies == null || _stList.SelectedIndex < 0)
             {
                 _stRecentStatus.Text = "请先在「策略选择与编辑」里选一个策略";
-                _stRecentStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                _stRecentStatus.ForeColor = C.UpErr;
                 return;
             }
             var req = StRequest((int)_stRecentDays.Value);
@@ -527,7 +527,7 @@ namespace StockPool
                     Invoke((Action)(() =>
                     {
                         _stRecentStatus.Text = "回测失败：" + msg;
-                        _stRecentStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                        _stRecentStatus.ForeColor = C.UpErr;
                     }));
                 }
             });
@@ -539,7 +539,7 @@ namespace StockPool
             if (j.TryGetValue("ok", out okv) && okv is bool && !(bool)okv)
             {
                 _stRecentStatus.Text = "回测失败：" + StErrMsg(j);
-                _stRecentStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                _stRecentStatus.ForeColor = C.UpErr;
                 return;
             }
             var metrics = (Dictionary<string, object>)j["metrics"];
@@ -567,7 +567,7 @@ namespace StockPool
             }
             _stRecentGrid.Fit();
             _stRecentStatus.Text = "完成（最近 " + (int)_stRecentDays.Value + " 个交易日）";
-            _stRecentStatus.ForeColor = Color.FromArgb(60, 160, 90);
+            _stRecentStatus.ForeColor = C.DownSoft;
         }
 
         // ---------------- ⑤ 当前策略推荐 ----------------
@@ -628,7 +628,7 @@ namespace StockPool
             if (_stStrategies == null || _stList.SelectedIndex < 0)
             {
                 _stRecoStatus.Text = "请先在「策略选择与编辑」里选一个策略";
-                _stRecoStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                _stRecoStatus.ForeColor = C.UpErr;
                 return;
             }
             var req = StRequest(0);
@@ -649,7 +649,7 @@ namespace StockPool
                     Invoke((Action)(() =>
                     {
                         _stRecoStatus.Text = "计算失败：" + msg;
-                        _stRecoStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                        _stRecoStatus.ForeColor = C.UpErr;
                     }));
                 }
             });
@@ -661,7 +661,7 @@ namespace StockPool
             if (j.TryGetValue("ok", out okv) && okv is bool && !(bool)okv)
             {
                 _stRecoStatus.Text = "计算失败：" + StErrMsg(j);
-                _stRecoStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                _stRecoStatus.ForeColor = C.UpErr;
                 return;
             }
             var s = (Dictionary<string, object>)j["summary"];
@@ -680,7 +680,7 @@ namespace StockPool
             StFillRecoGrid(_stHoldGrid, j["hold"], true);
 
             _stRecoStatus.Text = "截至 " + StStr(j["date"], "") + " · 每只资金带 " + Money(ToDbl(j["band"]));
-            _stRecoStatus.ForeColor = Color.FromArgb(60, 160, 90);
+            _stRecoStatus.ForeColor = C.DownSoft;
         }
 
         private void StFillRecoGrid(StockGrid grid, object list, bool hold)
@@ -703,7 +703,7 @@ namespace StockPool
                             Pct(ToDbl(d["weight"])), Money(pnl));
                         // A 股习惯：红涨绿跌
                         grid.Rows[ri].Cells[7].Style.ForeColor =
-                            pnl >= 0 ? Color.FromArgb(208, 57, 59) : Color.FromArgb(60, 160, 90);
+                            pnl >= 0 ? C.UpErr : C.DownSoft;
                         grid.Rows[ri].Cells[6].Style.ForeColor = _cSub;
                     }
                     else
@@ -798,7 +798,7 @@ namespace StockPool
             if (_stStrategies == null || _stList.SelectedIndex < 0)
             {
                 _stResultStatus.Text = "请先在「策略选择与编辑」里选一个策略";
-                _stResultStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                _stResultStatus.ForeColor = C.UpErr;
                 return;
             }
             var meta = _stStrategies[_stList.SelectedIndex];
@@ -845,7 +845,7 @@ namespace StockPool
                     Invoke((Action)(() =>
                     {
                         _stResultStatus.Text = "回测失败：" + ex.Message;
-                        _stResultStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                        _stResultStatus.ForeColor = C.UpErr;
                     }));
                 }
             });
@@ -864,7 +864,7 @@ namespace StockPool
                     if (ed != null) msg = "回测失败：" + StStr(ed["message"], "");
                 }
                 _stResultStatus.Text = msg;
-                _stResultStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                _stResultStatus.ForeColor = C.UpErr;
                 return;
             }
 
@@ -906,7 +906,7 @@ namespace StockPool
             object nstk;
             int doneCount = (metrics.TryGetValue("num_stocks", out nstk)) ? ToInt(nstk) : 0;
             _stResultStatus.Text = "回测完成（参与统计 " + doneCount + " 只）";
-            _stResultStatus.ForeColor = Color.FromArgb(60, 160, 90);
+            _stResultStatus.ForeColor = C.DownSoft;
             object errs;
             if (j.TryGetValue("data_errors", out errs))
             {
@@ -1138,21 +1138,21 @@ namespace StockPool
 
             if (_stEqBench != null)
             {
-                using (var pen = new Pen(Color.FromArgb(240, 160, 40), 1.5f))
+                using (var pen = new Pen(C.LineGoldDeep, 1.5f))
                     for (int i = 1; i < _stEqBench.Count; i++)
                         if (_stEqBench[i] != null && _stEqBench[i - 1] != null)
                             g.DrawLine(pen, pt(i - 1, _stEqBench[i - 1].Value), pt(i, _stEqBench[i].Value));
             }
-            using (var pen = new Pen(Color.FromArgb(0, 120, 215), 2f))
+            using (var pen = new Pen(C.AccentDeep, 2f))
                 for (int i = 1; i < _stEq.Count; i++)
                     if (_stEq[i] != null && _stEq[i - 1] != null)
                         g.DrawLine(pen, pt(i - 1, _stEq[i - 1].Value), pt(i, _stEq[i].Value));
 
             using (var bb = new SolidBrush(_cText))
             {
-                g.DrawString("组合", new Font("Microsoft YaHei UI", 9f), new SolidBrush(Color.FromArgb(0, 120, 215)), (float)padL, 0f);
+                g.DrawString("组合", new Font("Microsoft YaHei UI", 9f), new SolidBrush(C.AccentDeep), (float)padL, 0f);
                 if (_stEqBench != null)
-                    g.DrawString("基准", new Font("Microsoft YaHei UI", 9f), new SolidBrush(Color.FromArgb(240, 160, 40)), (float)(padL + 44), 0f);
+                    g.DrawString("基准", new Font("Microsoft YaHei UI", 9f), new SolidBrush(C.LineGoldDeep), (float)(padL + 44), 0f);
                 g.DrawString(((double)(_stEq[_stEq.Count - 1] ?? min)).ToString("F0"), this.Font, bb, (float)padL, (float)(padT + h + 2));
             }
         }
@@ -1200,7 +1200,7 @@ namespace StockPool
                     Invoke((Action)(() =>
                     {
                         _stResultStatus.Text = "加载失败（确认后端已启动）：" + ex.Message;
-                        _stResultStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                        _stResultStatus.ForeColor = C.UpErr;
                     }));
                 }
             });
