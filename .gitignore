@@ -1,9 +1,64 @@
-# ==================== 隐私 / 密钥（禁止提交）====================
-# 真实密钥只放 .env，绝不提交；只提交 .env.example 模板
+# =====================================================================
+# .gitignore —— 按「职责」分五类，而不是按技术栈堆
+#   1) 源码            —— 全部跟踪（本节只是说明）
+#   2) 依赖声明与锁文件 —— 声明/锁文件跟踪；虚拟环境与依赖目录忽略
+#   3) 可重建的构建缓存
+#   4) 配置与凭据       —— 模板跟踪，真实值忽略
+#   5) 日志与持久化状态
+#
+# ⚠️ 改完必须验证：已跟踪文件一个都不能变少（否则等于静默丢文件）
+# =====================================================================
+
+
+# -------------------- 1) 源码（不忽略任何东西）--------------------
+# 说明：代码属于仓库，全部跟踪。这里只登记目录归属，方便后续分类对照。
+#
+#   backend_fastapi/    后端源码（按功能：core / features / indicators / strategies / chip_formulas）
+#   launcher/           前端原生启动器（按页面：StockPage / StrategyPage / MarketPage /
+#                       ValuationPage / DownloadPage / ChipRankPage + 公共件）
+#   frontend/           前端网页（按页面分目录，shared 放共享 js）
+#   agent_dsh/          dsh agent（其 node_modules 由第 2 类统一忽略）
+#
+# 本类**不要**在这里写任何忽略规则。
+# ----------------------------------------------------------
+
+
+# -------------------- 2) 依赖声明与锁文件 --------------------
+# ✅ 跟踪：requirements.txt / requirements.lock.txt /
+#         package.json / package-lock.json
+# ❌ 忽略：虚拟环境、依赖目录
+venv/
+.venv/
+env/
+ENV/
+node_modules/
+.runtime/          # 本机 Node 运行时，可重新下载
+# ----------------------------------------------------------
+
+
+# -------------------- 3) 可重建的构建缓存 ------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+*.tmp
+*.temp
+*.cache
+*.pid
+cordis.runtime.yml
+# ----------------------------------------------------------
+
+
+# -------------------- 4) 配置与凭据 ----------------------
 .env
 .env.*
 !.env.example
-# 其他常见密钥文件：证书 / 私钥 / 凭据
 *.key
 *.pem
 *.p12
@@ -12,54 +67,23 @@ secrets.*
 credentials.*
 *apikey*
 *api_key*
-!.env.example
+*.token
+# 启动器生成：浅色 / 深色主题状态（页面读取它）
+frontend/theme-state.js
+# ----------------------------------------------------------
+# 说明：上面这一行里的 `frontend/theme-state.js` 是**被忽略**的真实配置，
+# 不要因为它出现在本文件就以为它已跟踪 —— 它只在 .gitignore 里。
+# ----------------------------------------------------------
 
-# ==================== Python ====================
-__pycache__/
-*.py[cod]
-*.pyo
-venv/
-.venv/
-*.egg-info/
-dist/
-build/
 
-# ==================== Node ====================
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# ==================== OS 生成文件 ====================
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# ==================== 日志 / 缓存 / 临时 ====================
+# -------------------- 5) 日志与持久化状态 ----------------
 logs/
 *.log
-*.tmp
-*.temp
-*.cache
-*.pid
-cordis.runtime.yml
-# 运行期数据（股票池库 / 实验室库 / SCR 数据）现已集中存放在项目外的数据目录，
-# 默认 D:\stockanaly-data，可用 .env 的 DATA_DIR 修改；下面两项为遗留与回退位置兜底
+# 后端运行期数据（旧位置回退兜底；现默认在项目外）
 backend_fastapi/data/
+# SCR 数据旧位置（现集中在数据盘 chip/ 下）
 backend_fastapi/chip_data/
-agent_dsh/skills_library/mentor-*.skill
-uvicorn.log
-
-# ==================== 编辑器 / 本地工具配置 ====================
-.vscode/
-.idea/
-.claude/
-
-# ==================== 启动器生成 ====================
-# 浅色 / 深色主题状态，由启动器窗口上的「主题」按钮写入，页面读取它
-frontend/theme-state.js
-
-# ==================== 策略校验缓存（运行时自动生成）====================
-# registry.scan() 在导入时生成，记录各策略文件的校验结果，不可提交
+instance.lock
+# 策略 / 筹码公式的运行时校验缓存（自动生成，不可提交）
 backend_fastapi/strategies/_validated.json
+# ----------------------------------------------------------
