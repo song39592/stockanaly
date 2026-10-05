@@ -132,6 +132,37 @@ def _report_periods(count: int = 8) -> list[str]:
     return out[:count]
 
 
+# 往回试报告期的**总时间预算**（秒）。
+# 单个报告期 `_ak(..., timeout=20)` 由看门狗线程硬切断，报告期有 8 个且**串行**，
+# 于是最坏 8×20 = 160s；而调用方（筹码分布 `/api/chip/dist`、个股基本信息接口）
+# 在启动器一侧只有 30s 超时 —— 上游一慢，整条链路就被判「无响应」。
+# 实测正常情况下**第一个报告期就命中**（0.4~0.9s），预算给到 6s 已留了 7 倍余量。
+_HOLDERS_BUDGET = 6.0
+_HOLDERS_PERIOD_TIMEOUT = 20.0
+
+
+def _walk_report_periods(fetch, budget: float = _HOLDERS_BUDGET):
+    """从最近报告期往回试，返回第一个有数据的 `(period, df)`；全都没有则 `(None, None)`。
+
+    `fetch(period, timeout)` 负责真正取数。**`budget` 是硬约束**：预算用尽立即停，
+    哪怕后面的报告期其实有数据 —— 取不到就回退到「不做锁仓修正」，
+    这正是本模块既有的降级约定（见 `lockup_ratio` 的说明），只是原先只防「失败」、
+    没防「变慢」。上游不稳时**不应**让用户等一分钟。
+    """
+    deadline = time.monotonic() + max(0.5, float(budget))
+    for period in _report_periods():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        try:
+            df = fetch(period, min(_HOLDERS_PERIOD_TIMEOUT, left))
+        except Exception:                                # noqa: BLE001 - 单期失败换下一期
+            continue
+        if df is not None and not getattr(df, "empty", True):
+            return period, df
+    return None, None
+
+
 def _json_safe(v: Any) -> Any:
     """把 akshare / pandas 带来的值洗成 JSON 安全类型。
 
@@ -162,29 +193,27 @@ def top_holders(code: str) -> dict:
     """前十大股东（含股份类型，可据 `股份类型` 区分流通 / 限售）。
 
     十大股东按报告期披露，故从最近报告期往回试，取第一个有数据的期。
+    遍历受 `_HOLDERS_BUDGET` 总预算约束（见 `_walk_report_periods` 的说明）。
     """
     symbol = price_service.market_symbol(code)
-    for period in _report_periods():
-        try:
-            df = _ak(ak.stock_gdfx_top_10_em, symbol=symbol, date=period, timeout=20)
-        except Exception:
-            continue
-        if df is None or getattr(df, "empty", True):
-            continue
-        items: list[dict] = []
-        for _, row in df.iterrows():
-            items.append({
-                "rank": _json_safe(row.get("名次")),
-                "name": _json_safe(row.get("股东名称")),
-                "share_type": _json_safe(row.get("股份类型")),
-                "shares": _json_safe(row.get("持股数")),
-                "pct": _json_safe(row.get("占总股本持股比例")),
-                "change": _json_safe(row.get("增减")),
-                "change_ratio": _json_safe(row.get("变动比率")),
-            })
-        if items:
-            return {"period": period, "items": items, "error": None}
-    return {"period": None, "items": [], "error": "未取到十大股东数据"}
+    period, df = _walk_report_periods(
+        lambda p, t: _ak(ak.stock_gdfx_top_10_em, symbol=symbol, date=p, timeout=t))
+    if df is None:
+        return {"period": None, "items": [], "error": "未取到十大股东数据"}
+    items: list[dict] = []
+    for _, row in df.iterrows():
+        items.append({
+            "rank": _json_safe(row.get("名次")),
+            "name": _json_safe(row.get("股东名称")),
+            "share_type": _json_safe(row.get("股份类型")),
+            "shares": _json_safe(row.get("持股数")),
+            "pct": _json_safe(row.get("占总股本持股比例")),
+            "change": _json_safe(row.get("增减")),
+            "change_ratio": _json_safe(row.get("变动比率")),
+        })
+    if not items:
+        return {"period": None, "items": [], "error": "未取到十大股东数据"}
+    return {"period": period, "items": items, "error": None}
 
 
 def free_top_holders(code: str) -> dict:
@@ -193,30 +222,30 @@ def free_top_holders(code: str) -> dict:
     与 `top_holders` 的区别在于比例口径：`top_holders` 是「十大股东」按**总股本**的
     比例，这里是「十大流通股东」按**流通股本**的比例——正是筹码锁仓修正要用的口径
     （对应通达信 / 东财「十大流通股东」页的「占流通股比例」列）。
+
+    ⚠️ 本函数在**筹码分布**的冷路径上（`chip_formulas` → `_lockup_of` → `lockup_ratio`），
+    启动器给 `/api/chip/dist` 的超时只有 30s，故遍历必须受 `_HOLDERS_BUDGET` 约束。
     """
     symbol = price_service.market_symbol(code)
-    for period in _report_periods():
-        try:
-            df = _ak(ak.stock_gdfx_free_top_10_em, symbol=symbol, date=period, timeout=20)
-        except Exception:
-            continue
-        if df is None or getattr(df, "empty", True):
-            continue
-        items: list[dict] = []
-        for _, row in df.iterrows():
-            items.append({
-                "rank": _json_safe(row.get("名次")),
-                "name": _json_safe(row.get("股东名称")),
-                "nature": _json_safe(row.get("股东性质")),
-                "share_type": _json_safe(row.get("股份类型")),
-                "shares": _json_safe(row.get("持股数")),
-                "pct": _json_safe(row.get("占总流通股本持股比例")),
-                "change": _json_safe(row.get("增减")),
-                "change_ratio": _json_safe(row.get("变动比率")),
-            })
-        if items:
-            return {"period": period, "items": items, "error": None}
-    return {"period": None, "items": [], "error": "未取到十大流通股东数据"}
+    period, df = _walk_report_periods(
+        lambda p, t: _ak(ak.stock_gdfx_free_top_10_em, symbol=symbol, date=p, timeout=t))
+    if df is None:
+        return {"period": None, "items": [], "error": "未取到十大流通股东数据"}
+    items: list[dict] = []
+    for _, row in df.iterrows():
+        items.append({
+            "rank": _json_safe(row.get("名次")),
+            "name": _json_safe(row.get("股东名称")),
+            "nature": _json_safe(row.get("股东性质")),
+            "share_type": _json_safe(row.get("股份类型")),
+            "shares": _json_safe(row.get("持股数")),
+            "pct": _json_safe(row.get("占总流通股本持股比例")),
+            "change": _json_safe(row.get("增减")),
+            "change_ratio": _json_safe(row.get("变动比率")),
+        })
+    if not items:
+        return {"period": None, "items": [], "error": "未取到十大流通股东数据"}
+    return {"period": period, "items": items, "error": None}
 
 
 def lockup_ratio(code: str, min_pct: float = 5.0) -> dict:
