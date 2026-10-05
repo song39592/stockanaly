@@ -323,8 +323,8 @@ GET  /api/history/download/tdx/status       通达信目录检测
 - **位置**：`<data>/logs/backend.log`（INFO 及以上）、`<data>/logs/uvicorn-error.log`（WARNING 及以上）。
 - **双写，不能只写文件**：stderr **必须保留** —— 启动器按输出流实时捕获并打 `[err]` 标签，
   停掉 stderr 界面上就什么都看不到了。文件只是给事后回溯用的副本。
-- **轮转**：按天轮转、保留 **14 天**（`logutil.KEEP_DAYS`）。跨分区的过期清理计划挂到
-  定时任务上（**尚未实现**），在那之前 `logutil` 只管自己的轮转，日志不会无限增长。
+- **轮转**：按天轮转、保留 **7 天**（`logutil.KEEP_DAYS`，与 `cleanup.DEFAULT_RETAIN_DAYS`
+  是同一个口径 —— 两个数字必须一起改）。跨分区的过期清理由 `cleanup.py` 负责，见下节。
 - **级别**：`info` 常规流程 / `warning` 降级与异常（带 `exc_info=True` 让堆栈一起进文件）/
   `critical` 致命（打到 stderr 显示为 `[fatal]`）。
 - **禁止写入**：密钥、`LLM_API_KEY`、DPAPI 密封值、`.env` 全文 —— 只写「已配置 / 未配置」这类状态。
@@ -356,3 +356,29 @@ except Exception as exc:
 启动器「读取错误日志」按钮硬编码读**旧路径** `backend_fastapi/uvicorn-error.log`。
 该路径**保持原样不动**（仍由 uvicorn 的重定向写入），`<data>/logs/` 下的同名文件只是副本，
 所以启动器无需改动。等下次因其它原因重新编译 exe 时再考虑切换。
+
+### 7. 清理（`cleanup.py`）
+
+清理逻辑**刻意与「谁触发它」解耦**：定时清理跑在后端进程里，而「程序打不开」恰恰最需要
+清理（日志撑爆、缓存损坏）—— 那时定时器根本没机会执行。所以 `cleanup.py` 做成
+**零业务依赖**（不 import FastAPI / main / 任何 service），后端完全起不来也能跑。
+
+| 对象 | 默认策略 |
+|---|---|
+| `logs/*.log.<日期>`（轮转旧日志） | 超过 7 天删除 |
+| `logs/dump-*.zip`（诊断包） | 超过 7 天删除 |
+| `cache/**` | 全部可清（定义上就能重建） |
+| `chip/processed/scr90_rank_*.json` | **非当前周**删除，当前周那份保留 |
+| `bars/*.db.bak`（约 1 GB） | **默认不动**，需显式 `--bak` —— 它是迁移失败时唯一的回滚退路，删了不可逆 |
+
+**永不清理**：`state/`（库与锁）、`config/`（用户配置）、`bars/*.db`（行情分片）、
+`chip/raw`、`chip/meta.json`。宁可多占空间，也不能让清理变成数据事故。
+
+三种触发方式：
+- **手动救急**：双击 `backend_fastapi/清理日志与缓存.bat`（默认预览，加 `--go` 才真删）；
+  或直接 `python cleanup.py --dry-run` / `--go` / `--bak` / `--days N`。
+- **定时**：`download_service._scheduler_tick()` 每天调一次 `cleanup.schedule_tick()`，
+  内部按**日期**去重（不是每 tick），60 秒一轮也不会重复扫描目录。
+- 清理放在 tick 的**最前面**：否则会被长时间运行的下载任务「饿死」，而有任务时最该清日志。
+
+每一项独立 try/except：日志清不掉也继续清缓存；`--dry-run` 可先看会删什么。

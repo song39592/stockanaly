@@ -662,6 +662,16 @@ def _ensure_idle_task() -> str | None:
 @_serialized
 def _scheduler_tick() -> None:
     """一次调度：到点就补最新数据，空闲就接着补完整历史（两者不同时跑）。"""
+    # 每日清理（过期日志 / 诊断包 / 可重建缓存 / 跨周周榜）：
+    # **刻意放在最前面** —— 后面的 `if _has_alive_task(): return` 会让清理被长时间
+    # 运行的下载任务「饿死」，而有任务在跑时恰恰最需要清日志。
+    # `schedule_tick()` 内部按**日期**去重，60 秒一轮进来也只会真的清一次。
+    try:
+        import cleanup
+        cleanup.schedule_tick()
+    except Exception:                         # noqa: BLE001 - 清理失败绝不能影响下载调度
+        pass
+
     if _has_alive_task():
         return
     stored = download_store.settings_map()

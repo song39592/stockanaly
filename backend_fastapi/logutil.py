@@ -24,7 +24,9 @@ from pathlib import Path
 import config
 
 LOGGER_NAME = "stockpool"
-KEEP_DAYS = 14                       # 轮转文件保留天数（定时清理见第 24 项）
+# 轮转文件保留天数。**与 cleanup.DEFAULT_RETAIN_DAYS 保持一致** ——
+# 两个数字打架时以清理为准（它更严格），但默认就该是同一个口径。
+KEEP_DAYS = 7
 
 # 级别 → 启动器一直在用的标签，保持 stderr 输出与改造前完全一致
 _LEVEL_TAGS = {logging.INFO: "info", logging.WARNING: "warn",
