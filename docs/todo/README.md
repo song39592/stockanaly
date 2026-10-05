@@ -62,7 +62,7 @@
 | 23 ✅ | [23-新增-dumplog诊断包.md](23-新增-dumplog诊断包.md) | 一键打包日志+完整性+**脱敏**配置 | ★★★★ / ★☆☆（依赖 21/22）—— **已完成** |
 | 24 ✅ | [24-新增-定时清理.md](24-新增-定时清理.md) | 接进**已有**的 download_service 调度循环 | ★★★ / ★★☆（依赖 21/22/23）—— **已完成** |
 | 25 ✅ | [25-前端-网页按页面分子目录.md](25-前端-网页按页面分子目录.md) | 3 个 HTML + 共享 js → 按页面分目录 | ★★★ / ★★☆ —— **已完成** |
-| 26 | [26-前端-启动器公共件归位.md](26-前端-启动器公共件归位.md) | GridKit/Cards/J/C 等公共件集中，别散在各页 | ★★★ / ★☆☆ |
+| 26 ✅ | [26-前端-启动器公共件归位.md](26-前端-启动器公共件归位.md) | GridKit/Cards/J/C 等公共件集中，别散在各页 | ★★★ / ★☆☆ —— **已完成** |
 | 27 | [27-后端-core子包.md](27-后端-core子包.md) | 基础设施层先归位（后端搬家**第一步**） | ★★★★ / ★★★（依赖 19） |
 | 28 | [28-后端-features-market.md](28-后端-features-market.md) | 盘面/板块搬到 `features/market/` | ★★★ / ★★★（依赖 27） |
 | 29 | [29-后端-features-stock.md](29-后端-features-stock.md) | 个股/估值/板块索引搬到 `features/stock/` | ★★★ / ★★★（依赖 27） |
@@ -94,6 +94,10 @@
 ## 已完成的项
 - **19** `.gitignore` 按五类重写（源码 / 依赖 / 构建缓存 / 配置凭据 / 日志状态）；
   并确立**提交原则**：生成物也要提交（exe 属运行必需产物，必须入库），只忽略可重建项。
+- **26** 启动器公共件归位：新建 `launcher/UiKit.cs`，从骨架文件搬出 11 个页面骨架/控件工厂方法
+  （`NewPage/Stack/Group/Row/AddRow/MiniBtn/Lbl/Mute/Dot/Check`）；`StockPoolLauncher.cs` 2778→2606 行。
+  `Palette/J/Http/Cards` **故意不建空壳**（分别是第 01/02/03/06 项的落点）。
+  另：把只存在于 `refactor/ui-grid-kit` 分支的 `GridKit.cs` 合并进本分支（按「所有改动一个分支」）。
 - **25** 网页按页面分目录：`frontend/{home,mentor-lab,chip-scr}/index.html` + `shared/`；
   同步改启动器 4 处路径、`.gitignore`、`启动系统.bat`、`package.json` 测试 glob。exe 已重编。
 - **24** 清理：新增 `cleanup.py`（**零业务依赖**，后端起不来也能跑）+ `清理日志与缓存.bat`

@@ -23,6 +23,19 @@
     新模块打日志的写法。该节**只做导航**，权威细节仍以 `config.py` / `storage.py` / `logutil.py`
     的注释为准，避免变成第二份需要同步的真相。
 
+- **启动器公共件归位 · 新增 `launcher/UiKit.cs`**（待办 26）：把散在骨架文件里的
+  页面骨架与控件工厂搬到独立文件，`StockPoolLauncher.cs` 由 2778 → 2606 行。
+  - 搬出 11 个方法：`NewPage` `Stack` `AddRow` `Row` `Group` `Dot` `Mute` `Lbl`
+    `MiniBtn`(×2) `Check` —— 即「页面骨架 + 控件工厂」。
+  - **零风险**：这些都是 `partial class MainForm` 的成员，**调用点一行没改**；
+    唯一动的是 `build_exe.bat`（新增文件必须登记才参与编译）。以 `csc` exit 0 验证。
+  - **刻意没建** `Palette.cs` / `J.cs` / `Http.cs` / `Cards.cs`：本项踩坑点明确说
+    「别做这一项搬空壳」，它们分别是第 01/02/03/06 项的落点，做那几项时顺手落。
+- **合并分支 `refactor/ui-grid-kit`**：`GridKit.cs`（`StockGrid` + `GridColumn`，
+  13 张表统一、删除 9 份重复实现）此前**只存在于那条分支**、不在本分支，
+  而待办 README 却把它记为「已完成」。按「所有改动放在一个分支」的要求合并进来
+  （仅 exe 二进制冲突，按 ours 解决后重新编译）。
+
 - **`frontend/` 按页面分子目录**（待办 25）：从「7 个文件平铺」改为
   `home/` `mentor-lab/` `chip-scr/`（各目录下统一 `index.html`）+ `shared/`（共享 js）。
   - 用 `git mv` 移动，git 状态显示为 `R`，**文件历史完整保留**。
