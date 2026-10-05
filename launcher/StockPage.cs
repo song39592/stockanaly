@@ -2598,7 +2598,7 @@ namespace StockPool
         /// 故单独成一个窗口渲染，不走 KLineChart 的副图面板。
         /// 数据来自 GET /api/chip/dist（换手率衰减 + 三角形分布，见 chip_dist_service.py）。
         /// </summary>
-        private sealed class ChipPanel : Control
+        private sealed class ChipPanel : ChartControl
         {
             private const int LeftPad = 6;
             private const int RightPad = 8;
@@ -2617,8 +2617,7 @@ namespace StockPool
 
             public ChipPanel()
             {
-                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
-                    | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+                // SetStyle 已上移到基类 ChartControl（第 07 项）
                 DoubleBuffered = true;
                 Width = 172;
             }
@@ -2675,7 +2674,7 @@ namespace StockPool
             {
                 base.OnPaint(e);
                 var g = e.Graphics;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
+                BeginPaint(g);                 // 抗锯齿统一由基类设置（第 07 项）
                 bool dark = (BackColor.R + BackColor.G + BackColor.B) < 200;
                 Color grid = dark ? Color.FromArgb(54, 58, 68) : Color.FromArgb(222, 224, 228);
                 Color text = ForeColor;
@@ -2688,16 +2687,13 @@ namespace StockPool
                     // 标题右侧标出当前帧的日期：光标回溯时才知道看的是哪一天
                     if (_frame >= 0 && _frame < _dates.Count)
                     {
-                        using (var fmtR = new StringFormat { Alignment = StringAlignment.Far })
-                            g.DrawString(_dates[_frame], Font, tb, Width - RightPad, 3, fmtR);
+                        g.DrawString(_dates[_frame], Font, tb, Width - RightPad, 3, FmtRight);
                     }
                     if (_bins.Count == 0 || _frames.Count == 0)
                     {
                         using (var mb = new SolidBrush(_failed ? C.UpErr : text))
-                        using (var fmt = new StringFormat { Alignment = StringAlignment.Near })
                             g.DrawString(_status, Font, mb,
-                                new RectangleF(2, 22, Width - 4, Height - 24), fmt);
-                        return;
+                                new RectangleF(2, 22, Width - 4, Height - 24), FmtLeft);                        return;
                     }
 
                     // 价格轴：优先与 K 线完全一致（同一 lo/hi 映射到同一纵向区间）
@@ -2809,10 +2805,9 @@ namespace StockPool
                             }
                         }
                         // 标签贴着横轴、右对齐（图形只到 Width-RightPad，不会压住最右侧一格）
-                        using (var fmtTick = new StringFormat { Alignment = StringAlignment.Far })
                         using (var bTick = new SolidBrush(C.Flat))
                             g.DrawString(maxPct.ToString("F2") + "%", Font, bTick,
-                                         Width - RightPad, bottom - 14, fmtTick);
+                                         Width - RightPad, bottom - 14, FmtRight);
                     }
 
                     // 统计区（价格区之下）：平均成本 / 获利比例 / 峰位 / 集中度
@@ -2841,7 +2836,7 @@ namespace StockPool
             }
         }
 
-        private sealed class KLineChart : Control
+        private sealed class KLineChart : ChartControl
         {
             private const int LeftPad = 54;
             private const int RightPad = 10;
@@ -2910,8 +2905,7 @@ namespace StockPool
 
             public KLineChart()
             {
-                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
-                    | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+                // SetStyle 已上移到基类 ChartControl（第 07 项）
                 Height = 470;
                 _tip.AutoPopDelay = 5000;
                 _tip.InitialDelay = 120;
@@ -2975,10 +2969,7 @@ namespace StockPool
                 return d;
             }
 
-            public override Size GetPreferredSize(Size proposedSize)
-            {
-                return new Size(proposedSize.Width, Height);
-            }
+            // GetPreferredSize 已上移到基类 ChartControl（第 07 项）
 
             private static List<List<double>> ComputeMA(List<KBar> bars)
             {
@@ -3218,7 +3209,7 @@ namespace StockPool
             {
                 base.OnPaint(e);
                 var g = e.Graphics;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
+                BeginPaint(g);                 // 抗锯齿统一由基类设置（第 07 项）
 
                 bool dark = (BackColor.R + BackColor.G + BackColor.B) < 200;
                 Color grid = dark ? Color.FromArgb(54, 58, 68) : Color.FromArgb(222, 224, 228);
@@ -3233,10 +3224,9 @@ namespace StockPool
                     ClearAxis();
                     DrawLegend(g, text, -1);
                     using (var b = new SolidBrush(text))
-                    using (var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
                     {
                         var area = new RectangleF(0, 24, Width, Height - 24);
-                        g.DrawString("请输入股票代码开始分析", Font, b, area, fmt);
+                        g.DrawString("请输入股票代码开始分析", Font, b, area, FmtCenter);
                     }
                     return;
                 }
@@ -3540,9 +3530,8 @@ namespace StockPool
                             string d = vis[idx].Date;
                             if (d.Length >= 5) d = d.Substring(5);   // MM-DD
                             int x = (int)xOf(idx);
-                            var fmt = new StringFormat { Alignment = StringAlignment.Center };
                             int labelW = step > 0 ? step : 1;   // 标签间距（根），避免矩形过窄被裁
-                            g.DrawString(d, Font, b3, new RectangleF((float)(x - labelW * slot / 2), (float)(bottomMost + 2), (float)(labelW * slot), (float)BottomPad), fmt);
+                            g.DrawString(d, Font, b3, new RectangleF((float)(x - labelW * slot / 2), (float)(bottomMost + 2), (float)(labelW * slot), (float)BottomPad), FmtCenter);
                         }
                     }
                 }

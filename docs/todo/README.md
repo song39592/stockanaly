@@ -33,7 +33,7 @@
 | 04 | [04-前端-股票名称获取合一.md](04-前端-股票名称获取合一.md) | 前端 | 个股页与估值页同一段取名逻辑抄两遍 | ★★★★ / ★☆☆ |
 | 05 | [05-前端-SubTab机制抽取.md](05-前端-SubTab机制抽取.md) | 前端 | 3 份近乎逐字的二级页机制 → `SubTabStrip` | ★★★★ / ★★★ |
 | 06 | [06-前端-KPI卡片搬家.md](06-前端-KPI卡片搬家.md) | 前端 | `AddKpi`/`VKpiRow` 住在 ValuationPage 却被 3 页调用 | ★★★ / ★☆☆ |
-| 07 | [07-前端-图表基类.md](07-前端-图表基类.md) | 前端 | 双缓冲 SetStyle 4 份逐字 + 抗锯齿不统一 | ★★★ / ★★☆ |
+| 07 ✅ | [07-前端-图表基类.md](07-前端-图表基类.md) | 前端 | 双缓冲 SetStyle 4 份逐字 + 抗锯齿不统一 | ★★★ / ★★☆ —— **已完成** |
 | 08 | [08-前端-小样板合集.md](08-前端-小样板合集.md) | 前端 | IsOk / ErrOf / SetErr / ToggleVisible / Debounce / FlatBtn | ★★ / ★☆☆ |
 | 09 | [09-后端-json_safe公共化.md](09-后端-json_safe公共化.md) | 后端 | 唯一写对的 NaN 清洗只服务 1 个模块 | ★★★★★ / ★☆☆ |
 | 10 | [10-后端-scr90_series合并.md](10-后端-scr90_series合并.md) | 后端 | 2 份逐字符雷同的 SCR90 序列 + 1 个判空缺陷 | ★★★★ / ★☆（**须在 00 之后**） |
@@ -94,6 +94,10 @@
 ## 已完成的项
 - **19** `.gitignore` 按五类重写（源码 / 依赖 / 构建缓存 / 配置凭据 / 日志状态）；
   并确立**提交原则**：生成物也要提交（exe 属运行必需产物，必须入库），只忽略可重建项。
+- **07** 图表基类：新建 `launcher/ChartKit.cs`（`ChartControl : Control` 基类），4 个自绘控件改为继承它。
+  `SetStyle` 4 份 → 1、`GetPreferredSize` 3 份 → 1、抗锯齿**5 个表面全开**（原先 3 个没开）、
+  `StringFormat` 全部改用基类缓存（`StockPage` 每帧 new 5 处 → 0）。`StEquityPaint` 是
+  PictureBox 事件处理器、进不了基类，手工设一次。价格轴协作未动。
 - **03** HTTP 补齐：新建 `launcher/Http.cs`（`Probe`×3 / `GetText` / `PostJson` 原样搬入），
   并补齐 `GetText` 的 `ReadWriteTimeout`（**真 bug**：大响应体读取阶段原本无超时保护）、
   `Proxy = null`、`Expect100Continue = false`；`PostJson` 补后两项。

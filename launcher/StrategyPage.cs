@@ -1092,6 +1092,9 @@ namespace StockPool
         {
             var box = (PictureBox)sender;
             var g = e.Graphics;
+            // 本函数是 PictureBox 的事件处理器、不是 Control 子类，进不了 ChartControl 基类，
+            // 抗锯齿只能手工设一次（与其它 4 个自绘表面保持一致，第 07 项）
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             var r = box.ClientRectangle;
             g.Clear(_cBg);
             if (_stEq == null || _stEq.Count < 2)

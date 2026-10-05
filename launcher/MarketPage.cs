@@ -1198,7 +1198,7 @@ namespace StockPool
         // ================= 自绘控件 =================
 
         /// <summary>横向条形图（每行：名称 + 条形 + 数值；正值红、负值绿，0 轴按正负极值居中，贴近网页 echarts 的观感）。</summary>
-        private class MktBars : Control
+        private sealed class MktBars : ChartControl
         {
             public class Item
             {
@@ -1217,8 +1217,7 @@ namespace StockPool
 
             public MktBars()
             {
-                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
-                    | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+                // SetStyle 已上移到基类 ChartControl（第 07 项）
                 Height = 40;
             }
 
@@ -1230,17 +1229,13 @@ namespace StockPool
                 Invalidate();
             }
 
-            /// <summary>在 AutoSize 容器（TableLayoutPanel）里，行高按 PreferredSize 计算，
-            /// 不重写的话行高会偏小、控件顶部被裁（首行压没）。</summary>
-            public override Size GetPreferredSize(Size proposedSize)
-            {
-                return new Size(proposedSize.Width, Height);
-            }
+            // GetPreferredSize 已上移到基类 ChartControl（第 07 项）
 
             protected override void OnPaint(PaintEventArgs e)
             {
                 base.OnPaint(e);
                 var g = e.Graphics;
+                BeginPaint(g);                 // 抗锯齿统一由基类设置（第 07 项）
                 if (_items.Count == 0)
                 {
                     using (var br = new SolidBrush(ForeColor))
@@ -1293,12 +1288,11 @@ namespace StockPool
                 }
             }
 
-            private static readonly StringFormat FmtLeft = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center };
-            private static readonly StringFormat FmtRight = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center };
+            // FmtLeft / FmtRight 已上移到基类 ChartControl（第 07 项）
         }
 
         /// <summary>涨跌家数分段条：按占比横向分段着色（涨红 / 平灰 / 跌绿）。</summary>
-        private class MktRatioBar : Control
+        private sealed class MktRatioBar : ChartControl
         {
             public class Seg
             {
@@ -1311,8 +1305,7 @@ namespace StockPool
 
             public MktRatioBar()
             {
-                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
-                    | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+                // SetStyle 已上移到基类 ChartControl（第 07 项）
                 Height = 28;
             }
 
@@ -1323,15 +1316,13 @@ namespace StockPool
                 Invalidate();
             }
 
-            public override Size GetPreferredSize(Size proposedSize)
-            {
-                return new Size(proposedSize.Width, Height);
-            }
+            // GetPreferredSize 已上移到基类 ChartControl（第 07 项）
 
             protected override void OnPaint(PaintEventArgs e)
             {
                 base.OnPaint(e);
                 var g = e.Graphics;
+                BeginPaint(g);                 // 抗锯齿统一由基类设置（第 07 项）
                 double total = 0;
                 foreach (Seg s in _segs) total += s.Value;
                 if (total <= 0)
@@ -1356,7 +1347,7 @@ namespace StockPool
                 }
             }
 
-            private static readonly StringFormat FmtCenter = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            // FmtCenter 已上移到基类 ChartControl（第 07 项）
         }
     }
 }

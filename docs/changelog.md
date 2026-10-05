@@ -23,6 +23,20 @@
     新模块打日志的写法。该节**只做导航**，权威细节仍以 `config.py` / `storage.py` / `logutil.py`
     的注释为准，避免变成第二份需要同步的真相。
 
+- **自绘表面抽公共基类 `ChartControl`**（待办 07）：新增 `launcher/ChartKit.cs`，
+  `MktBars` / `MktRatioBar` / `ChipPanel` / `KLineChart` 改为继承它。
+  - `SetStyle(...)` 从 4 份逐字相同 → 1 处（基类）；`GetPreferredSize` 3 份 → 1 处。
+  - **抗锯齿现在 5 个表面全开** —— 原先只有 K 线与筹码面板开，条形图 / 分段条 / 净值曲线没开，
+    观感不一致。这是本项**唯一有意的视觉变化**。
+  - `StringFormat` 全部改用基类的 3 个静态缓存（`StockPage` 原先每帧 new 5 处 → 0）。
+    踩坑点提醒过：静态缓存是**正确**写法（`StringFormat` 不可变但非线程安全），别改回每帧 new。
+  - `StEquityPaint` 是 `PictureBox` 的事件处理器、不是 `Control` 子类，进不了基类，
+    按文档例外处理：手工设一次 `SmoothingMode`。
+  - **价格轴协作未被打断**：`ChipPanel` 依赖 `KLineChart` 的 `TryGetPriceAxis` /
+    `PriceAxisChanged` 来对齐，两处一行未改。
+  - 网格色 / 值域映射 / min-max 扫描**按建议不收**（网格色两套深色值差 4，留给调色板统一）。
+  - 附注：`sealed` 不影响「继承基类」（它禁止的是被继承），4 个控件的 `sealed` 全部保留。
+
 - **HTTP 封装补齐三行配置 + 归位到 `Http.cs`**（待办 03）：新增 `launcher/Http.cs`，
   `Probe`(×3) / `GetText` / `PostJson` 从骨架文件原样搬入，并补齐缺失的配置。
   - **修一个真 bug**：`GetText` 以前只设了 `Timeout`，而 `Timeout` **只保护到「收到响应头」**，
