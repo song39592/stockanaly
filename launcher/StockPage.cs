@@ -2423,8 +2423,16 @@ namespace StockPool
                 string from = _stockHistoryPath;
                 if (!File.Exists(from))
                 {
-                    string legacy = Path.Combine(ResolveDataDirSetting(), "history_stock_view.json");
-                    if (File.Exists(legacy)) from = legacy;
+                    // 老位置有两个：根目录（最早）与 config/（第 21 项分区后的位置），都试一遍
+                    string root = ResolveDataDirSetting();
+                    string[] legacyPaths = {
+                        Path.Combine(root, "history_stock_view.json"),
+                        Path.Combine(root, "config", "history_stock_view.json"),
+                    };
+                    foreach (string legacy in legacyPaths)
+                    {
+                        if (File.Exists(legacy)) { from = legacy; break; }
+                    }
                 }
                 if (File.Exists(from))
                 {

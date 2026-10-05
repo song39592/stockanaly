@@ -11,8 +11,8 @@ import mentor_store
 class MentorStoreTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        mentor_store.DATA_DIR = Path(self.temp.name)
-        mentor_store.DB_PATH = mentor_store.DATA_DIR / "test.db"
+        mentor_store.STATE_DIR = Path(self.temp.name)
+        mentor_store.DB_PATH = mentor_store.STATE_DIR / "test.db"
         mentor_store.init_db()
 
     def tearDown(self):

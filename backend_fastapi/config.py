@@ -3,6 +3,9 @@
 
 数据目录（`DATA_DIR`）集中存放所有运行期数据（SQLite 库、SCR 原始文件与计算结果），
 与代码分开，便于备份与迁移。解析优先级见 `_resolve_data_dir`。
+
+根目录下按用途分区：`config/`（用户配置）、`state/`（库与锁）、`logs/`、`cache/`，
+以及保持在根的 `bars/`（行情分片）与 `chip/`（SCR）。
 """
 import os
 from pathlib import Path
@@ -78,6 +81,19 @@ def _resolve_data_dir() -> Path:
 
 
 DATA_DIR = _resolve_data_dir()
+
+# 数据根目录下的**固定分区**（第 21 项：从「全部平铺在根目录」改为分区存放）。
+# 各模块一律引用这些常量，不要自己拼路径 —— 否则下次调整结构又要满仓库改字符串。
+#   config/  用户配置：可手工修改的 json（视图 / 阈值等）
+#   state/   持久化状态：SQLite 库、单实例锁
+#   logs/    日志（第 22 项的落点）
+#   cache/   可重建缓存，丢了重算即可
+# 注：`bars/`（行情分片，2 GB 级）**刻意留在根目录不搬** —— 移动既慢又易中断，
+# 且它本身体积占绝对多数，搬进子目录没有任何收益。
+CONFIG_DIR = DATA_DIR / "config"
+STATE_DIR = DATA_DIR / "state"
+LOGS_DIR = DATA_DIR / "logs"
+CACHE_DIR = DATA_DIR / "cache"
 
 
 def llm_ready() -> bool:

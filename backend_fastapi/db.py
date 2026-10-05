@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """本地 SQLite 基础设施：连接、建表调度、元信息与完整性钩子。
 
-库文件布局（均位于 `config.DATA_DIR` 下）：
+库文件布局（根为 `config.DATA_DIR`，库本身位于其 `state/` 分区）：
 
-    stock_history.db    主库：股票池快照、消息面、同步任务（体积小）
+    state/stock_history.db  主库：股票池快照、消息面、同步任务（体积小）
     bars/factors.db     复权因子与除权除息明细（全量，行数少）
     bars/bars_YYYY.db   日 K 原始价，**按年分片**（单文件可控，便于备份与归档）
 
@@ -25,7 +25,7 @@ import config
 import crypto
 
 DATA_DIR = config.DATA_DIR
-DB_PATH = DATA_DIR / "stock_history.db"
+DB_PATH = config.STATE_DIR / "stock_history.db"      # 持久化状态统一放 state/
 BARS_DIR = DATA_DIR / "bars"
 FACTORS_DB = BARS_DIR / "factors.db"
 

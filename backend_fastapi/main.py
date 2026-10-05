@@ -105,6 +105,19 @@ def _mount_routes() -> None:
 def _init_stores() -> None:
     """初始化本地存储；失败同样只记录、不阻止服务启动。"""
     try:
+        # 第 21 项：旧版本把状态文件平铺在数据根目录，这里一次性搬进 state/。
+        # **必须先于 migrate_legacy**：迁移的语义是「目标已有就不动」，
+        # 先让根目录的真数据落进 state/，项目内的旧副本才不会反过来把它顶掉。
+        result = storage.migrate_to_subdirs()
+        if result["moved"] or result["cleaned"]:
+            print(f"[info] 数据目录分区迁移：搬入 state/ {result['moved']}，"
+                  f"清理陈旧文件 {result['cleaned']}", file=sys.stderr)
+        if result["errors"]:
+            print(f"[warn] 分区迁移有未处理项（已保留原状）：{result['errors']}",
+                  file=sys.stderr)
+    except Exception as exc:              # noqa: BLE001
+        _record_error("数据目录分区迁移", "storage", exc)
+    try:
         # 数据目录已移到项目外（见 config.DATA_DIR）：启动时把项目内旧位置的数据
         # 复制过去，避免看起来像「数据丢了」。只复制、不删除源文件。
         result = storage.migrate_legacy()
@@ -170,7 +183,7 @@ def _is_loaded(module_name: str) -> bool:
 # 建表、刷新指纹，再来拦就已经晚了（两边互相覆盖指纹与签名，属静默损坏）。
 # 锁失败时的提示已足够清楚，直接以非 0 退出码结束，便于启动脚本判断。
 try:
-    instance_lock.acquire(config.DATA_DIR)
+    instance_lock.acquire(config.STATE_DIR)
 except instance_lock.AlreadyRunningError as exc:
     print(f"[fatal] {exc}", file=sys.stderr)
     raise SystemExit(1) from None

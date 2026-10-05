@@ -15,9 +15,15 @@ from typing import Any
 
 from pypdf import PdfReader
 
+import config
 
-DATA_DIR = Path(__file__).resolve().parent / "data"
-DB_PATH = DATA_DIR / "mentor_lab.db"
+
+# ⚠️ 这里原先指向**项目内**的 backend_fastapi/data/（= config.LEGACY_DATA_DIR），
+# 于是实验室数据一直写在代码目录里：数据目录换地方时不会跟着走，而且实测出现过
+# 「项目内那份是空库、数据盘那份才是真数据」的分叉（用户看起来像数据丢了）。
+# 改为引用 STATE_DIR 后两边归一，老数据由 storage 的迁移逻辑搬进 state/。
+STATE_DIR = config.STATE_DIR
+DB_PATH = STATE_DIR / "mentor_lab.db"
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_TEXT_CHARS = 300_000
 
@@ -32,7 +38,7 @@ def new_id(prefix: str) -> str:
 
 @contextmanager
 def connect():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
