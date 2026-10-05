@@ -6,11 +6,50 @@
 
 ### 变更
 
+- **后端新增 `core/` 子包，基础设施层归位**（待办 27，后端搬家的第一步）：
+  `backend_fastapi/` 原为扁平结构（约 87 个 `.py` 同层），现把**依赖图底部**的 14 个模块
+  `git mv` 进 `core/`（保住历史）：`config` `crypto` `dpapi` `envfile` `storage` `db`
+  `instance_lock` `logutil` `periods` `tdx_reader` `share_service` `price_store`
+  `price_service` `kline_service`。
+  - **比原清单多收 `crypto`**：`db` 与 `price_store` 都依赖它、它只依赖 `config`/`dpapi`/`envfile`，
+    留在外层会让 core 反过来依赖顶层。
+  - core 内部 17 处 import 改**相对导入**（`from . import config`）。
+  - **踩坑点 1（最大的雷）**：`config.py` 移进子包后 `Path(__file__).parent` 变成了 `core/`。
+    真正会静默出错的不只 `BASE_DIR` —— `ENV_PATH` 在文件顶部**直接**用
+    `Path(__file__).resolve().parent` 取值、并不经过 `BASE_DIR`；漏改它会导致
+    **`.env` 找不到、LLM 配置全丢且毫无报错**。修法是新增
+    `PROG_DIR = Path(__file__).resolve().parent.parent`，让 `ENV_PATH` 与 `BASE_DIR`
+    都由它派生，「多退一级」全文件只出现一次。
+  - ⭐ **兼容转发用 `sys.modules` 别名，而不是 `from core.x import *`**（与原建议不同）：
+    `import *` 只是**复制**一份名字，而测试里大量 `patch.object(config, "DATA_DIR", ...)`、
+    `patch.object(storage, "ENV_PATH", ...)` —— 补丁打在**副本**上、实现仍读真实值，
+    **补丁静默失效**。实测后果是 52 个测试里 26 个失败，且 `update_data_dir` 去改**真实 `.env`**，
+    把临时目录路径写了进去（`.env` 与 `.env.bak` 双双被污染、`DATA_DIR` 一度指向已删除的 Temp 目录）。
+    改成别名（`sys.modules[__name__] = _impl`）后 52 个全过，且下划线私有名自动可见
+    （`price_store._shard_years`、`crypto._key` 这 4 处跨模块引用不必再手工补清单）。
+  - **踩坑点 3**：启动器把 `backend_fastapi/storage.py` 当脚本跑
+    （`--set-data-dir-base64`，`StockPoolLauncher.cs:1579` 路径写死），故该文件保留同名入口，
+    `__main__` 分支显式调 `_impl.main()`；实测合法值返回 `ok:true`/退出 0、非法路径 `ok:false`/退出 1。
+  - **踩坑点 2**：`main.py` 的 `ROUTE_MODULES` 里 11 项全是 `*_routes`，不含任何 core 模块。
+  - 已知**反向依赖 1 条**（不影响运行，因 `market_service` 是叶子模块、不成环）：
+    `core/price_service.py` 的 `from market_service import _ak`。
+    顺带发现 `_ak` 其实是通用的 akshare 调用包装（带超时与降级），被从盘面页借走属于放错位置 ——
+    **第 28 项搬 `market_service` 时必须一并处理**。
+  - 验证：搬家前落 57 项基线（全部路径常量 / 分区目录 / 库常量 / `.env` 读取结果 /
+    跨模块私有名 / 各模块公开名清单），搬家后**零差异**；`/health` 无模块错误、11 个路由全挂载；
+    个股 / 盘面 / 下载三页冒烟全 `ok=true`；**单元测试 52 个全绿**；
+    测试前后真实 `.env` 哈希一致。
+
+- **日志保留期文档纠错**：第 22 / 24 项文档里写的「保留 14 天」与代码不符 ——
+  `logutil.KEEP_DAYS` 与 `cleanup.DEFAULT_RETAIN_DAYS` **都是 7**（注释明确要求两者同口径）。
+  已把 4 处「14 天」改为「7 天」。注意别与 `price_service.OVERLAP_DAYS = 14`
+  （增量同步的重叠窗口）混淆，那是另一个常量。
+
 - **后端日志落盘到 `<data>/logs/`**（待办 22）：原先全仓没有用 `logging`，后端靠
   `print(..., file=sys.stderr)` 输出，启动器一关窗口日志就没了、事后无法回溯。
   - 新增 `logutil.py`：具名 logger `stockpool` **双写** —— stderr 保持原样
     （启动器按输出流打 `[err]` 标签的行为不变）+ `<data>/logs/backend.log`（INFO+）
-    与 `<data>/logs/uvicorn-error.log`（WARNING+），按天轮转、保留 14 天、UTF-8。
+    与 `<data>/logs/uvicorn-error.log`（WARNING+），按天轮转、保留 7 天、UTF-8。
     日志文件不可写时**降级为只写 stderr**，不让日志拖垮启动。
   - `main.py` 11 处 `print` 换成 `logger.info/warning/critical`；`_record_error` 改带
     `exc_info=True`，**异常堆栈随之进文件**（原先只 `traceback.print_exc()` 打到 stderr）。
@@ -19,7 +58,7 @@
   - 启动器**零改动**：`backend_fastapi/uvicorn-error.log` 旧路径保持不变（兼容方案 A）。
   - 约定文档：`backend_fastapi/README.md` 新增「十一、数据盘与日志约定」，一次写全
     第 21~24 项共用的那份契约 —— 数据根目录解析优先级、分区表（各放什么 / 谁在写 / 能否重建）、
-    迁移规则（非破坏、幂等、执行顺序）、日志规则（位置 / 双写 / 轮转 14 天 / 级别 / 禁止写入内容）、
+    迁移规则（非破坏、幂等、执行顺序）、日志规则（位置 / 双写 / 轮转 7 天 / 级别 / 禁止写入内容）、
     新模块打日志的写法。该节**只做导航**，权威细节仍以 `config.py` / `storage.py` / `logutil.py`
     的注释为准，避免变成第二份需要同步的真相。
 

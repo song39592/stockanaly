@@ -6,7 +6,7 @@
 > - 新增 `backend_fastapi/logutil.py`：具名 logger `stockpool`，**双写** ——
 >   `StreamHandler(sys.stderr)`（保持 `[info]`/`[warn]`/`[error]`/`[fatal]` 前缀不变，
 >   启动器按流打标签的行为不受影响）+ 两个 `TimedRotatingFileHandler`
->   （按天轮转、保留 14 天、UTF-8）：`<data>/logs/backend.log`（INFO+）
+>   （按天轮转、保留 7 天（logutil.KEEP_DAYS，与 cleanup.DEFAULT_RETAIN_DAYS 同口径）、UTF-8）：`<data>/logs/backend.log`（INFO+）
 >   与 `<data>/logs/uvicorn-error.log`（WARNING+，与 uvicorn 错误日志同名便于对照）。
 >   日志文件不可写时**降级为只写 stderr**，绝不让日志拖垮启动。
 > - `main.py`：11 处 `print(..., file=sys.stderr)` 全部换成 `logger.info/warning/critical`；
