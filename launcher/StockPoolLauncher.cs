@@ -598,7 +598,7 @@ namespace StockPool
                         SelectTab(_stockTabIndex);
                         _stockCode.Text = code;
                         StockOpen();
-                        StockSubSelect(0);
+                        _stockStrip.Select(0);
                         HideQuickSearch();
                     }
                     else
@@ -785,8 +785,9 @@ namespace StockPool
             if (_btnTheme != null) _btnTheme.Text = _light ? "主题：浅色" : "主题：深色";
             Skin(this);
             SkinTabs();
-            if (_mktSubBtns != null && _mktSubBtns.Count > 0) SkinMktSubTabs();
-            if (_stockSubBtns != null && _stockSubBtns.Count > 0) SkinStockSubTabs();
+            if (_mktStrip != null && _mktStrip.HasTabs) _mktStrip.SkinTabs();
+            if (_stockStrip != null && _stockStrip.HasTabs) _stockStrip.SkinTabs();
+            if (_stStrip != null && _stStrip.HasTabs) _stStrip.SkinTabs();   // 原先漏了策略页
             if (_stockHistoryList != null) StockRenderHistoryNav();
             if (_stockRangeMap != null && _stockRangeMap.Count > 0) StockSetRangeActive();
             if (_stockAdjustMap != null && _stockAdjustMap.Count > 0) StockSetAdjustActive();

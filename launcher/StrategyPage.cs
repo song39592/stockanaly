@@ -23,11 +23,7 @@ namespace StockPool
         private bool _stLoaded = false;
 
         // 二级导航
-        private FlowLayoutPanel _stSubBar;
-        private Panel _stSubBody;
-        private readonly List<Button> _stSubBtns = new List<Button>();
-        private readonly List<Panel> _stSubPages = new List<Panel>();
-        private int _stSubIndex;
+        private SubTabStrip _stStrip;
 
         // ① 策略选择与编辑
         private List<Dictionary<string, object>> _stStrategies;
@@ -116,91 +112,33 @@ namespace StockPool
             g0.Margin = new Padding(0, 0, 0, 4);
             root.Controls.Add(head, 0, 0);
 
-            _stSubBar = new FlowLayoutPanel();
-            _stSubBar.Dock = DockStyle.Top;
-            _stSubBar.Height = 30;
-            _stSubBar.FlowDirection = FlowDirection.LeftToRight;
-            _stSubBar.WrapContents = false;
-            _stSubBar.Margin = new Padding(0, 0, 0, 2);
-            _stSubBar.Padding = new Padding(0);
-            root.Controls.Add(_stSubBar, 0, 1);
-
-            _stSubBody = new Panel();
-            _stSubBody.Dock = DockStyle.Fill;
-            _stSubBody.Margin = new Padding(0);
-            _stSubBody.AutoScroll = true;
-            root.Controls.Add(_stSubBody, 0, 2);
-
-            StAddSubPage("策略选择与编辑", StBuildSelect);
-            StAddSubPage("回测范围", StBuildScope);
-            StAddSubPage("回测结果", StBuildResult);
-            StAddSubPage("近期策略成果", StBuildRecent);
-            StAddSubPage("当前策略推荐", StBuildReco);
-
-            StSubSelect(0);
-            return p;
-        }
-
-        private void StAddSubPage(string title, Action<TableLayoutPanel> build)
-        {
-            int idx = _stSubPages.Count;
-
-            var b = new Button();
-            b.Text = title;
-            b.Tag = "mkt-subtab";
-            b.FlatStyle = FlatStyle.Flat;
-            b.FlatAppearance.BorderSize = 0;
-            b.Font = new Font("Microsoft YaHei UI", 9f);
-            b.TabStop = false;
-            b.Margin = new Padding(0, 0, 2, 0);
-            b.Click += delegate { StSubSelect(idx); };
-            _stSubBtns.Add(b);
-            _stSubBar.Controls.Add(b);
-
-            var page = new Panel();
-            page.Dock = DockStyle.Fill;
-            page.AutoScroll = true;
-            page.Tag = "tabpage";
-            var stack = Stack();
-            build(stack);
-            page.Controls.Add(stack);
-            _stSubPages.Add(page);
-        }
-
-        private void StSubSelect(int index)
-        {
-            if (index < 0 || index >= _stSubPages.Count) return;
-            _stSubIndex = index;
-            _stSubBody.Controls.Clear();
-            var page = _stSubPages[index];
-            page.Visible = true;
-            page.Dock = DockStyle.Fill;
-            _stSubBody.Controls.Add(page);
-            Skin(page);
-            page.Invalidate(true);
-            StSkinSubTabs();
-        }
-
-        private void StSkinSubTabs()
-        {
-            if (_stSubBtns == null) return;
-            for (int i = 0; i < _stSubBtns.Count; i++)
+            // 本页与个股 / 盘面两处**刻意不同**，都是历史形态，不要顺手统一：
+            //   FixedButtonSize=false —— 按钮不设固定高宽，走 Button 默认的紧凑形态；
+            //   BodyAutoScroll=true  —— 内容容器自带滚动条（另两个页的容器不滚）。
+            _stStrip = new SubTabStrip(this, root, 1, 2, "st-subtab")
             {
-                bool sel = (i == _stSubIndex);
-                _stSubBtns[i].BackColor = sel ? _cPanel : _cBg;
-                _stSubBtns[i].ForeColor = sel ? _cText : _cSub;
-                _stSubBtns[i].Invalidate();
-            }
+                FixedButtonSize = false,
+                BodyAutoScroll = true
+            };
+
+            _stStrip.Add("策略选择与编辑", StBuildSelect);
+            _stStrip.Add("回测范围", StBuildScope);
+            _stStrip.Add("回测结果", StBuildResult);
+            _stStrip.Add("近期策略成果", StBuildRecent);
+            _stStrip.Add("当前策略推荐", StBuildReco);
+
+            _stStrip.Select(0);
+            return p;
         }
 
         private void StOnEnter()
         {
             if (!_stLoaded) StLoadStrategies();
-            if (_stSubBody != null)
+            if (_stStrip != null)
             {
-                StSubSelect(_stSubIndex);
-                _stSubBody.PerformLayout();
-                _stSubBody.Invalidate(true);
+                _stStrip.Select(_stStrip.Index);
+                _stStrip.Body.PerformLayout();
+                _stStrip.Body.Invalidate(true);
             }
         }
 

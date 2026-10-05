@@ -71,11 +71,7 @@ namespace StockPool
         private readonly Dictionary<Button, int> _stockRangeMap = new Dictionary<Button, int>();
 
         // 二级导航：K线 / 记录·消息 / 估值 各一页（K线页不滚动，图表撑满，避免滚轮缩放与翻页冲突）
-        private FlowLayoutPanel _stockSubBar;
-        private Panel _stockSubBody;
-        private readonly List<Button> _stockSubBtns = new List<Button>();
-        private readonly List<Panel> _stockSubPages = new List<Panel>();
-        private int _stockSubIndex;
+        private SubTabStrip _stockStrip;
 
         // 历史查看记录（最多 10 条，先进先出滚动覆盖）
         // 持久化到启动器自己的 %APPDATA%\StockPoolLauncher\history_stock_view.json：
@@ -260,20 +256,13 @@ namespace StockPool
             AddRow(b0, rangeRow);
             mainCol.Controls.Add(g0, 0, 1);
 
-            // ---- 二级标签栏 ----
-            _stockSubBar = new FlowLayoutPanel();
-            _stockSubBar.Dock = DockStyle.Top;
-            _stockSubBar.Height = 30;
-            _stockSubBar.FlowDirection = FlowDirection.LeftToRight;
-            _stockSubBar.WrapContents = false;
-            _stockSubBar.Margin = new Padding(0, 0, 0, 2);
-            _stockSubBar.Padding = new Padding(0);
-            mainCol.Controls.Add(_stockSubBar, 0, 2);
-
-            _stockSubBody = new Panel();
-            _stockSubBody.Dock = DockStyle.Fill;
-            _stockSubBody.Margin = new Padding(0);
-            mainCol.Controls.Add(_stockSubBody, 0, 3);
+            // ---- 二级标签栏（K 线页不滚动，图表撑满）----
+            _stockStrip = new SubTabStrip(this, mainCol, 2, 3, "stock-subtab");
+            _stockStrip.OnSelected = delegate(int index)
+            {
+                // 切到 K线 页就把焦点交给图表，↑↓ 缩放 / ←→ 移光标立刻可用
+                if (index == 0 && _stockKline != null) _stockKline.FocusForKeys();
+            };
 
             // 主内容列挂到根布局的右列
             root.Controls.Add(mainCol, 1, 0);
@@ -358,7 +347,7 @@ namespace StockPool
             kLayout.Controls.Add(_stockChipFormula, 1, 0);     // 筹码公式下拉
             kLayout.Controls.Add(_stockKline, 0, 1);       // 图表占满剩余高度
             kLayout.Controls.Add(_stockChip, 1, 1);        // 右侧筹码分布窗口
-            StockAddSubTab("K线", klinePage);
+            _stockStrip.Add("K线", klinePage);
 
             // ---- 二级页 ② 基本信息：行业 / 市值 / 前十大股东 / 涨停与连板（/api/stock/profile）----
             var basicPage = new Panel();
@@ -409,7 +398,7 @@ namespace StockPool
             AddRow(basicStack, gh);
 
             basicPage.Controls.Add(basicStack);
-            StockAddSubTab("基本信息", basicPage);
+            _stockStrip.Add("基本信息", basicPage);
 
             // ---- 二级页 ③ 记录 · 消息 ----
             var recPage = new Panel();
@@ -433,7 +422,7 @@ namespace StockPool
             AddRow(b4, _stockEvents);          // 全部消息直接展示，不再折叠
             AddRow(recStack, g4);
             recPage.Controls.Add(recStack);
-            StockAddSubTab("记录 · 消息", recPage);
+            _stockStrip.Add("记录 · 消息", recPage);
 
             // ---- 二级页 ③ 估值（完整过程见估值计算标签页）----
             var valPage = new Panel();
@@ -461,7 +450,7 @@ namespace StockPool
             }, 180)));
             AddRow(valStack, g5);
             valPage.Controls.Add(valStack);
-            StockAddSubTab("估值", valPage);
+            _stockStrip.Add("估值", valPage);
 
             // ---- 二级页 ③.5 扫雷（通达信「扫雷宝 · 个股亮点」，来自 /api/stock/saolei）----
             var slPage = new Panel();
@@ -478,7 +467,7 @@ namespace StockPool
             AddRow(bsl, _stockSaoleiList);
             AddRow(slStack, gsl);
             slPage.Controls.Add(slStack);
-            StockAddSubTab("扫雷", slPage);
+            _stockStrip.Add("扫雷", slPage);
 
             // ---- 二级页 ④ AI 分析（调 /api/stock/research）----
             var aiPage = new Panel();
@@ -504,7 +493,7 @@ namespace StockPool
             AddRow(b6, _stockAiBox);
             AddRow(aiStack, g6);
             aiPage.Controls.Add(aiStack);
-            StockAddSubTab("AI 分析", aiPage);
+            _stockStrip.Add("AI 分析", aiPage);
 
             // ---- 二级页 ⑤ AI 分析偏好（作为投喂变量，自动存本地）----
             StockLoadAiPrefs();   // 先加载已保存偏好，供控件初始选中
@@ -548,9 +537,9 @@ namespace StockPool
             AddRow(bp, gpf);
             AddRow(prefStack, gp);
             prefPage.Controls.Add(prefStack);
-            StockAddSubTab("偏好设置", prefPage);
+            _stockStrip.Add("偏好设置", prefPage);
 
-            StockSubSelect(0);
+            _stockStrip.Select(0);
 
             _stockCode.KeyDown += delegate(object s, KeyEventArgs e)
             {
@@ -576,63 +565,6 @@ namespace StockPool
             StockLoadHistoryFile();
             StockRenderHistoryNav();
             return p;
-        }
-
-        /// <summary>建一个二级页：按钮进标签栏，页面进内容区（由 StockSubSelect 只挂载当前页）。</summary>
-        private void StockAddSubTab(string title, Panel page)
-        {
-            int idx = _stockSubPages.Count;
-
-            var b = new Button();
-            b.Text = title;
-            b.Tag = "stock-subtab";
-            b.AutoSize = false;
-            b.Height = 28;
-            b.Width = Math.Max(96, TextRenderer.MeasureText(title, Font).Width + 24);
-            b.FlatStyle = FlatStyle.Flat;
-            b.FlatAppearance.BorderSize = 0;
-            b.Font = new Font("Microsoft YaHei UI", 9f);
-            b.TabStop = false;
-            b.Margin = new Padding(0, 0, 2, 0);
-            b.Click += delegate { StockSubSelect(idx); };
-            _stockSubBtns.Add(b);
-            _stockSubBar.Controls.Add(b);
-
-            page.Dock = DockStyle.Fill;
-            page.Visible = false;
-            page.Margin = new Padding(0);
-            page.Tag = "tabpage";
-            _stockSubPages.Add(page);
-        }
-
-        private void StockSubSelect(int index)
-        {
-            if (index < 0 || index >= _stockSubPages.Count) return;
-            _stockSubIndex = index;
-            // 容器里只挂当前页，避免多个 Dock=Fill 面板叠放导致布局错乱
-            _stockSubBody.Controls.Clear();
-            var page = _stockSubPages[index];
-            page.Visible = true;
-            page.Dock = DockStyle.Fill;
-            _stockSubBody.Controls.Add(page);
-            Skin(page);                 // 懒挂载的页首次显示前按当前主题上色
-            page.Invalidate(true);
-            SkinStockSubTabs();
-            // 切到 K线 页就把焦点交给图表，↑↓ 缩放 / ←→ 移光标立刻可用
-            if (index == 0 && _stockKline != null) _stockKline.FocusForKeys();
-        }
-
-        /// <summary>二级标签配色（跟随主题）：选中用卡片色，未选中用窗口底色。</summary>
-        private void SkinStockSubTabs()
-        {
-            if (_stockSubBtns == null) return;
-            for (int i = 0; i < _stockSubBtns.Count; i++)
-            {
-                bool sel = (i == _stockSubIndex);
-                _stockSubBtns[i].BackColor = sel ? _cPanel : _cBg;
-                _stockSubBtns[i].ForeColor = sel ? _cText : _cSub;
-                _stockSubBtns[i].Invalidate();
-            }
         }
 
         // ---- 打开 ----
@@ -2360,7 +2292,7 @@ bool ok = J.IsOk(j);
                 btn.ForeColor = cur ? Color.White : _cText;
                 string name = string.IsNullOrEmpty(h.Name) ? "" : ("  " + h.Name);
                 btn.Text = h.Code + name;
-                btn.Click += delegate { _stockCode.Text = h.Code; StockOpen(); StockSubSelect(0); };
+                btn.Click += delegate { _stockCode.Text = h.Code; StockOpen(); _stockStrip.Select(0); };
                 btn.MouseUp += delegate(object s, MouseEventArgs e)
                 {
                     if (e.Button == MouseButtons.Right) StockRemoveHistory(h.Code);
@@ -2471,11 +2403,11 @@ bool ok = J.IsOk(j);
             // 个股页需要代码才能加载，进入时不自动拉取；仅确保图表按当前主题重绘。
             if (_stockKline != null) _stockKline.Invalidate();
             // 从别的顶级标签切进来时，重新挂载当前二级页并刷新，避免首屏不刷新
-            if (_stockSubBody != null)
+            if (_stockStrip != null)
             {
-                StockSubSelect(_stockSubIndex);
-                _stockSubBody.PerformLayout();
-                _stockSubBody.Invalidate(true);
+                _stockStrip.Select(_stockStrip.Index);
+                _stockStrip.Body.PerformLayout();
+                _stockStrip.Body.Invalidate(true);
             }
             StockRenderHistoryNav();   // 刷新左侧历史导航的当前项高亮
         }

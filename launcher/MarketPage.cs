@@ -53,11 +53,7 @@ namespace StockPool
         private bool _mktAiFired = false;     // 是否已自动生成过一次
 
         // 二级导航：① / ② / ③ 各自一页，④ 连板 + ⑤ 大面股 合为一页
-        private FlowLayoutPanel _mktSubBar;
-        private Panel _mktSubBody;
-        private readonly List<Button> _mktSubBtns = new List<Button>();
-        private readonly List<Panel> _mktSubPages = new List<Panel>();
-        private int _mktSubIndex;
+        private SubTabStrip _mktStrip;
 
         /// <summary>
         /// 盘面及板块：二级导航把五块分成四页 —— ① 外围环境 / ② 大盘资金 / ③ 板块β 各自独立，
@@ -102,107 +98,28 @@ namespace StockPool
             root.Controls.Add(head, 0, 0);
 
             // ---- 二级标签栏 ----
-            _mktSubBar = new FlowLayoutPanel();
-            _mktSubBar.Dock = DockStyle.Top;   // Fill 在 AutoSize 行里高度算不准，会留下大片空白
-            _mktSubBar.Height = 30;
-            _mktSubBar.FlowDirection = FlowDirection.LeftToRight;
-            _mktSubBar.WrapContents = false;
-            _mktSubBar.Margin = new Padding(0, 0, 0, 2);
-            _mktSubBar.Padding = new Padding(0);
-            root.Controls.Add(_mktSubBar, 0, 1);
-
-            _mktSubBody = new Panel();
-            _mktSubBody.Dock = DockStyle.Fill;
-            _mktSubBody.Margin = new Padding(0);
-            root.Controls.Add(_mktSubBody, 0, 2);
+            _mktStrip = new SubTabStrip(this, root, 1, 2, "mkt-subtab");
+            _mktStrip.OnSelected = delegate(int index)
+            {
+                // 首次切到「AI 分析」页时才生成：此时应用早已启动、后端已就绪，
+                // 避免在 BuildMarketPage（应用启动瞬间）抢跑导致「连不上后端」。
+                if (index == _mktAiSubIndex && !_mktAiFired)
+                {
+                    _mktAiFired = true;
+                    MktLoadMktAi(false);
+                }
+            };
 
             // ---- 四个二级页 ----
-            MktAddSubPage("外围环境", MktBuildGlobal);
-            MktAddSubPage("大盘资金", MktBuildCapital);
-            MktAddSubPage("板块β", MktBuildSectors);
-            MktAddSubPage("连板 · 大面股", MktBuildLadder);
-            _mktAiSubIndex = _mktSubPages.Count;
-            MktAddSubPage("AI 分析", MktBuildMktAi);
+            _mktStrip.Add("外围环境", MktBuildGlobal);
+            _mktStrip.Add("大盘资金", MktBuildCapital);
+            _mktStrip.Add("板块β", MktBuildSectors);
+            _mktStrip.Add("连板 · 大面股", MktBuildLadder);
+            _mktAiSubIndex = _mktStrip.Count;
+            _mktStrip.Add("AI 分析", MktBuildMktAi);
 
-            MktSubSelect(0);
+            _mktStrip.Select(0);
             return p;
-        }
-
-        /// <summary>建一个二级页：按钮进标签栏，内容面板进内容区（内容用 Stack 纵向堆叠）。</summary>
-        private void MktAddSubPage(string title, Action<TableLayoutPanel> build)
-        {
-            int idx = _mktSubPages.Count;
-
-            var b = new Button();
-            b.Text = title;
-            b.Tag = "mkt-subtab";
-            b.AutoSize = false;
-            b.Height = 28;
-            b.Width = Math.Max(96, TextRenderer.MeasureText(title, Font).Width + 24);
-            b.FlatStyle = FlatStyle.Flat;
-            b.FlatAppearance.BorderSize = 0;
-            b.Font = new Font("Microsoft YaHei UI", 9f);
-            b.TabStop = false;
-            b.Margin = new Padding(0, 0, 2, 0);
-            b.Click += delegate { MktSubSelect(idx); };
-            _mktSubBtns.Add(b);
-            _mktSubBar.Controls.Add(b);
-
-            var page = new Panel();
-            page.Dock = DockStyle.Fill;
-            page.Visible = false;
-            page.AutoScroll = true;
-            page.Margin = new Padding(0);
-            page.Tag = "tabpage";
-            var stack = Stack();
-            build(stack);
-            page.Controls.Add(stack);
-            // 不在这里挂到 _mktSubBody：由 MktSubSelect 只挂载当前页，
-            // 避免多个 Dock=Fill 面板叠放（叠放时切 Visible 会布局错乱）。
-            _mktSubPages.Add(page);
-        }
-
-        private void MktSubSelect(int index)
-        {
-            if (index < 0 || index >= _mktSubPages.Count) return;
-            _mktSubIndex = index;
-
-            // 容器里只挂当前这一页：先摘掉旧的，再挂上新的。
-            // 之前是四页都 Dock=Fill 叠在容器里靠 Visible 切换，会出现
-            // 「切过去没变、再切一次才对」的布局错乱。
-            _mktSubBody.Controls.Clear();
-            var page = _mktSubPages[index];
-            page.Visible = true;
-            page.Dock = DockStyle.Fill;
-            _mktSubBody.Controls.Add(page);
-            // 二级页只在被选中时才挂到控件树上，而全局换肤 Skin(this) 只递归挂载中的控件，
-            // 所以这些页在首次显示前一直是系统默认配色（表格白底、列头浅灰），
-            // 必须切一次主题才会被补上。这里在挂载的同时按当前主题上色。
-            Skin(page);
-            page.Invalidate(true);
-
-            SkinMktSubTabs();
-
-            // 首次切到「AI 分析」页时才生成：此时应用早已启动、后端已就绪，
-            // 避免在 BuildMarketPage（应用启动瞬间）抢跑导致「连不上后端」。
-            if (index == _mktAiSubIndex && !_mktAiFired)
-            {
-                _mktAiFired = true;
-                MktLoadMktAi(false);
-            }
-        }
-
-        /// <summary>二级标签配色（跟随主题）：选中用卡片色，未选中用窗口底色。</summary>
-        private void SkinMktSubTabs()
-        {
-            if (_mktSubBtns == null) return;
-            for (int i = 0; i < _mktSubBtns.Count; i++)
-            {
-                bool sel = (i == _mktSubIndex);
-                _mktSubBtns[i].BackColor = sel ? _cPanel : _cBg;
-                _mktSubBtns[i].ForeColor = sel ? _cText : _cSub;
-                _mktSubBtns[i].Invalidate();
-            }
         }
 
         /// <summary>进入本页时自动拉最新数据：清掉日期勾选（走实时 / 最近交易日口径）再加载。</summary>
@@ -212,11 +129,11 @@ namespace StockPool
             MktLoadAll();
 
             // 从别的顶级标签切进来时，重新挂载当前二级页并刷新，避免首屏不刷新
-            if (_mktSubBody != null)
+            if (_mktStrip != null)
             {
-                MktSubSelect(_mktSubIndex);
-                _mktSubBody.PerformLayout();
-                _mktSubBody.Invalidate(true);
+                _mktStrip.Select(_mktStrip.Index);
+                _mktStrip.Body.PerformLayout();
+                _mktStrip.Body.Invalidate(true);
             }
         }
 

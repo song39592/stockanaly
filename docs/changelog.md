@@ -23,6 +23,24 @@
     新模块打日志的写法。该节**只做导航**，权威细节仍以 `config.py` / `storage.py` / `logutil.py`
     的注释为准，避免变成第二份需要同步的真相。
 
+- **二级页机制收成 `SubTabStrip` 控件**（待办 05）：个股页 / 盘面页 / 策略页原先各写一套
+  「顶部一排小按钮 + 一个内容容器」，`Add` / `Select` / 换肤循环三份近乎逐字重复，
+  外加三份几乎一样的字段组与标签栏搭建代码。现收成 `launcher/SubTabStrip.cs` 一个控件
+  （持有 bar / body / btns / pages / index），三页各持一个实例。
+  - **`Add` 两个重载都保留**：`Add(title, Panel)` 供个股页（7 个子页外部先建好再传入，
+    不改成委托式，否则要动 7 个调用点）；`Add(title, Action<TLP>)` 供盘面 / 策略（内部套 Stack）。
+  - **两处懒加载特例靠 `OnSelected` 钩子承载**，不写死进 `Select`：
+    盘面页「AI 分析」子页首次切到才生成（避免应用启动瞬间抢跑请求后端）、
+    个股页切到 K 线子页把键盘焦点交给图表。钩子设计不到位 AI 页就会在启动时开始生成。
+  - ⭐ **顺手修 bug**：`ApplyTheme()` 原先只调 `SkinMktSubTabs()` + `SkinStockSubTabs()`，
+    **漏了策略页** —— 策略页二级页按钮在浅色↔深色切换后不会重新上色。现三条都挂上。
+  - 策略页按钮原先误用 `"mkt-subtab"` 作 `Tag`（复制粘贴错标），改为 `"st-subtab"`；
+    已确认全仓对这两个 `Tag` **只赋值、从不读取**（`Skin()` 只按 `"muted"` 分支），零影响。
+  - **两处刻意保留的差异**（文档未记，实际存在）：策略页按钮没设 `AutoSize/Height/Width`，
+    走默认紧凑形态；其内容容器另有 `AutoScroll = true`。统一前者会让策略页按钮整体变大，
+    属视觉变化，故各留一个开关（`FixedButtonSize` / `BodyAutoScroll`）并注释「不要顺手统一」。
+  - `build_exe.bat` 源文件清单加入 `SubTabStrip.cs`。
+
 - **股票名称获取合一**（待办 04）：新增 `Http.FetchStockName(code, onOk, onFail)` 与
   `PriceSuffix(price)`，个股页 `StockLoadName` 与估值页 `ValuationLookupName`
   由各 32 行降到各 15 行，`api/stock/quote?code=` 全仓只剩一处。

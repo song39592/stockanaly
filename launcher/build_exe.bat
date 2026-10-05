@@ -32,6 +32,7 @@ echo 正在编译原生窗口程序...
   "%~dp0UiKit.cs" ^
   "%~dp0Cards.cs" ^
   "%~dp0ChartKit.cs" ^
+  "%~dp0SubTabStrip.cs" ^
   "%~dp0Http.cs" ^
   "%~dp0J.cs" ^
   "%~dp0Palette.cs" ^

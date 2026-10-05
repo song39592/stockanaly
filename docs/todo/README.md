@@ -31,7 +31,7 @@
 | 02 | [02-前端-JSON工具收敛.md](02-前端-JSON工具收敛.md) | 前端 | 4 份逐字等价的取键函数 + 6 份转 double | ★★★★★ / ★★☆ |
 | 03 | [03-前端-HTTP补齐三行.md](03-前端-HTTP补齐三行.md) | 前端 | `GetText`/`PostJson` 补 Proxy/ReadWriteTimeout/Expect100 | ★★★★ / ★☆☆ |
 | 04 ✅ | [04-前端-股票名称获取合一.md](04-前端-股票名称获取合一.md) | 前端 | 个股页与估值页同一段取名逻辑抄两遍 | ★★★★ / ★☆☆ —— **已完成** |
-| 05 | [05-前端-SubTab机制抽取.md](05-前端-SubTab机制抽取.md) | 前端 | 3 份近乎逐字的二级页机制 → `SubTabStrip` | ★★★★ / ★★★ |
+| 05 ✅ | [05-前端-SubTab机制抽取.md](05-前端-SubTab机制抽取.md) | 前端 | 3 份近乎逐字的二级页机制 → `SubTabStrip` | ★★★★ / ★★★ —— **已完成** |
 | 06 | [06-前端-KPI卡片搬家.md](06-前端-KPI卡片搬家.md) | 前端 | `AddKpi`/`VKpiRow` 住在 ValuationPage 却被 3 页调用 | ★★★ / ★☆☆ |
 | 07 ✅ | [07-前端-图表基类.md](07-前端-图表基类.md) | 前端 | 双缓冲 SetStyle 4 份逐字 + 抗锯齿不统一 | ★★★ / ★★☆ —— **已完成** |
 | 08 ◐ | [08-前端-小样板合集.md](08-前端-小样板合集.md) | 前端 | IsOk / ErrOf / SetErr / ToggleVisible / Debounce / FlatBtn | ★★ / ★☆☆ —— **部分完成 3/6** |
@@ -94,6 +94,10 @@
 ## 已完成的项
 - **19** `.gitignore` 按五类重写（源码 / 依赖 / 构建缓存 / 配置凭据 / 日志状态）；
   并确立**提交原则**：生成物也要提交（exe 属运行必需产物，必须入库），只忽略可重建项。
+- **05** 二级页机制收成 `SubTabStrip.cs` 控件：个股 / 盘面 / 策略三份 Add + Select + 换肤循环
+  与标签栏搭建合并为 1 套，三页各持一个实例（5 字段组 ×3 → 1 字段 ×3）。
+  两处懒加载（盘面 AI 子页、个股 K 线焦点）靠 `OnSelected` 钩子保住；
+  顺带**修掉策略页换肤漏挂**的 bug；策略页按钮紧凑形态与容器滚动条两处差异用开关保留。
 - **04** 股票名称获取合一：新增 `Http.FetchStockName(code, onOk, onFail)` + `PriceSuffix`，
   `StockLoadName` / `ValuationLookupName` 各由 32 行降到 15 行。竞态守卫、失败兜底文案、
   个股页 `StockAddHistory` 副作用三处差异**全部留在调用方**。
