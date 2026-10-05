@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 
 import config
 import valuation_service
+from core import httpclient
 from collectors import (
     get_basic_info_evidence, get_announcements, fetch_notice_content, get_news,
     evidence_search_url, event_signal, _clip, SLEEP_NOTICE,
@@ -353,23 +354,19 @@ def stock_boards_endpoint(code: str, refresh: bool = False):
 # --------------------------------------------------------------------------- #
 TDX_SLB_URL = "http://page3.tdx.com.cn:7615/TQLEX?Entry=CWServ.pcwebcall_fx_slbggld"
 TDX_SLB_JSON = "http://page3.tdx.com.cn:7615/site/pcwebcall_static/bxb/json/{code}.json"
-TDX_SLB_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+# UA / Referer 统一到 core.httpclient（第 15 项）。原先这里自带的 Chrome/120.0.0.0
+# 已删 —— 换成统一的 Chrome/124 后实测通达信扫雷宝两个接口仍正常返回。
+# 注：扫雷宝的 referer 必须带 code 参数，故用 httpclient 的模板常量格式化。
 
 
 def _tdx_slb(code: str, mode: str):
     """调用通达信扫雷宝接口，返回首个结果集的 Content（行列表）。"""
-    referer = ("http://page3.tdx.com.cn:7615/site/pcwebcall_static/bxb/bxb.html"
-               "?code=" + code + "&color=0")
     body = json.dumps({"CallName": "pcwebcall_fx_slbggld", "Params": [mode, code, ""]})
-    resp = requests.post(
+    resp = httpclient.post(
         TDX_SLB_URL,
+        referer=httpclient.TDX_SLB_REFERER.format(code=code),
         data=body.encode("utf-8"),
-        headers={
-            "User-Agent": TDX_SLB_UA,
-            "Referer": referer,
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        },
+        headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
         timeout=8,
     )
     resp.encoding = "utf-8"
@@ -391,11 +388,9 @@ def _as_int(v, default=0):
 
 def _tdx_saolei_json(code: str):
     """抓取通达信扫雷宝静态 JSON（含 154 项风险清单），返回解析后的 dict。"""
-    referer = ("http://page3.tdx.com.cn:7615/site/pcwebcall_static/bxb/bxb.html"
-               "?code=" + code + "&color=0")
-    resp = requests.get(
+    resp = httpclient.get(
         TDX_SLB_JSON.format(code=code),
-        headers={"User-Agent": TDX_SLB_UA, "Referer": referer},
+        referer=httpclient.TDX_SLB_REFERER.format(code=code),
         timeout=8,
     )
     if resp.status_code == 404:

@@ -20,13 +20,12 @@ import datetime as dt
 import re
 import threading
 
-import requests
-
+from core import httpclient
 import market_service as ms
 
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/124.0.0 Safari/537.36")
-SINA_REFERER = "https://finance.sina.com.cn/"
+# UA / SINA_REFERER 统一到 core.httpclient（第 15 项）；本模块原先自带的副本已删。
+# ⚠️ 本模块两处调用都**不传 retries**（用默认 1）：估值是同步页面请求，
+# 若跟着盘面那份 retries=3，数据源抖动时最坏耗时从 12s 涨到约 38.5s，页面像卡死。
 
 DEFAULT_DISCOUNT_RATE = 0.10        # 贴现率（统一 10%）
 DEFAULT_PERPETUAL_GROWTH = 0.0      # 永续增长率（建议 0）
@@ -70,17 +69,6 @@ def _num(value, digits=4):
         return None
 
 
-def _get(url, referer=None, timeout=12, encoding=None):
-    headers = {"User-Agent": UA}
-    if referer:
-        headers["Referer"] = referer
-    resp = requests.get(url, headers=headers, timeout=timeout)
-    resp.raise_for_status()
-    if encoding:
-        resp.encoding = encoding
-    return resp
-
-
 def _market_prefix(code: str) -> str:
     """6 位代码 → sh / sz / bj 前缀。"""
     if code.startswith(("60", "68", "51", "58", "11")):
@@ -102,8 +90,8 @@ def fetch_quote(code: str, errors: list) -> dict:
     result: dict = {"price": None, "shares": None, "source": []}
 
     try:
-        resp = _get(f"https://hq.sinajs.cn/list={symbol}", referer=SINA_REFERER,
-                    encoding="gbk", timeout=10)
+        resp = httpclient.get(f"https://hq.sinajs.cn/list={symbol}",
+                              referer=httpclient.SINA_REFERER, encoding="gbk", timeout=10)
         payload = resp.text.split("=", 1)[-1].strip().strip('";')
         fields = payload.split(",")
         if len(fields) > 3:
@@ -121,7 +109,7 @@ def fetch_quote(code: str, errors: list) -> dict:
         errors.append(f"新浪行情获取失败：{exc}")
 
     try:
-        resp = _get(f"https://qt.gtimg.cn/q={symbol}", timeout=10, encoding="gbk")
+        resp = httpclient.get(f"https://qt.gtimg.cn/q={symbol}", timeout=10, encoding="gbk")
         payload = resp.text.split("=", 1)[-1].strip().strip('";')
         fields = payload.split("~")
         if len(fields) > 45:

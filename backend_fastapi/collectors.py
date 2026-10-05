@@ -11,16 +11,13 @@ import time
 import datetime
 from urllib.parse import quote
 
-import requests
 import akshare as ak
 
 from market_service import _ak   # 统一走带硬超时的 akshare 调用，避免数据源无响应时挂死
+from core import httpclient
 
-UA = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-    "Referer": "https://data.eastmoney.com/",
-}
+# 原先本模块自带的 UA(Chrome/120)+Referer 字典已删，统一走 core.httpclient（第 15 项）。
+# 东财公告正文接口对 UA 不敏感（实测换 124 后仍正常返回）。
 
 # 抓取正文时的请求间隔（秒），防反爬
 SLEEP_NOTICE = 1.2
@@ -163,7 +160,7 @@ def fetch_notice_content(art_code: str):
     url = (f"https://np-cnotice-stock.eastmoney.com/api/content/ann"
            f"?art_code={art_code}&client_source=web&page_index=1")
     try:
-        r = requests.get(url, headers=UA, timeout=15)
+        r = httpclient.get(url, referer=httpclient.EASTMONEY_REFERER, timeout=15)
         j = r.json()
         return j.get("data", {}).get("notice_content", "") or None
     except Exception:

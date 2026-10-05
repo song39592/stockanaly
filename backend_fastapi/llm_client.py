@@ -6,10 +6,16 @@
 import requests
 
 import config
+from core import httpclient
 
 
 def call_llm(prompt: str, timeout: int = 180) -> str:
-    """OpenAI 兼容 chat/completions 调用。"""
+    """OpenAI 兼容 chat/completions 调用。
+
+    超时默认 180 秒 —— LLM 是分钟级语义，与行情的十秒级完全不同，
+    所以这里**显式传 timeout**给 `httpclient.post`（它的 timeout 是必填参数，
+    不给默认值正是为了防止有人误用行情口径的默认值）。
+    """
     url = config.LLM_BASE_URL.rstrip("/") + "/chat/completions"
     payload = {
         "model": config.LLM_MODEL,
@@ -18,7 +24,7 @@ def call_llm(prompt: str, timeout: int = 180) -> str:
         "stream": False,
     }
     headers = {"Authorization": f"Bearer {config.LLM_API_KEY}", "Content-Type": "application/json"}
-    response = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    response = httpclient.post(url, json=payload, headers=headers, timeout=timeout)
     response.raise_for_status()
     return response.json()["choices"][0]["message"]["content"]
 

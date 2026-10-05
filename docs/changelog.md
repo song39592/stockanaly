@@ -6,6 +6,28 @@
 
 ### 变更
 
+- **raw HTTP 收敛为 `core/httpclient.py`**（待办 15）：改之前 raw HTTP 有 **6 份**独立实现
+  （待办只记了 4 份），UA **4 个变体**混用（Chrome `120.0`、`120.0.0.0`、`124.0.0` ×2），
+  只有盘面那一份有重试 + 退避，也只有它复用连接。
+  - 新增 `core/httpclient.py`（98 行）：UA / referer 常量唯一、进程内共用 `requests.Session`、
+    `get()` 带重试与线性退避、`post()` 的超时必填。旧路径留 `httpclient.py` 别名转发。
+  - 6 处接入：`market_service._http_get`（→ `retries=3`，全仓唯一允许重试的调用点）、
+    `valuation_service._get`（→ 默认 `retries=1`）、`core/share_service` 内联、
+    `collectors` 内联（东财公告）、`stock_routes` 的通达信扫雷宝 GET + POST、`llm_client`。
+    原先各自携带的 UA 副本与常量的重复定义全部删除。
+  - **akshare 侧按要求未动** —— `market_service._ak` 已是唯一封装、7 个模块在用。
+  - ⭐ **`retries` 默认定 1 而不是 3**：待办点出的风险（估值页最坏耗时 12s → 38.5s）已规避。
+    反过来让调用方**显式**传 3，这样「默认重试」这个坑不会再被无意踩到。
+  - **`post` 的 `timeout` 必填、无默认值** —— LLM 是分钟级语义，与行情十秒级完全不同，
+    强制显式传参是唯一可靠的防呆手段。
+  - **顺带修掉改的过程中自己引入的一处行为回退**：`httpclient.post` 最初没加 `referer`，
+    接过去后通达信扫雷宝的 `Referer` 头丢了（该接口要求 referer 带 code），已补上并复验。
+  - 验证：改前/改后**逐个数据源实况对照**，7 条链路取值完全一致
+    （新浪 200/570 字符、估值 price 1258.62 & shares 12.5008、
+    流通股本 1,250,081,836 & turnover 0.31、东财公告 6 条、东财新闻 9 条、
+    通达信 JSON 4 键 + POST 正常）；`/health` 无模块错误、stderr 无告警；
+    接口冒烟 8 条全 `ok=true`；**单元测试 52 个全绿**；真实 `.env` 未被改动。
+
 - **后端新增 `core/` 子包，基础设施层归位**（待办 27，后端搬家的第一步）：
   `backend_fastapi/` 原为扁平结构（约 87 个 `.py` 同层），现把**依赖图底部**的 14 个模块
   `git mv` 进 `core/`（保住历史）：`config` `crypto` `dpapi` `envfile` `storage` `db`

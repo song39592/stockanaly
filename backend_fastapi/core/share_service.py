@@ -21,10 +21,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
-import requests
+from . import httpclient
 
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+# UA 统一到 core.httpclient（第 15 项）。本模块原先是全仓最旧的 Chrome/120，
+# 实测换 124 后腾讯行情仍正常取到值（float_shares 与 valuation_service 的 shares 自洽）。
 TIMEOUT = 10
 
 # 字段下标（腾讯行情）
@@ -70,8 +70,7 @@ def fetch_share_capital(code: str, errors: list | None = None) -> dict:
     }
     symbol = market_symbol(code)
     try:
-        resp = requests.get(f"https://qt.gtimg.cn/q={symbol}",
-                            headers={"User-Agent": UA}, timeout=TIMEOUT)
+        resp = httpclient.get(f"https://qt.gtimg.cn/q={symbol}", timeout=TIMEOUT)
         resp.encoding = "gbk"
         resp.raise_for_status()
     except Exception as exc:                      # noqa: BLE001 - 单源失败即降级

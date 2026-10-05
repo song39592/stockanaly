@@ -29,7 +29,6 @@ import time
 from concurrent import futures as cf
 
 import pandas as pd
-import requests
 
 class _MissingAkShare:
     """akshare 缺失时的占位对象：任何属性访问返回 None，交由 _ak 统一降级。"""
@@ -43,16 +42,18 @@ try:
 except Exception:  # pragma: no cover - 依赖缺失时整体降级
     ak = _MissingAkShare()
 
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/124.0.0 Safari/537.36")
-SINA_REFERER = "https://finance.sina.com.cn/"
+from core import httpclient
+
+# UA / SINA_REFERER / HTTP 重试统一到 core.httpclient（第 15 项）。
+# 本模块原先自带的 UA(Chrome/124)、SINA_REFERER、_session、_http_get 全部删除。
+# ⚠️ 本模块仅剩的 1 处 HTTP 调用**显式传 retries=3**（见下方 build 相关处）：
+# 盘面历史行情在收盘后批量取数，数据源抖动时重试能显著提高成功率，
+# 这是全仓唯一允许重试的调用点。其它调用方一律用默认 retries=1。
 
 CACHE_TTL = 60                      # 盘中快照缓存 60 秒，避免频繁打数据源
 HIST_CACHE_TTL = 6 * 3600           # 历史交易日数据不会再变，缓存 6 小时
 _cache: dict = {}
 _cache_lock = threading.Lock()
-_session = requests.Session()
-_session.headers.update({"User-Agent": UA})
 
 
 # --------------------------------------------------------------------------- #
@@ -138,23 +139,6 @@ def _cached(key: str, producer, ttl: int = CACHE_TTL, retry_ttl: int = RETRY_TTL
     with _cache_lock:
         _cache[key] = (time.time(), value)
     return value, False
-
-
-def _http_get(url, referer=None, retries=3, timeout=12, encoding=None, params=None):
-    """GET 请求，失败重试（退避），全部失败抛出最后一次异常。"""
-    last = None
-    for attempt in range(retries):
-        try:
-            headers = {"Referer": referer} if referer else None
-            resp = _session.get(url, params=params, headers=headers, timeout=timeout)
-            resp.raise_for_status()
-            if encoding:
-                resp.encoding = encoding
-            return resp
-        except Exception as exc:      # noqa: BLE001 - 统一重试后抛出
-            last = exc
-            time.sleep(0.5 * (attempt + 1))
-    raise last
 
 
 AK_TIMEOUT = 15                       # 普通 akshare 调用硬超时（秒），超时视为该来源不可用
@@ -511,8 +495,9 @@ def global_market(date=None):
         symbols = [sym for _, items in SINA_QUOTE_GROUPS for sym, _ in items]
         quotes = {}
         try:
-            text = _http_get("https://hq.sinajs.cn/list=" + ",".join(symbols),
-                             referer=SINA_REFERER, encoding="gbk").text
+            text = httpclient.get("https://hq.sinajs.cn/list=" + ",".join(symbols),
+                                  referer=httpclient.SINA_REFERER, encoding="gbk",
+                                  retries=3).text          # 全仓唯一允许重试的调用点
             for line in text.split(";"):
                 line = line.strip()
                 if not line.startswith("var hq_str_"):
