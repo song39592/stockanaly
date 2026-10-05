@@ -32,6 +32,29 @@
 > `AutoScroll = true`（另两页不滚，个股页的 K 线页要撑满图表）→ `BodyAutoScroll` 开关。
 > 两处都写了注释说明「不要顺手统一」。
 >
+> **⛔ 首次提交后应用起不来（已修，务必读）**
+> `csc` 编译 exit 0、无 lint，**但双击即崩**：
+>
+> ```
+> System.NullReferenceException
+>    在 StockPool.MainForm+SubTabStrip..ctor(...)
+>    在 StockPool.MainForm.BuildMarketPage()
+>    在 StockPool.MainForm..ctor()
+> ```
+>
+> 原因：`BodyAutoScroll` 的 setter 直接写 `_body.AutoScroll`，而构造函数里有一行
+> `BodyAutoScroll = false;` **排在 `_body = new Panel()` 之前** → 读未赋值的字段。
+>
+> **编译器为什么不报错**：C# 的 definite-assignment 分析只管**局部变量**与**参数**；
+> 对 `readonly` 字段它只检查「赋值位置是否合法」，**不检查读取**。
+> 所以这种 NPE 一定编译得过、只在运行时炸。
+>
+> 修法：把那行**删掉** —— `_bodyAutoScroll` 是 `bool`、`Panel.AutoScroll` 默认也是 `false`，
+> 本来就不需要设。已在属性注释里写明「只能在构造函数跑完之后设」及其原因。
+>
+> **教训**：本项目所有编译都过、无 lint，**不等于能跑**。
+> 改完启动器必须**实际双击跑一次**再提交，不能只看 exit 0。
+
 > **一处自己引入又修掉的回归风险（记录以免复发）**
 > 原来三处的守卫是 `if (_xSubBody != null)`，意图是「该页是否已构建」。
 > 直译成 `if (_xStrip.Body != null)` 就错了 —— `Body` 由构造函数赋值、**永不为 null**，
@@ -78,7 +101,10 @@
 ## 验收
 - [x] 三份 Add/Select/Skin 合并为 1 套 ✅ 旧标识符全仓检索**无残留**；
       标签配色循环 / `_body.Controls.Clear()` / 标签栏搭建各只剩 1 处
-- [x] 编译通过 ✅ `csc` exit 0，无 lint；exe 243,712 字节
+- [x] 编译通过 ✅ `csc` exit 0，无 lint
+- [x] **能实际启动** ✅ 修掉 NPE 后实跑：窗口起来、标题「股票池追踪系统」、30 秒存活、
+      事件日志无 .NET Runtime 错误；正常关闭后后端子进程被回收（8000 已释放）。
+      崩溃发生在 `MainForm..ctor` 内，故**三个页面的构建均已验证通过**
 - [ ] 个股页 7 个子页切换正常，切到 K 线页仍自动获得键盘焦点 —— **未做**（需人工）
 - [ ] 盘面页切到 AI 子页才触发生成（启动时**不**生成）—— **未做**（需人工）
 - [ ] 浅色↔深色切换后，三个页的二级页按钮配色都跟随（含策略页，即修了漏挂 bug）—— **未做**（需人工）

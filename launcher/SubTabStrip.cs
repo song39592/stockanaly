@@ -47,7 +47,14 @@ namespace StockPool
 
             private bool _bodyAutoScroll;
             /// <summary>内容容器是否自带滚动条。仅策略页为 true（个股页的 K 线页要撑满图表、
-            /// 不能滚，否则滚轮缩放会与滚动打架）。构造后改也立即生效。</summary>
+            /// 不能滚，否则滚轮缩放会与滚动打架）。
+            ///
+            /// ⚠️ **只能在构造函数跑完之后设**（用对象初始化器即可）。它在 setter 里直接写 `_body`，
+            /// 而 `_body` 是 readonly 字段、要到构造函数末尾才赋值 —— 编译器**不会**报
+            /// 「可能未赋值」，因为它只检查 readonly 字段的赋值位置，不检查读取。
+            /// 在构造函数里先 `BodyAutoScroll = false;` 会在启动时抛 NullReferenceException。
+            /// 之所以默认值不用在这里设：`_bodyAutoScroll` 与 `Panel.AutoScroll` 本来就都是 false。
+            /// </summary>
             public bool BodyAutoScroll
             {
                 get { return _bodyAutoScroll; }
@@ -60,7 +67,6 @@ namespace StockPool
                 _app = app;
                 _buttonTag = buttonTag;
                 FixedButtonSize = true;      // 默认给固定尺寸；策略页在初始化器里改成 false
-                BodyAutoScroll = false;
 
                 var bar = new FlowLayoutPanel();
                 bar.Dock = DockStyle.Top;     // Fill 在 AutoSize 行里高度算不准，会留下大片空白
