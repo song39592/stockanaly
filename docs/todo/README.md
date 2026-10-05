@@ -94,6 +94,10 @@
 ## 已完成的项
 - **19** `.gitignore` 按五类重写（源码 / 依赖 / 构建缓存 / 配置凭据 / 日志状态）；
   并确立**提交原则**：生成物也要提交（exe 属运行必需产物，必须入库），只忽略可重建项。
+- **03** HTTP 补齐：新建 `launcher/Http.cs`（`Probe`×3 / `GetText` / `PostJson` 原样搬入），
+  并补齐 `GetText` 的 `ReadWriteTimeout`（**真 bug**：大响应体读取阶段原本无超时保护）、
+  `Proxy = null`、`Expect100Continue = false`；`PostJson` 补后两项。
+  **未统一「抛异常 vs 返回 bool」**（改动面 20 余处，需单列评估）。
 - **06** KPI 卡片搬家：新建 `launcher/Cards.cs`，`AddKpi` / `VKpiRow` 从 ValuationPage 原样搬入
   （零行为改动、调用点一行未改，调用数 24 / 7 与搬家前一致）。`StKpiCard`/`StCardRow`/`MktRow`
   **刻意不并入**（有边框 / 排版相反 / 形态不同，合并就是视觉回归）。

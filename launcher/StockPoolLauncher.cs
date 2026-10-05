@@ -2287,48 +2287,6 @@ namespace StockPool
             lb.Text = "● " + text;
         }
 
-        private static bool Probe(string url)
-        {
-            return Probe(url, 1500);
-        }
-
-        private static bool Probe(string url, int timeoutMs)
-        {
-            string body;
-            return Probe(url, timeoutMs, out body);
-        }
-
-        private static bool Probe(string url, int timeoutMs, out string body)
-        {
-            body = "";
-            HttpWebResponse resp = null;
-            try
-            {
-                var req = (HttpWebRequest)WebRequest.Create(url);
-                req.Method = "GET";
-                req.Timeout = timeoutMs;
-                req.ReadWriteTimeout = timeoutMs;
-                req.KeepAlive = false;
-                resp = (HttpWebResponse)req.GetResponse();
-                using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
-                {
-                    body = sr.ReadToEnd();
-                }
-                return (int)resp.StatusCode < 400;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                if (resp != null)
-                {
-                    try { resp.Close(); } catch { }
-                }
-            }
-        }
-
         private static string JsonValue(string json, string key)
         {
             if (string.IsNullOrEmpty(json)) return null;
@@ -2342,84 +2300,6 @@ namespace StockPool
                 return Convert.ToString(v);
             }
             catch { return null; }
-        }
-
-        private static bool PostJson(string url, string json, int timeoutMs, out string body)
-        {
-            body = "";
-            HttpWebResponse resp = null;
-            try
-            {
-                var req = (HttpWebRequest)WebRequest.Create(url);
-                req.Method = "POST";
-                req.ContentType = "application/json; charset=utf-8";
-                req.Timeout = timeoutMs;
-                req.ReadWriteTimeout = timeoutMs;
-                req.KeepAlive = false;
-                var bytes = Encoding.UTF8.GetBytes(json);
-                req.ContentLength = bytes.Length;
-                using (var s = req.GetRequestStream())
-                    s.Write(bytes, 0, bytes.Length);
-                resp = (HttpWebResponse)req.GetResponse();
-                using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
-                    body = sr.ReadToEnd();
-                return (int)resp.StatusCode < 400;
-            }
-            catch (WebException ex)
-            {
-                try
-                {
-                    if (ex.Response != null)
-                        using (var sr = new StreamReader(ex.Response.GetResponseStream(), Encoding.UTF8))
-                            body = sr.ReadToEnd();
-                }
-                catch { }
-                return false;
-            }
-            catch { return false; }
-            finally
-            {
-                if (resp != null)
-                {
-                    try { resp.Close(); } catch { }
-                }
-            }
-        }
-
-        private static bool GetText(string url, int timeoutMs, out string body)
-        {
-            body = "";
-            HttpWebResponse resp = null;
-            try
-            {
-                var req = (HttpWebRequest)WebRequest.Create(url);
-                req.Method = "GET";
-                req.Timeout = timeoutMs;
-                req.KeepAlive = false;
-                resp = (HttpWebResponse)req.GetResponse();
-                using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
-                    body = sr.ReadToEnd();
-                return (int)resp.StatusCode < 400;
-            }
-            catch (WebException ex)
-            {
-                try
-                {
-                    if (ex.Response != null)
-                        using (var sr = new StreamReader(ex.Response.GetResponseStream(), Encoding.UTF8))
-                            body = sr.ReadToEnd();
-                }
-                catch { }
-                return false;
-            }
-            catch { return false; }
-            finally
-            {
-                if (resp != null)
-                {
-                    try { resp.Close(); } catch { }
-                }
-            }
         }
 
         #endregion

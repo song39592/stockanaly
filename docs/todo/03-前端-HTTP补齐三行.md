@@ -1,6 +1,31 @@
 # 03 · 前端：HTTP 请求封装补齐三行（纯增量，顺手修一个真 bug）
 
-> 状态：待办　|　优先级：高　|　收益 ★★★★☆ / 风险 ★☆☆☆☆
+> 状态：**已完成**（2026-10-05）　|　优先级：高　|　收益 ★★★★☆ / 风险 ★☆☆☆☆
+
+> **回填实际改动**
+> 新建 `launcher/Http.cs`，把 `Probe`(×3) / `GetText` / `PostJson` 从 `StockPoolLauncher.cs`
+> 搬过去（零行为改动，调用点一行未改），并**补齐缺失的配置**。
+>
+> | 函数 | 补了什么 |
+> |---|---|
+> | `GetText` | `ReadWriteTimeout`（**真 bug 修复**）+ `Proxy = null` + `Expect100Continue = false` |
+> | `PostJson` | `Proxy = null` + `Expect100Continue = false` |
+> | `Probe` | **不动**（见下） |
+>
+> **真 bug 是什么**：`GetText` 以前只设了 `Timeout`，而 `Timeout` **只保护到「收到响应头」**，
+> 之后的响应体读取完全不受保护。请求 `/api/chip/rank?limit=100` 这类大响应时，
+> 服务端中途卡住会一直挂着 —— 补上 `ReadWriteTimeout` 后才与 `VRequest` 对齐。
+>
+> **按踩坑点刻意没做的**
+> - **没有统一「抛异常 vs 返回 bool」**：那要动 20 余处错误处理分支，是单点改动面最大的一项，
+>   必须单独评估。`VRequest` 把 4xx/5xx 响应体当正常返回的语义**完整保留**。
+> - **超时值一律由调用方显式传入，不设默认值** —— 15s / 30s / 120s（重取名称）/ 300s（SSE）各有业务原因。
+> - **SSE（`VRequestStream`）没并入同步版**，只是共用「建 req」那几行的思路。
+> - `JsonValue`（13 处调用）**没搬**：它是 JSON 助手不是 HTTP 封装，且不属于本项范围。
+>
+> ⚠️ **留了一处不一致，等你决定**：`Probe` 仍缺 `Proxy = null`（本项刻意收窄范围）。
+> 它打的是本机 `127.0.0.1` 健康检查，所以现状能工作；但从「统一口径」角度它与
+> `GetText`/`PostJson` 不一致。要不要一并补上？
 
 ## 问题
 `launcher/` 里有 5 份 HTTP 封装，行为契约并不一致；其中 `GetText`/`PostJson` **漏了三项配置**，
@@ -46,7 +71,13 @@ req.ServicePoint.Expect100Continue = false;   // 少一个 100-continue RTT
 - 超时值不能一刀切：15s / 30s / 120s（重取名称）/ 300s（SSE）各有业务原因。
 - SSE 流式（`VRequestStream`）是独立能力，最多共用「建 req 那几行」，不要并入同步版。
 
-## 验收
-- [ ] 三处配置补齐，`csc` 编译 exit 0
-- [ ] 大盘/个股/策略/周榜各页各点一次，行为与改动前一致
-- [ ] 周榜「重取名称」（120s 超时的大请求）能正常走完
+## 验收（2026-10-05）
+- [x] `GetText` 三处配置补齐 ✅ `Http.cs:131-133`（ReadWriteTimeout / Proxy / Expect100Continue）
+- [x] `PostJson` 两处配置补齐 ✅ `Http.cs:87-88`（Proxy / Expect100Continue）
+- [x] `csc` 编译 exit 0 ✅ 无 lint 报错；编译通过同时证明**没有重复定义**
+- [x] 骨架文件里已无这些函数 ✅ `StockPoolLauncher.cs` 检索为空
+- [x] `VRequest` / `VRequestStream` 未被改动 ✅ 仍保留各自的 `Proxy = null`
+- [x] 错误契约未统一（按要求） ✅ bool 版与抛异常版并存
+- [ ] 大盘 / 个股 / 策略 / 周榜各页点一次，行为与改动前一致 —— **未做**（需人工）
+- [ ] 周榜「重取名称」（120s 超时的大请求）能正常走完 —— **未做**（需人工；
+      这正是 `ReadWriteTimeout` 修的就是场景，建议重点试）

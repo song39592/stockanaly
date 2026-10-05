@@ -23,6 +23,19 @@
     新模块打日志的写法。该节**只做导航**，权威细节仍以 `config.py` / `storage.py` / `logutil.py`
     的注释为准，避免变成第二份需要同步的真相。
 
+- **HTTP 封装补齐三行配置 + 归位到 `Http.cs`**（待办 03）：新增 `launcher/Http.cs`，
+  `Probe`(×3) / `GetText` / `PostJson` 从骨架文件原样搬入，并补齐缺失的配置。
+  - **修一个真 bug**：`GetText` 以前只设了 `Timeout`，而 `Timeout` **只保护到「收到响应头」**，
+    之后读取响应体完全不受保护 —— 请求 `/api/chip/rank?limit=100` 这类大响应时，
+    服务端中途卡住会一直挂着。补上 `ReadWriteTimeout` 后才与 `VRequest` 对齐。
+  - 另补 `Proxy = null`（本机直连，绕开系统代理 / PAC 自动发现，否则同一台机器上
+    一半请求走代理一半不走）与 `Expect100Continue = false`（少一个往返）。
+    `GetText` 补 3 处，`PostJson` 补 2 处。
+  - **刻意不做**：统一「抛异常 vs 返回 bool」的错误契约 —— 要动 20 余处错误处理分支，
+    改动面最大，须单列评估。`VRequest` 把 4xx/5xx 响应体当正常返回的语义完整保留。
+    超时值仍由调用方显式传入（15s/30s/120s/300s 各有业务原因，不设默认值）。
+  - 留了一处不一致待定：`Probe` 仍缺 `Proxy = null`（本项收窄范围），它打的是本机健康检查。
+
 - **KPI 卡片公共件归位**（待办 06）：新增 `launcher/Cards.cs`，
   `VKpiRow` / `AddKpi` 从 `ValuationPage.cs` **原样搬入**（`ValuationPage.cs` 722 → 593 行）。
   - **零行为改动**：两个函数自包含，且是 `partial class MainForm` 成员，
