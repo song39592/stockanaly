@@ -186,6 +186,37 @@ namespace StockPool
             return b;
         }
 
+        /// <summary>状态标签置为错误态：写入文案 + 标红（第 08 项）。</summary>
+        private static void SetErr(Label l, string msg)
+        {
+            l.Text = msg;
+            l.ForeColor = C.UpErr;
+        }
+
+        /// <summary>
+        /// 防抖：延迟 <paramref name="ms"/> 毫秒后触发一次 <paramref name="action"/>
+        /// （第 08 项）。连续调用只会跑最后一次 —— 滚轮缩放这类会连续触发。
+        ///
+        /// ⚠️ 语义要点：首次调用时才创建定时器并绑定 Tick，之后每次都先 Stop 再 Start，
+        /// 所以「重新计时」而不是「排队」。
+        /// </summary>
+        private static void Debounce(ref Timer t, int ms, Action action)
+        {
+            if (t == null)
+            {
+                t = new Timer();
+                t.Interval = ms;
+                var slot = t;
+                slot.Tick += delegate
+                {
+                    slot.Stop();
+                    action();
+                };
+            }
+            t.Stop();
+            t.Start();
+        }
+
         private static CheckBox Check(string text, bool value)
         {
             var c = new CheckBox();

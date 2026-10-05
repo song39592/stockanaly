@@ -505,8 +505,7 @@ namespace StockPool
         {
             if (_stStrategies == null || _stList.SelectedIndex < 0)
             {
-                _stRecentStatus.Text = "请先在「策略选择与编辑」里选一个策略";
-                _stRecentStatus.ForeColor = C.UpErr;
+                SetErr(_stRecentStatus, "请先在「策略选择与编辑」里选一个策略");
                 return;
             }
             var req = StRequest((int)_stRecentDays.Value);
@@ -526,8 +525,7 @@ namespace StockPool
                     string msg = ex.Message;
                     Invoke((Action)(() =>
                     {
-                        _stRecentStatus.Text = "回测失败：" + msg;
-                        _stRecentStatus.ForeColor = C.UpErr;
+                        SetErr(_stRecentStatus, "回测失败：" + msg);
                     }));
                 }
             });
@@ -535,11 +533,9 @@ namespace StockPool
 
         private void StRenderRecent(Dictionary<string, object> j)
         {
-            object okv;
-            if (j.TryGetValue("ok", out okv) && okv is bool && !(bool)okv)
+            if (J.IsFailed(j))
             {
-                _stRecentStatus.Text = "回测失败：" + StErrMsg(j);
-                _stRecentStatus.ForeColor = C.UpErr;
+                SetErr(_stRecentStatus, "回测失败：" + StErrMsg(j));
                 return;
             }
             var metrics = (Dictionary<string, object>)j["metrics"];
@@ -627,8 +623,7 @@ namespace StockPool
         {
             if (_stStrategies == null || _stList.SelectedIndex < 0)
             {
-                _stRecoStatus.Text = "请先在「策略选择与编辑」里选一个策略";
-                _stRecoStatus.ForeColor = C.UpErr;
+                SetErr(_stRecoStatus, "请先在「策略选择与编辑」里选一个策略");
                 return;
             }
             var req = StRequest(0);
@@ -648,8 +643,7 @@ namespace StockPool
                     string msg = ex.Message;
                     Invoke((Action)(() =>
                     {
-                        _stRecoStatus.Text = "计算失败：" + msg;
-                        _stRecoStatus.ForeColor = C.UpErr;
+                        SetErr(_stRecoStatus, "计算失败：" + msg);
                     }));
                 }
             });
@@ -657,11 +651,9 @@ namespace StockPool
 
         private void StRenderReco(Dictionary<string, object> j)
         {
-            object okv;
-            if (j.TryGetValue("ok", out okv) && okv is bool && !(bool)okv)
+            if (J.IsFailed(j))
             {
-                _stRecoStatus.Text = "计算失败：" + StErrMsg(j);
-                _stRecoStatus.ForeColor = C.UpErr;
+                SetErr(_stRecoStatus, "计算失败：" + StErrMsg(j));
                 return;
             }
             var s = (Dictionary<string, object>)j["summary"];
@@ -785,8 +777,7 @@ namespace StockPool
         {
             if (_stStrategies == null || _stList.SelectedIndex < 0)
             {
-                _stResultStatus.Text = "请先在「策略选择与编辑」里选一个策略";
-                _stResultStatus.ForeColor = C.UpErr;
+                SetErr(_stResultStatus, "请先在「策略选择与编辑」里选一个策略");
                 return;
             }
             var meta = _stStrategies[_stList.SelectedIndex];
@@ -832,8 +823,7 @@ namespace StockPool
                 {
                     Invoke((Action)(() =>
                     {
-                        _stResultStatus.Text = "回测失败：" + ex.Message;
-                        _stResultStatus.ForeColor = C.UpErr;
+                        SetErr(_stResultStatus, "回测失败：" + ex.Message);
                     }));
                 }
             });
@@ -841,8 +831,7 @@ namespace StockPool
 
         private void StRenderResult(Dictionary<string, object> j)
         {
-            object okv;
-            if (j.TryGetValue("ok", out okv) && okv is bool && !(bool)okv)
+            if (J.IsFailed(j))
             {
                 string msg = "回测失败";
                 object err;
@@ -851,8 +840,7 @@ namespace StockPool
                     var ed = err as Dictionary<string, object>;
                     if (ed != null) msg = "回测失败：" + J.StrOr(ed["message"], "");
                 }
-                _stResultStatus.Text = msg;
-                _stResultStatus.ForeColor = C.UpErr;
+                SetErr(_stResultStatus, msg);
                 return;
             }
 
@@ -1190,8 +1178,7 @@ namespace StockPool
                 {
                     Invoke((Action)(() =>
                     {
-                        _stResultStatus.Text = "加载失败（确认后端已启动）：" + ex.Message;
-                        _stResultStatus.ForeColor = C.UpErr;
+                        SetErr(_stResultStatus, "加载失败（确认后端已启动）：" + ex.Message);
                     }));
                 }
             });

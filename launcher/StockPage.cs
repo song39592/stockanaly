@@ -678,8 +678,7 @@ namespace StockPool
                     Invoke((Action)delegate
                     {
                         if (_stockCode.Text.Trim() != code) return;
-                        object okv;
-                        bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+bool ok = J.IsOk(j);
                         if (ok && j.ContainsKey("name"))
                         {
                             double? pr = J.NumOrNull(J.Get(j, "price"));
@@ -956,18 +955,10 @@ namespace StockPool
         /// <summary>索引正在后台重建时，隔几秒重查一次直到建好（重建约 1 分钟）。</summary>
         private void ScheduleBoardsRetry()
         {
-            if (_boardsTimer == null)
+            Debounce(ref _boardsTimer, 6000, delegate
             {
-                _boardsTimer = new System.Windows.Forms.Timer();
-                _boardsTimer.Interval = 6000;
-                _boardsTimer.Tick += delegate
-                {
-                    _boardsTimer.Stop();
-                    if (_stockCurrent != null) StockLoadBoards(_stockCurrent);
-                };
-            }
-            _boardsTimer.Stop();
-            _boardsTimer.Start();
+                if (_stockCurrent != null) StockLoadBoards(_stockCurrent);
+            });
         }
 
         private void StockRenderBoards(Dictionary<string, object> j)
@@ -976,8 +967,7 @@ namespace StockPool
             Color muted = C.Flat;
             _stockCptBlocks.Text = "";
             _stockRgnBlocks.Text = "";
-            object okv;
-            bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+bool ok = J.IsOk(j);
             if (!ok)
             {
                 string emsg = J.Str(J.Get(j, "detail"));
@@ -1096,8 +1086,7 @@ namespace StockPool
             _stockBasicLimitKpi.Controls.Clear();
             _stockBasicHolders.Rows.Clear();
 
-            object okv;
-            bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+bool ok = J.IsOk(j);
             if (!ok)
             {
                 string emsg = J.Str(J.Get(j, "detail"));
@@ -1216,18 +1205,10 @@ namespace StockPool
         /// <summary>滚轮缩放会连续改变可见根数，防抖后再重算筹码，避免每滚一格就发一次请求。</summary>
         private void ScheduleChipReload()
         {
-            if (_chipTimer == null)
+            Debounce(ref _chipTimer, 400, delegate
             {
-                _chipTimer = new System.Windows.Forms.Timer();
-                _chipTimer.Interval = 400;
-                _chipTimer.Tick += delegate
-                {
-                    _chipTimer.Stop();
-                    if (_stockCurrent != null) StockLoadChip(_stockCurrent);
-                };
-            }
-            _chipTimer.Stop();
-            _chipTimer.Start();
+                if (_stockCurrent != null) StockLoadChip(_stockCurrent);
+            });
         }
 
         private void StockLoadChip(string code)
@@ -1257,8 +1238,7 @@ namespace StockPool
                         return;
                     }
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body);
-                    object okv;
-                    bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+bool ok = J.IsOk(j);
                     if (!ok)
                     {
                         string emsg = J.Str(J.Get(j, "error"));
@@ -1466,8 +1446,7 @@ namespace StockPool
 
         private void StockRenderHistory(Dictionary<string, object> j)
         {
-            object okv;
-            bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+bool ok = J.IsOk(j);
             if (!ok)
             {
                 string emsg = J.Str(J.Get(j, "detail"));
@@ -1913,8 +1892,7 @@ namespace StockPool
                     {
                         Invoke((Action)delegate
                         {
-                            _stockValStatus.Text = "计算失败";
-                            _stockValStatus.ForeColor = C.UpErr;
+                            SetErr(_stockValStatus, "计算失败");
                         });
                     }
                     catch (Exception) { }
@@ -1927,15 +1905,13 @@ namespace StockPool
             _stockValKpi.Controls.Clear();
             _stockValGrid.Rows.Clear();
 
-            object okv;
-            bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+bool ok = J.IsOk(j);
             if (!ok)
             {
                 string emsg = J.Str(J.Get(j, "error"));
                 if (emsg == "") emsg = J.Str(J.Get(j, "detail"));
                 if (emsg == "") emsg = "计算失败";
-                _stockValStatus.Text = emsg;
-                _stockValStatus.ForeColor = C.UpErr;
+                SetErr(_stockValStatus, emsg);
                 return;
             }
 
@@ -2014,8 +1990,7 @@ namespace StockPool
                         {
                             if (_stockAiStatus != null)
                             {
-                                _stockAiStatus.Text = "分析失败（网络/超时，确认后端已启动且配置了 LLM）";
-                                _stockAiStatus.ForeColor = C.UpErr;
+                                SetErr(_stockAiStatus, "分析失败（网络/超时，确认后端已启动且配置了 LLM）");
                             }
                         });
                     }
@@ -2100,15 +2075,13 @@ namespace StockPool
         private void StockRenderAi(Dictionary<string, object> j)
         {
             if (_stockAiStatus == null || _stockAiBox == null) return;
-            object okv;
-            bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+bool ok = J.IsOk(j);
             if (!ok)
             {
                 string emsg = J.Str(J.Get(j, "error"));
                 if (emsg == "") emsg = J.Str(J.Get(j, "detail"));
                 if (emsg == "") emsg = "分析失败";
-                _stockAiStatus.Text = emsg;
-                _stockAiStatus.ForeColor = C.UpErr;
+                SetErr(_stockAiStatus, emsg);
                 _stockAiMarkdown = "";
                 FillAiDoc(_stockAiBox, _stockAiMarkdown);
                 return;

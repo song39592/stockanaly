@@ -128,6 +128,27 @@ namespace StockPool
             return Num(Get(j, k));
         }
 
+        // ---------------- 响应判定（第 08 项）----------------
+
+        /// <summary>响应是否明确「成功」：非空 + 有 ok + ok 是 bool true。</summary>
+        public static bool IsOk(Dictionary<string, object> j)
+        {
+            object v;
+            return j != null && j.TryGetValue("ok", out v) && v is bool && (bool)v;
+        }
+
+        /// <summary>响应是否明确「失败」：有 ok 且 ok 是 <c>false</c>。
+        ///
+        /// 与 <c>!IsOk(j)</c> **不等价**：ok 字段缺失时 <c>IsOk</c> 返回 false，
+        /// 取反就变成「失败」；而原来的写法（`TryGetValue` + `!(bool)okv`）在字段缺失时
+        /// 不成立。策略页三处用的正是后者，所以单独给一个名字，**不要合并**。
+        /// </summary>
+        public static bool IsFailed(Dictionary<string, object> j)
+        {
+            object v;
+            return j != null && j.TryGetValue("ok", out v) && v is bool && !(bool)v;
+        }
+
         // ---------------- 百分比（三个口径，别混用）----------------
 
         /// <summary>带符号百分数：v 是小数（0.1 转 +10.00%）。</summary>

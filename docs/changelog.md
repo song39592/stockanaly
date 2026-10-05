@@ -23,6 +23,18 @@
     新模块打日志的写法。该节**只做导航**，权威细节仍以 `config.py` / `storage.py` / `logutil.py`
     的注释为准，避免变成第二份需要同步的真相。
 
+- **小样板合集（3/6 类）**（待办 08）：`J.IsOk`(12 处) + `J.IsFailed`(3 处)、
+  `UiKit.SetErr`(20 处)、`UiKit.Debounce`(2 处)。
+  - ⚠️ **策略页那 3 处刻意没有合并**：它们是**取反且不容错**的写法
+    （`TryGetValue` + `!(bool)okv`），与 `!IsOk(j)` 不等价 —— `ok` 字段缺失时
+    `IsOk` 返回 false、取反就变成「失败」，而原写法不成立。故另给 `J.IsFailed(j)`。
+  - `SetErr` 只替换**严格同构**的 20 处（`.Text = X;` 紧邻 `.ForeColor = C.UpErr;`）；
+    剩下 8 处中间夹 `Tag = "bad"` 或是表格单元格（还要改字体），逐处判断风险大于收益，保留。
+  - **另 3 类经核查判定不该做**：`ErrOf`（前提已被第 02 项改变 —— 那些地方现在已是单键读取，
+    再抽会**给没有兜底的路径加上兜底 = 改变行为**）、`ToggleVisible`（收益低、控件类型不同）、
+    `FlatBtn`（3 个 subtab 按钮形态确实不同，策略页走默认 `AutoSize`，强行统一会改变外观；
+    且第 05 项 SubTab 抽取会一并吃掉）。
+
 - **自绘表面抽公共基类 `ChartControl`**（待办 07）：新增 `launcher/ChartKit.cs`，
   `MktBars` / `MktRatioBar` / `ChipPanel` / `KLineChart` 改为继承它。
   - `SetStyle(...)` 从 4 份逐字相同 → 1 处（基类）；`GetPreferredSize` 3 份 → 1 处。

@@ -310,8 +310,7 @@ namespace StockPool
                     Invoke((Action)delegate
                     {
                         if (_vCode.Text.Trim() != code) return;
-                        object okv;
-                        bool isOk = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+bool isOk = J.IsOk(j);
                         if (isOk && j.ContainsKey("name"))
                         {
                             double? pr = J.NumOrNull(J.Get(j, "price"));
@@ -336,9 +335,7 @@ namespace StockPool
         // ---- 渲染 ----
         private void ValuationShowResult(Dictionary<string, object> j, string raw)
         {
-            bool ok = false;
-            object ov;
-            if (j != null && j.TryGetValue("ok", out ov) && ov is bool) ok = (bool)ov;
+bool ok = J.IsOk(j);
 
             if (!ok)
             {
@@ -545,8 +542,7 @@ namespace StockPool
             _vKpiRow1.Controls.Clear();
             _vKpiRow2.Controls.Clear();
             _vGrid.Rows.Clear();
-            _vStatusResult.Text = "失败";
-            _vStatusResult.ForeColor = C.UpErr;
+            SetErr(_vStatusResult, "失败");
             _vNote.Text = msg;
             _vNote.Height = 32;
             _vNote.Visible = true;

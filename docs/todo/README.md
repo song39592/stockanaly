@@ -34,7 +34,7 @@
 | 05 | [05-前端-SubTab机制抽取.md](05-前端-SubTab机制抽取.md) | 前端 | 3 份近乎逐字的二级页机制 → `SubTabStrip` | ★★★★ / ★★★ |
 | 06 | [06-前端-KPI卡片搬家.md](06-前端-KPI卡片搬家.md) | 前端 | `AddKpi`/`VKpiRow` 住在 ValuationPage 却被 3 页调用 | ★★★ / ★☆☆ |
 | 07 ✅ | [07-前端-图表基类.md](07-前端-图表基类.md) | 前端 | 双缓冲 SetStyle 4 份逐字 + 抗锯齿不统一 | ★★★ / ★★☆ —— **已完成** |
-| 08 | [08-前端-小样板合集.md](08-前端-小样板合集.md) | 前端 | IsOk / ErrOf / SetErr / ToggleVisible / Debounce / FlatBtn | ★★ / ★☆☆ |
+| 08 ◐ | [08-前端-小样板合集.md](08-前端-小样板合集.md) | 前端 | IsOk / ErrOf / SetErr / ToggleVisible / Debounce / FlatBtn | ★★ / ★☆☆ —— **部分完成 3/6** |
 | 09 | [09-后端-json_safe公共化.md](09-后端-json_safe公共化.md) | 后端 | 唯一写对的 NaN 清洗只服务 1 个模块 | ★★★★★ / ★☆☆ |
 | 10 | [10-后端-scr90_series合并.md](10-后端-scr90_series合并.md) | 后端 | 2 份逐字符雷同的 SCR90 序列 + 1 个判空缺陷 | ★★★★ / ★☆（**须在 00 之后**） |
 | 11 | [11-后端-错误体形状统一.md](11-后端-错误体形状统一.md) | 后端 | 4 种路由错误风格 → 统一 error 形状（不动状态码） | ★★★★ / ★★ |
@@ -94,6 +94,10 @@
 ## 已完成的项
 - **19** `.gitignore` 按五类重写（源码 / 依赖 / 构建缓存 / 配置凭据 / 日志状态）；
   并确立**提交原则**：生成物也要提交（exe 属运行必需产物，必须入库），只忽略可重建项。
+- **08** 小样板合集（**3/6 类**）：`J.IsOk`(12 处) + `J.IsFailed`(3 处，取反语义**刻意不合并**)、
+  `UiKit.SetErr`(20 处严格同构形态)、`UiKit.Debounce`(2 处)。
+  **另 3 类判定不该做**：`ErrOf`（前提被 02 项改变，抽取会改变行为）、
+  `ToggleVisible`（收益低、控件类型不同）、`FlatBtn`（3 处形态确实不同，且第 05 项会一并吃掉）。
 - **07** 图表基类：新建 `launcher/ChartKit.cs`（`ChartControl : Control` 基类），4 个自绘控件改为继承它。
   `SetStyle` 4 份 → 1、`GetPreferredSize` 3 份 → 1、抗锯齿**5 个表面全开**（原先 3 个没开）、
   `StringFormat` 全部改用基类缓存（`StockPage` 每帧 new 5 处 → 0）。`StEquityPaint` 是

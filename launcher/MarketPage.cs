@@ -559,8 +559,7 @@ namespace StockPool
             Label target = MktStatusOf(name);
             if (target != null)
             {
-                target.Text = msg;
-                target.ForeColor = C.UpErr;
+                SetErr(target, msg);
             }
             _mktFailed++;
         }
@@ -923,8 +922,7 @@ namespace StockPool
         {
             if (_mktAiStatus != null)
             {
-                _mktAiStatus.Text = msg;
-                _mktAiStatus.ForeColor = C.UpErr;
+                SetErr(_mktAiStatus, msg);
             }
             _mktAiMarkdown = "";
             if (_mktAiBox != null) FillAiDoc(_mktAiBox, "");
@@ -933,15 +931,13 @@ namespace StockPool
         private void MktRenderMktAi(Dictionary<string, object> j)
         {
             if (_mktAiStatus == null || _mktAiBox == null) return;
-            object okv;
-            bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+bool ok = J.IsOk(j);
             if (!ok)
             {
                 string emsg = J.Str(J.Get(j, "error"));
                 if (emsg == "") emsg = J.Str(J.Get(j, "detail"));
                 if (emsg == "") emsg = "分析失败";
-                _mktAiStatus.Text = emsg;
-                _mktAiStatus.ForeColor = C.UpErr;
+                SetErr(_mktAiStatus, emsg);
                 _mktAiMarkdown = "";
                 FillAiDoc(_mktAiBox, "");
                 return;
@@ -964,12 +960,10 @@ namespace StockPool
             _mktLuRows.Controls.Clear();
             _mktLuStocks.Rows.Clear();
 
-            object okv;
-            bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+bool ok = J.IsOk(j);
             if (!ok)
             {
-                _mktLuStatus.Text = J.Str(J.Get(j, "trade_date")) + " 未获取到涨停池数据";
-                _mktLuStatus.ForeColor = C.UpErr;
+                SetErr(_mktLuStatus, J.Str(J.Get(j, "trade_date")) + " 未获取到涨停池数据");
                 return;
             }
 
@@ -1146,12 +1140,10 @@ namespace StockPool
             _mktBlasted.Rows.Clear();
             _mktLimitDown.Rows.Clear();
 
-            object okv;
-            bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+bool ok = J.IsOk(j);
             if (!ok)
             {
-                _mktBlStatus.Text = J.Str(J.Get(j, "trade_date")) + " 未获取到大面股数据";
-                _mktBlStatus.ForeColor = C.UpErr;
+                SetErr(_mktBlStatus, J.Str(J.Get(j, "trade_date")) + " 未获取到大面股数据");
                 return;
             }
 
