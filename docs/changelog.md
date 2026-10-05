@@ -90,6 +90,36 @@
   注：后端 `chip_service.py`（SCR 选股，导入 xls 三档分类）本轮**保留**——
   新增的 `chip_rank_service` 仍复用它的 `<data>/chip/processed` 目录与周口径工具。
 
+- **前端表格抽象统一**：新增 `launcher/GridKit.cs`，把 13 张表格的显示收敛到一个
+  自定义控件 `StockGrid`（已加进 `build_exe.bat`）。
+  - 此前「只读 / 禁排序 / 禁选中高亮 / 自适应列宽列高 / 点击代码跳个股页」这套组合被
+    **复制了五遍**（`MktGrid` / `StGrid` / `ScrGrid` 及两处内联），高度自适应也有四套算法。
+    现在外观与行为内聚在控件里，各页只声明「有哪些列 + 每行是什么值」。
+  - 列用**稳定标识**（`GridColumn.Name`）而非中文表头取单元格：此前有表用表头当列标识、
+    有表叫 c0..cn、有表压根没设 Name，`Cells["代码"]` 换个表就炸。
+  - 列宽**逐列控制**（AllCells / Fill / 固定宽），不由整表二选一——Fill 会把「名称」这类
+    短列撑得很宽，AllCells 更适合窄列，两者各有场景。
+  - 高度按内容撑开、封顶 620 才出滚动条；填完行调 `Fit()` 统一重算（避免逐行 Add 把列算窄）。
+  - 「点击代码跳详情页」内置到控件（声明 `IsCode`/`Jump` 即可），跳转统一走新增的
+    `OpenStock(code)`——原先「写 `_stockCode` + `SelectTab`」的两步式在盘面页、
+    快捷搜索、历史导航各抄了一遍。回测明细表不设 Jump（它的点击是展开逐笔交易）。
+  - 现价沿用各表自己数据里的价格（策略取 recommend 的 price、周榜取 close …），
+    这一层不代为取数，保持「表格只负责显示」。
+  - 删除：`MktGrid` / `StGrid` / `ScrGrid` / `MktFit` / `StFitGridHeight` /
+    `StAutoWidth` / `StAdjustHeight` / `MktWireStockJump` / `MktJumpToStock`。
+  - 表格**不要设 `BackgroundColor = Color.Transparent`**：DataGridView 不支持透明背景，
+    运行时会抛 `ArgumentException`；建表发生在窗体构造期，表现就是「编译通过但打不开」。
+
+- **修复 SCR90 周榜「名称列全空」**：名称原先在 6 线程跑满 CPU 之后才去取，akshare 请求
+  容易超时；而 `_load_names` 是「拿不到就算了」的静默降级，结果是一整列名称全空且查不出原因。
+  - 名称改为**计算前先取**（趁机器还空着），并新增 `names_resolved` 字段如实反映取到几条。
+  - 名称与计算**解耦**：新增 `POST /api/chip/rank/names`，可给已算好的结果**单独补齐名称**，
+    不必重跑十几分钟的重型计算；页面加了「重取名称」按钮，取不到时状态行给出提示。
+
+- **表格「名称」列加宽度下限**：新增 `GridColumn.MinWidth`。名称会带 `*ST` / `XD` / `XR` /
+  `DR` / `N` 这类前缀，纯按内容自适应在名字都较短（或全为空显示「—」）时会窄到看不全。
+  统一由 `NameColumn()` 提供（点击跳转 + 92px 下限），周榜 / 策略 / 盘面各表的名称列都用它。
+
 ### 新增
 
 - **清理：手动脚本 + 定时调用同一套逻辑**（待办 24）：按你的意见**先做「手动清理」本体，

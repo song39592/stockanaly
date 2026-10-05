@@ -42,17 +42,17 @@ namespace StockPool
         private FlowLayoutPanel _stockBasicKpi;               // 行业 / 市值 / 股本 KPI
         private FlowLayoutPanel _stockBasicLimitKpi;          // 涨停 / 连板 KPI
         private Label _stockBasicBus;                         // 主营业务
-        private DataGridView _stockBasicHolders;              // 前十大股东表
+        private StockGrid _stockBasicHolders;                // 前十大股东表
         private Label _stockBlocks;                           // 基本信息页 · 所属板块（行业行）
         private Label _stockCptBlocks;                        // 所属板块（概念行）
         private Label _stockRgnBlocks;                        // 所属板块（地域行）
         private System.Windows.Forms.Timer _boardsTimer;      // 板块索引重建后的重试
         private int _stockBasicRound = 0;
-        private DataGridView _stockTimeline;                // 入池 / 出池记录
+        private StockGrid _stockTimeline;                   // 入池 / 出池记录
         private TableLayoutPanel _stockEvents;              // 消息面时间轴
         private System.Collections.ArrayList _stockEventData = new System.Collections.ArrayList();
         private FlowLayoutPanel _stockValKpi;               // 估值 KPI
-        private DataGridView _stockValGrid;                 // 估值情景表
+        private StockGrid _stockValGrid;                    // 估值情景表
         private Label _stockSaoleiStatus;                   // 扫雷状态行
         private TableLayoutPanel _stockSaoleiList;          // 扫雷 · 风险清单 + 个股亮点
         private string _stockCurrent = null;
@@ -396,8 +396,15 @@ namespace StockPool
 
             TableLayoutPanel bh;
             var gh = Group("前十大股东", out bh);
-            _stockBasicHolders = MktGrid(230, false,
-                new string[] { "名次", "股东名称", "股份类型", "持股数", "占总股本", "增减", "变动" });
+            _stockBasicHolders = NewGrid(new List<GridColumn> {
+                new GridColumn("名次", "rank", true),
+                new GridColumn("股东名称"),
+                new GridColumn("股份类型"),
+                new GridColumn("持股数", "shares", true),
+                new GridColumn("占总股本", "pct", true),
+                new GridColumn("增减", "change", true),
+                new GridColumn("变动", "change_ratio", true),
+            });
             AddRow(bh, _stockBasicHolders);
             AddRow(basicStack, gh);
 
@@ -410,7 +417,13 @@ namespace StockPool
             var recStack = Stack();
             TableLayoutPanel b3;
             var g3 = Group("入池 / 出池记录", out b3);
-            _stockTimeline = MktGrid(180, true, new string[] { "入池日期", "出池日期", "在榜天数", "状态" });
+            _stockTimeline = NewGrid(new List<GridColumn> {
+                new GridColumn("入池日期", "start"),
+                new GridColumn("出池日期", "end"),
+                new GridColumn("在榜天数", "days", true),
+                new GridColumn("状态", "state"),
+            });
+            _stockTimeline.SetSortable(true);       // 该表保留排序（按日期/天数排）
             AddRow(b3, _stockTimeline);
             AddRow(recStack, g3);
 
@@ -432,7 +445,15 @@ namespace StockPool
             _stockValKpi = VKpiRow();
             AddRow(b5, Row(_stockValStatus));
             AddRow(b5, _stockValKpi);
-            _stockValGrid = MktGrid(150, false, new string[] { "情景", "增长率", "每股价值", "股价/价值", "判断", "预测价", "收益率" });
+            _stockValGrid = NewGrid(new List<GridColumn> {
+                new GridColumn("情景", "label"),
+                new GridColumn("增长率", "growth", true),
+                new GridColumn("每股价值", "value_per_share", true),
+                new GridColumn("股价/价值", "undervalued_ratio", true),
+                new GridColumn("判断", "verdict"),
+                new GridColumn("预测价", "target_price", true),
+                new GridColumn("收益率", "return_rate", true),
+            });
             AddRow(b5, _stockValGrid);
             AddRow(b5, Row(MiniBtn("在估值页打开完整计算", delegate
             {
@@ -1136,6 +1157,7 @@ namespace StockPool
                         VStr(VSafe(h, "change")),
                         VStr(VSafe(h, "change_ratio")));
                 }
+                _stockBasicHolders.Fit(200, 620);
             }
 
             var errs = VArr(VSafe(j, "errors"));
@@ -1588,7 +1610,7 @@ namespace StockPool
             if (spans.Count == 0)
             {
                 _stockTimeline.Rows.Add("—", "—", "—", "暂无记录");
-                MktFit(_stockTimeline);
+                _stockTimeline.Fit(180, 620);
                 return;
             }
             // 倒序：最近的在前面
@@ -1605,7 +1627,7 @@ namespace StockPool
                     : (days >= 3 ? Color.FromArgb(233, 154, 53) : Color.FromArgb(150, 158, 172));
                 _stockTimeline.Rows[row].Cells[3].Style.ForeColor = open ? Color.FromArgb(239, 83, 80) : Color.FromArgb(150, 158, 172);
             }
-            MktFit(_stockTimeline);
+            _stockTimeline.Fit(180, 620);
         }
 
         private void StockRenderEvents(System.Collections.ArrayList events)
@@ -1971,7 +1993,7 @@ namespace StockPool
                         _stockValGrid.Rows[row].Cells[6].Style.ForeColor = rr.Value > 0 ? Color.FromArgb(239, 83, 80) : (rr.Value < 0 ? Color.FromArgb(63, 185, 80) : Color.FromArgb(150, 158, 172));
                 }
             }
-            MktFit(_stockValGrid);
+            _stockValGrid.Fit(150, 620);
 
             _stockValStatus.Text = VStr(VSafe(j, "name")) + "（" + VStr(VSafe(j, "code")) + "）已计算";
             _stockValStatus.Tag = "muted";
