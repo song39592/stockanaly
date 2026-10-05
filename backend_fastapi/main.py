@@ -15,9 +15,7 @@
 import importlib
 import os
 import subprocess
-import sys
 import time
-import traceback
 import platform
 
 from fastapi import FastAPI
@@ -28,9 +26,12 @@ import crypto
 import db
 import instance_lock
 import integrity
+import logutil
 import mentor_store
 import price_store
 import storage
+
+logger = logutil.logger          # stderr 实时输出 + <data>/logs/ 落盘（见 logutil.py）
 
 START_TIME = time.time()
 
@@ -85,11 +86,14 @@ _integrity_state: dict = {"ok": True, "issues": [], "libraries": []}
 
 
 def _record_error(label: str, module_name: str, exc: BaseException) -> None:
-    """记录模块故障并打印到后端日志（stderr）。"""
+    """记录模块故障并写入日志（stderr 实时显示 + 文件留痕）。
+
+    `exc_info=True` 会把堆栈一起带进日志文件，便于事后定位；
+    打到 stderr 的形态与改造前一致（仍是 `[warn] ...` + 堆栈）。
+    """
     detail = f"{type(exc).__name__}: {exc}"
     _module_errors.append({"label": label, "module": module_name, "error": detail})
-    print(f"[warn] {label}（{module_name}）不可用：{detail}", file=sys.stderr)
-    traceback.print_exc()
+    logger.warning("%s（%s）不可用：%s", label, module_name, detail, exc_info=True)
 
 
 def _mount_routes() -> None:
@@ -110,11 +114,10 @@ def _init_stores() -> None:
         # 先让根目录的真数据落进 state/，项目内的旧副本才不会反过来把它顶掉。
         result = storage.migrate_to_subdirs()
         if result["moved"] or result["cleaned"]:
-            print(f"[info] 数据目录分区迁移：搬入 state/ {result['moved']}，"
-                  f"清理陈旧文件 {result['cleaned']}", file=sys.stderr)
+            logger.info("数据目录分区迁移：搬入 state/ %s，清理陈旧文件 %s",
+                        result["moved"], result["cleaned"])
         if result["errors"]:
-            print(f"[warn] 分区迁移有未处理项（已保留原状）：{result['errors']}",
-                  file=sys.stderr)
+            logger.warning("分区迁移有未处理项（已保留原状）：%s", result["errors"])
     except Exception as exc:              # noqa: BLE001
         _record_error("数据目录分区迁移", "storage", exc)
     try:
@@ -122,8 +125,8 @@ def _init_stores() -> None:
         # 复制过去，避免看起来像「数据丢了」。只复制、不删除源文件。
         result = storage.migrate_legacy()
         if result["migrated"]:
-            print(f"[info] 已迁移 {len(result['migrated'])} 个数据文件："
-                  f"{result['from']} → {result['to']}", file=sys.stderr)
+            logger.info("已迁移 %d 个数据文件：%s → %s",
+                        len(result["migrated"]), result["from"], result["to"])
     except Exception as exc:              # noqa: BLE001
         _record_error("数据目录初始化与迁移", "storage", exc)
     try:
@@ -135,7 +138,7 @@ def _init_stores() -> None:
         # 只读源表、不删除，确认无误后可自行清理旧表。
         result = price_store.migrate_legacy_shards()
         if result.get("migrated"):
-            print(f"[info] 行情表已迁移到分片结构：{result['migrated']}", file=sys.stderr)
+            logger.info("行情表已迁移到分片结构：%s", result["migrated"])
     except Exception as exc:              # noqa: BLE001
         _record_error("行情分片迁移", "price_store", exc)
     try:
@@ -144,29 +147,28 @@ def _init_stores() -> None:
         state = crypto.seal_state()
         if state.get("usable") and not state.get("sealed") and crypto.dpapi_available():
             if crypto.seal_now().get("ok"):
-                print("[info] 校验密钥已改由本机 DPAPI 密封保存（不再以明文存放在 .env）",
-                      file=sys.stderr)
+                logger.info("校验密钥已改由本机 DPAPI 密封保存（不再以明文存放在 .env）")
     except Exception as exc:              # noqa: BLE001
         _record_error("校验密钥密封", "crypto", exc)
     try:
         # 按股指纹：为既有数据补算一次（此后每次写入只重算受影响的那几只）
         digests = price_store.ensure_digests()
         if digests.get("created"):
-            print(f"[info] 已为 {digests['created']} 只股票补算数据指纹", file=sys.stderr)
+            logger.info("已为 %s 只股票补算数据指纹", digests["created"])
         if digests.get("upgraded"):
-            print(f"[info] 数据指纹算法已升级到 v{digests.get('version')}："
-                  f"按当前数据重算 {digests['upgraded']} 只股票的指纹", file=sys.stderr)
+            logger.info("数据指纹算法已升级到 v%s：按当前数据重算 %s 只股票的指纹",
+                        digests.get("version"), digests.get("upgraded"))
     except Exception as exc:              # noqa: BLE001
         _record_error("数据指纹初始化", "price_store", exc)
     try:
         # 完整性：先为既有数据补一次签名（首次引入本机制时需要），再整体校验一次
         signed = integrity.ensure_signed()
         if signed.get("signed"):
-            print(f"[info] 已为 {len(signed['signed'])} 个数据库补写完整性签名", file=sys.stderr)
+            logger.info("已为 %d 个数据库补写完整性签名", len(signed["signed"]))
         state = integrity.summary()
         _integrity_state.update(state)
         if not state.get("ok"):
-            print(f"[warn] 数据完整性校验发现问题：{state['issues']}", file=sys.stderr)
+            logger.warning("数据完整性校验发现问题：%s", state["issues"])
     except Exception as exc:              # noqa: BLE001
         _record_error("数据完整性校验", "integrity", exc)
     try:
@@ -185,7 +187,7 @@ def _is_loaded(module_name: str) -> bool:
 try:
     instance_lock.acquire(config.STATE_DIR)
 except instance_lock.AlreadyRunningError as exc:
-    print(f"[fatal] {exc}", file=sys.stderr)
+    logger.critical("%s", exc)
     raise SystemExit(1) from None
 
 _init_stores()
@@ -196,8 +198,8 @@ _mount_routes()
 try:
     import indicators.data as _ind_data
     _ind_data.warm("day")
-except Exception:                        # noqa: BLE001 - 预热失败不影响正常启动
-    pass
+except Exception as exc:                 # noqa: BLE001 - 预热失败不影响正常启动
+    logger.debug("RPS 面板预热失败（不影响启动）：%s", exc)
 
 
 @app.get("/health")

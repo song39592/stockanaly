@@ -6,6 +6,23 @@
 
 ### 变更
 
+- **后端日志落盘到 `<data>/logs/`**（待办 22）：原先全仓没有用 `logging`，后端靠
+  `print(..., file=sys.stderr)` 输出，启动器一关窗口日志就没了、事后无法回溯。
+  - 新增 `logutil.py`：具名 logger `stockpool` **双写** —— stderr 保持原样
+    （启动器按输出流打 `[err]` 标签的行为不变）+ `<data>/logs/backend.log`（INFO+）
+    与 `<data>/logs/uvicorn-error.log`（WARNING+），按天轮转、保留 14 天、UTF-8。
+    日志文件不可写时**降级为只写 stderr**，不让日志拖垮启动。
+  - `main.py` 11 处 `print` 换成 `logger.info/warning/critical`；`_record_error` 改带
+    `exc_info=True`，**异常堆栈随之进文件**（原先只 `traceback.print_exc()` 打到 stderr）。
+  - 用具名 logger + `propagate=False` 而非直接配 root：uvicorn 的 `--log-config` 会调
+    `dictConfig`，其配置不动 root 且带 `disable_existing_loggers: false`，因此不会被冲掉。
+  - 启动器**零改动**：`backend_fastapi/uvicorn-error.log` 旧路径保持不变（兼容方案 A）。
+  - 约定文档：`backend_fastapi/README.md` 新增「十一、数据盘与日志约定」，一次写全
+    第 21~24 项共用的那份契约 —— 数据根目录解析优先级、分区表（各放什么 / 谁在写 / 能否重建）、
+    迁移规则（非破坏、幂等、执行顺序）、日志规则（位置 / 双写 / 轮转 14 天 / 级别 / 禁止写入内容）、
+    新模块打日志的写法。该节**只做导航**，权威细节仍以 `config.py` / `storage.py` / `logutil.py`
+    的注释为准，避免变成第二份需要同步的真相。
+
 - **数据盘按用途分区 + 一次性自动迁移**（`config/ state/ logs/ cache/`，待办 21）：
   原先用户配置、数据库、锁文件全部平铺在数据根目录，现在分区存放：
   `config/`（用户配置）、`state/`（库与单实例锁）、`logs/`、`cache/`；
