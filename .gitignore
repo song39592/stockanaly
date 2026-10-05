@@ -69,10 +69,11 @@ credentials.*
 *api_key*
 *.token
 # 启动器生成：浅色 / 深色主题状态（页面读取它）
-frontend/theme-state.js
+frontend/shared/theme-state.js
 # ----------------------------------------------------------
-# 说明：上面这一行里的 `frontend/theme-state.js` 是**被忽略**的真实配置，
+# 说明：上面这一行里的 `frontend/shared/theme-state.js` 是**被忽略**的真实配置，
 # 不要因为它出现在本文件就以为它已跟踪 —— 它只在 .gitignore 里。
+# 路径随第 25 项（网页按页面分子目录）从 frontend/ 改到 frontend/shared/。
 # ----------------------------------------------------------
 
 

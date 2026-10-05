@@ -23,6 +23,20 @@
     新模块打日志的写法。该节**只做导航**，权威细节仍以 `config.py` / `storage.py` / `logutil.py`
     的注释为准，避免变成第二份需要同步的真相。
 
+- **`frontend/` 按页面分子目录**（待办 25）：从「7 个文件平铺」改为
+  `home/` `mentor-lab/` `chip-scr/`（各目录下统一 `index.html`）+ `shared/`（共享 js）。
+  - 用 `git mv` 移动，git 状态显示为 `R`，**文件历史完整保留**。
+  - `analysis-engine.js` 先确认过引用关系：被 `index` 与 `mentor-lab` **两个**页面引用，
+    故放 `shared/`（不是盲目归类）；`theme.js` / `theme-state.js` 同样共享。
+  - 同步改的引用（4 类）：HTML 内 `src=` → `../shared/...`；启动器 C# 四处
+    （`OpenWebPage` 签名由「文件名」改「子目录名」、`OpenWeb()`、**`FindRoot()` 根目录探测**、
+    `ToggleTheme()` 写主题状态）；`.gitignore` 的 `frontend/theme-state.js` → `shared/`；
+    以及两处原计划外但必须改的 —— `启动系统.bat` 直接 `start` 打开 `index.html`、
+    `agent_dsh/package.json` 的测试 glob `../frontend/*.test.cjs`（不改会因 glob 失配而**静默不执行**）。
+  - 三份 README（根 / backend_fastapi / agent_dsh）的路径引用一并更新。exe 已重新编译。
+  - 注：`chip-scr` 里指向 `stock-analysis.html` 的链接是**历史死链**
+    （该页在 `3ed9e6f` 改为原生实现时已删除），非本次引入，未擅自改动。
+
 - **数据盘按用途分区 + 一次性自动迁移**（`config/ state/ logs/ cache/`，待办 21）：
   原先用户配置、数据库、锁文件全部平铺在数据根目录，现在分区存放：
   `config/`（用户配置）、`state/`（库与单实例锁）、`logs/`、`cache/`；
