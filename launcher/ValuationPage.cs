@@ -301,35 +301,18 @@ namespace StockPool
         {
             string code = _vCode.Text.Trim();
             if (!System.Text.RegularExpressions.Regex.IsMatch(code, "^[0-9]{6}$")) { _vName.Text = ""; return; }
-            System.Threading.Tasks.Task.Run(delegate
-            {
-                try
+            FetchStockName(code,
+                delegate(string name, string display)
                 {
-                    string resp = VRequest("http://127.0.0.1:8000/api/stock/quote?code=" + code, null);
-                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    Invoke((Action)delegate
-                    {
-                        if (_vCode.Text.Trim() != code) return;
-bool isOk = J.IsOk(j);
-                        if (isOk && j.ContainsKey("name"))
-                        {
-                            double? pr = J.NumOrNull(J.Get(j, "price"));
-                            _vName.Text = J.Str(J.Get(j, "name")) + (pr != null ? "  " + pr.Value.ToString("F2") + " 元" : "");
-                        }
-                        else
-                        {
-                            string e2 = J.Str(J.Get(j, "error"));
-                            _vName.Text = e2 == "" ? "未找到该代码对应的股票" : e2;
-                        }
-                    });
-                }
-                catch (Exception ex)
+                    if (_vCode.Text.Trim() != code) return;        // 竞态守卫：输入框已换成别的代码
+                    _vName.Text = display;
+                },
+                delegate(string err)
                 {
-                    string m = "名称查询失败：" + ex.Message;
-                    try { Invoke((Action)delegate { _vName.Text = m; }); }
-                    catch (Exception) { }
-                }
-            });
+                    if (_vCode.Text.Trim() != code) return;
+                    // 失败兜底文案与个股页不同（本页多一层「未找到」），刻意不统一
+                    _vName.Text = err == "" ? "未找到该代码对应的股票" : err;
+                });
         }
 
         // ---- 渲染 ----

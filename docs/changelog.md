@@ -23,6 +23,17 @@
     新模块打日志的写法。该节**只做导航**，权威细节仍以 `config.py` / `storage.py` / `logutil.py`
     的注释为准，避免变成第二份需要同步的真相。
 
+- **股票名称获取合一**（待办 04）：新增 `Http.FetchStockName(code, onOk, onFail)` 与
+  `PriceSuffix(price)`，个股页 `StockLoadName` 与估值页 `ValuationLookupName`
+  由各 32 行降到各 15 行，`api/stock/quote?code=` 全仓只剩一处。
+  - **三处差异按踩坑点全部留在调用方**：竞态守卫（各自比自己的输入框 `_stockCode` / `_vCode`）、
+    估值页独有的失败兜底「未找到该代码对应的股票」、个股页的副作用 `StockAddHistory(code, name)`。
+  - **一处有意偏离建议做法**：回调签名由 `(name, price)` 改为 `(name, display)` ——
+    「名称 + `  ` + 现价 + ` 元`」这段拼接格式两处也逐字相同，收进共享方法才真正消除最后一点重复；
+    现价已格式化进 `display`，两个调用方都没单独用到裸 `price`，不损失信息。
+  - 归位到 `Http.cs`：那里已有 `Probe`/`GetText`/`PostJson`，加业务级请求属同一层；
+    `VRequest` 本身也是 HTTP 封装（只是"抛异常"那一 flavor），不算跨层。
+
 - **小样板合集（3/6 类）**（待办 08）：`J.IsOk`(12 处) + `J.IsFailed`(3 处)、
   `UiKit.SetErr`(20 处)、`UiKit.Debounce`(2 处)。
   - ⚠️ **策略页那 3 处刻意没有合并**：它们是**取反且不容错**的写法

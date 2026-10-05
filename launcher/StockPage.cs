@@ -669,35 +669,18 @@ namespace StockPool
 
         private void StockLoadName(string code)
         {
-            System.Threading.Tasks.Task.Run(delegate
-            {
-                try
+            FetchStockName(code,
+                delegate(string name, string display)
                 {
-                    string resp = VRequest("http://127.0.0.1:8000/api/stock/quote?code=" + code, null);
-                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    Invoke((Action)delegate
-                    {
-                        if (_stockCode.Text.Trim() != code) return;
-bool ok = J.IsOk(j);
-                        if (ok && j.ContainsKey("name"))
-                        {
-                            double? pr = J.NumOrNull(J.Get(j, "price"));
-                            string nm = J.Str(J.Get(j, "name"));
-                            _stockName.Text = nm + (pr != null ? "  " + pr.Value.ToString("F2") + " 元" : "");
-                            StockAddHistory(code, nm);   // 补全历史记录中的名称
-                        }
-                        else
-                        {
-                            _stockName.Text = J.Str(J.Get(j, "error"));
-                        }
-                    });
-                }
-                catch (Exception ex)
+                    if (_stockCode.Text.Trim() != code) return;   // 竞态守卫：输入框已换成别的代码
+                    _stockName.Text = display;
+                    StockAddHistory(code, name);                  // 补全历史记录中的名称
+                },
+                delegate(string err)
                 {
-                    try { Invoke((Action)delegate { _stockName.Text = "名称查询失败：" + ex.Message; }); }
-                    catch (Exception) { }
-                }
-            });
+                    if (_stockCode.Text.Trim() != code) return;
+                    _stockName.Text = err;
+                });
         }
 
         // ---- 历史（K线 / 轨迹 / 消息）----

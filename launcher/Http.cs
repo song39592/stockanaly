@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Text;
+using System.Web.Script.Serialization;
 
 namespace StockPool
 {
@@ -156,6 +158,62 @@ namespace StockPool
                     try { resp.Close(); } catch { }
                 }
             }
+        }
+
+        // ================= 业务级请求 =================
+
+        /// <summary>拉取股票名称 + 现价，并在 UI 线程上回调（第 04 项）。
+        ///
+        /// 背景：个股页 `StockLoadName` 与估值页 `ValuationLookupName` 各自写了一遍
+        /// 「调 `/api/stock/quote` → 反序列化 → `Invoke` 回 UI 线程」，约 25 行逐字重复。
+        ///
+        /// **三处差异刻意留给调用方**，不在这里统一：
+        ///   1. **竞态守卫**：个股页比 `_stockCode`、估值页比 `_vCode` —— 依赖各自的输入框。
+        ///      回调闭包里能拿到 `code`，所以由调用方在回调第一行自己比。
+        ///   2. **失败兜底文案**：估值页多一层「未找到该代码对应的股票」。
+        ///   3. **个股页的副作用** `StockAddHistory(code, name)`（补全历史记录里的名称）。
+        ///
+        /// 回调参数给的是 `(name, display)` 而不是待办建议的 `(name, price)`：
+        /// 「名称  +  现价 +  元」这段拼接格式两处也逐字相同，放进本方法才能真正消除
+        /// 最后一点重复；现价已格式化进 `display`，目前谁也没单独用到裸 `price`。
+        ///
+        /// 网络异常统一转成 `onFail("名称查询失败：" + ex.Message)` —— 两处原本逐字相同。
+        /// </summary>
+        private void FetchStockName(string code, Action<string, string> onOk, Action<string> onFail)
+        {
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    string resp = VRequest("http://127.0.0.1:8000/api/stock/quote?code=" + code, null);
+                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    Invoke((Action)delegate
+                    {
+                        if (J.IsOk(j) && j.ContainsKey("name"))
+                        {
+                            string nm = J.Str(J.Get(j, "name"));
+                            onOk(nm, nm + PriceSuffix(J.Get(j, "price")));
+                        }
+                        else
+                        {
+                            onFail(J.Str(J.Get(j, "error")));
+                        }
+                    });
+                }
+                catch (Exception ex)
+                {
+                    string m = "名称查询失败：" + ex.Message;
+                    try { Invoke((Action)delegate { onFail(m); }); }
+                    catch (Exception) { }
+                }
+            });
+        }
+
+        /// <summary>现价后缀：能解析时为「  12.34 元」，否则空串（两处原先逐字相同）。</summary>
+        private static string PriceSuffix(object price)
+        {
+            double? pr = J.NumOrNull(price);
+            return pr != null ? "  " + pr.Value.ToString("F2") + " 元" : "";
         }
     }
 }
