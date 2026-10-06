@@ -30,6 +30,8 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from core.jsonutil import json_safe          # 第 09 项：出口清洗
+
 from . import data
 
 REGISTRY: dict[str, "IndicatorMeta"] = {}
@@ -106,7 +108,9 @@ def _normalize_series(result: dict, df: pd.DataFrame) -> list[dict]:
         out.append({
             "name": item["name"],
             "kind": kind,
-            "data": [None if pd.isna(v) else float(v) for v in data.values],
+            # 走公共清洗（第 09 项）：指标值本就是浮点，语义与原先
+            # 「NaN→None，否则 float()」一致，另多挡住 ±Inf。
+            "data": [json_safe(v) for v in data.values],
         })
     return out
 

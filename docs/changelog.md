@@ -6,6 +6,39 @@
 
 ### 变更
 
+- **`_json_safe` 提公共层 + 给缺清洗的出口补调用**（待办 09）：
+  NaN / ±Inf / numpy 标量一旦到达响应层，FastAPI 的 `JSONResponse` 是严格模式
+  （`allow_nan=False`），会抛 `ValueError: Out of range float values are not JSON compliant`，
+  Starlette 兜底返回**纯文本 500** —— 前端只看到「无效的 JSON 基元: Internal」，
+  完全指不到真正出问题的字段。
+  - ⭐ **关键发现：待办的建议做法照原样做是空操作。**
+    `_json_safe` 遇到 `dict` / `list` 是**原样返回**（`float(dict)` 抛 TypeError，
+    走 `return v if isinstance(v, (list, dict)) else None`）——
+    实测 `out is body` 为 `True`、嵌套 NaN 全部保留。
+    现有代码一直是**逐字段**调用（`stock_profile` 12 处，全在列表推导里），所以从未暴露；
+    一旦按建议改成「整块清洗」，会得到一个**看起来加了、实际没加**的假修复。
+    故新增**递归版** `json_safe_deep` 供 HTTP 出口用，并在注释里写明两者分工
+    （`json_safe` 单值 / 对 dict 恒等映射；`json_safe_deep` 整块 / 递归）。
+  - 新增 `core/jsonutil.py` + 旧路径 `jsonutil.py` 别名转发；
+    `stock_profile._json_safe` 改为薄封装，12 处既有调用一行未改。
+  - **7 个 HTTP 出口**接入递归清洗：`/api/stock/valuation`、`/api/stock/quote`、
+    盘面 5 个 GET（global / capital / sectors / limit-up / big-loss）。
+  - 另统一 2 处**语义等价**的半成品：`core/kline_service.to_records`（内联 `pd.isna`）
+    与 `indicators/base.py` 指标序列。
+  - **两处刻意不统一**（待办归类有误，已在文件里说明）：
+    `strategies/core/stats.py:_num` 带 `round(f, 3)`，替换会悄悄丢掉四舍五入；
+    `chip_service.py` 那 4 处内联是**输入侧解析守卫**（`clean_code` 命中 NaN 返回 `""`
+    而不是 `None`），不是出口清洗，替换会改变其返回值。
+  - 踩坑点落实：`int` 分支仍在 `float` 之前（就地注释说明 numpy `bool_` 的原因）；
+    只在出口洗一次、service 层不动；对已 JSON 安全的值是恒等映射。
+  - 验证：6 类异常值（嵌套 NaN/Inf、numpy 标量、顶层 NaN、list 内 NaN、tuple、正常响应）
+    用 `json.dumps(allow_nan=False)` 验证**全部由非法变合法**；
+    9 个接口改前/改后逐字段对比，**确定性接口 `kline`/`profile`/`quote` 完全一致**。
+    > 取证方法记档：盘面是实时数据，改前/改后快照的 24 处差异**不能**直接当成回归 ——
+    > 另抓一份**噪声基线**（同代码、间隔 20s、自比）得到 17 处差异，位置与之完全重合，
+    > 证明那些是数据源波动。验证「输出没变」必须先建立噪声基线。
+    > 另发现**第二个失败模式**：numpy 标量在严格序列化下是 `TypeError` 而非 `ValueError`。
+
 - **修复：筹码分布偶发「筹码接口无响应」**（`bug-01`）：
   个股页 K 线正常但筹码区域报红字「筹码接口无响应」，**重开即不复现**，后端日志无任何错误。
   - **根因**：`/api/chip/dist` 的冷路径上，锁仓修正要取「十大流通股东」，

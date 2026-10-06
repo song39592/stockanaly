@@ -22,6 +22,7 @@ import akshare as ak
 import price_service
 import price_store
 import share_service
+from core.jsonutil import json_safe          # 第 09 项：清洗逻辑已公共化
 from market_service import _ak
 
 _CACHE: dict[str, tuple[float, Any]] = {}
@@ -164,29 +165,12 @@ def _walk_report_periods(fetch, budget: float = _HOLDERS_BUDGET):
 
 
 def _json_safe(v: Any) -> Any:
-    """把 akshare / pandas 带来的值洗成 JSON 安全类型。
+    """已迁到 `core/jsonutil.py`（第 09 项）——这里是别名，保留是为了既有引用不用改。
 
-    关键是 **NaN / Inf → None**：Python 的 `json.dumps` 默认放行 NaN（产出非法 JSON），
-    而 FastAPI 的 JSONResponse 默认严格模式，遇到 NaN 直接抛
-    `ValueError: Out of range float values are not JSON compliant`，
-    Starlette 兜底返回纯文本 500，前端只见「无效的 JSON 基元: Internal」。
-    顺带把 numpy 标量（int64 / float64 / bool_）转成 Python 原生类型。
+    原实现叫 `_json_safe`（私有名），公共层改名 `json_safe` 并另加递归版
+    `json_safe_deep` 供 HTTP 出口用。`stock_profile` 是逐字段调用，用单值版即可。
     """
-    if v is None or isinstance(v, (str, bool)):
-        return v
-    if isinstance(v, (int,)) or (hasattr(v, "item") and isinstance(v.item(), int)):
-        try:
-            return int(v)
-        except (ValueError, OverflowError, TypeError):
-            return None
-    f = None
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return v if isinstance(v, (list, dict)) else None
-    if f != f or f in (float("inf"), float("-inf")):     # NaN / ±Inf
-        return None
-    return f
+    return json_safe(v)
 
 
 def top_holders(code: str) -> dict:

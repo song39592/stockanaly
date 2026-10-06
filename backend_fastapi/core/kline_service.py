@@ -26,6 +26,7 @@ from typing import Any
 
 import pandas as pd
 from . import price_store
+from .jsonutil import json_safe
 from .periods import normalize, resample_bars
 
 # 参与输出的列（其余如 fetched_at / source 由调用方按需保留）
@@ -80,14 +81,16 @@ def get_bars(code: str, start: str | dt.date | None = None,
 def to_records(df: pd.DataFrame) -> list[dict[str, Any]]:
     """K 线序列 → 接口的 bars 结构（日期回到 `trade_date` 字段）。
 
-    NaN 一律转成 None：JSON 里 NaN 是非法的，前端也按 null 处理。
+    逐字段走 `core.jsonutil.json_safe`（第 09 项）替代原先的内联 `pd.isna` 判断：
+    除了 NaN→None，还顺带处理 ±Inf 与 numpy 标量（int64/float64 → 原生类型），
+    出口不会再因一个非法浮点值让整个接口 500。
     """
     if df is None or df.empty:
         return []
     out = df.copy()
     out.index = [str(d)[:10] for d in out.index]
     out = out.reset_index().rename(columns={"index": "trade_date", "date": "trade_date"})
-    return [{k: (None if pd.isna(v) else v) for k, v in row.items()}
+    return [{k: json_safe(v) for k, v in row.items()}
             for row in out.to_dict("records")]
 
 

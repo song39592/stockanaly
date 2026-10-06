@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 import config
 import valuation_service
 from core import httpclient
+from core.jsonutil import json_safe_deep
 from collectors import (
     get_basic_info_evidence, get_announcements, fetch_notice_content, get_news,
     evidence_search_url, event_signal, _clip, SLEEP_NOTICE,
@@ -288,7 +289,9 @@ def research_endpoint(req: ResearchRequest):
 def stock_valuation(req: ValuationRequest):
     """股票估值：两段法净利润贴现（前 5 年 + 永续增长），输出乐观/中性/悲观三情景与计算过程。"""
     try:
-        return valuation_service.valuate(req.model_dump())
+        # 出口清洗（第 09 项）：必须用 deep 版 —— 单值版对 dict 是恒等映射，洗了等于没洗。
+        # 正常路径逐字段不变；只有 NaN/±Inf 会被换成 null（改动前那些值会让接口直接 500）。
+        return json_safe_deep(valuation_service.valuate(req.model_dump()))
     except Exception as e:                    # noqa: BLE001 - 统一转成可读错误，避免 500 空响应
         raise HTTPException(status_code=500, detail=f"估值计算失败：{e}")
 
@@ -297,7 +300,7 @@ def stock_valuation(req: ValuationRequest):
 def stock_quote(code: str):
     """按代码查股票名称与当前股价（轻量，供输入代码后即时确认，不拉财务数据）。"""
     try:
-        return valuation_service.quote_only(code)
+        return json_safe_deep(valuation_service.quote_only(code))
     except Exception as e:                    # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"名称查询失败：{e}")
 

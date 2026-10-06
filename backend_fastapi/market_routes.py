@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 
 import config
 import market_service
+from core.jsonutil import json_safe_deep      # 第 09 项：出口清洗
 from llm_client import call_llm, llm_error_detail
 
 router = APIRouter(prefix="/api/market", tags=["盘面及板块分析"])
@@ -80,7 +81,7 @@ def market_global(date: str = "", force: bool = False):
     """① 外围环境：美股 / 港股 / 大宗商品 / 费城半导体。date 为空时返回实时行情。"""
     if force:
         market_service.clear_cache("global_market")
-    return market_service.global_market(date or None)
+    return json_safe_deep(market_service.global_market(date or None))
 
 
 @router.get("/capital")
@@ -88,7 +89,7 @@ def market_capital(date: str = "", force: bool = False):
     """② 大盘资金：两市成交、涨跌家数、主力净流向、特大单方向。"""
     if force:
         market_service.clear_cache("capital_flow")
-    return market_service.capital_flow(date or None)
+    return json_safe_deep(market_service.capital_flow(date or None))
 
 
 @router.get("/sectors")
@@ -96,7 +97,7 @@ def market_sectors(date: str = "", window: str = "今日", force: bool = False):
     """③ 板块β：行业 / 概念板块资金流 Top10、申万一级行业涨跌。date 为空时返回实时/近N日（window）。"""
     if force:
         market_service.clear_cache("sector_beta")
-    return market_service.sector_beta(date or None, window)
+    return json_safe_deep(market_service.sector_beta(date or None, window))
 
 
 @router.get("/limit-up")
@@ -104,7 +105,7 @@ def market_limit_up(date: str = "", force: bool = False):
     """④ 连板梯队：连板结构与晋级率。date 为空时自动取最近交易日。"""
     if force:
         market_service.clear_cache("limit_up")
-    return market_service.limit_up_ladder(date or None)
+    return json_safe_deep(market_service.limit_up_ladder(date or None))
 
 
 @router.get("/big-loss")
@@ -112,7 +113,7 @@ def market_big_loss(date: str = "", force: bool = False):
     """⑤ 大面股：炸板池 + 跌停池。date 为空时自动取最近交易日。"""
     if force:
         market_service.clear_cache("big_loss")
-    return market_service.big_loss(date or None)
+    return json_safe_deep(market_service.big_loss(date or None))
 
 
 @router.post("/ai-analysis")
