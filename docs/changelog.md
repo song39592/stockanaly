@@ -6,6 +6,44 @@
 
 ### 变更
 
+- **个股 / 估值 / 板块归位 `features/stock/`**（待办 29，后端按功能搬家第 2 项）：
+  ```
+  features/stock/
+  ├─ __init__.py
+  ├─ profile.py       <- 原 stock_profile.py
+  ├─ routes.py        <- 原 stock_routes.py
+  ├─ valuation.py     <- 原 valuation_service.py
+  └─ board_index.py   <- 原 board_service.py
+  ```
+  - **只改了因搬家失效的 import，函数体一行未动**：
+    `profile.py` 的 `price_service/price_store/share_service` 改指 `core`（第 27 项已搬）、
+    `_ak` 改指 `features.market.service`；`valuation.py` 的 `ms` 同理；
+    `board_index.py` 的 `db` 改指 `core`；
+    `routes.py` 顶部 `valuation_service` 与**两处函数内延迟导入**
+    （`stock_profile` / `board_service`）改为包内引用。
+  - **待办 5 个踩坑点逐条遵守**：没有重构 `stock_profile` 任何函数（第 09/10 项的事）；
+    没有统一 `_cached`（失败也缓存）与 `lockup_ratio`（失败不缓存）的矛盾语义；
+    没有动估值出口清洗（第 09 项已补）；没有统一三份 market 前缀规则（第 16 项）；
+    `board_index` 的 TTL 仍是 **DB 持久化**（`_TTL_HOURS=24`），没改成进程内缓存。
+  - **转发必须用别名的理由多了一条**：除下划线私有名外，`stock_profile` 还有模块级
+    可变状态 `_CACHE`（6 小时 TTL 的股东/行业缓存）。`from x import *` 复制出的名字
+    **不含同一份缓存**，`clear_cache()` 就清不到实现里那份、缓存永远清不掉。
+    已验证 `stock_profile._CACHE is features.stock.profile._CACHE` 为 `True`。
+  - **HTTP 路径零变化**：`router` 的 prefix 仍是 `/api/stock`，
+    `main.py` 仍按字符串 `"stock_routes"` 引用（靠转发），启动器与网页端不需要改。
+  - 验证：10 个模块全部导入成功（含 `chip_formulas.core.data`、`main`）；
+    4 个转发与实现是**同一对象**；私有名 `lockup_ratio` / `_market_prefix` / `_TTL_HOURS` 照常可见；
+    个股页 4 条验收全通（基本信息 1.2s / 所属板块 0.0s / 重取名称 0.3s / 筹码分布 1.0s
+    且 `lockup_applied=true`）；估值三档情景齐全 0.7s；连带回归 K线 0.4s、盘面板块β 1.0s；
+    `/health` 无模块错误、stderr 无告警；52 个单元测试全绿。
+  - 踩坑：同一个 PowerShell here-string 陷阱连续踩三次（docstring 收尾 `"""` 缺失），
+    其中一次还用 `.Replace()` 把 `valuation.py` 整个改成
+    `rrom __ruture__ mmport annotatmons`（`f`/`i`/`c` 被系统性替换），靠 `git diff` 才发现。
+    **改进已落实**：批量生成/修改 Python 文件的脚本自带两道检查（`"""` 个数为偶 +
+    `ast.parse` 通过）才落盘，事后又跑全仓 .py 扫描确认 0 个问题文件。
+    > 结论：在这个环境里改 Python **不要用 PowerShell 的 `.Replace()`** ——
+    > 它的编码/转义处理已坏过两次；用 Python 脚本替换并在脚本内自带校验。
+
 - **盘面/板块归位 `features/market/`**（待办 28，后端按功能搬家的第一项）：
   ```
   backend_fastapi/features/

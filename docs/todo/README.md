@@ -65,7 +65,7 @@
 | 26 ✅ | [26-前端-启动器公共件归位.md](26-前端-启动器公共件归位.md) | GridKit/Cards/J/C 等公共件集中，别散在各页 | ★★★ / ★☆☆ —— **已完成** |
 | 27 ✅ | [27-后端-core子包.md](27-后端-core子包.md) | 基础设施层先归位（后端搬家**第一步**） | ★★★★ / ★★★（依赖 19）—— **已完成** |
 | 28 ✅ | [28-后端-features-market.md](28-后端-features-market.md) | 盘面/板块搬到 `features/market/` | ★★★ / ★★★（依赖 27）—— **已完成** |
-| 29 | [29-后端-features-stock.md](29-后端-features-stock.md) | 个股/估值/板块索引搬到 `features/stock/` | ★★★ / ★★★（依赖 27） |
+| 29 ✅ | [29-后端-features-stock.md](29-后端-features-stock.md) | 个股/估值/板块索引搬到 `features/stock/` | ★★★ / ★★★（依赖 27）—— **已完成** |
 | 30 | [30-后端-features-history.md](30-后端-features-history.md) | 股票池历史搬到 `features/history/` | ★★★ / ★★☆（依赖 27） |
 | 31 | [31-后端-features-download.md](31-后端-features-download.md) | 下载与调度搬到 `features/download/` | ★★★ / ★★★（依赖 27） |
 | 32 | [32-后端-features-system.md](32-后端-features-system.md) | 系统设置/完整性/修复搬到 `features/system/` | ★★ / ★★☆（依赖 27） |
@@ -106,6 +106,10 @@
 先修完再搬，动的文件少、回归面小。
 
 ## 已完成的项
+- **29** 个股/估值/板块归位 `features/stock/`（`profile` / `routes` / `valuation` / `board_index`）：
+  只改因搬家失效的 import，**函数体一行未动**（TTL 缓存、`_cached` 与 `lockup_ratio` 的矛盾语义、
+  三份 market 前缀规则、board_index 的 DB 持久化 TTL 全部原样，留给各自的后续项）。
+  顶层 4 个**别名转发**——除私有名外，`stock_profile._CACHE` 也必须是**同一份**，否则 `clear_cache()` 清不到。
 - **28** 盘面/板块归位 `features/market/`：`service.py` 是**纯 rename**（内容零改动，
   TTL 缓存与盘后延长原样保留）、`routes.py` 只改 1 行 import。顶层留**别名转发**，
   7 处 `from market_service import _ak` 与 `main.py` 的字符串 `"market_routes"` **一行未改**。
