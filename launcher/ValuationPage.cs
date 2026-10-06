@@ -195,6 +195,9 @@ namespace StockPool
                 new GridColumn("预测价", "target_price", true) { Size = DataGridViewAutoSizeColumnMode.Fill },
                 new GridColumn("收益率", "return_rate", true) { Size = DataGridViewAutoSizeColumnMode.Fill },
             });
+            // 第 20 项：情景对比表可按增长率 / 预测价 / 收益率排序
+            // （默认行序是「基准→保守→乐观」，排序后用户可自己按收益率看）。
+            _vGrid.SetSortable(true);
         }
 
         private void ValuationToggleParams()

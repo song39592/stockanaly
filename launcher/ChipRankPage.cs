@@ -94,7 +94,7 @@ namespace StockPool
             root.Controls.Add(_scrInfo);
 
             _scrGrid = NewGrid(new List<GridColumn> {
-                new GridColumn("#", "rank", true),
+                new GridColumn("#", "rank", true) { Ordinal = true },
                 new GridColumn("代码", "code") { IsCode = true, Jump = true },
                 NameColumn(),
                 new GridColumn("行业", "industry"),
@@ -107,6 +107,7 @@ namespace StockPool
             });
             _scrGrid.Dock = DockStyle.None;         // 本页是流式布局，宽度显式给
             _scrGrid.Width = 1180;
+            _scrGrid.SetSortable(true);             // 第 20 项：任意列可排序
             root.Controls.Add(_scrGrid);
 
             _scrTimer = new Timer();
