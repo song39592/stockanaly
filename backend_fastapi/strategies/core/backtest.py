@@ -53,7 +53,11 @@ def _load_names(codes: list[str]) -> dict[str, str]:
         try:
             import akshare as ak
             from market_service import _ak          # 统一的超时/降级封装
-            df = _ak(ak.stock_info_a_code_name, timeout=30)
+            # timeout=90：实测这张全市场表**冷启动要 50.8s**（5572 行）。原来给 30s
+            # 在接口变慢时就会超时 → 返回空映射 → 周榜/回测的**名称整列空白**。
+            # （2026-10-06 实测：同一接口 31.4s 超时失败、50.8s 成功。）
+            # 名称是「锦上添花」，但整列空白很显眼，所以宁可多等。
+            df = _ak(ak.stock_info_a_code_name, timeout=90)
             if df is not None and not getattr(df, "empty", True):
                 _name_cache["map"] = {
                     str(r["code"]).zfill(6): str(r["name"])

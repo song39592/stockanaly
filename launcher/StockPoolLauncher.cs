@@ -634,11 +634,23 @@ namespace StockPool
         // ---- 右下角隐藏搜索框：键盘输入即唤出；回车打开 / ESC 取消 / 切换界面隐藏 ----
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            Keys key = keyData & Keys.KeyCode;
+
+            // ---- ESC：先让「已展开的搜索框」自己处理（取消搜索），再谈返回 ----
+            // 顺序很重要：搜索框可见时 ESC 属于它，不该被「返回上一页」抢走。
+            if (key == Keys.Escape)
+            {
+                if (_quickSearch != null && _quickSearch.Visible)
+                    return base.ProcessCmdKey(ref msg, keyData);   // 交给搜索框的 KeyDown
+                if (EscReturnFromStock()) return true;            // 从表格跳来 -> 原路返回
+                return base.ProcessCmdKey(ref msg, keyData);
+            }
+
             // 仅当搜索框未显示、且当前焦点不在文本类控件（避免劫持已有输入框）时，用数字键唤出。
             if (_quickSearch != null && !_quickSearch.Visible
                 && !(ActiveControl is TextBox) && !(ActiveControl is ComboBox) && !(ActiveControl is RichTextBox))
             {
-                Keys k = keyData & Keys.KeyCode;
+                Keys k = key;
                 if (((k >= Keys.D0 && k <= Keys.D9) || (k >= Keys.NumPad0 && k <= Keys.NumPad9))
                     && (keyData & (Keys.Control | Keys.Alt)) == 0)
                 {
@@ -676,6 +688,12 @@ namespace StockPool
         private void SelectTab(int index)
         {
             if (index < 0 || index >= _tabPages.Count) return;
+            // 第 20 项：ESC 返回点只在「表格跳转」这条路上有效。带 ESC 返回返回到本页时
+            // 要清掉（见 EscReturnFromStock），而用户**手动**切到别的页签同样意味着
+            // 「放弃返回意图」—— 否则他离开个股页去别处办事，回头按ESC 会被拽回来。
+            if (_returnTabIndex >= 0 && index != _stockTabIndex
+                && index != _returnTabIndex)
+                _returnTabIndex = -1;
             HideQuickSearch();
             _tabIndex = index;
             for (int i = 0; i < _tabPages.Count; i++) _tabPages[i].Visible = (i == index);

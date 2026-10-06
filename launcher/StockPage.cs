@@ -386,7 +386,7 @@ namespace StockPool
             TableLayoutPanel bh;
             var gh = Group("前十大股东", out bh);
             _stockBasicHolders = NewGrid(new List<GridColumn> {
-                new GridColumn("名次", "rank", true),
+                new GridColumn("名次", "rank", true) { Ordinal = true },
                 new GridColumn("股东名称"),
                 new GridColumn("股份类型"),
                 new GridColumn("持股数", "shares", true),
@@ -394,6 +394,7 @@ namespace StockPool
                 new GridColumn("增减", "change", true),
                 new GridColumn("变动", "change_ratio", true),
             });
+            _stockBasicHolders.SetSortable(true);   // 第 20 项：按持股数/增减等排序
             AddRow(bh, _stockBasicHolders);
             AddRow(basicStack, gh);
 
@@ -443,6 +444,7 @@ namespace StockPool
                 new GridColumn("预测价", "target_price", true),
                 new GridColumn("收益率", "return_rate", true),
             });
+            _stockValGrid.SetSortable(true);        // 第 20 项：情景表按增长率/收益率排序
             AddRow(b5, _stockValGrid);
             AddRow(b5, Row(MiniBtn("在估值页打开完整计算", delegate
             {

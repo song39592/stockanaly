@@ -404,6 +404,10 @@ namespace StockPool
             });
             StPlaceGrid(_stPerStockGrid);
             _stPerStockGrid.CellClick += StPerStockCellClick;
+            // 第 20 项：**刻意不开排序**。它是主从结构 —— StToggleExpand 按
+            // **行索引**记录展开状态，排序会让展开的明细与它的主行错位
+            // （点开一只票后排序，明细会跑到别的票下面）。要开排序得先改成
+            // 按代码记录展开状态，不在本次范围内。
             AddRow(bg, _stPerStockGrid);
             AddRow(stack, g);
         }
@@ -435,6 +439,7 @@ namespace StockPool
                 new GridColumn("交易次数", "trades", true),
             });
             StPlaceGrid(_stRecentGrid);
+            _stRecentGrid.SetSortable(true);   // 第 20 项：可改按交易次数等排序
             AddRow(bg, _stRecentGrid);
             AddRow(stack, g);
         }
@@ -525,6 +530,7 @@ namespace StockPool
                 new GridColumn("建议仓位", "weight", true),
             });
             StPlaceGrid(_stBuyGrid);
+            _stBuyGrid.SetSortable(true);        // 第 20 项
             AddRow(b1, _stBuyGrid);
             AddRow(stack, g1);
 
@@ -537,6 +543,7 @@ namespace StockPool
                 new GridColumn("原仓位", "weight", true),
             });
             StPlaceGrid(_stSellGrid);
+            _stSellGrid.SetSortable(true);       // 第 20 项
             AddRow(b2, _stSellGrid);
             AddRow(stack, g2);
 
@@ -553,6 +560,7 @@ namespace StockPool
                 new GridColumn("浮盈亏", "pnl", true),
             });
             StPlaceGrid(_stHoldGrid);
+            _stHoldGrid.SetSortable(true);       // 第 20 项：可按浮盈亏/仓位排序
             AddRow(b3, _stHoldGrid);
             AddRow(stack, g3);
         }
