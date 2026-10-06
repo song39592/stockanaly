@@ -859,6 +859,74 @@ def _factor_at(factors: list[dict[str, Any]], day: str) -> float | None:
     return result
 
 
+# --------------------------------------------------------------------------- #
+# 后复权：生效区间判定（第 17 项）—— 全项目**唯一**的一份「哪天起该乘哪个因子」
+# --------------------------------------------------------------------------- #
+def hfq_steps(factors: list[dict[str, Any]], dates: list[str]) -> list[tuple[int, Any]]:
+    """产出 `(起始下标, hfq_factor)`：因子在 `dates[i]` 这天起生效。
+
+    规则（与本模块 `load_bars` 的 hfq 口径一致，第 17 项前曾被复刻过一份在
+    `indicators/data.py::_apply_hfq` 里）：
+    某交易日的因子 = **`ex_date <= 该日` 的最近一条**的 `hfq_factor`；
+    早于首条因子时没有因子（调用方各自决定怎么处理，见下）。
+
+    只在因子**发生变化**时产出，因此产出条数 = 事件数（实测中位数 10 只/票），
+    调用方既能顺着上一步一路沿用（逐日取值），也能直接对 `[i:]` 整段缩放
+    （切片赋值）—— 两种用法都不必逐日循环，这是它能被共用的前提。
+
+    ⚠️ `hfq_factor` 为 `None` 的事件**照样产出**（值就是 None），由调用方决定
+    「保持原始价」还是「沿用上一个」。两侧目前行为不同且都保留：
+    `load_bars` 遇 None 视为「无可用因子」→ 该 bar 保持原始价并置
+    `adjusted=False`；`apply_hfq_factors` 则是跳过该事件、沿用上一个有效因子。
+    现有因子表实测 **0 行 NULL**（68668 行全为数值），故两者当前等价。
+
+    因子**不是**累乘：`hfq_factor` 本身已是相对上市首日的累计因子，
+    同一 ex_date 有多条时以最后一条为准（实测无重复 (code, ex_date)）。
+    """
+    steps: list[tuple[int, Any]] = []
+    cursor = 0
+    total = len(factors)
+    for i, day in enumerate(dates):
+        while cursor < total and str(factors[cursor]["ex_date"])[:10] <= day:
+            steps.append((i, factors[cursor]["hfq_factor"]))
+            cursor += 1
+    return steps
+
+
+def apply_hfq_factors(panel: "pd.DataFrame") -> "pd.DataFrame":
+    """把原始收盘价**宽表**（索引 trade_date、列 code）按后复权因子缩放。
+
+    给「同一交易日全市场」的面板用（RPS 等横截面指标）：`load_market_close`
+    读回的是未复权收盘价，复权这一步以前在 `indicators/data.py::_apply_hfq`
+    里**另写了一份**——它自己复制了 `load_bars` 的 hfq 算法，一旦
+    `price_store` 改复权规则，RPS 排名就会**静默算错**且无人察觉
+    （两条链没有任何交叉验证）。第 17 项把这份实现收回来，
+    因子生效区间的判定统一走 `hfq_steps`。
+
+    只影响价格，不动成交量 / 换手率（与 `load_bars` 的口径一致）。
+    早于该票首条因子的日期保持原始价（等价 `load_bars` 的 `adjusted=False`）。
+    """
+    if panel is None or panel.empty:
+        return panel if panel is not None else pd.DataFrame()
+
+    by_code: dict[str, list[dict[str, Any]]] = {}
+    for row in load_all_factors():
+        by_code.setdefault(row["code"], []).append(row)
+
+    dates = [str(d)[:10] for d in panel.index]
+    base = panel.to_numpy(dtype="float64", copy=True)
+    adj = base.copy()
+    for j, code in enumerate(panel.columns):
+        factors = by_code.get(str(code))
+        if not factors:
+            continue                      # 无因子 -> 保持原始价
+        for i, fac in hfq_steps(factors, dates):
+            if fac is None:
+                continue                  # 见 hfq_steps 的说明：此处沿用上一个有效因子
+            adj[i:, j] = base[i:, j] * float(fac)
+    return pd.DataFrame(adj, index=panel.index, columns=panel.columns)
+
+
 def load_bars(code: str, adjust: str = "qfq", start: str | None = None,
               end: str | None = None, as_of: str | None = None) -> list[dict[str, Any]]:
     """按口径读取日 K，复权价**现算**。
@@ -888,12 +956,14 @@ def load_bars(code: str, adjust: str = "qfq", start: str | None = None,
         return [{**bar, "adjust": store_adjust, "adjusted": False} for bar in raw]
 
     out: list[dict[str, Any]] = []
+    # 第 17 项：生效区间的判定统一走 hfq_steps（与 apply_hfq_factors 同一份），
+    # 免得「哪天起该乘哪个因子」在两处各算一遍、改一处就静默分叉。
+    steps = hfq_steps(factors, [bar["trade_date"] for bar in raw])
     cursor, current = 0, None
-    for bar in raw:
-        # 因子按除权日升序、交易日也升序，用指针前进即可，整体 O(bars + factors)
-        day = bar["trade_date"]
-        while cursor < len(factors) and factors[cursor]["ex_date"] <= day:
-            current = factors[cursor]["hfq_factor"]
+    for day_index, bar in enumerate(raw):
+        # steps 只在因子变化处产出，顺着往下走即可；未走到任何 step 说明早于首条因子
+        while cursor < len(steps) and steps[cursor][0] <= day_index:
+            current = steps[cursor][1]
             cursor += 1
         if current is None:                                  # 早于首条因子（未上市/异常）
             out.append({**bar, "adjust": store_adjust, "adjusted": False})

@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""K 线序列服务：**全项目唯一的「取数 + 周期合样」出口**。
+"""K 线序列服务：**行情消费方唯一的「取数 + 周期合样」出口**（第 17 项修正口径）。
+
+> ⚠️ 原文写的是「全项目唯一」，**不准确**。准确说法：数据源层与运维脚本
+> 不走这一层（见下方「已知例外」），但**所有行情消费方都走**。
 
 为什么要有这一层：
   以前 `periods.resample_bars` 在三处各自调用（个股历史 / 指标 / 筹码），
@@ -9,7 +12,25 @@
     * 用户看到的 K 线 == 指标计算的输入，对齐是**结构保证**，不靠自觉；
     * 合样只算一次并缓存，三个消费方共用。
 
-为什么不落盘：周 / 月 K 是**派生口径**（日线才是唯一落库数据），与「不存
+## 已知例外（**刻意不走本层**，第 17 项登记）
+
+1. `features/history/service.py` 的 `load_trusted_bars` 直接
+   `price_store.load_bars(...)`：它需要捕获 `price_store.UntrustedDataError`
+   做全量重抓，而 `get_bars` 不抛这个异常、也不暴露指纹校验。
+   它只是**读单只票的日线**，周 / 月合样那一步仍走本层的 `resample`。
+2. `features/stock/profile.py` 的涨停统计用
+   `price_store.load_bars(code, adjust="raw")`：日线专用、不需要合样。
+
+## 第 17 项修掉的两处「绕过」（原先是各自复刻）
+
+3. 后复权算法：`indicators/data.py::_apply_hfq` 曾**自己实现了一遍**
+   「哪天起该乘哪个因子」。现已收回 `price_store.apply_hfq_factors`，
+   生效区间的判定全项目只有 `price_store.hfq_steps` 一份
+   （`load_bars` 与面板共用），对拍 2500 个值零差异。
+4. 周 / 月分桶：`indicators/data.py::_resample_panel` 曾自己用 `bucket_key`
+   手写一遍「取桶内最后一根」。现已复用 `periods.bucket_last_indices`。
+
+不落盘的原因：周 / 月 K 是**派生口径**（日线才是唯一落库数据），与「不存
 qfq_factor」「指标不落库」同理——只存不可变数据，派生的一律现算，
 免得引入失效 / 陈旧这类新的不可信来源。这里做的是内存缓存，不是文件。
 

@@ -64,6 +64,23 @@ def _merge(bucket: list[dict[str, Any]], period: str) -> dict[str, Any]:
     return item
 
 
+def bucket_last_indices(dates: Iterable[str], period: str) -> list[int]:
+    """每个桶内**最后一个交易日**的下标（第 17 项，供面板合样共用）。
+
+    与 `resample_bars` 的分桶规则同源：都用 `bucket_key`、都取桶内最后一根。
+    `indicators/data.py::_resample_panel` 以前自己用 `bucket_key` 手写了一遍
+    等价逻辑，一旦 `bucket_key` 的边界规则改动（例如把某周起点挪一天），
+    `resample_bars` 会跟着改而RPS 面板**不会** —— 两边静默分叉，
+    且症状只是「RPS 排名有点怪」，极难归因。
+
+    只返回下标、不聚合，供「只要收盘价、且要保留矩阵形态」的面板使用；
+    需要完整 OHLCV 聚合的调用方仍应走 `resample_bars`。
+    """
+    keys = [bucket_key(str(d)[:10], period) for d in dates]
+    last = len(keys) - 1
+    return [i for i in range(len(keys)) if i == last or keys[i + 1] != keys[i]]
+
+
 def resample_bars(bars: Iterable[dict[str, Any]], period: str | None = "day") -> list[dict[str, Any]]:
     """把日线序列合成指定周期；period=day 时原样返回（不复制）。"""
     period = normalize(period)
