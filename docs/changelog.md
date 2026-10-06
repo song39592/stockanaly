@@ -6,6 +6,69 @@
 
 ### 变更
 
+- **筹码体系归位 `features/chip/`**（待办 34，**阶段 C 收官**，全仓耦合面最大、所以最后搬）：
+  ```
+  features/chip/
+  ├─ __init__.py
+  ├─ scr_service.py    <- 原 chip_service.py       SCR 导入/合并/三档分类（529 行）
+  ├─ rank_service.py   <- 原 chip_rank_service.py  SCR90 周级三档（439 行）
+  ├─ scr_routes.py     <- 原 chip_routes.py        /api/chip/scr/*
+  ├─ dist_routes.py    <- 原 chip_dist_routes.py   /api/chip/dist/*
+  ├─ rank_routes.py    <- 原 chip_rank_routes.py   /api/chip/rank/*
+  └─ formulas/         <- 原 chip_formulas/ 整包（含 ARCHITECTURE.md，7 个 .py）
+  ```
+  顶层保留 **6 个别名转发**。**5 个模块改名**（三个 routes 否则会撞名），
+  但**转发名一律保持原样** —— `main.py` 的 `ROUTE_MODULES` 字符串引用与
+  `cleanup.py:140` / `dumplog.py:141` 等既有调用方**一行都不用改**。
+  - ⭐ **发现「转发做不到的事」（本项最关键的认知）**：
+    `sys.modules` 别名转发能覆盖「import 该模块后用它的公开名」，
+    但**覆盖不了「按包名动态导入它的子模块」**。
+    `formulas/core/registry.py:34` 原本**硬编码** `_FORMULA_PACKAGE = "chip_formulas"`，
+    `:69` 用 `importlib.import_module(f"{_FORMULA_PACKAGE}.{mod_name}")` 拼公式子模块名。
+    硬编码在搬家后会去 import 一个已不存在的顶层命名空间；
+    而只靠转发的话，`importlib.import_module("chip_formulas.tri_decay")`
+    会因父模块被换成别名对象而**把同一个文件当成两个模块各加载一次**
+    （`sys.modules` 出现两个键，公式注册表与 `__module__` 全乱）。
+    改为 **`_FORMULA_PACKAGE = __package__.rsplit(".", 1)[0]`**（本文件位于 `<包>.core`，
+    去掉最后一段即包名）—— **以后再搬也不必手工同步**。
+    验证：公式 `__module__` 由 `chip_formulas.tri_decay` 变为
+    `features.chip.formulas.tri_decay`，**这正是修复生效的证据**。
+  - **函数体零改动**：12 个搬入文件里 **11 个零差异**；唯一改动是上面那个常量
+    （+4 行注释）。`formulas/` 其余 6 个 .py 与 `ARCHITECTURE.md` 原样迁移，
+    注册机制（`@chip_formula` / 文件名即 id / LOAD 五步校验）完全未动。
+  - **周口径权威定义方仍是 `scr_service`**：`MARKET_CLOSE_HOUR=15` / `_as_moment` /
+    `week_start` / `expected_weeks` —— `week_start` 5 个样本、`expected_weeks(3)`/`(5)`、
+    函数签名、9 个模块级常量（含 `MIN_MARKET` / `LAUNCH_THRESHOLD`）**全部与基线一致**。
+    `rank_service._week_nodes` 仍走 `scr_service.expected_weeks`（源码断言），未改成各算一份。
+    *文档小误*：它说 `_as_date` 也是薄封装，实际 `_as_date` 只是 `datetime→date` 转换器
+    （`dt.date.fromisoformat`），从不调 `_as_moment` —— 原有实现，未改动。
+  - **三方依赖零循环导入**：`rank_service` 的 `:52` 依赖 `strategies.core.data`、
+    `:54` **模块级**读 `chip_service.PROCESSED_DIR`（实测与 `scr_service` 同一值）、
+    `:140` **函数内**延迟 import `strategies.core.backtest` —— **刻意没提到顶层**
+    （`strategies.scr90` 依赖 `chip_formulas`，提到顶层会立刻成环）。
+    11 个引用方逐个单独导入全部 OK。
+  - **`indicators/data.py:190` 的延迟 import 一个字没动**（踩坑点 5）——
+    提到顶层会立刻触发它与 `formulas/core/data.py` 的循环依赖。
+  - 验收实测：`/api/chip/rank/status` → **`state=ready`**；
+    `/api/chip/rank?weeks=1` → 100 条字段完整（`week=2026-09-28`）；
+    `/api/chip/dist?code=600519` → 80 分箱 × **1252 帧**、峰位 `1299.84`（高于收盘 `1235.58`，
+    三角形峰形合理）、峰占比 `6.51%`、**锁仓已应用**（`ratio=0.544991`）；
+    `strategies.scr90` 导入正常；`/api/chip/*` **12 条路由全挂上**；
+    `validation_report()` → `total=1 valid=1 invalid=0`；
+    `/health` 无模块错误、11/11 路由、stderr 无告警。
+  - **筹码矩阵用加权校验和验证，不是抽样** —— 13 个统计量
+    （`pct.shape` / `pct.max` / **`pct.hash` 加权校验和** / `centers.hash` /
+    `close.hash` / `turnover.hash` / `float_shares` / `lockup_ratio` /
+    `lockup_factor` / `warm` / `dates.len` …）**与基线零差异**，
+    避免「形状对、数值错」的漏网。
+  - 全仓 **132 个** `.py` 三引号成对 + `ast.parse` 全部通过；52 个单元测试全绿；
+    `.env` 未被改动；HTTP 路径零变化（三组 prefix 各自不变）。
+  - **转发暂不删**：`indicators/data.py` / `indicators/registry.py` / `strategies/scr90.py`
+    三个**尚未搬**的模块仍 import `chip_formulas`，转发要继续服役；
+    等它们各自搬家时改指 `features.chip.formulas` 后再删。
+  - 执行方式：按原建议 4 步走（formulas 整包 → scr_service → rank_service → 三个 routes），
+    **每步搬完立刻验证再继续**，每步的验证结果都记进了待办文档。
+
 - **大佬策略实验室归位 `features/mentor/`**（待办 33，后端按功能搬家倒数第 2 项）：
   ```
   features/mentor/

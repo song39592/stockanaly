@@ -70,7 +70,7 @@
 | 31 ✅ | [31-后端-features-download.md](31-后端-features-download.md) | 下载与调度搬到 `features/download/` | ★★★ / ★★★（依赖 27）—— **已完成** |
 | 32 ✅ | [32-后端-features-system.md](32-后端-features-system.md) | 系统设置/完整性/修复搬到 `features/system/` | ★★ / ★★☆（依赖 27）—— **已完成** |
 | 33 ✅ | [33-后端-features-mentor.md](33-后端-features-mentor.md) | 大佬策略实验室搬到 `features/mentor/` | ★★ / ★★☆（依赖 27）—— **已完成** |
-| 34 | [34-后端-features-chip.md](34-后端-features-chip.md) | 筹码体系（**被依赖最多，最后搬**） | ★★★★ / ★★★★（依赖 27~33） |
+| 34 ✅ | [34-后端-features-chip.md](34-后端-features-chip.md) | 筹码体系（**被依赖最多，最后搬**） | ★★★★ / ★★★★（依赖 27~33）—— **已完成** |
 | 35 | [35-后端-目录改名与路径同步.md](35-后端-目录改名与路径同步.md) | 可选：`backend_fastapi` 改名 → 同步启动器/脚本/文案 | ★★ / ★★★★（**依赖全部**） |
 
 ---
@@ -106,6 +106,15 @@
 先修完再搬，动的文件少、回归面小。
 
 ## 已完成的项
+- **34** 筹码体系归位 `features/chip/`（**阶段 C 收官**）：`scr_service` / `rank_service` /
+  `scr_routes` / `dist_routes` / `rank_routes` + **整包** `formulas/`（含 ARCHITECTURE.md）。
+  5 个模块**改名**以避免三个 routes 撞名，**转发名保持原样**故 `main.py` 的字符串引用零改动。
+  ⭐ **发现「转发做不到的事」**：`sys.modules` 别名转发能覆盖「import 后用公开名」，
+  但**覆盖不了「按包名动态导入子模块」**。`formulas/core/registry.py` 原本硬编码
+  `_FORMULA_PACKAGE = "chip_formulas"` 供 `importlib.import_module` 拼子模块名 ——
+  硬编码在搬家后会 import 一个不存在的命名空间，而靠转发会让**同一文件被当两个模块加载两次**。
+  改为 `__package__.rsplit(".", 1)[0]` **自动推导**，以后再搬也不必手工同步。
+  验证用**加权校验和**（`pct.hash` 等 13 个统计量）而非抽样，避免「形状对、数值错」漏网。
 - **33** 大佬策略实验室归位 `features/mentor/`（**4 个**模块）：**函数体零改动**（20 行 import 差异）。
   ⭐ **文档漏列了 `store.py`**（`mentor_store`，321 行，被 `main.py:30/:175`、`mentor_routes`、
   `test_mentor_store` 依赖）—— 按 4 模块搬，否则顶层会留一个孤立文件。
