@@ -253,16 +253,11 @@ def compute(code: str, formula_id: str | None = None, params: dict | None = None
                    for i in range(win)]
     last_close = float(res.close[-1])
     centers = res.centers
-    p5 = _percentile(centers, pct, 5)
-    p15 = _percentile(centers, pct, 15)
-    p50 = _percentile(centers, pct, 50)
-    p85 = _percentile(centers, pct, 85)
-    p95 = _percentile(centers, pct, 95)
-
-    def scr(a: float | None, b: float | None) -> float | None:
-        if not a or not b or (a + b) == 0:
-            return None
-        return round((b - a) / (b + a), 6)
+    # 第 10 项曾在这里留过一份分位计算（P5/P15/P50/P85/P95）+ 局部 scr()，但它们
+    # **从未写进下面的返回字典** —— 响应里的 SCR90 由 _stats_of 走 scr.scr_frame 给出，
+    # 是一段没人读的死代码。上一版把 _percentile 收进 scr.py 时删了定义却漏删调用，
+    # 于是 /api/chip/dist 直接 NameError -> 500（前端显示「筹码接口无响应」）。
+    # 既然没人读，连同局部 scr() 一起删掉，不要为了「也许以后要用」把分位计算搬回来。
 
     return {
         "ok": True,
