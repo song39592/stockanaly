@@ -48,6 +48,7 @@ import numpy as np
 import pandas as pd
 
 from features.chip import formulas as chip_formulas
+from features.chip.formulas.core import scr
 from features.chip import scr_service as chip_service
 from strategies.core.data import list_universe_codes
 
@@ -96,29 +97,6 @@ def _result_path(week: dt.date) -> str:
 # --------------------------------------------------------------------------- #
 # 单只票：矩阵 → 逐日 SCR90 序列 + 收盘价序列
 # --------------------------------------------------------------------------- #
-def _scr90_series(res) -> pd.Series:
-    """筹码矩阵逐帧换算成 SCR90 序列（索引 = 交易日）。
-
-    逐帧按累计筹码线性插值取 P5 / P95；某帧筹码全空时留 NaN（该日不参与排名）。
-    """
-    pct = res.pct
-    centers = res.centers
-    out = np.full(pct.shape[0], np.nan)
-    for i in range(pct.shape[0]):
-        row = pct[i]
-        total = float(row.sum())
-        if total <= 0:
-            continue
-        cum = np.cumsum(row) / total
-        p5 = float(np.interp(0.05, cum, centers))
-        p95 = float(np.interp(0.95, cum, centers))
-        den = p95 + p5
-        if den == 0:
-            continue
-        out[i] = (p95 - p5) / den
-    return pd.Series(out, index=list(res.dates))
-
-
 def _compute_one(code: str, start: str | None, end: str | None,
                  adjust: str, bins: int) -> dict:
     """单只票：算整段 SCR90 与收盘价序列。异常向上抛，由调用方计入「数据不足」。"""
@@ -126,7 +104,7 @@ def _compute_one(code: str, start: str | None, end: str | None,
                                        end=end, adjust=adjust, bins=bins,
                                        offline=True)
     return {"code": code,
-            "scr": _scr90_series(res),
+            "scr": scr.scr_series_pd(res),
             "close": pd.Series(np.asarray(res.close, dtype=float),
                                index=list(res.dates))}
 

@@ -24,6 +24,7 @@ from typing import Any, Callable
 import numpy as np
 
 from . import data
+from . import scr
 
 FORMULAS: dict[str, "ChipFormulaMeta"] = {}
 DEFAULT_FORMULA_ID = "tri_decay"        # 未指定公式时用它；被删改则由调用方显式指定
@@ -145,15 +146,6 @@ def _normalize_rows(matrix: np.ndarray) -> np.ndarray:
     return matrix / safe[:, None] * 100.0
 
 
-def _percentile(centers: np.ndarray, pct: np.ndarray, q: float) -> float | None:
-    """按累计筹码取价格分位（线性插值）。"""
-    total = float(pct.sum())
-    if total <= 0:
-        return None
-    cum = np.cumsum(pct) / total
-    return float(np.interp(q / 100.0, cum, centers))
-
-
 def _stats_of(pct: np.ndarray, centers: np.ndarray, close_i: float) -> dict:
     """某一帧的统计（供光标回溯；字段精简以控响应体积）。
 
@@ -164,11 +156,11 @@ def _stats_of(pct: np.ndarray, centers: np.ndarray, close_i: float) -> dict:
         return {"close": round(close_i, 4), "avg_cost": None, "peak_price": None,
                 "peak_pct": None, "profit_ratio": None, "scr90": None}
     idx = int(np.argmax(pct))
-    p5 = _percentile(centers, pct, 5)
-    p95 = _percentile(centers, pct, 95)
-    scr90 = None
-    if p5 and p95 and (p95 + p5) != 0:
-        scr90 = round((p95 - p5) / (p95 + p5), 6)
+    # 第 10 项：SCR90 改走统一内核 scr.scr_frame（None 语义）。
+    # 顺带修掉原判空缺陷 `if p5 and p95` —— 分位价格**可以是 0**（低价股 / 分箱下沿在 0），
+    # 那种情况下原写法为假 → 静默返回 scr90=null，内核按 `den == 0` 才是对的。
+    scr90 = scr.scr_frame(pct, centers)
+    scr90 = None if scr90 is None else round(scr90, 6)
     return {
         "close": round(close_i, 4),
         "avg_cost": round(float((centers * pct).sum() / 100.0), 4),

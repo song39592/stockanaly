@@ -1,55 +1,77 @@
 # 10 · 后端：SCR90 序列计算合并（2 份逐字符雷同 + 修 1 个判空缺陷）
 
-> 状态：待办　|　优先级：高　|　收益 ★★★★☆ / 风险 ★☆☆☆☆
-> ⚠️ **前置：必须先完成第 00 项**（chip_rank_service 的 `rows` NameError），否则该模块现在跑不出结果、无法验证。
+> 状态：**已完成**（2026-10-06）　|　优先级：高　|　收益 ★★★★☆ / 风险 ★☆☆☆☆
+> 前置：第 00 项已完成（结论：`rows` NameError 不复现，无需改代码）→ 周榜可验证
+> 位置提示：`chip_formulas/` 已由第 34 项搬进 `features/chip/formulas/`，故内核落在
+> **`backend_fastapi/features/chip/formulas/core/scr.py`**（与建议一致）
 
-## 问题
-SCR90 序列的「按累计筹码取价格分位」这一算法，在仓库里有 **2 份逐字符完全一致**的实现，
-另有 1 份单帧版写着**判空缺陷**。
+## 回填实际改动
 
-## 证据
+**新增内核** `features/chip/formulas/core/scr.py`（107 行，纯 numpy + 一层 pandas 包装）：
 
-### 5a · `_percentile` 实为 2 份（不是 3 份）
-| 位置 | 签名 | 空筹码返回 |
+| 函数 | 语义 | 供谁用 |
 |---|---|---|
-| `indicators/chip_scr.py:19` | `_percentile(centers, row, q) -> float` | `float("nan")` |
-| `chip_formulas/core/base.py:148` | `_percentile(centers, pct, q) -> float \| None` | `None` |
+| `scr_series(pct, centers, q_lo, q_hi)` | **NaN** | 周榜、策略（两次调 5/95 与 15/85 的副图） |
+| `scr_frame(pct_row, centers, q_lo, q_hi)` | **None** | `base._stats_of`（要 JSON 序列化，`null` 比 NaN 诚实） |
+| `scr_value(p_lo, p_hi)` | NaN | 已取好分位时的比值 |
+| `scr_series_pd(res)` | pandas Series | 周榜与策略的共同用法（索引取 `res.dates`） |
 
-函数体本质相同（`np.interp(q/100, cumsum(row)/total, centers)`），**唯一实质差异是空值语义 NaN vs None**。
-（`chip_rank_service` 里**没有** `_percentile`，它把插值内联在 `_scr90_series` 的 :113-114）
+**三处调用点改用内核，两份雷同函数删除**：
 
-### 5b · 逐字符雷同的 2 份（本项目最干净的合并候选）
-- `chip_rank_service.py:99-119` `_scr90_series(res) -> pd.Series`
-- `strategies/scr90.py:37-57` `_scr90_series(res) -> pd.Series`
+| 文件 | 变化 |
+|---|---|
+| `features/chip/rank_service.py` | 删 `_scr90_series`（21 行）→ `scr.scr_series_pd(res)` |
+| `strategies/scr90.py` | 删 `_scr90_series`（21 行）→ `scr.scr_series_pd(res)` |
+| `features/chip/formulas/core/base.py` | 删本地 `_percentile` → `_stats_of` 改用 `scr.scr_frame` |
+| `indicators/chip_scr.py` | 删本地 `_percentile` + `_scr` → 两次 `scr.scr_series`（5/95 与 15/85） |
 
-函数体**完全一致**（含 docstring 措辞、变量名 `pct/centers/out/cum/p5/p95/den`、
-`np.full(pct.shape[0], np.nan)` 初始化、跳过 `den == 0`）。
+**函数体净删约 45 行**，算法只剩一份。
 
-### 5c · 含缺陷的单帧版
-`chip_formulas/core/base.py:157-179` `_stats_of(pct, centers, close_i)` —— 第 **170** 行：
-```python
-if p5 and p95 and (p95 + p5) != 0:
-```
-**缺陷**：`p5` 为 `0.0`（价格分位恰为 0）时 `if p5` 为假 → 静默返回 `scr90=None`。
-另两处用 `den == 0` 判断才是对的。
-（另有一份指标集成版 `indicators/chip_scr.py:42-58`，走 `chip_rows_of` 的 NaN 行对齐，同时算 SCR90/SCR70）
+## 踩坑点三条的处置
 
-## 建议做法
-在 `chip_formulas/core/scr.py` 提供两个函数：
-- `scr_series(pct, centers, q_lo=5, q_hi=95) -> np.ndarray`（**NaN 语义**）→ 供 5b 两处 + 5c-ii
-- `scr_frame(pct_row, centers) -> float | None`（**None 语义**）→ 供 5c-i，并**顺手把 `if p5 and p95` 改成 `den != 0`**
+1. ✅ **只合并算法内核，调用参数一律不动** —— 内核 docstring 用表格写明四类调用方的
+   「有无锁仓修正」差异（周榜/策略 = `offline=True` 无修正；副图/单帧 = qfq 带修正），
+   并注明「这是业务口径差异，不是该 unify 掉的重复；合并时把参数也统一会让数值整体偏移」。
+2. ✅ **判空缺陷已修，属行为变更并已量化** —— `if p5 and p95` → `den == 0`。
+   对照实验（同一输入、旧逻辑逐步复刻 vs 新内核）：
 
-## 注意（踩坑点）
-1. **只合并算法内核，不合并调用参数**：
-   - `chip_rank_service` 与 `strategies/scr90.py` 都是 `offline=True`（**无锁仓修正**）
-   - `indicators/chip_scr.py` 走 `qfq`（**带锁仓修正**）
-   两者口径不同，合并代码时不要把参数也统一了。
-2. 修 `if p5 and p95` → `den != 0` 是**行为变更**：会多产出少量原本为 `None` 的 scr90 值，
-   需确认前端对 `scr90: null` 的处理（副图与周榜都要看一眼）。
-3. `chip_rank_service` 已 `import chip_formulas`（:50），无新增依赖。
+   | 输入 | 旧逻辑 | 新内核 |
+   |---|---|---|
+   | 价格分箱含 0，`P5=0.0`、`P95=1.8` | **`None`**（p5=0 被当成空筹码） | **`1.0`**（正确值） |
+   | `den == 0`（P5=P95=0） | `None` | `None`（一致） |
+   | 正常样本 | 正常值 | 正常值（一致） |
 
-## 验收
-- [ ] 三处 SCR90 计算共用同一内核；两份逐字符雷同的函数消失
-- [ ] 周榜结果与合并前一致（可先在合并前后各跑一次小样本，逐值对比 `scr90`）
-- [ ] 策略 `scr90` 跑同样池子，信号条数与合并前一致
-- [ ] `if p5 and p95` 已修；分位为 0 的极端样本能产出非 None 的 scr90
+   **只影响「分位价格恰为 0」的样本**（分箱下沿正好落在 0 的低价股）；
+   实测 1252 日的 `chip_scr` 副图序列（SCR90 0.031→0.109、SCR70 0.021→0.067）
+   与四个极端样本的 `None` 语义**全部与修复前一致**，没有新增 `null`。
+3. ✅ `chip_rank_service` 原本已 `import chip_formulas`，本项只多一行
+   `from features.chip.formulas.core import scr`（同包内聚）。
+
+## 验收（2026-10-06 实测）
+
+- [x] 三处 SCR90 计算共用同一内核；两份逐字符雷同的函数消失 ✅
+      全仓检索：`_scr90_series` 0 处定义/0 处调用；`_percentile` 只剩内核里 1 份
+- [x] 周榜结果与合并前一致 ✅ **`/api/chip/rank?weeks=1` 100 条逐行逐值零差异**
+      （含 code / scr90 / rank 三列全等）；另在进程内对 600519 / 000002 / 000001
+      三个票做了 120 帧序列的**首 5 / 末 5 / NaN 数 / nansum** 对比，全部一致
+- [x] 策略 `scr90` 跑同样池子正常 ✅ `/api/strategies/recommend`（8 只票、top_n=3）
+      `ok=true`、持仓 3 只、买入 0、卖出 0，价格与盈亏均为合理值
+- [x] `if p5 and p95` 已修；分位为 0 的极端样本能产出非 None 的 scr90 ✅
+      对照表见上（`None` → `1.0`）
+- [x] `chip_formulas.validation_report()` 中 invalid 为 0 ✅
+      `total=1 valid=1 invalid=0`、`FORMULAS=['tri_decay']`
+      （`scr.py` 在 `core/` 下，被注册器的 `_EXCLUDE={"__init__","core"}` 正确排除，
+      不会被误当成一个公式）
+- [x] `/health` 的 `_module_errors` 为空 ✅ `ok=True`、11/11 路由、`integrity.ok=True`
+- [x] `chip_scr` 副图真实入口正常 ✅ `POST /api/indicators/batch`
+      （`{"code":"600519","items":[{"id":"chip_scr"}]}`）→ 1252 点、全部非空，
+      SCR90 与 SCR70 两条序列的值域与方向都合理（越集中值越小）
+- [x] 52 个单元测试全绿 ✅
+
+## 记录
+
+- 2026-10-06 执行，位置为阶段 D 第 24 步。
+- 本项执行期间**顺带发现并修掉了 bug-04 的续集污染**（000001 有 177 行
+  `close=8888.0` 的字段错位、factors 表 4 行夹具），详见
+  `docs/todo/bug-04-*.md` 的「续集」章节；入库校验同步加严为
+  「开收盘必须落在当日高低区间内」。

@@ -407,6 +407,14 @@ def _bad_bar(bar: dict[str, Any]) -> str:
             return key + " 非正数"
     if float(bar["high"]) < float(bar["low"]):
         return "high < low"
+    # 一致性：开收盘必须落在当日高低区间内。bug-04 续集实测过上游字段错位 ——
+    # 腾讯接口曾对 000001 的 177 个交易日返回 close=8888.0 而 O/H/L 正常，
+    # 「非正数/缺字段」那两条校验全都放行，污染直接进了库（后复权与策略回测全被带偏）。
+    lo, hi = float(bar["low"]), float(bar["high"])
+    for key in ("open", "close"):
+        v = float(bar[key])
+        if v < lo * 0.99 or v > hi * 1.01:
+            return "%s=%.4f 越出当日区间 [%.4f, %.4f]" % (key, v, lo, hi)
     return ""
 
 
