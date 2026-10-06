@@ -6,6 +6,48 @@
 
 ### 变更
 
+- **系统设置 / 完整性 / 修复归位 `features/system/`**（待办 32，后端按功能搬家第 5 项）：
+  ```
+  features/system/
+  ├─ __init__.py
+  ├─ routes.py     <- 原 system_routes.py   数据目录/存储信息/完整性/诊断包/重建
+  ├─ integrity.py  <- 原 integrity.py       启动期数据完整性校验
+  └─ repair.py     <- 原 repair_digests.py  指纹修复（独立 CLI）
+  ```
+  - **函数体零改动** —— difflib 逐行对比 HEAD：18 行差异**全是 import**，0 行非 import：
+    `integrity.py` 的 `crypto`/`db`/L215 函数内 `price_store` → `core`；
+    `routes.py` 的 `config`/`crypto`/`storage`/L138 函数内 `price_service` → `core`，
+    `integrity` → 同包；`repair.py` 的 `price_store` → `core`。
+    `import dumplog` 不动（`dumplog` 还在顶层）。
+  - ⭐ **`repair_digests.py` 是独立 CLI，转发额外带 `__main__` 守卫**：
+    全仓无人 import 它，它原本靠 `__main__` 跑，docstring 记载了
+    `python backend_fastapi/repair_digests.py [--apply]`。
+    **只做别名转发会让这条已写进文档的用法静默失效**，所以比第 27 项 `storage.py`
+    多做一步。实测干跑输出「失配 1 处」、`--help` 的 prog 名仍是 `repair_digests.py`、`EXIT=0`。
+  - 踩坑点四条：① `main.py:28` 的模块级 `import integrity` 走转发拿到同一模块对象，
+    `_integrity_state` 仍是「启动算一次并缓存」，实测 `/health` 的 `integrity.ok=True`；
+    ② `APIRouter(prefix="/api/system")` 一字未改，启动器
+    `StockPoolLauncher.cs:1535/1576/1589` 的 `Probe`/`PostJson` 照旧可用；
+    ③ 启动器 `storage.py --set-data-dir-base64` 那条离线链路（第 27 项的 core）
+    实测 `EXIT=0`；④ `POST /api/system/storage` 幂等实测 `ok=true`，`.env` 值未变。
+  - 基线逐项对照全部一致：`STATE_DIR` / `ENV_PATH` / `DB_PATH` / `storage.STATE_DIR` /
+    `integrity.ensure_signed()` / `router prefix` / **11 条路由清单** /
+    **`integrity` 全部公开名（含 `_all_targets` 等 3 个私有名）**。
+  - ⚠️ **排查出一处既有误报并证明与本项无关**：核对基线时 `integrity.summary()` 报
+    「`bars_2021` 文件修改时间明显晚于程序记录」。用 `git stash` 回到搬家前
+    （HEAD = 第 31 项、本项零改动）跑同样调用，**稳定复现同一条**（4/4 次）；
+    真实服务端流程下 `/health` 的 `integrity.ok=True`。
+    成因是 `integrity.py` **自己 docstring 就写明**的陷阱 —— 打开 WAL 库会创建 `-wal`，
+    其 mtime 是「此刻」，若在连接之后取值会把「打开库」误判成「被外部写入」。
+    属既有时效性敏感点，**不在纯搬家项里修**，需单独立项。
+  - 流程教训两条：① 转发生成器首版把「转发名」当「实现文件名」（`repair_digests` 的实现是
+    `repair.py`），**`ast.parse` 查不出**（运行期 `ImportError`），靠导入自检才暴露
+    —— **语法校验必须再配一个导入自检**；
+    ② import 扫描器的判据不该是我记得的那几个模块名，应对照「所有项目内模块」的完整清单
+    （先前漏掉了 `routes.py` 的 `crypto` 与 L138 的 `price_service`）。
+  - 验证：10 个模块全部导入成功；3 个转发与实现是同一对象；11/11 路由挂载、
+    stderr 无告警；全仓 .py 三引号成对 + `ast.parse` 全部通过；52 个单元测试全绿。
+
 - **下载与调度归位 `features/download/`**（待办 31，后端按功能搬家第 4 项）：
   ```
   features/download/

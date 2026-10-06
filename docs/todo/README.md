@@ -68,7 +68,7 @@
 | 29 ✅ | [29-后端-features-stock.md](29-后端-features-stock.md) | 个股/估值/板块索引搬到 `features/stock/` | ★★★ / ★★★（依赖 27）—— **已完成** |
 | 30 ✅ | [30-后端-features-history.md](30-后端-features-history.md) | 股票池历史搬到 `features/history/` | ★★★ / ★★☆（依赖 27）—— **已完成** |
 | 31 ✅ | [31-后端-features-download.md](31-后端-features-download.md) | 下载与调度搬到 `features/download/` | ★★★ / ★★★（依赖 27）—— **已完成** |
-| 32 | [32-后端-features-system.md](32-后端-features-system.md) | 系统设置/完整性/修复搬到 `features/system/` | ★★ / ★★☆（依赖 27） |
+| 32 ✅ | [32-后端-features-system.md](32-后端-features-system.md) | 系统设置/完整性/修复搬到 `features/system/` | ★★ / ★★☆（依赖 27）—— **已完成** |
 | 33 | [33-后端-features-mentor.md](33-后端-features-mentor.md) | 大佬策略实验室搬到 `features/mentor/` | ★★ / ★★☆（依赖 27） |
 | 34 | [34-后端-features-chip.md](34-后端-features-chip.md) | 筹码体系（**被依赖最多，最后搬**） | ★★★★ / ★★★★（依赖 27~33） |
 | 35 | [35-后端-目录改名与路径同步.md](35-后端-目录改名与路径同步.md) | 可选：`backend_fastapi` 改名 → 同步启动器/脚本/文案 | ★★ / ★★★★（**依赖全部**） |
@@ -106,6 +106,13 @@
 先修完再搬，动的文件少、回归面小。
 
 ## 已完成的项
+- **32** 系统设置/完整性/修复归位 `features/system/`（`routes` / `integrity` / `repair`）：
+  **函数体零改动**（difflib 逐行核对：18 行差异全是 import）。
+  ⭐ `repair_digests.py` 是**独立 CLI**（全仓无人 import），别名转发**额外带 `__main__` 守卫**，
+  保住了它 docstring 里记载的 `python repair_digests.py [--apply]` 那条用法 ——
+  否则只做转发会让已写进文档的调用方式**静默失效**。
+  另排查出 `integrity` 一处**既有**误报（`-wal` mtime 与 `_meta` 记录的时效敏感点，
+  它自己 docstring 就有记载），已用 `git stash` 回到搬家前复现，证明**与本项无关**。
 - **31** 下载与调度归位 `features/download/`（`service` / `store` / `routes`）：**函数体零改动**，
   `git diff` 只有 9 行 import。全仓最有状态的一块（自带调度线程 + 任务引擎 + 落库断点续跑）。
   ⭐ 踩坑点 1「模块级 `_start_background()`」用**两条独立证据**验住：

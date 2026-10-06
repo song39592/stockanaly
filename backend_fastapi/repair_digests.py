@@ -1,47 +1,31 @@
 # -*- coding: utf-8 -*-
-"""维护脚本：修复「指纹与数据不一致」的日 K 记录。
+"""兼容转发：`repair_digests` 已移入 `features/system/repair.py`（第 32 项）。
 
-用法（在 backend_fastapi 目录、用 venv python）：
-    .\\venv\\Scripts\\python.exe repair_digests.py            # 干跑：只列失配清单，不落库
-    .\\venv\\Scripts\\python.exe repair_digests.py --apply    # 真正按当前数据重算指纹
+**这是过渡文件，不是实现。** 新代码请直接用 `features.system.repair`。
 
-背景：某次批量增量同步（source=腾讯证券）写库后没刷指纹，导致大量 (代码, 年份分片)
-指纹停在旧行数 / 旧内容，`load_bars` 抛 UntrustedDataError。数据出自可信管道、非篡改，
-故按「当前数据 = 新基线」修复（见 price_store.repair_digests）。
+⚠️ **本文件原本是独立 CLI**，全仓无人 import 它。
+它自己的 docstring 记载了调用方式 `python repair_digests.py [--apply]`，
+所以本转发**额外带 __main__ 守卫**，保证那条使用方式不断。
+若不需要 CLI，直接 `from features.system.repair import main` 亦可。
 
-⚠️ 只在确认数据可信、且后端进程**没有正在写日 K** 时执行 --apply：
-若同步任务恰好写库，重算出的指纹可能又立刻过期（无害但会重复触发校验失败）。
+## 为什么用 `sys.modules` 别名，而不是 `from ... import *`
+
+别名转发拿到的是**同一个模块对象**，因此下划线私有名照常可见
+（`integrity._all_targets` / `_latest_mtime` / `_parse_iso` 三个是跨模块可见的），
+`patch.object(...)` 真正生效。`import *` 只复制名字做不到这些。
 """
-from __future__ import annotations
 
-import argparse
 import sys
 
-import price_store
+from features.system import repair as _impl
 
-# 控制台可能是 GBK（未 chcp 65001 时），中文输出会炸；统一按 UTF-8 输出
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.modules[__name__] = _impl
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="修复日K指纹（默认干跑）")
-    ap.add_argument("--apply", action="store_true", help="真正重算指纹（缺省只干跑）")
-    args = ap.parse_args()
-
-    res = price_store.repair_digests(dry_run=not args.apply)
-    label = "已修复" if args.apply else "干跑（未落库）"
-    print(f"{label}：失配 {res['count']} 处")
-    for year, n in sorted(res["by_year"].items()):
-        print(f"  {year} 年分片: {n}")
-    shown = res["items"][:40]
-    for item in shown:
-        print(f"  {item['code']} @ {item['year']}: {item['reason']}")
-    if len(res["items"]) > 40:
-        print(f"  ... 其余 {len(res['items']) - 40} 处略")
-    if args.apply and res["updated"]:
-        print(f"已重算 {len(res['updated'])} 条指纹。")
-
-
+# 本文件原本是**独立 CLI 脚本**（不是被 import 的模块），用法是
+#   python backend_fastapi/repair_digests.py            # 干跑：只列失配清单，不落库
+#   python backend_fastapi/repair_digests.py --apply    # 真正按当前数据重算指纹
+# 上面两行在原文件的 docstring 里有记载。搬进包后 __name__ 仍是 __main__，
+# 故显式调实现里的 main()，**保证这条使用方式不断**（与第 27 项 storage.py 同样做法）。
 if __name__ == "__main__":
-    main()
+    raise SystemExit(_impl.main() or 0)
