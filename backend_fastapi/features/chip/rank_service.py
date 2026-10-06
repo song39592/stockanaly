@@ -56,11 +56,25 @@ from strategies.core.data import list_universe_codes
 PROCESSED_DIR = chip_service.PROCESSED_DIR
 IO_WORKERS = 6                 # 与 strategies/core/data.py 同量级：再多线程只是在抢 SQLite 连接
 DEFAULT_TOP = 100              # 每期取 SCR90 最小的 N 只（= 最集中）
-DEFAULT_WEEKS = 5              # 连续几期在榜算「全勤」（对齐 chip_service.FULL_WEEKS）
 DEFAULT_DAYS = 250             # 筹码窗口（交易日），同时决定预热长度
 DEFAULT_BINS = 80
-DEFAULT_CHG_DAYS = 30          # 离榜时看多少交易日的涨幅（对齐 chip_service 的「30日涨幅%」）
-DEFAULT_LAUNCH = 10.0          # 涨幅 ≥ 该阈值视为「上涨离开/启动型」（对齐 LAUNCH_THRESHOLD）
+
+# ---- 与 scr_service 共用的阈值（第 12 项：把「对齐注释」改成「代码引用」）----
+# 这两个确实是同一口径：都在判「连续几期算全勤」/「涨幅≥该值算上涨离榜」，
+# 改一处的业务含义就该跟着变，不该靠注释提醒人去同步。
+DEFAULT_WEEKS = chip_service.FULL_WEEKS
+DEFAULT_LAUNCH = chip_service.LAUNCH_THRESHOLD
+
+# ⚠️ `DEFAULT_CHG_DAYS` **刻意不对齐** scr_service —— 待办 12 原建议在这里补一个
+# `chip_service.CHG_DAYS_DEFAULT` 再引用，**那条建议是错的**，理由：
+#   - 本侧的 30 是**交易日窗口**：`s.iloc[-1 - days]` 取的是交易日序列往前第 30 根；
+#   - scr_service 的 `chg30` 是**导出文件里现成的列名**（「30日涨幅%」），
+#     那个 30 是行情软件的统计口径（本项目无从控制它），且 scr_service
+#     **根本没有「天数」这个参数** —— 它是按列名直读的。
+# 数值相同纯属巧合（都是 30）。若为「看起来统一」而在 scr_service 里造一个
+# CHG_DAYS_DEFAULT，它自己一个调用点都没有，就是个骗人的常量。
+# 真正该统一的是「涨幅阈值的百分比」，已由上面的 DEFAULT_LAUNCH 接管。
+DEFAULT_CHG_DAYS = 30
 
 _LOCK = threading.Lock()
 _STATE: dict[str, Any] = {
@@ -272,7 +286,7 @@ def _worker(week: dt.date, weeks: list[dt.date], codes: list[str], top_n: int,
                          "count": len(left_down), "items": left_down},
             },
         }
-        os.makedirs(PROCESSED_DIR, exist_ok=True)
+        chip_service._ensure_dirs()   # 第 14 项：复用而非内联 makedirs（与复用 PROCESSED_DIR 同性质）
         with open(_result_path(week), "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
 

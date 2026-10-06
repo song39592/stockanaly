@@ -38,9 +38,9 @@
 | 09 ✅ | [09-后端-json_safe公共化.md](09-后端-json_safe公共化.md) | 后端 | 唯一写对的 NaN 清洗只服务 1 个模块 | ★★★★★ / ★☆☆ —— **已完成** |
 | 10 ✅ | [10-后端-scr90_series合并.md](10-后端-scr90_series合并.md) | 后端 | 2 份逐字符雷同的 SCR90 序列 + 1 个判空缺陷 | ★★★★ / ★☆（须在 00 之后）—— **已完成** | |
 | 11 ✅ | [11-后端-错误体形状统一.md](11-后端-错误体形状统一.md) | 后端 | 4 种路由错误风格 → 统一 error 形状（不动状态码） | ★★★★ / ★★ —— **已完成** |
-| 12 | [12-后端-阈值常量与chip_service对齐.md](12-后端-阈值常量与chip_service对齐.md) | 后端 | 三档阈值靠注释同步 → 改成代码引用 | ★★★ / ★ |
+| 12 ✅ | [12-后端-阈值常量与chip_service对齐.md](12-后端-阈值常量与chip_service对齐.md) | 后端 | 三档阈值靠注释同步 → 改成代码引用 | ★★★ / ★ —— **已完成**（1 处判定不该对齐） |
 | 13 | [13-后端-ParamSpec三份合并.md](13-后端-ParamSpec三份合并.md) | 后端 | 三处 `ParamSpec` 字段逐字符相同 | ★★★ / ★☆ |
-| 14 | [14-后端-ensure_dirs复用.md](14-后端-ensure_dirs复用.md) | 后端 | 已 import 却自写一行 makedirs | ★★ / ☆ |
+| 14 ✅ | [14-后端-ensure_dirs复用.md](14-后端-ensure_dirs复用.md) | 后端 | 已 import 却自写一行 makedirs | ★★ / ☆ —— **已完成** |
 | 15 ✅ | [15-后端-httpclient统一.md](15-后端-httpclient统一.md) | 后端 | raw HTTP **6 份**（原记 4 份）+ UA 四个变体 | ★★★ / ★★ —— **已完成** |
 | 16 | [16-后端-market_symbol三份口径.md](16-后端-market_symbol三份口径.md) | 后端 | 3 份市场前缀规则集互相矛盾 | ★★ / ★★★（**先评估**） |
 | 17 | [17-后端-kline_service出口收口.md](17-后端-kline_service出口收口.md) | 后端 | 自称唯一出口但有 4 处绕过，含自写后复权 | ★★★ / ★★★ |
@@ -106,6 +106,20 @@
 先修完再搬，动的文件少、回归面小。
 
 ## 已完成的项
+- **12 + 14**（同文件同批提交）：`rank_service` 的阈值常量与内联 `makedirs` 清理。
+  `DEFAULT_WEEKS`/`DEFAULT_LAUNCH` 改为**直接引用** `scr_service`（改上游会联动，实测验证）。
+  ⭐ **`DEFAULT_CHG_DAYS` 判定「不该对齐」**——待办建议在 `scr_service` 补一个
+  `CHG_DAYS_DEFAULT` 再引用，**照做会造一个骗人的常量**：本侧的 30 是**交易日窗口**
+  （`s.iloc[-1-days]` 取交易日序列），`scr_service` 的 `chg30` 是**导出文件的列名**
+  「30日涨幅%」（行情软件的口径，本项目无从控制，且它根本没有「天数」这个参数）。
+  数值同为 30 纯属巧合。该统一的「涨幅阈值百分比」已由 `DEFAULT_LAUNCH` 接管。
+  按待办建议只做复用、不改名（`_ensure_dirs` 改公开名会动6 个调用点，留给后续）。
+  ⚠️ **本项实测教训（比改动更重要）**：验证「删掉 processed 能否自动重建」时，
+  我的脚本**真删了生产数据盘**的 `<data>/chip/processed/`，清空了用户的周榜缓存 ——
+  这正是 `bug-04`（测试夹具污染生产数据库）同形态的错误，自己犯了。已触发
+  `force=true` 重算恢复。正确做法应是把 `DATA_DIR` 指到临时目录
+  （`test_support.require_data_isolation` 就是干这个的）。
+  **教训：验证「目录能自动重建」时，先问「删的是谁的数据」。**
 - **11** 路由错误体形状统一：新增 `apiutil.py`（`ok/fail/soft_fail/guard/http_error/install`），
   形状统一为 `{"ok":false,"detail":…,"error":{"code","message"}}`。
   ⭐ 主力杠杆是**全局异常处理器**—— 全仓 90 余处 `raise HTTPException(detail=…)`

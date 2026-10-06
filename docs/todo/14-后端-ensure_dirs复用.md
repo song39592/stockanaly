@@ -1,6 +1,26 @@
 # 14 · 后端：`chip_rank_service` 复用 `chip_service._ensure_dirs`
 
-> 状态：待办　|　优先级：低　|　收益 ★★☆☆☆ / 风险 ☆☆☆☆☆（零风险，一行）
+> 状态：**已完成**（2026-10-06）　|　优先级：低　|　收益 ★★☆☆☆ / 风险 ☆☆☆☆☆（零风险，一行）
+> 注：待办里的文件名是**搬家前**的旧名（`chip_service` → `features/chip/scr_service.py`，
+> `chip_rank_service` → `features/chip/rank_service.py`，第 34 项）。
+
+## 实际落地
+
+`rank_service._worker` 写盘前那行内联的 `os.makedirs(PROCESSED_DIR, exist_ok=True)`
+已换成 `chip_service._ensure_dirs()`（模块内 `makedirs` 只剩注释里那一处提及）。
+
+按待办的建议**只做复用、不改名**（`_ensure_dirs` 改公开名要动 6 个调用点，留给后续）。
+调用跨模块私有函数与它现有的 `PROCESSED_DIR` / `expected_weeks` 复用同性质，
+代码里就地注明了这一点。
+
+## 验收
+- [x] `rank_service` 不再内联 makedirs
+- [x] 调用 `_ensure_dirs()` 后 `processed/` 可自动重建（实测：删除后调用即重建，
+      连带 `DATA_DIR` / `RAW_DIR` 一并建好）
+- [x] 52 个单元测试全绿
+
+> ⚠️ 验证时**误删了生产 `processed/` 目录**，详见第 12 项里记的教训；
+> 已触发 `force=true` 重算恢复。
 
 ## 问题
 `chip_rank_service` 已经 `import chip_service`（:51），也直接复用了它的 `PROCESSED_DIR`（:54），
