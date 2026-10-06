@@ -6,6 +6,47 @@
 
 ### 变更
 
+- **下载与调度归位 `features/download/`**（待办 31，后端按功能搬家第 4 项）：
+  ```
+  features/download/
+  ├─ __init__.py
+  ├─ service.py   <- 原 download_service.py  任务引擎 + 调度循环（975 行）
+  ├─ store.py     <- 原 download_store.py    任务落库、断点续跑、暂停/继续/取消
+  └─ routes.py    <- 原 download_routes.py
+  ```
+  - **函数体零改动** —— `git diff` 只有 **9 行 import**：
+    `service.py` 的 `db`/`price_service`/`price_store`/`tdx_reader` 改指 `core`、
+    `download_store` 改指同包、`history_store` 改指 `features.history.store`、
+    `from market_service import _ak` 改指 `features.market.service`；
+    `routes.py` 的 `download_service` 改指同包；`store.py` 的 `db` 改指 `core.db`。
+    L682 函数内 `import cleanup` 不动（`cleanup.py` 仍在顶层）。
+  - ⭐ **踩坑点 1「模块级 `_start_background()`」是本项最大风险**，用**两条独立证据**验住：
+    ① 沿转发链导入后进程内出现 **`Thread-1 (_scheduler_loop)`** 线程；
+    ② 把 `download_store` 的 `last_cleanup_date` **清空**再起后端，
+    **85 秒内被调度线程写回 `2026-10-06`**（`SCHEDULER_INTERVAL = 60`）——
+    不只是"线程在"，而是真的跑完一轮并触发了 `cleanup.schedule_tick()`。
+    **这同时也证通了第 24 项的定时清理链路**（`cleanup.py` 本身未搬动）。
+    触发链一环未改：`main.py` 的 `ROUTE_MODULES` 字符串 `"download_routes"` → 转发 →
+    `features.download.routes` → import service → 模块级 `_start_background()`。
+  - ⭐ **先查后搬**：三个文件里 `__file__` / `Path()` / `os.path` 检索为**空**。
+    这是第 27 项 `config.PROG_DIR` 踩过的坑（多退一级否则静默指错目录），本项提前排除。
+    DB 路径来自 `core/db.py` 的 `config.STATE_DIR`，落在数据盘
+    `E:\stockanaly-data\state\stock_history.db`，搬家前后一致 ——
+    **运行中的任务不会因搬家"丢失"**（`download_tasks` 25 行 / `download_settings` 8 行健在）。
+  - **下载页任务引擎完整跑通一遍生命周期**：
+    `新建 → queued(total=100)` → `进度 → running` → `暂停 → paused` → `进度 → paused` →
+    `继续 → running` → `取消 → cancelled`，每步 `ok=true`
+    （用 `scope=pool` + `mode=incremental` + `source=tdx` 本机数据，不打外网）。
+  - **`recover_stale()` 单独构造实验**：把任务在库里写回 `running`（模拟进程被强杀、
+    内存 worker 已消失），调 `recover_stale()` 返回 **1**、状态变回 **`paused`**。
+  - 启动器退出码文案（`requirements.txt` / `.venv` 硬编码路径）属第 35 项，本次**不含任何 .cs**。
+  - 按数据源并发（`ThreadPoolExecutor(max_workers=len(jobs))`，5 个 block 各一线程）
+    与第 07 项的按标的批量并发语义不同，本项只改 import、未触碰该段。
+  - 验证：10 个模块全部导入成功（含 `cleanup`、`core.db`、`test_settings_download`、`main`）；
+    3 个转发与实现是同一对象；`settings_map` 8 个键**零差异**；
+    全仓 .py 三引号成对 + `ast.parse` 全部通过；4 个只读端点全 `ok=true`；
+    `/health` 无模块错误、11/11 路由挂载、stderr 无告警；52 个单元测试全绿。
+
 - **股票池历史归位 `features/history/`**（待办 30，后端按功能搬家第 3 项）：
   ```
   features/history/

@@ -67,7 +67,7 @@
 | 28 ✅ | [28-后端-features-market.md](28-后端-features-market.md) | 盘面/板块搬到 `features/market/` | ★★★ / ★★★（依赖 27）—— **已完成** |
 | 29 ✅ | [29-后端-features-stock.md](29-后端-features-stock.md) | 个股/估值/板块索引搬到 `features/stock/` | ★★★ / ★★★（依赖 27）—— **已完成** |
 | 30 ✅ | [30-后端-features-history.md](30-后端-features-history.md) | 股票池历史搬到 `features/history/` | ★★★ / ★★☆（依赖 27）—— **已完成** |
-| 31 | [31-后端-features-download.md](31-后端-features-download.md) | 下载与调度搬到 `features/download/` | ★★★ / ★★★（依赖 27） |
+| 31 ✅ | [31-后端-features-download.md](31-后端-features-download.md) | 下载与调度搬到 `features/download/` | ★★★ / ★★★（依赖 27）—— **已完成** |
 | 32 | [32-后端-features-system.md](32-后端-features-system.md) | 系统设置/完整性/修复搬到 `features/system/` | ★★ / ★★☆（依赖 27） |
 | 33 | [33-后端-features-mentor.md](33-后端-features-mentor.md) | 大佬策略实验室搬到 `features/mentor/` | ★★ / ★★☆（依赖 27） |
 | 34 | [34-后端-features-chip.md](34-后端-features-chip.md) | 筹码体系（**被依赖最多，最后搬**） | ★★★★ / ★★★★（依赖 27~33） |
@@ -106,6 +106,14 @@
 先修完再搬，动的文件少、回归面小。
 
 ## 已完成的项
+- **31** 下载与调度归位 `features/download/`（`service` / `store` / `routes`）：**函数体零改动**，
+  `git diff` 只有 9 行 import。全仓最有状态的一块（自带调度线程 + 任务引擎 + 落库断点续跑）。
+  ⭐ 踩坑点 1「模块级 `_start_background()`」用**两条独立证据**验住：
+  ① 转发链导入后进程内出现 `Thread-1 (_scheduler_loop)` 线程；
+  ② 把 `last_cleanup_date` 清空再起后端，**85 秒内被写回今天** —— 不只是线程在，
+  而是真的跑完一轮并触发了定时清理（第 24 项链路一并证通）。
+  另**先查后搬**确认三个文件无任何 `__file__` 路径推导（第 27 项 `PROG_DIR` 踩过的坑），
+  落库路径落在数据盘、搬家前后一致。
 - **30** 股票池历史归位 `features/history/`（`service` / `store` / `routes`）：只改 import，函数体未动。
   ⭐ 用**源码断言**验住了踩坑点 1 —— `load_trusted_bars` 仍直连 `price_store.load_bars`、
   仍捕获 `UntrustedDataError`、**没有**被改成走 `kline_service.get_bars`，
