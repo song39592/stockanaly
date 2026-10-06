@@ -6,16 +6,23 @@
 #   4) 配置与凭据       —— 模板跟踪，真实值忽略
 #   5) 日志与持久化状态
 #
-# ⚠️ 改完必须验证：已跟踪文件一个都不能变少（否则等于静默丢文件）
+# ⚠️ 改完必须验证：已跟踪文件一个都不能变少（否则等于静默丢文件）。
+#    命令：`git ls-files | Measure-Object -Line` 前后对比，
+#    再看 `git status --porcelain` 是否与改动前一致。
 # =====================================================================
 
 
 # -------------------- 1) 源码（不忽略任何东西）--------------------
 # 说明：代码属于仓库，全部跟踪。这里只登记目录归属，方便后续分类对照。
 #
-#   backend_fastapi/    后端源码（按功能：core / features / indicators / strategies / chip_formulas）
-#   launcher/           前端原生启动器（按页面：StockPage / StrategyPage / MarketPage /
-#                       ValuationPage / DownloadPage / ChipRankPage + 公共件）
+#   backend_fastapi/    后端源码：core/（基础设施）+ features/（按功能分包
+#                       market / stock / history / download / system / mentor
+#                       / chip）+ indicators/ + strategies/ + 顶层兼容转发
+#                       （chip_formulas 已于第 34 项搬入 features/chip/formulas/）
+#   launcher/           前端原生启动器（按页面 StockPage / StrategyPage / MarketPage /
+#                       ValuationPage / DownloadPage / ChipRankPage，
+#                       公共件 UiKit / GridKit / ChartKit / Cards / J / Http /
+#                       AsyncKit / Palette / SubTabStrip）
 #   frontend/           前端网页（按页面分目录，shared 放共享 js）
 #   agent_dsh/          dsh agent（其 node_modules 由第 2 类统一忽略）
 #
@@ -32,7 +39,16 @@ venv/
 env/
 ENV/
 node_modules/
-.runtime/          # 本机 Node 运行时，可重新下载
+# 本机 Node 运行时，可重新下载
+# ⚠️ 注释必须写在**上一行**：gitignore 不支持行尾注释 —— 行首的 `#` 才是注释，
+#    行尾的 `#` 会被当成**字面量**，整行模式变成「路径 + # + 文字」而匹配不到任何东西。
+#    （第 19 项实测：`.runtime/` 曾因写成行尾注释而一直失效，实际是 .git/info/exclude
+#     在兜底；一旦那条被清掉就会突然开始暴露 .runtime/。）
+.runtime/
+# 第 19 项实测：venv 有 9668 个文件 / 230MB。若日后考虑把 backend_fastapi
+# 改名为 backend，**venv 不要留在旧目录** —— 那会让 venv 与源码分属两个目录，
+# 比现在更难维护（探测要试两个位置、安装脚本跨目录）。要么整体迁移，
+# 要么就别改这个名。
 # ----------------------------------------------------------
 
 
@@ -68,12 +84,11 @@ credentials.*
 *apikey*
 *api_key*
 *.token
-# 启动器生成：浅色 / 深色主题状态（页面读取它）
+# 启动器生成的主题状态（本机状态，页面读它决定浅色/深色，不进版本库）
 frontend/shared/theme-state.js
-# ----------------------------------------------------------
-# 说明：上面这一行里的 `frontend/shared/theme-state.js` 是**被忽略**的真实配置，
-# 不要因为它出现在本文件就以为它已跟踪 —— 它只在 .gitignore 里。
-# 路径随第 25 项（网页按页面分子目录）从 frontend/ 改到 frontend/shared/。
+# ⚠️ `!.env.example` 是**唯一**允许提交的凭据模板，删掉会让新机器无法初始化。
+# ⚠️ 别给 theme-state.js 加 `!` 反向规则 —— 它是运行期生成的本机状态，
+#    反向规则会把每次切主题都变成一次提交噪声。
 # ----------------------------------------------------------
 
 
@@ -87,4 +102,28 @@ backend_fastapi/chip_data/
 instance.lock
 # 策略 / 筹码公式的运行时校验缓存（自动生成，不可提交）
 backend_fastapi/strategies/_validated.json
+
+# ---- 以下两条是**防御性规则**：它们的匹配目标当前并不在仓库内 ----
+# 加它们不是为现在，而是为「以后有人把产物生成到源码树里」时能自动挡住
+# （与上面的 instance.lock 同思路）。数据盘在仓库外，所以平时用不上。
+# 将来的磁盘缓存目录（<data>/cache/）
+cache/
+# dumplog 诊断包（第 23 项，实际落在 <data>/logs/）
+dump-*.zip
+
+# ⚠️ **故意不加**的两条，理由写在这里防止以后被人「补全」：
+#
+#   *.db / *.sqlite*            —— 不做全局忽略。仓库里可能出现需要提交的
+#                                 示例/测试库，一刀切会静默吞掉它们。数据盘的
+#                                 DB 本来就在仓库外；源码树里若真出现临时库，
+#                                 上面的 backend_fastapi/data/ 已覆盖。
+#
+#   agent_dsh/skills_library/*.skill
+#                              —— **不要**忽略。这三个（bft / general /
+#                                 short-trader-01）是**手写的技能定义**，属第 1 类
+#                                 源码，已被 git 跟踪。第 19 项原文把它们当成
+#                                 「运行期产物」，是误判：运行期生成的是
+#                                 agent_dsh/.env 与 dsh.log（前两个规则已覆盖），
+#                                 skills_library 是版本化资产。给已跟踪文件加
+#                                 忽略规则不生效，还会误导后来人以为它不该进库。
 # ----------------------------------------------------------
