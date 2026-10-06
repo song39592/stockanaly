@@ -40,6 +40,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 import re
 from typing import Any
 
@@ -386,9 +387,35 @@ def repair_digests(dry_run: bool = True) -> dict:
             "items": affected, "updated": updated}
 
 
+def _bad_bar(bar: dict[str, Any]) -> str:
+    """返回该柱不可入库的原因；空串 = 合法。
+
+    bug-04（测试夹具污染生产库）的教训：一根「只有 close、O/H/L/V 全空」的柱
+    足以同时打坏两张脸 —— 前端图表价格刻度被撑到负值（红烛从图例顶贯到绘图区底）、
+    筹码分布全分箱 NaN（turnover 缺失沿衰减累积传染）-> JSON 序列化直接 500。
+    所以在写入的门口拒收：缺任一 O/H/L/C、或有非正价格，一律不入库。
+    """
+    for key in ("open", "high", "low", "close"):
+        v = bar.get(key)
+        if v is None:
+            return "缺少 " + key
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            return key + " 不是数值"
+        if math.isnan(fv) or math.isinf(fv) or fv <= 0:
+            return key + " 非正数"
+    if float(bar["high"]) < float(bar["low"]):
+        return "high < low"
+    return ""
+
+
 def upsert_bars(code: str, bars: list[dict[str, Any]], adjust: str = "raw",
-                source: str = "") -> int:
+                source: str = "", validate: bool = True) -> int:
     """写入日 K：按年份分组，路由到对应的分片库（主键保证同口径同日覆盖）。
+
+    `validate=True`（默认）时跳过缺 O/H/L/C 或价格非正的柱（见 `_bad_bar`）；
+    单元测试里故意写「只有 close」的夹具柱时请显式传 `validate=False`。
 
     ⚠️ **写入前先判定旧指纹：已损坏则不重算**。
     增量写入只覆盖「有数据的那几天」，若此时直接重算指纹，会把**本次没覆盖到的
@@ -402,6 +429,8 @@ def upsert_bars(code: str, bars: list[dict[str, Any]], adjust: str = "raw",
     for bar in bars:
         day = str(bar.get("date") or "")[:10]
         if not day:
+            continue
+        if validate and _bad_bar(bar):
             continue
         grouped.setdefault(_year_of(day), []).append((
             code, day, store_adjust, bar.get("open"), bar.get("high"), bar.get("low"),
@@ -426,7 +455,7 @@ def upsert_bars(code: str, bars: list[dict[str, Any]], adjust: str = "raw",
 
 
 def overwrite_bars(code: str, bars: list[dict[str, Any]], adjust: str = "raw",
-                   source: str = "") -> dict[str, int]:
+                   source: str = "", validate: bool = True) -> dict[str, int]:
     """用给定数据**整体替换**某股某口径的日 K。
 
     与 `upsert_bars` 的区别：upsert 只写「有数据的那些天」，库里多出来的旧行**不会被动**；
@@ -442,6 +471,8 @@ def overwrite_bars(code: str, bars: list[dict[str, Any]], adjust: str = "raw",
     for bar in bars:
         day = str(bar.get("date") or bar.get("trade_date") or "")[:10]
         if not day:
+            continue
+        if validate and _bad_bar(bar):
             continue
         grouped.setdefault(_year_of(day), []).append((
             code, day, store_adjust, bar.get("open"), bar.get("high"), bar.get("low"),

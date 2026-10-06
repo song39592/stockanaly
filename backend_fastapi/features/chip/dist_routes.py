@@ -23,6 +23,23 @@ from core.periods import normalize
 router = APIRouter(prefix="/api/chip/dist", tags=["筹码体系 · 筹码分布"])
 
 
+
+def _finite(obj):
+    """递归把 NaN / Inf 换成 None（json.dumps 对非有限浮点直接抛 ValueError）。
+
+    bug-04 的教训：一根缺字段的脏柱让筹码分布全分箱变 NaN，路由本身没问题，
+    却在**响应序列化**阶段 500 —— 前端只看到「筹码接口无响应」，完全无从排查。
+    在出口处净化一次，脏数据最多表现为空 bin，不再打挂接口。
+    """
+    if isinstance(obj, float):
+        return None if (obj != obj or obj in (float("inf"), float("-inf"))) else obj
+    if isinstance(obj, dict):
+        return {k: _finite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_finite(v) for v in obj]
+    return obj
+
+
 @router.get("/formulas")
 def chip_dist_formulas():
     """可用筹码公式清单（LOAD 校验通过者）；default 供前端默认选中。"""
@@ -64,9 +81,9 @@ def chip_dist(code: str = Query(..., min_length=6, max_length=6,
         if not isinstance(parsed, dict):
             raise HTTPException(status_code=400, detail="params 必须是 JSON 对象")
     try:
-        return chip_formulas.compute(
+        return _finite(chip_formulas.compute(
             code, formula_id=formula, params=parsed, start=start, end=end,
-            adjust=adjust, days=days or None, bins=bins, period=period)
+            adjust=adjust, days=days or None, bins=bins, period=period))
     except KeyError as exc:                     # 公式 id 不存在
         raise HTTPException(status_code=400, detail=str(exc).strip("'"))
     except RuntimeError as exc:                 # 行情不足 / 缺流通股本：业务性失败

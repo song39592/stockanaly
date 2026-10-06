@@ -1391,6 +1391,9 @@ bool ok = J.IsOk(j);
                     b.L = J.NumOrNull(J.Get(d, "low")) ?? 0;
                     b.H = J.NumOrNull(J.Get(d, "high")) ?? 0;
                     b.V = J.NumOrNull(J.Get(d, "volume")) ?? 0;
+                    // 跳过坏柱（bug-04）：O/H/L 缺失被补成 0 的柱会把价格刻度
+                    // 撑到负值（红烛从图例顶贯到绘图区底）。入库已在后端拒收，这里再兜一层。
+                    if (b.O <= 0 || b.H <= 0 || b.L <= 0 || b.C <= 0 || b.H < b.L) continue;
                     bars.Add(b);
                 }
             }
@@ -1409,6 +1412,7 @@ bool ok = J.IsOk(j);
                     b.L = J.NumOrNull(J.Get(d, "low")) ?? 0;
                     b.H = J.NumOrNull(J.Get(d, "high")) ?? 0;
                     b.V = J.NumOrNull(J.Get(d, "volume")) ?? 0;
+                    if (b.O <= 0 || b.H <= 0 || b.L <= 0 || b.C <= 0 || b.H < b.L) continue;   // 坏柱（bug-04）
                     barsRaw.Add(b);
                 }
             }
