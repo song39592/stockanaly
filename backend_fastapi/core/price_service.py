@@ -19,6 +19,7 @@ from typing import Any
 import akshare as ak
 
 from . import price_store
+from .fallback import first_ok
 from . import share_service
 from market_service import _ak
 
@@ -151,6 +152,13 @@ def _bar_problem(bar: dict[str, Any]) -> str | None:
     return None
 
 
+# 日 K 取数的总预算（秒）。原本两源各 30~35s 串行 → 最坏 65s，
+# 而它在同步路径上（下载 / 全局重取）。正常下首个源即命中，
+# 预算 45s 已留 4 倍余量（bug-02）。
+_DAILY_BUDGET = 45.0
+_DAILY_PER_SOURCE = 35.0
+
+
 def fetch_daily(code: str, start: dt.date, end: dt.date,
                 adjust: str = "raw") -> tuple[list[dict[str, Any]], str, list[str]]:
     """抓取并校验某区间的日 K。
@@ -167,23 +175,31 @@ def fetch_daily(code: str, start: dt.date, end: dt.date,
     ak_adjust = _AK_ADJUST.get(store_adjust, store_adjust)
     sd, ed = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
-    # 北交所（920 新段 + 原精选层 8/4 段）：东财/腾讯接口对该段常返回空，改走新浪
+    def _df_ok(df) -> bool:
+        return df is not None and not getattr(df, "empty", True)
+
+    def _sina(t):
+        return _ak(ak.stock_zh_a_daily, symbol=market_symbol(code), start_date=sd,
+                   end_date=ed, adjust=ak_adjust, timeout=t)
+
+    def _eastmoney(t):
+        return _ak(ak.stock_zh_a_hist, symbol=code, period="daily", start_date=sd,
+                   end_date=ed, adjust=ak_adjust, timeout=t)
+
+    def _tencent(t):
+        return _ak(ak.stock_zh_a_hist_tx, symbol=market_symbol(code), start_date=sd,
+                   end_date=ed, adjust=ak_adjust, timeout=t)
+
+    # 数据源顺序按板块不同。⚠️ 原本两源各 30~35s 且**串行** → 最坏 65s；
+    # 用公共件把整条链压进 _DAILY_BUDGET（bug-02），正常情况下首个源即命中。
     if code.startswith(("920", "8", "4")):
-        source = "新浪财经"
-        frame = _ak(ak.stock_zh_a_daily, symbol=market_symbol(code),
-                    start_date=sd, end_date=ed, adjust=ak_adjust, timeout=35)
-        if frame is None or getattr(frame, "empty", True):
-            source = "东方财富"
-            frame = _ak(ak.stock_zh_a_hist, symbol=code, period="daily",
-                        start_date=sd, end_date=ed, adjust=ak_adjust, timeout=30)
+        order = [("新浪财经", _sina), ("东方财富", _eastmoney),
+                 ("腾讯证券", _tencent)]
     else:
-        source = "东方财富"
-        frame = _ak(ak.stock_zh_a_hist, symbol=code, period="daily",
-                    start_date=sd, end_date=ed, adjust=ak_adjust, timeout=30)
-        if frame is None or getattr(frame, "empty", True):
-            source = "腾讯证券"
-            frame = _ak(ak.stock_zh_a_hist_tx, symbol=market_symbol(code),
-                        start_date=sd, end_date=ed, adjust=ak_adjust, timeout=35)
+        order = [("东方财富", _eastmoney), ("腾讯证券", _tencent),
+                 ("新浪财经", _sina)]
+    source, frame = first_ok(order, budget=_DAILY_BUDGET, per_call=_DAILY_PER_SOURCE,
+                             is_ok=_df_ok)
 
     bars = normalize_bars(frame)
     if not bars:

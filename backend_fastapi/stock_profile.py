@@ -22,6 +22,7 @@ import akshare as ak
 import price_service
 import price_store
 import share_service
+from core.fallback import first_ok             # 第 09/bug-02 项：串行多源回退的总时间预算
 from core.jsonutil import json_safe          # 第 09 项：清洗逻辑已公共化
 from market_service import _ak
 
@@ -133,35 +134,36 @@ def _report_periods(count: int = 8) -> list[str]:
     return out[:count]
 
 
-# 往回试报告期的**总时间预算**（秒）。
+# 往回试报告期的**总时间预算**（秒）。实现已并入公共件 `core.fallback.first_ok`（bug-02）。
 # 单个报告期 `_ak(..., timeout=20)` 由看门狗线程硬切断，报告期有 8 个且**串行**，
-# 于是最坏 8×20 = 160s；而调用方（筹码分布 `/api/chip/dist`、个股基本信息接口）
-# 在启动器一侧只有 30s 超时 —— 上游一慢，整条链路就被判「无响应」。
+# 于是最坏 8×20 = 160s；而调用方（筹码分布 `/api/chip/dist` 只有 30s、
+# 个股基本信息 `/api/stock/profile` 90s）—— 上游一慢，整条链路就被判「无响应」。
 # 实测正常情况下**第一个报告期就命中**（0.4~0.9s），预算给到 6s 已留了 7 倍余量。
 _HOLDERS_BUDGET = 6.0
 _HOLDERS_PERIOD_TIMEOUT = 20.0
 
 
-def _walk_report_periods(fetch, budget: float = _HOLDERS_BUDGET):
-    """从最近报告期往回试，返回第一个有数据的 `(period, df)`；全都没有则 `(None, None)`。
+def _frame_ok(df) -> bool:
+    """空 DataFrame 视为「这个源没数据」（`first_ok` 的 is_ok 判定）。"""
+    return df is not None and not getattr(df, "empty", True)
 
-    `fetch(period, timeout)` 负责真正取数。**`budget` 是硬约束**：预算用尽立即停，
-    哪怕后面的报告期其实有数据 —— 取不到就回退到「不做锁仓修正」，
-    这正是本模块既有的降级约定（见 `lockup_ratio` 的说明），只是原先只防「失败」、
-    没防「变慢」。上游不稳时**不应**让用户等一分钟。
+
+def _period_fetch(func, symbol, period):
+    """把「取某报告期的十大（流通）股东」包装成 `first_ok` 要的 `fetch(timeout)` 形态。"""
+    def fetch(timeout: float):
+        return _ak(func, symbol=symbol, date=period, timeout=timeout)
+    return fetch
+
+
+def _first_report_frame(func, symbol):
+    """从最近报告期往回试，返回第一个有数据的 `(报告期, DataFrame)`。
+
+    预算用尽即返回 `(None, None)` —— 取不到就按既有约定降级（锁仓修正回退 (0.0, 1.0)、
+    股东列表为空并带 error），**不改变任何既有降级语义**。
     """
-    deadline = time.monotonic() + max(0.5, float(budget))
-    for period in _report_periods():
-        left = deadline - time.monotonic()
-        if left <= 0:
-            break
-        try:
-            df = fetch(period, min(_HOLDERS_PERIOD_TIMEOUT, left))
-        except Exception:                                # noqa: BLE001 - 单期失败换下一期
-            continue
-        if df is not None and not getattr(df, "empty", True):
-            return period, df
-    return None, None
+    return first_ok([(p, _period_fetch(func, symbol, p)) for p in _report_periods()],
+                    budget=_HOLDERS_BUDGET, per_call=_HOLDERS_PERIOD_TIMEOUT,
+                    is_ok=_frame_ok)
 
 
 def _json_safe(v: Any) -> Any:
@@ -177,11 +179,10 @@ def top_holders(code: str) -> dict:
     """前十大股东（含股份类型，可据 `股份类型` 区分流通 / 限售）。
 
     十大股东按报告期披露，故从最近报告期往回试，取第一个有数据的期。
-    遍历受 `_HOLDERS_BUDGET` 总预算约束（见 `_walk_report_periods` 的说明）。
+    遍历受 `_HOLDERS_BUDGET` 总预算约束（见 `_first_report_frame` 的说明）。
     """
     symbol = price_service.market_symbol(code)
-    period, df = _walk_report_periods(
-        lambda p, t: _ak(ak.stock_gdfx_top_10_em, symbol=symbol, date=p, timeout=t))
+    period, df = _first_report_frame(ak.stock_gdfx_top_10_em, symbol)
     if df is None:
         return {"period": None, "items": [], "error": "未取到十大股东数据"}
     items: list[dict] = []
@@ -211,8 +212,7 @@ def free_top_holders(code: str) -> dict:
     启动器给 `/api/chip/dist` 的超时只有 30s，故遍历必须受 `_HOLDERS_BUDGET` 约束。
     """
     symbol = price_service.market_symbol(code)
-    period, df = _walk_report_periods(
-        lambda p, t: _ak(ak.stock_gdfx_free_top_10_em, symbol=symbol, date=p, timeout=t))
+    period, df = _first_report_frame(ak.stock_gdfx_free_top_10_em, symbol)
     if df is None:
         return {"period": None, "items": [], "error": "未取到十大流通股东数据"}
     items: list[dict] = []
@@ -283,6 +283,11 @@ def company_info(code: str) -> dict:
     失败再回退**同花顺主营** `stock_zyjs_ths`（只有主营业务、无行业）。
     总股本不在这里取：巨潮的「注册资金」是人民币万元、非股数，口径不对，用腾讯的市值反推值。
     """
+    # 巨潮 → 同花顺两源**串行**回退，各 timeout=20 → 最坏 40s。测得结论（bug-02）：
+    # 调用方 /api/stock/profile 在启动器一侧有 **90s** 超时（VRequest 默认），40s 低于阈值，
+    # 因此**不属于必修，故未加预算**（与表中其他低于阈值的项保持一致）。
+    # 实测冷启动 16.4s（营业部分取数常常正常）；若以后要压冷启动时间，
+    # 再用 core.fallback.first_ok 给它加预算（此处就是那个入口）。
     def produce():
         try:
             df = _ak(ak.stock_profile_cninfo, symbol=code, timeout=20)

@@ -6,6 +6,38 @@
 
 ### 变更
 
+- **系统性排查并硬化「多数据源串行回退」**（`bug-02`，`bug-01` 的同类模式）：
+  `bug-01` 修的是 `stock_profile` 两处，但根因是一类模式 —— 「多源 / 多报告期**串行**回退，
+  每源各自带超时、整条链没有**总时间预算**」。代码里几乎所有降级注释都写着
+  「失败一律回退，不该拖垮主流程」，但那只防住了「**失败**」，没防住「**变慢**」。
+  - ⭐ **排查后必修项从 10 处缩到 3 处** —— 立项清单是 AST 扫的**候选**
+    （「同一函数里有 ≥2 个 `_ak` 调用」），逐处读控制流后发现**一半不是串行回退**：
+    - `market_service._hist_frame` 是 `source` 的**互斥分支**（us/hk/ff 三选一）且**不在循环里**；
+    - `core/price_service.fetch_daily` 的北交所 / 其余分支也是**互斥**，
+      每次只跑 2 源 → 最坏 **65s** 而非估算的 130s；
+    - `strategies/core/data.list_universe_codes` **读本地库**，本就不是数据源回退。
+    > AST 只能回答「函数里有几个 `_ak` 调用」，**回答不了「它们会不会串行执行」**。
+    > 我自己立的规矩「待查项必须实测确认，不许照抄估算」，这次先遵守了才算数。
+  - 单次上限用 `_uses_v8()` **实测**判定：依赖 py_mini_racer 的接口走 60s、其余 15s；
+    **19 个接口里 6 个走 V8**，且 `stock_fund_flow_*` 全是 V8 —— 意味着「并行发起」也会因
+    `_V8_LOCK` 全局锁而退化成排队串行。
+  - **新增公共件 `core/fallback.py`**：`first_ok(sources, budget, per_call, is_ok)`
+    给出**与源数量无关的总时间预算**，每次实际传 `min(per_call, 剩余预算)`；
+    预算用尽立即停并由调用方按**既有约定**降级（本次未改变任何降级语义）。
+  - 接入 3 处：`download_service._universe_codes`（**180s → 20s**）、
+    `core/price_service.fetch_daily`（**65s → 45s**）、
+    `stock_profile` 两个报告期遍历（bug-01 已加预算，本次**并入公共件**、删掉手写那份）。
+  - **低于阈值的一律不改并写明理由**：`company_info` 40s、盘面各接口 30~40s
+    （调用方 `VRequest` 默认 90s）、`sector_beta` **早已有 35s deadline**（别人修过）、
+    `board_service._sync_worker` 在**后台线程**不阻塞 HTTP。
+  - 另发现未修（需独立决策）：后台板块重建可能跑数十分钟且期间索引一直是旧的；
+    V8 全局锁让并行退化、两处各写一遍 `join` 土办法没有公共件；
+    `first_ok` 只解决串行，不覆盖「多线程 + 逐个 join」形态。
+  - 验证：公共件 6 项单元测试（含**断言每次收到的 timeout 递减** ——
+    这是预算能传导到底层 `_ak` 的唯一途径，第一版测试漏了这项）；
+    真实上游 6 个函数全部正常（0.36~10.7s，取数与改动前一致）；
+    接口冒烟 8 条全 `ok=true`；`/health` 无模块错误、stderr 无告警；52 个单元测试全绿。
+
 - **`_json_safe` 提公共层 + 给缺清洗的出口补调用**（待办 09）：
   NaN / ±Inf / numpy 标量一旦到达响应层，FastAPI 的 `JSONResponse` 是严格模式
   （`allow_nan=False`），会抛 `ValueError: Out of range float values are not JSON compliant`，

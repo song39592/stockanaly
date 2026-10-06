@@ -27,6 +27,7 @@ import history_store
 import price_service
 import price_store
 import tdx_reader
+from core.fallback import first_ok      # bug-02：串行多源回退的总时间预算
 from market_service import _ak
 
 # 默认下载窗口：**最近 5 年**（界面「起始日期」可改）。
@@ -156,17 +157,28 @@ def _normalize_codes(raw: Any) -> list[str]:
 # --------------------------------------------------------------------------- #
 # 下载范围
 # --------------------------------------------------------------------------- #
+# 全市场代码表的取数预算（秒）。两个源原本各 timeout=90 且串行 -> 最坏 180s，
+# 而本函数在下载接口的同步路径上。正常情况下首个源即命中（实测 1~2s），
+# 预算给到 20s 已留 10 倍余量（bug-02）。
+_UNIVERSE_BUDGET = 20.0
+_UNIVERSE_PER_SOURCE = 90.0
+
+
 def _universe_codes() -> list[str]:
-    """取全市场 A 股代码（akshare；两个来源任一可用即可）。"""
-    frame = None
+    """取全市场 A 股代码（akshare；两个来源任一可用即可）。
+
+    ⚠️ 两个源各自 `timeout=90` 且**串行** → 最坏 180s。本函数在
+    `/api/history/download/*` 的**同步路径**上被调用（`_resolve_codes(scope="all")`），
+    启动器一侧超时有限，故用公共件把整条链压进 `_UNIVERSE_BUDGET`（bug-02）。
+    降级语义不变：两个源都取不到仍抛 RuntimeError，由调用方转成可读错误。
+    """
+    sources = []
     for name in ("stock_info_a_code_name", "stock_zh_a_spot_em"):
         func = getattr(ak, name, None)
-        if func is None:
-            continue
-        frame = _ak(func, timeout=90)
-        if frame is not None and not getattr(frame, "empty", True):
-            break
-        frame = None
+        if func is not None:
+            sources.append((name, lambda t, _fn=func: _ak(_fn, timeout=t)))
+    _, frame = first_ok(sources, budget=_UNIVERSE_BUDGET, per_call=_UNIVERSE_PER_SOURCE,
+                        is_ok=lambda df: df is not None and not getattr(df, "empty", True))
     if frame is None:
         raise RuntimeError("A 股代码列表获取失败（数据源无响应，或 akshare 未提供该接口）")
     columns = {str(column).strip(): column for column in frame.columns}
