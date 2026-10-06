@@ -70,7 +70,20 @@ def _num(value, digits=4):
 
 
 def _market_prefix(code: str) -> str:
-    """6 位代码 → sh / sz / bj 前缀。"""
+    """6 位代码 → sh / sz / bj 前缀（供新浪报价 `hq.sinajs.cn`）。
+
+    ⚠️ **第 16 项：与 `price_service.market_symbol` /
+    `core/share_service.market_symbol` 是三份不同的规则集，刻意不统一。**
+    分歧段（可转债 / B 股 / 北交所白名单外新号段）都不在股票池里，详见
+    `docs/todo/16-后端-market_symbol三份口径.md`，行为由 `test_market_symbol.py` 锁定。
+
+    ⚠️ **本份是三份里唯一有「真实未来风险」的一份**：它对北交所用
+    **白名单**（`43/83/87/92`）而不是「其余 → bj」，且**缺省兜底是 `sh`**。
+    北交所若开新号段（如 `88x`/`93x`），本份会兜底成 `sh` ——
+    新浪报价对 `sh<北交所代码>` 取不到数；而 `price_service` /
+    `share_service` 会正确判 `bj`。届时症状是「个股页估值空白」。
+    真要改的时候，**本份的兜底值应改成 `bj`**，而不是去动另两份。
+    """
     if code.startswith(("60", "68", "51", "58", "11")):
         return "sh"
     if code.startswith(("00", "30", "12", "15", "16", "18")):

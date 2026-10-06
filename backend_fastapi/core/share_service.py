@@ -34,7 +34,19 @@ _MIN_FIELDS = 46          # 少于此长度视为返回异常（正常为 88）
 
 
 def market_symbol(code: str) -> str:
-    """6 位代码 → 带市场前缀（sh / sz / bj）的符号。"""
+    """6 位代码 → 带市场前缀（sh / sz / bj）的符号（供腾讯行情 `qt.gtimg.cn`）。
+
+    ⚠️ **第 16 项：与 `price_service.market_symbol` /
+    `features.stock.valuation._market_prefix` 是三份不同的规则集，刻意不统一。**
+    分歧段（可转债 / B 股 / 北交所白名单外新号段）都不在股票池里，
+    真实池 5585 只的三份判定完全一致。评估与理由见
+    `docs/todo/16-后端-market_symbol三份口径.md`，行为由
+    `test_market_symbol.py` 锁定 —— 改这里前先看那份文档。
+
+    与另两处的实际差异只有两处，且都不可达：
+    - 本份会 **zfill 补零**（另两份不会），故非 6 位输入时行为不同；
+    - 本份 `2 位 ∪ 1 位` 的并集写法，使`110059` 判 `sh`（`price_service` 判 `sz`）。
+    """
     code = str(code).strip().zfill(6)
     if code.startswith(("60", "68", "51", "58", "11", "5", "6")):
         return "sh" + code

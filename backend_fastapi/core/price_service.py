@@ -33,7 +33,22 @@ OVERLAP_DAYS = 14                                         # 增量重叠窗口�
 
 
 def market_symbol(code: str) -> str:
-    """6 位代码 → 带市场前缀（sh / sz / bj）的符号。"""
+    """6 位代码 → 带市场前缀（sh / sz / bj）的符号。
+
+    ⚠️ **第 16 项：这里与 `share_service.market_symbol` /
+    `features.stock.valuation._market_prefix` 是三份不同的规则集，刻意不统一。**
+
+    评估结论（`docs/todo/16-后端-market_symbol三份口径.md`）：真实股票池
+    5585 只的 2 位前缀只有 `00/30/60/68/92` 五种，三份在这五种上**完全一致**；
+    出现分歧的段（沪市可转债 `11`、B 股 `900`/`200`、北交所白名单外的新号段）
+    **都不在股票池里**——它们不是股票，本模块也不为它们准备数据源。
+    统一成一份只会改动**永不被执行**的分支，纯属扩大分叉面（待办踩坑点说得准：
+    「不要顺手取并集」）。现状由 `test_market_symbol.py` 全量锁定。
+
+    本模块用 **1 位前缀**，故把沪市可转债 `11xxxx` 判成 `sz`（另两份判 `sh`），
+    B 股 `900xxx` 判成 `bj`（`valuation` 判 `sh`）。这些都是不可达分支，
+    **别顺手改成2 位规则**：改了不会让任何现存取数变好，只会让三份多一处不同。
+    """
     if code.startswith(("6", "5")):
         return "sh" + code
     if code.startswith(("0", "1", "2", "3")):
