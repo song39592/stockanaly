@@ -6,6 +6,42 @@
 
 ### 变更
 
+- **股票池历史归位 `features/history/`**（待办 30，后端按功能搬家第 3 项）：
+  ```
+  features/history/
+  ├─ __init__.py
+  ├─ service.py   <- 原 history_service.py   （K线 / 入池出池轨迹 / 消息面）
+  ├─ store.py     <- 原 history_store.py     （pool_snapshots 快照）
+  └─ routes.py    <- 原 history_routes.py
+  ```
+  - **只改了因搬家失效的 import，函数体一行未动**：`service.py` 的 `history_store`
+    改指包内、`kline_service`/`price_service`/`price_store` 改指 `core`；
+    `routes.py` 的 `periods` 改指 `core.periods`；`store.py` 的 `db` 改指 `core.db`。
+    `from collectors import ...` 未动（`collectors` 还在顶层）。
+  - 顶层保留 3 个**别名转发**（`sys.modules[__name__] = _impl`），其中 `history_routes`
+    尤其关键 —— `main.py` 的 `ROUTE_MODULES` 与 `/health` 模块清单都按**字符串**
+    `"history_routes"` 引用它。
+  - ⭐ **踩坑点 1 用源码断言验住**（而不只是"没改"）：
+    `load_trusted_bars` 里 `price_store.load_bars` 仍在（True）、
+    `UntrustedDataError` 捕获仍在（True）、**`kline_service.get_bars` 不在**（True）
+    —— 「脏数据自动重抓」能力完整保留，没有被"顺手优化"掉。
+    周/月合样仍走 `kline_service.resample`（已断言）。
+  - **HTTP 路径零变化**：prefix 仍是 `/api/history`。
+  - ⚠️ **发现一处层级倒置（未修）**：`core/db.py` 的 `init_db()` 里有函数内
+    `import history_store`（原注释「避免与 db 形成模块级循环依赖」），
+    本项之后它指向 `features.history.store` —— 变成 **core 依赖 features**。
+    这是既有状况（`db.init_db()` 本就要编排上层三家的建表），本项只做位置移动、
+    `core/db.py` 一行未改。要治需把「建表编排」挪出 `core/db.py`，
+    属职责边界变更，不该塞进纯搬家项。
+  - 验证：11 个模块全部导入成功（含 `core.db`、`download_service`、两个测试模块、`main`）；
+    3 个转发与实现是同一对象；**日线 1252 根 / 周线 264 根 / 月线 62 根**，
+    `events` 73 项（轨迹/消息面）、`pool` 字段齐全；
+    `/api/history/download/universe`（`latest_snapshot_codes()` 唯一的消费方）`ok=true`；
+    `/health` 无模块错误、11 个路由全挂载、stderr 无告警；52 个单元测试全绿。
+  - 流程改进已见效：第 29 项连续踩三次 PowerShell here-string 吞掉 docstring 收尾的坑，
+    本项**全程改用 Python 脚本 + 脚本内自带双校验**（`"""` 个数为偶 + `ast.parse` 通过）
+    才落盘，**一次事故都没出**；事后另跑全仓 `.py` 扫描确认 0 问题文件。
+
 - **个股 / 估值 / 板块归位 `features/stock/`**（待办 29，后端按功能搬家第 2 项）：
   ```
   features/stock/

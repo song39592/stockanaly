@@ -1,69 +1,22 @@
-"""股票池历史、K线与消息面的 HTTP 接口。"""
+# -*- coding: utf-8 -*-
+"""兼容转发：`routes` 已移入 `features/history/routes.py`（第 30 项）。
 
-from __future__ import annotations
+**这是过渡文件，不是实现。** 新代码请直接用 `features.history.routes`。
 
-import re
+**这个转发尤其关键**：`main.py` 的 `ROUTE_MODULES` 与 `/health` 的模块清单
+都以**字符串** `"history_routes"` 引用它，顶层必须保留这个可导入的同名模块。
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field, field_validator
+`router` 的 prefix 仍是 `/api/history`，**HTTP 路径没有任何变化**。
 
-import history_service
-import history_store
-from periods import normalize
+## 为什么用 `sys.modules` 别名，而不是 `from ... import *`
 
-router = APIRouter(prefix="/api/history", tags=["股票池历史与K线"])
+别名转发拿到的是**同一个模块对象**，因此下划线私有名照常可见、
+模块级状态（`history_store` 的连接与建表标志）是同一份，测试里的
+`patch.object(...)` 真正生效。`import *` 只复制名字做不到这些。
+"""
 
+import sys
 
-class PoolStock(BaseModel):
-    code: str
-    name: str = ""
-    industry: str = ""
-    region: str = ""
-    price: float | None = None
-    change: float | None = None
+from features.history import routes as _impl
 
-    @field_validator("code")
-    @classmethod
-    def code_is_valid(cls, value: str) -> str:
-        value = value.strip().zfill(6)
-        if not re.fullmatch(r"\d{6}", value):
-            raise ValueError("股票代码必须是6位数字")
-        return value
-
-
-class PoolImportRequest(BaseModel):
-    snapshot_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
-    stocks: list[PoolStock]
-    sync_market: bool = True
-
-
-@router.post("/pool/import")
-def import_pool(req: PoolImportRequest):
-    stocks = [item.model_dump() for item in req.stocks]
-    history_store.save_snapshot(req.snapshot_date, stocks)
-    job_id = history_service.enqueue_snapshot_sync(req.snapshot_date, stocks) if req.sync_market and stocks else None
-    return {"ok": True, "saved": len(stocks), "job_id": job_id}
-
-
-@router.get("/sync/{job_id}")
-def sync_status(job_id: str):
-    job = history_store.get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="同步任务不存在")
-    return {"ok": True, "job": job}
-
-
-@router.get("/stock/{code}")
-def get_stock_history(code: str, start: str | None = None, end: str | None = None,
-                      refresh: bool = False, period: str = "day"):
-    if not re.fullmatch(r"\d{6}", code):
-        raise HTTPException(status_code=400, detail="股票代码必须是6位数字")
-    try:
-        period = normalize(period)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    try:
-        return {"ok": True, **history_service.stock_detail(code, start, end, refresh,
-                                                           period=period)}
-    except Exception as exc:  # noqa: BLE001 - 转换为可读接口错误
-        raise HTTPException(status_code=500, detail=f"个股历史加载失败：{exc}")
+sys.modules[__name__] = _impl

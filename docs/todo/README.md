@@ -66,7 +66,7 @@
 | 27 ✅ | [27-后端-core子包.md](27-后端-core子包.md) | 基础设施层先归位（后端搬家**第一步**） | ★★★★ / ★★★（依赖 19）—— **已完成** |
 | 28 ✅ | [28-后端-features-market.md](28-后端-features-market.md) | 盘面/板块搬到 `features/market/` | ★★★ / ★★★（依赖 27）—— **已完成** |
 | 29 ✅ | [29-后端-features-stock.md](29-后端-features-stock.md) | 个股/估值/板块索引搬到 `features/stock/` | ★★★ / ★★★（依赖 27）—— **已完成** |
-| 30 | [30-后端-features-history.md](30-后端-features-history.md) | 股票池历史搬到 `features/history/` | ★★★ / ★★☆（依赖 27） |
+| 30 ✅ | [30-后端-features-history.md](30-后端-features-history.md) | 股票池历史搬到 `features/history/` | ★★★ / ★★☆（依赖 27）—— **已完成** |
 | 31 | [31-后端-features-download.md](31-后端-features-download.md) | 下载与调度搬到 `features/download/` | ★★★ / ★★★（依赖 27） |
 | 32 | [32-后端-features-system.md](32-后端-features-system.md) | 系统设置/完整性/修复搬到 `features/system/` | ★★ / ★★☆（依赖 27） |
 | 33 | [33-后端-features-mentor.md](33-后端-features-mentor.md) | 大佬策略实验室搬到 `features/mentor/` | ★★ / ★★☆（依赖 27） |
@@ -106,6 +106,10 @@
 先修完再搬，动的文件少、回归面小。
 
 ## 已完成的项
+- **30** 股票池历史归位 `features/history/`（`service` / `store` / `routes`）：只改 import，函数体未动。
+  ⭐ 用**源码断言**验住了踩坑点 1 —— `load_trusted_bars` 仍直连 `price_store.load_bars`、
+  仍捕获 `UntrustedDataError`、**没有**被改成走 `kline_service.get_bars`，
+  「脏数据自动重抓」能力完整保留。顶层 3 个别名转发，`main.py` 的字符串引用照旧可用。
 - **29** 个股/估值/板块归位 `features/stock/`（`profile` / `routes` / `valuation` / `board_index`）：
   只改因搬家失效的 import，**函数体一行未动**（TTL 缓存、`_cached` 与 `lockup_ratio` 的矛盾语义、
   三份 market 前缀规则、board_index 的 DB 持久化 TTL 全部原样，留给各自的后续项）。
