@@ -24,6 +24,13 @@ from . import envfile
 PROG_DIR = Path(__file__).resolve().parent.parent
 
 ENV_PATH = PROG_DIR / ".env"
+
+# 第 35 项：用户可见文案里**不再写死程序目录名**，改为动态取。
+# 这三项提示原本硬编码了 "backend_fastapi/.env"，是「目录改名」时**必须同步**的点 ——
+# 漏改的后果是提示用户去一个不存在的路径填密钥（用户会照做，然后 LM 依然不通）。
+# 动态取目录名后，改名只需移动目录，这几处自动跟随。
+# ⚠️ 只用于**给人看的文案**；BASE_DIR / ENV_PATH 等运行时路径本就是动态派生的。
+_ENV_HINT = f"{PROG_DIR.name}/.env"
 # 留下真正来自父进程的覆盖项，避免把 dotenv 注入的旧值误认为外部配置。
 DATA_DIR_OVERRIDES = {key: os.environ[key] for key in ("STOCK_DATA_DIR", "DATA_DIR")
                       if os.environ.get(key, "").strip()}
@@ -122,10 +129,11 @@ def llm_config_problem() -> str | None:
         # 密封值存在却解不开时给出可操作的提示，而不是笼统的「未配置」
         if _env(LLM_KEY_SEALED) and not LLM_API_KEY:
             return ("LLM 密钥已密封但当前无法解开（DPAPI 绑定本机，可能换了机器或用户），"
-                    "请在 backend_fastapi/.env 中重新填写 LLM_API_KEY")
-        return f"服务端未配置 LLM，缺少：{'、'.join(missing)}（请在 backend_fastapi/.env 中填写）"
+                    f"请在 {_ENV_HINT} 中重新填写 LLM_API_KEY")
+        return (f"服务端未配置 LLM，缺少：{'、'.join(missing)}"
+                f"（请在 {_ENV_HINT} 中填写）")
     if not LLM_API_KEY.isascii() or not LLM_API_KEY.startswith("sk-"):
-        return ("LLM_API_KEY 仍是占位符或格式不正确，请在 backend_fastapi/.env 中填入真实密钥"
+        return (f"LLM_API_KEY 仍是占位符或格式不正确，请在 {_ENV_HINT} 中填入真实密钥"
                 "（形如 sk-xxxxxxxx，可在 https://platform.deepseek.com/api_keys 申请）")
     if not LLM_BASE_URL.isascii() or not LLM_BASE_URL.startswith(("http://", "https://")):
         return "LLM_BASE_URL 格式不正确，应形如 https://api.deepseek.com/v1"
