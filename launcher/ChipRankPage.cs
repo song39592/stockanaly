@@ -90,13 +90,15 @@ namespace StockPool
             root.Controls.Add(viewRow);
 
             _scrInfo = Mute(Lbl(""));
-            _scrInfo.MaximumSize = new Size(820, 0);
+            _scrInfo.MaximumSize = new Size(1100, 0);
             root.Controls.Add(_scrInfo);
 
             _scrGrid = NewGrid(new List<GridColumn> {
                 new GridColumn("#", "rank", true),
                 new GridColumn("代码", "code") { IsCode = true, Jump = true },
                 NameColumn(),
+                new GridColumn("行业", "industry"),
+                new GridColumn("流通市值", "float_mv_yi", true),
                 new GridColumn("SCR90", "scr90", true),
                 new GridColumn("收盘", "close", true),
                 new GridColumn("涨幅%", "chg", true),
@@ -104,7 +106,7 @@ namespace StockPool
                 new GridColumn("最近在榜", "last_week"),
             });
             _scrGrid.Dock = DockStyle.None;         // 本页是流式布局，宽度显式给
-            _scrGrid.Width = 900;
+            _scrGrid.Width = 1180;
             root.Controls.Add(_scrGrid);
 
             _scrTimer = new Timer();
@@ -297,8 +299,14 @@ namespace StockPool
                     object chgObj = J.Get(d, "chg");
                     string chg = (chgObj == null) ? "—" : (J.NumAt(d, "chg").ToString("F2") + "%");
                     string close = J.Get(d, "close") == null ? "—" : J.NumAt(d, "close").ToString("F2");
+                    // 行业 / 流通市值：后端从本地库补的（行业查 board_index、
+                    // 市值 = 收盘价 × 流通股本），拿不到时显示「—」而不是 0。
+                    string industry = J.Str(J.Get(d, "industry"));
+                    if (industry.Length == 0) industry = "—";
+                    string mv = J.Get(d, "float_mv_yi") == null
+                        ? "—" : J.NumAt(d, "float_mv_yi").ToString("F1");
                     data.Add(new[] {
-                        no.ToString(), J.Str(J.Get(d, "code")), name,
+                        no.ToString(), J.Str(J.Get(d, "code")), name, industry, mv,
                         J.NumAt(d, "scr90").ToString("F4"), close, chg,
                         J.NumAt(d, "weeks_on").ToString("F0"), J.Str(J.Get(d, "last_week")) });
                 }

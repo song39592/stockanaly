@@ -112,6 +112,39 @@ def boards_of(code: str) -> dict[str, Any]:
             "index_fetched_at": st.get("fetched_at")}
 
 
+def industries_of(codes: list[str]) -> dict[str, str]:
+    """批量取「所属行业」：{code: 最相关的行业名}。
+
+    给周榜这类**一次要几十上百只**的场景用 —— 逐票调 `boards_of` 是 N 次 SQL 往返，
+    虽仍是毫秒级但没必要；这里一次 `IN` 查询搞定。
+    取分板块里**成分股最少**的那个（与 `boards_of` 的排序一致：成分越少越「专属」，
+    如 600664 同时属于「化学制药」和「医药商业」，前者更专属）。
+
+    索引没建过 / 该股无记录时**不在返回 dict 里**（调用方按缺省显示「—」），
+    不抛异常 —— 行业是展示性字段，拿不到不该影响主流程。
+    """
+    out: dict[str, str] = {}
+    wanted = [str(c).zfill(6) for c in codes or []]
+    if not wanted:
+        return out
+    # SQLite 的 IN 有变量数上限（999），分批查；每批 500 足够且仍是 1 次往返
+    for i in range(0, len(wanted), 500):
+        chunk = wanted[i:i + 500]
+        marks = ",".join("?" * len(chunk))
+        try:
+            with db_mod.connect(db_mod.FACTORS_DB) as conn:
+                _ensure_tables(conn)
+                rows = conn.execute(
+                    "SELECT code, board FROM board_members WHERE category='industry' "
+                    "AND code IN (%s) ORDER BY member_count, board" % marks,
+                    chunk).fetchall()
+        except Exception:                # noqa: BLE001 - 索引缺失/表未建：静默降级
+            continue
+        for r in rows:                  # 已按 member_count 升序，首条即最专属
+            out.setdefault(r["code"], r["board"])
+    return out
+
+
 def _sync_worker() -> None:
     global _syncing, _last_sync_error
     try:

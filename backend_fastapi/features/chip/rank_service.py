@@ -120,6 +120,10 @@ def _compute_one(code: str, start: str | None, end: str | None,
                                        offline=True)
     return {"code": code,
             "scr": scr.scr_series_pd(res),
+            # 流通股本随结果一起带出：榜单要显示「流通市值」，而
+            # 市值 = 收盘价 × 流通股本。offline=True 时股本只从本地库读
+            # （auto_sync=False，不联网），所以这是**零额外成本**的。
+            "float_shares": float(getattr(res, "float_shares", 0.0) or 0.0),
             "close": pd.Series(np.asarray(res.close, dtype=float),
                                index=list(res.dates))}
 
@@ -133,6 +137,18 @@ def _load_names(codes: list[str]) -> dict[str, str]:
         from strategies.core.backtest import _load_names as remote
         return remote(codes) or {}
     except Exception:                                    # noqa: BLE001 - 名称缺失可降级
+        return {}
+
+
+def _load_industries(codes: list[str]) -> dict[str, str]:
+    """批量取所属行业 {code: 行业名}；索引未建 / 某票无记录时不在返回里。
+
+    与 `_load_names` 一样是「锦上添花」：拿不到就留空，前端显示「—」。
+    """
+    try:
+        from features.stock import board_index
+        return board_index.industries_of(codes) or {}
+    except Exception:                                    # noqa: BLE001 - 行业缺失可降级
         return {}
 
 
@@ -179,12 +195,17 @@ def _worker(week: dt.date, weeks: list[dt.date], codes: list[str], top_n: int,
     skipped: dict[str, str] = {}
     scr: dict[str, pd.Series] = {}
     close: dict[str, pd.Series] = {}
+    shares: dict[str, float] = {}
     try:
         # 名称**先取**：只有一次网络请求（约 11~25s），放在重型计算之前 ——
         # 之后 6 线程跑满 CPU 时再取，akshare 很容易超时，而 _load_names 是
         # 「拿不到就算了」的静默降级，结果就是一整列名称全空、还查不出原因。
         # 失败也不影响榜单：随后可经 POST /api/chip/rank/names 单独补齐（不必重算）。
         names = _load_names(codes)
+        # 行业：本地 board_index 表（个股页「所属板块」用的同一个库），一次 IN 查询取全部。
+        # ⚠️ 不走 akshare —— profile 的行业来自巨潮、**单票 16.4s**，100 行要 27 分钟；
+        # 而 board_index 已由个股页后台建好（24h TTL），本地查是毫秒级。
+        industries = _load_industries(codes)
         with ThreadPoolExecutor(max_workers=IO_WORKERS) as pool:
             futures = {pool.submit(_compute_one, c, fetch_start, None,
                                    "qfq", bins): c for c in codes}
@@ -204,6 +225,7 @@ def _worker(week: dt.date, weeks: list[dt.date], codes: list[str], top_n: int,
                     continue
                 scr[code] = got["scr"]
                 close[code] = got["close"]
+                shares[code] = got.get("float_shares") or 0.0
                 with _LOCK:
                     _STATE["done"] += 1
 
@@ -225,9 +247,15 @@ def _worker(week: dt.date, weeks: list[dt.date], codes: list[str], top_n: int,
         def item(code: str, scr90: float) -> dict:
             c, _r = _ret_at(close[code], weeks[0], chg_days)
             weeks_on = on_weeks.get(code, [])
+            # 流通市值（亿）= 收盘价 × 流通股本。股本来自本地库（offline 模式不联网），
+            # 缺失时留None 而不是填 0 —— 0 会被前端当成「市值 0 亿」显示成假数据。
+            sh = shares.get(code) or 0.0
+            mv = (c * sh / 1e8) if (c and sh) else None
             return {
                 "code": code,
                 "name": names.get(code) or "",
+                "industry": industries.get(code) or "",
+                "float_mv_yi": round(mv, 2) if mv else None,
                 "scr90": round(float(scr90), 6),
                 "close": None if c is None else round(c, 4),
                 "chg": None if _r is None else round(_r, 4),   # 区间涨幅(%)，chg_days 个交易日
