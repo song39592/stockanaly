@@ -23,24 +23,14 @@ from typing import Any, Callable
 
 import numpy as np
 
+from core.paramspec import ParamSpec         # 第 13 项：定义收敛到 core/paramspec.py
+
 from . import data
 from . import scr
 
 FORMULAS: dict[str, "ChipFormulaMeta"] = {}
 DEFAULT_FORMULA_ID = "tri_decay"        # 未指定公式时用它；被删改则由调用方显式指定
 DEFAULT_BINS = 80
-
-
-@dc.dataclass
-class ParamSpec:
-    """公式参数规格：供前端渲染控件 + 后端填充默认值 / 校验范围。"""
-    name: str
-    type: str                 # "int" | "float" | "choice"
-    default: Any
-    min: float | None = None
-    max: float | None = None
-    choices: list | None = None
-    label: str = ""
 
 
 @dc.dataclass

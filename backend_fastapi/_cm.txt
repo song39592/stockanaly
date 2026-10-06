@@ -1,0 +1,37 @@
+fix(backend): 周榜每次重算都在最后一步 NameError、结果永不落盘（bug-06）
+
+用户报「SCR90 一直提示刷新本周」。根因不是缓存缺失，而是 payload 构造里
+一行引用了本模块里从来就不存在的变量：
+
+    "names_resolved": sum(1 for r in rows if r["name"]),
+
+e706176（新增 names_resolved + 把取名提到计算之前）删掉了旧结构却漏改了
+引用它的那一行。于是每次周榜重算都在最后一步抛 NameError，结果文件永不
+写盘 —— 数据算完了却存不下来。
+
+症状极具误导性：status 里 done=100% 但 computed=0 / error=null，因为
+(a) 异常发生在 _STATE 更新之前的 payload 构造里；
+(b) except 分支把它记成 state=error，而 status() 见文件不存在又改写成
+idle，把真正的错误信息盖掉了 —— 于是从接口上完全看不出出了错。
+也正因如此它一直没被发现：只要结果文件在（跨周重算前）就一直能读，
+一旦需要重算就永远失败。这才是「一直提示刷新本周」的长期成因。
+
+修法：按注释原意（名称取到几条）统计 names 里非空的条数。
+
+同批提交第 13 项（ParamSpec 三份合一）—— 纯重构，与本修复无关：
+三处逐字段相同的 dataclass 收敛到 core/paramspec.py。选 core/ 而非待办
+建议的 common/spec.py，因为它必须零依赖（只 import dataclasses/typing），
+否则三边 import 它会构成循环依赖。注意 strategies/core/ 与
+features/chip/formulas/core/ 里的 core 指各自子包，故一律用绝对路径。
+三处再导出按待办要求保留；顺带清掉 indicators/base.py 与
+strategies/core/base.py 里因删定义而失效的 typing.Any 导入。
+
+验证：
+- rows NameError 复现（旧表达式确实抛）→ 新表达式 3；4 组边界（全空/空值/
+  部分/全满）全对；_worker 非注释代码里 rows 归零
+- ParamSpec：7 个 import 路径拿到同一类对象（is 真）、字段顺序不变、
+  位置与关键字两种调用形式都正常
+- 三个注册中心 LOAD 校验全过：指标 8 个、策略 2 个、策略 invalid=0、
+  筹码公式 invalid=0
+- 全仓 class ParamSpec 只剩 1 处；52 个单元测试全绿
+- /health route_errors=0、11 模块全 true

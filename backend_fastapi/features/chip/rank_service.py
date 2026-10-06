@@ -268,8 +268,17 @@ def _worker(week: dt.date, weeks: list[dt.date], codes: list[str], top_n: int,
             "skipped": len(skipped),
             "skipped_reasons": reasons,
             "skipped_sample": dict(list(skipped.items())[:20]),
-            # 名称取到几条（0 = 没取到，可点「重取名称」单独补齐，不必重算）
-            "names_resolved": sum(1 for r in rows if r["name"]),
+            # 名称取到几条（0 = 没取到，可点「重取名称」单独补齐，不必重算）。
+            # ⚠️ 原来这里写的是 `sum(1 for r in rows if r["name"])`，而 **`rows`
+            # 这个变量在本模块里从来就不存在** —— `e706176`（新增 names_resolved /
+            # 把取名提到计算之前）删掉了旧结构却漏改了引用它的那一行，于是
+            # **每次周榜重算都在最后一步 NameError**、结果文件永不落盘，
+            # 前端于是永远提示「刷新本周」。数据算完了却存不下来，症状极具迷惑性
+            # （status 里 done=100% 但 computed=0 / error=None，因为异常发生在
+            # 状态更新之前的 payload 构造里，而 except 分支把它记成 error 后
+            # status() 又因文件不存在改写成 idle）。
+            # 口径：统计 names 里非空的条数 —— 与注释「取到几条」一致。
+            "names_resolved": sum(1 for v in names.values() if v),
             "lockup": False,            # 批量不联网 → 未做锁仓修正，口径透明
             "formula": chip_formulas.base.DEFAULT_FORMULA_ID,
             "elapsed": round(time.time() - started, 1),

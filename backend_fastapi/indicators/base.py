@@ -26,11 +26,12 @@
 from __future__ import annotations
 
 import dataclasses as dc
-from typing import Any, Callable
+from typing import Callable
 
 import pandas as pd
 
 from core.jsonutil import json_safe          # 第 09 项：出口清洗
+from core.paramspec import ParamSpec         # 第 13 项：定义收敛到 core/paramspec.py
 
 from . import data
 
@@ -38,18 +39,6 @@ REGISTRY: dict[str, "IndicatorMeta"] = {}
 
 VALID_PANELS = ("main", "lower", "right", "none")
 VALID_KINDS = ("line", "bar")
-
-
-@dc.dataclass
-class ParamSpec:
-    """指标参数规格，供前端动态渲染输入控件与后端校验。"""
-    name: str
-    type: str                 # "int" | "float" | "choice"
-    default: Any
-    min: float | None = None
-    max: float | None = None
-    choices: list | None = None
-    label: str = ""
 
 
 @dc.dataclass

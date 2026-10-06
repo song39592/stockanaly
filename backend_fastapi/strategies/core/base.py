@@ -35,24 +35,14 @@ Signal 字段：
 from __future__ import annotations
 
 import dataclasses as dc
-from typing import Any, Callable
+from typing import Callable
 
 import pandas as pd
 
+from core.paramspec import ParamSpec         # 第 13 项：定义收敛到 core/paramspec.py
+
 
 REGISTRY: dict[str, "StrategyMeta"] = {}
-
-
-@dc.dataclass
-class ParamSpec:
-    """策略额外参数规格：供前端渲染控件 + 后端校验/填充默认值。"""
-    name: str
-    type: str                 # "int" | "float" | "choice"
-    default: Any
-    min: float | None = None
-    max: float | None = None
-    choices: list | None = None
-    label: str = ""
 
 
 @dc.dataclass

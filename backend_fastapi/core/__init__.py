@@ -12,6 +12,7 @@
     instance_lock.py  单实例锁
     logutil.py        日志（stderr 双写 + <data>/logs/ 落盘）
     periods.py        周期合样（day/week/month 桶）
+paramspec.py      参数规格 ParamSpec（指标 / 策略 / 筹码公式三处共用的唯一定义，第 13 项）
     tdx_reader.py     通达信日线 / 除权文件读取
     share_service.py  流通股本抓取
     price_store.py    行情存储与指纹校验
