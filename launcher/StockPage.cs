@@ -621,26 +621,21 @@ namespace StockPool
             int round = ++_stockRound;
             _stockStatus.Text = refresh ? "正在更新真实行情与消息…" : "正在读取K线与消息缓存…";
             _stockStatus.Tag = "muted";
-            System.Threading.Tasks.Task.Run(delegate
-            {
-                try
+            // 第 18 项：改用统一异步骨架。守卫语义与原来一字不差 ——
+            // round 在发起请求前捕获，返回时若已不是当前轮就丢弃结果。
+            RunUi<Dictionary<string, object>>(
+                delegate
                 {
-                    string url = "http://127.0.0.1:8000/api/history/stock/" + code + "?refresh=" + (refresh ? "true" : "false")
+                    string url = "http://127.0.0.1:8000/api/history/stock/" + code
+                           + "?refresh=" + (refresh ? "true" : "false")
                            + "&period=" + (string.IsNullOrEmpty(_stockPeriod) ? "day" : _stockPeriod);
                     string resp = VRequest(url, null);
-                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    Invoke((Action)delegate
-                    {
-                        if (round == _stockRound) StockRenderHistory(j);
-                    });
-                }
-                catch (Exception ex)
-                {
-                    string msg = "请求失败：" + ex.Message;
-                    try { Invoke((Action)delegate { if (round == _stockRound) StockFail(msg); }); }
-                    catch (Exception) { }
-                }
-            });
+                    return new JavaScriptSerializer()
+                        .Deserialize<Dictionary<string, object>>(resp);
+                },
+                delegate(Dictionary<string, object> j) { StockRenderHistory(j); },
+                delegate(Exception ex) { StockFail("请求失败：" + ex.Message); },
+                delegate { return round == _stockRound; });
         }
 
         private void StockFail(string msg)

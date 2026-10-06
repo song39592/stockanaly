@@ -181,32 +181,32 @@ namespace StockPool
         /// </summary>
         private void FetchStockName(string code, Action<string, string> onOk, Action<string> onFail)
         {
-            System.Threading.Tasks.Task.Run(delegate
-            {
-                try
+            // 第 18 项：改用统一异步骨架。这里传 stillValid = null ——
+            // 本函数**故意不做守卫**（它不知道调用方的判据），竞态判定由
+            // 调用点在 onOk / onFail 里自己做（见 StockLoadName 的代码比对）。
+            // 守卫**不能**下沉到这一层：调用方读的是 WinForms 控件，
+            // 只有调用点自己知道该比什么。
+            RunUi<Dictionary<string, object>>(
+                delegate
                 {
                     string resp = VRequest("http://127.0.0.1:8000/api/stock/quote?code=" + code, null);
-                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    Invoke((Action)delegate
-                    {
-                        if (J.IsOk(j) && j.ContainsKey("name"))
-                        {
-                            string nm = J.Str(J.Get(j, "name"));
-                            onOk(nm, nm + PriceSuffix(J.Get(j, "price")));
-                        }
-                        else
-                        {
-                            onFail(J.ErrMsg(j));
-                        }
-                    });
-                }
-                catch (Exception ex)
+                    return new JavaScriptSerializer()
+                        .Deserialize<Dictionary<string, object>>(resp);
+                },
+                delegate(Dictionary<string, object> j)
                 {
-                    string m = "名称查询失败：" + ex.Message;
-                    try { Invoke((Action)delegate { onFail(m); }); }
-                    catch (Exception) { }
-                }
-            });
+                    if (J.IsOk(j) && j.ContainsKey("name"))
+                    {
+                        string nm = J.Str(J.Get(j, "name"));
+                        onOk(nm, nm + PriceSuffix(J.Get(j, "price")));
+                    }
+                    else
+                    {
+                        onFail(J.ErrMsg(j));
+                    }
+                },
+                delegate(Exception ex) { onFail("名称查询失败：" + ex.Message); },
+                null);
         }
 
         /// <summary>现价后缀：能解析时为「  12.34 元」，否则空串（两处原先逐字相同）。</summary>

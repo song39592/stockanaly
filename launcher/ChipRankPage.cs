@@ -210,11 +210,17 @@ namespace StockPool
         {
             if (_scrBusy) return;
             _scrBusy = true;
-            Task.Run(delegate
-            {
-                string body;
-                var j = ScrJson("http://127.0.0.1:8000/api/chip/rank?limit=100", 30000, out body);
-                Invoke((Action)delegate
+            string body = "";
+            // 第 18 项：改用统一异步骨架（守卫 = null，本方法靠 _scrBusy 防重复点击）。
+            // ⚠️ busy 复位必须在**成功与失败两条路**上都做 —— 漏掉失败路径会导致
+            // 按钮点一次之后永久卡死（这正是待办 18 点名的踩坑点）。
+            RunUi<Dictionary<string, object>>(
+                delegate
+                {
+                    return ScrJson("http://127.0.0.1:8000/api/chip/rank?limit=100",
+                                   30000, out body);
+                },
+                delegate(Dictionary<string, object> j)
                 {
                     _scrBusy = false;
                     if (j == null)
@@ -234,8 +240,13 @@ namespace StockPool
                     _scrPayload = j;
                     ScrFillSummary();
                     ScrRender();
-                });
-            });
+                },
+                delegate(Exception ex)
+                {
+                    _scrBusy = false;
+                    ScrSetStatus("读取结果失败：" + ScrErr(body), true);
+                },
+                null);
         }
 
         private void ScrFillSummary()
