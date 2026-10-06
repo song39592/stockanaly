@@ -679,6 +679,11 @@ namespace StockPool
             HideQuickSearch();
             _tabIndex = index;
             for (int i = 0; i < _tabPages.Count; i++) _tabPages[i].Visible = (i == index);
+            // ⭐ 补染（bug 修复）：顶层页只切 Visible、从不重染 —— 页内**后来才加**的控件
+            // （如每次点「分析」都异步重建的指标勾选框）会永远停留在默认配色。
+            // 二级页 SubTabStrip.Select 挂载时会 Skin(page)，顶层这里补齐同样的行为，
+            // Skin 幂等、开销毫秒级，切页即自愈。
+            Skin(_tabPages[index]);
             SkinTabs();
             if (index == _mktTabIndex) MktOnEnter();   // 进入盘面页自动拉最新数据
             if (index == _stockTabIndex) StockOnEnter();
@@ -839,10 +844,29 @@ namespace StockPool
             }
         }
 
-        /// <summary>按当前配色给窗口及其所有控件上色（递归）。</summary>
+        /// <summary>按当前配色给窗口及其所有控件上色（递归）。
+        /// 自身染色与逐子递归都带容错（见循环处的说明），异常只牺牲出错控件自己。</summary>
         private void Skin(Control c)
         {
             if (c == null) return;
+            try { SkinColors(c); }
+            catch (Exception ex) { LogSkinFault(c, ex); }
+
+            // ⭐ 逐子容错（bug 修复：K 线图偶发整块变白、重启才恢复）：
+            // 原来整条递归一条道走到黑 —— 任何一个子控件在换肤时抛异常，
+            // 排在它**后面**的兄弟控件就全漏染（图表控件变默认白底黑字，正是
+            // 用户截图里那块「未换肤的白图」）。改为逐子 try/catch：
+            // 出错的控件只影响自己并留下日志证据，兄弟控件照常染色。
+            foreach (Control child in c.Controls)
+            {
+                try { Skin(child); }
+                catch (Exception ex) { LogSkinFault(child, ex); }
+            }
+        }
+
+        /// <summary>Skin 的染色主体（原 Skin 的 if-else 链，被 Skin 包了容错）。</summary>
+        private void SkinColors(Control c)
+        {
             string tag = c.Tag as string;
 
             if (tag == "dot")
@@ -973,8 +997,30 @@ namespace StockPool
                 c.BackColor = _cBg;
                 c.ForeColor = _cText;
             }
+        }
 
-            foreach (Control child in c.Controls) Skin(child);
+        /// <summary>换肤单个控件失败时落日志（launcher 目录 skin_error.log）。
+        /// 纯诊断用途：出现该文件即说明有控件在换肤时抛异常，内容含控件类型与堆栈。</summary>
+        private static void LogSkinFault(Control c, Exception ex)
+        {
+            try
+            {
+                string path = System.IO.Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory, "skin_error.log");
+                string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+                    + "  " + (c == null ? "<null>" : (c.GetType().Name + " '" + SafeCtlName(c) + "' tag=" + (c.Tag == null ? "-" : c.Tag.ToString())))
+                    + "  " + ex.GetType().Name + ": " + ex.Message
+                    + "  @ " + (ex.StackTrace == null ? "?" : ex.StackTrace.Replace("\r\n", " | "))
+                    + "\r\n";
+                System.IO.File.AppendAllText(path, line);
+            }
+            catch (Exception) { }          // 日志失败绝不能反过来打断换肤
+        }
+
+        private static string SafeCtlName(Control c)
+        {
+            try { return string.IsNullOrEmpty(c.Name) ? "-" : c.Name; }
+            catch (Exception) { return "-"; }
         }
 
         /// <summary>网页地址带上当前主题，页面一打开就是正确的颜色。</summary>

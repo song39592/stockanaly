@@ -706,6 +706,12 @@ namespace StockPool
                     _stockIndFlow.Controls.Add(cb);
                 }
             }
+            // ⭐ 补染（bug 修复）：本方法在**每次点「分析」**后都会被异步调到
+            // （StockOpen -> StockRefreshIndicatorList -> Invoke），Clear + 重建出的
+            // 勾选框是默认配色 —— `Check()` 不设 BackColor（默认 SystemColors.Window 白底）、
+            // `Lbl()` 甚至硬编码黑字，深色主题下分组标签直接看不见。
+            // 重建发生在页面挂载之后，之前的 Skin 不会再扫到这里，必须自己补一次。
+            Skin(_stockIndFlow);
         }
 
         private void StockLoadIndicators(string code)
@@ -1446,6 +1452,14 @@ bool ok = J.IsOk(j);
                 }
             }
 
+            // ⭐ 自愈补染（bug：K 线图偶发整块变白，用户重启才能恢复）：
+            // 截图证据显示白块的图表控件处于「从未被 Skin 过」的默认配色（黑字白底图例），
+            // 而其左侧轴刻度仍是深色旧帧 —— 但静态排查未能确证是哪条路径漏染
+            // （Select(0) 会 Skin(page)、ApplyTheme 会递归已挂载控件，理论上都覆盖得到）。
+            // 与其继续猜根因，这里在**每次数据渲染前**重新断言一次主题：
+            // Skin 幂等（同色重设无视觉扰动），此后图表最多「白一帧」，不可能白到重启。
+            Skin(_stockKline);
+            Skin(_stockChip);
             _stockKline.Period = _stockPeriod;      // 图例显示 日K / 周K / 月K
             _stockKline.SetData(bars, barsRaw, marks);
             // SetData 不重置可见根数，这里按当前选中的「范围」按钮同步一次：
@@ -2810,6 +2824,9 @@ bool ok = J.IsOk(j);
                 _marks.Clear();
                 if (marks != null) _marks.AddRange(marks);
                 _offset = 0;
+                // ⭐ 换股 / 刷新数据前关掉悬停浮窗：数据整批换掉后旧浮窗毫无意义，
+                // 且 _tip.Show 没给时长参数，不主动 Hide 会一直挂着（深色下即白块）。
+                _tip.Hide(this);
                 ApplyAdjust();
             }
 
@@ -2980,6 +2997,10 @@ bool ok = J.IsOk(j);
             {
                 int total = _bars.Count;
                 if (total == 0) return;
+                // ⭐ 悬停浮窗随缩放关闭（bug 修复）：_tip.Show 没给时长参数，会一直挂着；
+                // 缩放会改变每根 K 线的屏幕位置，不关的话浮窗就冻结在旧位置、显示旧数据，
+                // 在深色主题下就是一块醒目的白色小方块（用户报的「白块」症状之一）。
+                _tip.Hide(this);
                 int cur = _range > 0 ? _range : total;
                 int next = Math.Max(20, Math.Min(total, cur + step));
                 _range = (next >= total) ? 0 : next;
