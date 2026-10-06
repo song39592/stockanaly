@@ -71,11 +71,7 @@ namespace StockPool
         private readonly Dictionary<Button, int> _stockRangeMap = new Dictionary<Button, int>();
 
         // 二级导航：K线 / 记录·消息 / 估值 各一页（K线页不滚动，图表撑满，避免滚轮缩放与翻页冲突）
-        private FlowLayoutPanel _stockSubBar;
-        private Panel _stockSubBody;
-        private readonly List<Button> _stockSubBtns = new List<Button>();
-        private readonly List<Panel> _stockSubPages = new List<Panel>();
-        private int _stockSubIndex;
+        private SubTabStrip _stockStrip;
 
         // 历史查看记录（最多 10 条，先进先出滚动覆盖）
         // 持久化到启动器自己的 %APPDATA%\StockPoolLauncher\history_stock_view.json：
@@ -260,20 +256,13 @@ namespace StockPool
             AddRow(b0, rangeRow);
             mainCol.Controls.Add(g0, 0, 1);
 
-            // ---- 二级标签栏 ----
-            _stockSubBar = new FlowLayoutPanel();
-            _stockSubBar.Dock = DockStyle.Top;
-            _stockSubBar.Height = 30;
-            _stockSubBar.FlowDirection = FlowDirection.LeftToRight;
-            _stockSubBar.WrapContents = false;
-            _stockSubBar.Margin = new Padding(0, 0, 0, 2);
-            _stockSubBar.Padding = new Padding(0);
-            mainCol.Controls.Add(_stockSubBar, 0, 2);
-
-            _stockSubBody = new Panel();
-            _stockSubBody.Dock = DockStyle.Fill;
-            _stockSubBody.Margin = new Padding(0);
-            mainCol.Controls.Add(_stockSubBody, 0, 3);
+            // ---- 二级标签栏（K 线页不滚动，图表撑满）----
+            _stockStrip = new SubTabStrip(this, mainCol, 2, 3, "stock-subtab");
+            _stockStrip.OnSelected = delegate(int index)
+            {
+                // 切到 K线 页就把焦点交给图表，↑↓ 缩放 / ←→ 移光标立刻可用
+                if (index == 0 && _stockKline != null) _stockKline.FocusForKeys();
+            };
 
             // 主内容列挂到根布局的右列
             root.Controls.Add(mainCol, 1, 0);
@@ -358,7 +347,7 @@ namespace StockPool
             kLayout.Controls.Add(_stockChipFormula, 1, 0);     // 筹码公式下拉
             kLayout.Controls.Add(_stockKline, 0, 1);       // 图表占满剩余高度
             kLayout.Controls.Add(_stockChip, 1, 1);        // 右侧筹码分布窗口
-            StockAddSubTab("K线", klinePage);
+            _stockStrip.Add("K线", klinePage);
 
             // ---- 二级页 ② 基本信息：行业 / 市值 / 前十大股东 / 涨停与连板（/api/stock/profile）----
             var basicPage = new Panel();
@@ -379,10 +368,10 @@ namespace StockPool
             // 每类第一个（成分股最少的「最相关」板块）加 ★。数据来自 /api/stock/boards。
             TableLayoutPanel bk;
             var gbk = Group("所属板块（行业 / 概念 / 地域）", out bk);
-            _stockBlocks = BoardLine(Color.FromArgb(150, 158, 172));
+            _stockBlocks = BoardLine(C.Flat);
             _stockBlocks.Text = "板块标注加载中…";
-            _stockCptBlocks = BoardLine(Color.FromArgb(130, 210, 140));
-            _stockRgnBlocks = BoardLine(Color.FromArgb(110, 190, 220));
+            _stockCptBlocks = BoardLine(C.UpSoft);
+            _stockRgnBlocks = BoardLine(C.LineCyan);
             AddRow(bk, _stockBlocks);
             AddRow(bk, _stockCptBlocks);
             AddRow(bk, _stockRgnBlocks);
@@ -409,7 +398,7 @@ namespace StockPool
             AddRow(basicStack, gh);
 
             basicPage.Controls.Add(basicStack);
-            StockAddSubTab("基本信息", basicPage);
+            _stockStrip.Add("基本信息", basicPage);
 
             // ---- 二级页 ③ 记录 · 消息 ----
             var recPage = new Panel();
@@ -433,7 +422,7 @@ namespace StockPool
             AddRow(b4, _stockEvents);          // 全部消息直接展示，不再折叠
             AddRow(recStack, g4);
             recPage.Controls.Add(recStack);
-            StockAddSubTab("记录 · 消息", recPage);
+            _stockStrip.Add("记录 · 消息", recPage);
 
             // ---- 二级页 ③ 估值（完整过程见估值计算标签页）----
             var valPage = new Panel();
@@ -461,7 +450,7 @@ namespace StockPool
             }, 180)));
             AddRow(valStack, g5);
             valPage.Controls.Add(valStack);
-            StockAddSubTab("估值", valPage);
+            _stockStrip.Add("估值", valPage);
 
             // ---- 二级页 ③.5 扫雷（通达信「扫雷宝 · 个股亮点」，来自 /api/stock/saolei）----
             var slPage = new Panel();
@@ -478,7 +467,7 @@ namespace StockPool
             AddRow(bsl, _stockSaoleiList);
             AddRow(slStack, gsl);
             slPage.Controls.Add(slStack);
-            StockAddSubTab("扫雷", slPage);
+            _stockStrip.Add("扫雷", slPage);
 
             // ---- 二级页 ④ AI 分析（调 /api/stock/research）----
             var aiPage = new Panel();
@@ -504,7 +493,7 @@ namespace StockPool
             AddRow(b6, _stockAiBox);
             AddRow(aiStack, g6);
             aiPage.Controls.Add(aiStack);
-            StockAddSubTab("AI 分析", aiPage);
+            _stockStrip.Add("AI 分析", aiPage);
 
             // ---- 二级页 ⑤ AI 分析偏好（作为投喂变量，自动存本地）----
             StockLoadAiPrefs();   // 先加载已保存偏好，供控件初始选中
@@ -548,9 +537,9 @@ namespace StockPool
             AddRow(bp, gpf);
             AddRow(prefStack, gp);
             prefPage.Controls.Add(prefStack);
-            StockAddSubTab("偏好设置", prefPage);
+            _stockStrip.Add("偏好设置", prefPage);
 
-            StockSubSelect(0);
+            _stockStrip.Select(0);
 
             _stockCode.KeyDown += delegate(object s, KeyEventArgs e)
             {
@@ -578,63 +567,6 @@ namespace StockPool
             return p;
         }
 
-        /// <summary>建一个二级页：按钮进标签栏，页面进内容区（由 StockSubSelect 只挂载当前页）。</summary>
-        private void StockAddSubTab(string title, Panel page)
-        {
-            int idx = _stockSubPages.Count;
-
-            var b = new Button();
-            b.Text = title;
-            b.Tag = "stock-subtab";
-            b.AutoSize = false;
-            b.Height = 28;
-            b.Width = Math.Max(96, TextRenderer.MeasureText(title, Font).Width + 24);
-            b.FlatStyle = FlatStyle.Flat;
-            b.FlatAppearance.BorderSize = 0;
-            b.Font = new Font("Microsoft YaHei UI", 9f);
-            b.TabStop = false;
-            b.Margin = new Padding(0, 0, 2, 0);
-            b.Click += delegate { StockSubSelect(idx); };
-            _stockSubBtns.Add(b);
-            _stockSubBar.Controls.Add(b);
-
-            page.Dock = DockStyle.Fill;
-            page.Visible = false;
-            page.Margin = new Padding(0);
-            page.Tag = "tabpage";
-            _stockSubPages.Add(page);
-        }
-
-        private void StockSubSelect(int index)
-        {
-            if (index < 0 || index >= _stockSubPages.Count) return;
-            _stockSubIndex = index;
-            // 容器里只挂当前页，避免多个 Dock=Fill 面板叠放导致布局错乱
-            _stockSubBody.Controls.Clear();
-            var page = _stockSubPages[index];
-            page.Visible = true;
-            page.Dock = DockStyle.Fill;
-            _stockSubBody.Controls.Add(page);
-            Skin(page);                 // 懒挂载的页首次显示前按当前主题上色
-            page.Invalidate(true);
-            SkinStockSubTabs();
-            // 切到 K线 页就把焦点交给图表，↑↓ 缩放 / ←→ 移光标立刻可用
-            if (index == 0 && _stockKline != null) _stockKline.FocusForKeys();
-        }
-
-        /// <summary>二级标签配色（跟随主题）：选中用卡片色，未选中用窗口底色。</summary>
-        private void SkinStockSubTabs()
-        {
-            if (_stockSubBtns == null) return;
-            for (int i = 0; i < _stockSubBtns.Count; i++)
-            {
-                bool sel = (i == _stockSubIndex);
-                _stockSubBtns[i].BackColor = sel ? _cPanel : _cBg;
-                _stockSubBtns[i].ForeColor = sel ? _cText : _cSub;
-                _stockSubBtns[i].Invalidate();
-            }
-        }
-
         // ---- 打开 ----
         private void StockOpen()
         {
@@ -643,14 +575,14 @@ namespace StockPool
             {
                 _stockHint.Text = "股票代码必须是 6 位数字（如 600519）";
                 _stockHint.Tag = "bad";
-                _stockHint.ForeColor = Color.FromArgb(208, 57, 59);
+                _stockHint.ForeColor = C.UpErr;
                 _stockCode.Focus();
                 return;
             }
             if ((_stockHint.Tag as string) != "bad")
             {
                 _stockHint.Tag = "muted";
-                _stockHint.ForeColor = Color.FromArgb(150, 158, 172);
+                _stockHint.ForeColor = C.Flat;
                 _stockHint.Text = "数据加载中…";
             }
             _stockCurrent = code;
@@ -669,36 +601,18 @@ namespace StockPool
 
         private void StockLoadName(string code)
         {
-            System.Threading.Tasks.Task.Run(delegate
-            {
-                try
+            FetchStockName(code,
+                delegate(string name, string display)
                 {
-                    string resp = VRequest("http://127.0.0.1:8000/api/stock/quote?code=" + code, null);
-                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    Invoke((Action)delegate
-                    {
-                        if (_stockCode.Text.Trim() != code) return;
-                        object okv;
-                        bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
-                        if (ok && j.ContainsKey("name"))
-                        {
-                            double? pr = VNum(VSafe(j, "price"));
-                            string nm = VStr(VSafe(j, "name"));
-                            _stockName.Text = nm + (pr != null ? "  " + pr.Value.ToString("F2") + " 元" : "");
-                            StockAddHistory(code, nm);   // 补全历史记录中的名称
-                        }
-                        else
-                        {
-                            _stockName.Text = VStr(VSafe(j, "error"));
-                        }
-                    });
-                }
-                catch (Exception ex)
+                    if (_stockCode.Text.Trim() != code) return;   // 竞态守卫：输入框已换成别的代码
+                    _stockName.Text = display;
+                    StockAddHistory(code, name);                  // 补全历史记录中的名称
+                },
+                delegate(string err)
                 {
-                    try { Invoke((Action)delegate { _stockName.Text = "名称查询失败：" + ex.Message; }); }
-                    catch (Exception) { }
-                }
-            });
+                    if (_stockCode.Text.Trim() != code) return;
+                    _stockName.Text = err;
+                });
         }
 
         // ---- 历史（K线 / 轨迹 / 消息）----
@@ -707,33 +621,28 @@ namespace StockPool
             int round = ++_stockRound;
             _stockStatus.Text = refresh ? "正在更新真实行情与消息…" : "正在读取K线与消息缓存…";
             _stockStatus.Tag = "muted";
-            System.Threading.Tasks.Task.Run(delegate
-            {
-                try
+            // 第 18 项：改用统一异步骨架。守卫语义与原来一字不差 ——
+            // round 在发起请求前捕获，返回时若已不是当前轮就丢弃结果。
+            RunUi<Dictionary<string, object>>(
+                delegate
                 {
-                    string url = "http://127.0.0.1:8000/api/history/stock/" + code + "?refresh=" + (refresh ? "true" : "false")
+                    string url = "http://127.0.0.1:8000/api/history/stock/" + code
+                           + "?refresh=" + (refresh ? "true" : "false")
                            + "&period=" + (string.IsNullOrEmpty(_stockPeriod) ? "day" : _stockPeriod);
                     string resp = VRequest(url, null);
-                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    Invoke((Action)delegate
-                    {
-                        if (round == _stockRound) StockRenderHistory(j);
-                    });
-                }
-                catch (Exception ex)
-                {
-                    string msg = "请求失败：" + ex.Message;
-                    try { Invoke((Action)delegate { if (round == _stockRound) StockFail(msg); }); }
-                    catch (Exception) { }
-                }
-            });
+                    return new JavaScriptSerializer()
+                        .Deserialize<Dictionary<string, object>>(resp);
+                },
+                delegate(Dictionary<string, object> j) { StockRenderHistory(j); },
+                delegate(Exception ex) { StockFail("请求失败：" + ex.Message); },
+                delegate { return round == _stockRound; });
         }
 
         private void StockFail(string msg)
         {
             _stockStatus.Text = "加载失败：" + msg;
             _stockStatus.Tag = "bad";
-            _stockStatus.ForeColor = Color.FromArgb(208, 57, 59);
+            _stockStatus.ForeColor = C.UpErr;
             _stockKline.SetData(new List<KBar>(), new List<KBar>(), new List<KMark>());
             // 右侧筹码窗口同步清空，避免还留着上一只股票的分布
             if (_stockChip != null) _stockChip.SetStatus("筹码未加载", false);
@@ -763,7 +672,7 @@ namespace StockPool
                     {
                         foreach (Dictionary<string, object> it in list)
                         {
-                            string panel = VStr(VSafe(it, "panel"));
+                            string panel = J.Str(J.Get(it, "panel"));
                             if (panel == "none") continue;                   // 不显示类型：不进勾选列表
                             string grp = (panel == "main") ? "主图" : "副图";
                             if (!groups.ContainsKey(grp)) groups[grp] = new List<Dictionary<string, object>>();
@@ -785,13 +694,19 @@ namespace StockPool
                 _stockIndFlow.Controls.Add(Lbl(kv.Key + "："));
                 foreach (var it in kv.Value)
                 {
-                    string id = VStr(VSafe(it, "id"));
-                    string name = VStr(VSafe(it, "name"));
+                    string id = J.Str(J.Get(it, "id"));
+                    string name = J.Str(J.Get(it, "name"));
                     var cb = Check(name, _stockIndicators.Contains(id));
                     cb.CheckedChanged += delegate { StockSetIndicator(id, cb.Checked); };
                     _stockIndFlow.Controls.Add(cb);
                 }
             }
+            // ⭐ 补染（bug 修复）：本方法在**每次点「分析」**后都会被异步调到
+            // （StockOpen -> StockRefreshIndicatorList -> Invoke），Clear + 重建出的
+            // 勾选框是默认配色 —— `Check()` 不设 BackColor（默认 SystemColors.Window 白底）、
+            // `Lbl()` 甚至硬编码黑字，深色主题下分组标签直接看不见。
+            // 重建发生在页面挂载之后，之前的 Skin 不会再扫到这里，必须自己补一次。
+            Skin(_stockIndFlow);
         }
 
         private void StockLoadIndicators(string code)
@@ -839,7 +754,7 @@ namespace StockPool
                     if (!PostJson("http://127.0.0.1:8000/api/indicators/batch", json, 120000, out body) || string.IsNullOrEmpty(body))
                         return;
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body);
-                    var itemsResp = VArr(VSafe(j, "items"));
+                    var itemsResp = J.Arr(J.Get(j, "items"));
                     var dates = (_stockKline != null) ? _stockKline.GetDates() : new List<string>();
                     var panels = new List<LowerPanel>();
                     var mainSeries = new List<ChartSeries>();
@@ -847,21 +762,21 @@ namespace StockPool
                     {
                         foreach (Dictionary<string, object> it in itemsResp)
                         {
-                            string id = VStr(VSafe(it, "id"));
-                            string name = VStr(VSafe(it, "name"));
-                            string panel = VStr(VSafe(it, "panel"));
-                            if (VSafe(it, "error") != null) continue;
-                            var sArr = VArr(VSafe(it, "series"));
+                            string id = J.Str(J.Get(it, "id"));
+                            string name = J.Str(J.Get(it, "name"));
+                            string panel = J.Str(J.Get(it, "panel"));
+                            if (J.Get(it, "error") != null) continue;
+                            var sArr = J.Arr(J.Get(it, "series"));
                             if (sArr == null) continue;
                             if (panel == "main")
                             {
                                 // 主图叠加：序列直接叠加到价格轴
                                 foreach (Dictionary<string, object> s in sArr)
                                 {
-                                    string sname = VStr(VSafe(s, "name"));
-                                    string kind = VStr(VSafe(s, "kind"));
-                                    var dArr = VArr(VSafe(s, "data"));
-                                    var data = AlignSeries(dates, VSafe(s, "dates"), dArr);
+                                    string sname = J.Str(J.Get(s, "name"));
+                                    string kind = J.Str(J.Get(s, "kind"));
+                                    var dArr = J.Arr(J.Get(s, "data"));
+                                    var data = AlignSeries(dates, J.Get(s, "dates"), dArr);
                                     var cs = new ChartSeries { Name = sname, Kind = kind, Data = data };
                                     ApplySeriesStyle(cs);
                                     mainSeries.Add(cs);
@@ -873,10 +788,10 @@ namespace StockPool
                                 var lp = new LowerPanel { Id = id, Title = name, Weight = 1, Series = new List<ChartSeries>() };
                                 foreach (Dictionary<string, object> s in sArr)
                                 {
-                                    string sname = VStr(VSafe(s, "name"));
-                                    string kind = VStr(VSafe(s, "kind"));
-                                    var dArr = VArr(VSafe(s, "data"));
-                                    var data = AlignSeries(dates, VSafe(s, "dates"), dArr);
+                                    string sname = J.Str(J.Get(s, "name"));
+                                    string kind = J.Str(J.Get(s, "kind"));
+                                    var dArr = J.Arr(J.Get(s, "data"));
+                                    var data = AlignSeries(dates, J.Get(s, "dates"), dArr);
                                     var cs = new ChartSeries { Name = sname, Kind = kind, Data = data };
                                     ApplySeriesStyle(cs);
                                     lp.Series.Add(cs);
@@ -945,7 +860,7 @@ namespace StockPool
                         {
                             if (round != _stockRound || _stockBlocks == null) return;
                             _stockBlocks.Text = "板块标注不可用";
-                            _stockBlocks.ForeColor = Color.FromArgb(150, 158, 172);
+                            _stockBlocks.ForeColor = C.Flat;
                         });
                     }
                     catch (Exception) { }
@@ -956,31 +871,22 @@ namespace StockPool
         /// <summary>索引正在后台重建时，隔几秒重查一次直到建好（重建约 1 分钟）。</summary>
         private void ScheduleBoardsRetry()
         {
-            if (_boardsTimer == null)
+            Debounce(ref _boardsTimer, 6000, delegate
             {
-                _boardsTimer = new System.Windows.Forms.Timer();
-                _boardsTimer.Interval = 6000;
-                _boardsTimer.Tick += delegate
-                {
-                    _boardsTimer.Stop();
-                    if (_stockCurrent != null) StockLoadBoards(_stockCurrent);
-                };
-            }
-            _boardsTimer.Stop();
-            _boardsTimer.Start();
+                if (_stockCurrent != null) StockLoadBoards(_stockCurrent);
+            });
         }
 
         private void StockRenderBoards(Dictionary<string, object> j)
         {
             if (_stockBlocks == null) return;
-            Color muted = Color.FromArgb(150, 158, 172);
+            Color muted = C.Flat;
             _stockCptBlocks.Text = "";
             _stockRgnBlocks.Text = "";
-            object okv;
-            bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+bool ok = J.IsOk(j);
             if (!ok)
             {
-                string emsg = VStr(VSafe(j, "detail"));
+                string emsg = J.ErrMsg(j);
                 _stockBlocks.Text = string.IsNullOrEmpty(emsg) ? "板块标注不可用" : emsg;
                 _stockBlocks.ForeColor = muted;
                 return;
@@ -990,21 +896,21 @@ namespace StockPool
             bool syncing = false;
             object syv;
             if (j.TryGetValue("syncing", out syv) && syv is bool) syncing = (bool)syv;
-            var boardsObj = VSafe(j, "boards") as Dictionary<string, object>;
+            var boardsObj = J.Get(j, "boards") as Dictionary<string, object>;
             bool empty = (boardsObj == null
-                          || VArr(VSafe(boardsObj, "industry")) == null
-                          || VArr(VSafe(boardsObj, "industry")).Count == 0);
+                          || J.Arr(J.Get(boardsObj, "industry")) == null
+                          || J.Arr(J.Get(boardsObj, "industry")).Count == 0);
             if (empty)
             {
                 if (syncing)
                 {
                     _stockBlocks.Text = "板块索引建立中（约 1 分钟）…";
-                    _stockBlocks.ForeColor = Color.FromArgb(240, 170, 60);
+                    _stockBlocks.ForeColor = C.LineGold;
                     ScheduleBoardsRetry();
                     return;
                 }
                 _stockBlocks.Text = "板块索引未建立，点此 ↻ 重建索引";
-                _stockBlocks.ForeColor = Color.FromArgb(110, 190, 220);
+                _stockBlocks.ForeColor = C.LineCyan;
                 _stockBlocks.Cursor = Cursors.Hand;
                 _stockBlocks.Click -= StockRebuildBoards;      // 防重复挂接
                 _stockBlocks.Click += StockRebuildBoards;
@@ -1013,12 +919,12 @@ namespace StockPool
             _stockBlocks.Cursor = Cursors.Default;
 
             // 通达信配色：行业黄 / 概念绿 / 地域青；最相关（成分股最少）加 ★
-            _stockBlocks.Text = BoardLineText("行业：", VArr(VSafe(boardsObj, "industry")), 6);
-            _stockBlocks.ForeColor = Color.FromArgb(240, 200, 80);
-            _stockCptBlocks.Text = BoardLineText("概念：", VArr(VSafe(boardsObj, "concept")), 12);
-            _stockCptBlocks.ForeColor = Color.FromArgb(130, 210, 140);
-            _stockRgnBlocks.Text = BoardLineText("地域：", VArr(VSafe(boardsObj, "region")), 3);
-            _stockRgnBlocks.ForeColor = Color.FromArgb(110, 190, 220);
+            _stockBlocks.Text = BoardLineText("行业：", J.Arr(J.Get(boardsObj, "industry")), 6);
+            _stockBlocks.ForeColor = C.RpsYellowLight;
+            _stockCptBlocks.Text = BoardLineText("概念：", J.Arr(J.Get(boardsObj, "concept")), 12);
+            _stockCptBlocks.ForeColor = C.UpSoft;
+            _stockRgnBlocks.Text = BoardLineText("地域：", J.Arr(J.Get(boardsObj, "region")), 3);
+            _stockRgnBlocks.ForeColor = C.LineCyan;
         }
 
         private void StockRebuildBoards(object sender, EventArgs e)
@@ -1036,7 +942,7 @@ namespace StockPool
             {
                 var d = items[i] as Dictionary<string, object>;
                 if (d == null) continue;
-                string name = Convert.ToString(VSafe(d, "board"));
+                string name = Convert.ToString(J.Get(d, "board"));
                 if (string.IsNullOrEmpty(name)) continue;
                 names.Add((i == 0 && items.Count > 1 ? "★" : "") + name);
             }
@@ -1052,7 +958,7 @@ namespace StockPool
             int round = ++_stockBasicRound;
             _stockBasicStatus.Text = "正在加载基本信息…";
             _stockBasicStatus.Tag = "muted";
-            _stockBasicStatus.ForeColor = Color.FromArgb(150, 158, 172);
+            _stockBasicStatus.ForeColor = C.Flat;
             System.Threading.Tasks.Task.Run(delegate
             {
                 try
@@ -1071,7 +977,7 @@ namespace StockPool
                             {
                                 _stockBasicStatus.Text = "加载失败：" + ex.Message;
                                 _stockBasicStatus.Tag = "bad";
-                                _stockBasicStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                                _stockBasicStatus.ForeColor = C.UpErr;
                             }
                         });
                     }
@@ -1080,15 +986,9 @@ namespace StockPool
             });
         }
 
-        private static string FmtYi(object o)
-        {
-            double? v = VNum(o);
-            return v == null ? "—" : v.Value.ToString("F2") + " 亿";
-        }
-
         private static string FmtShares(object o)
         {
-            double? v = VNum(o);
+            double? v = J.NumOrNull(o);
             if (v == null) return "—";
             if (v >= 1e8) return (v.Value / 1e8).ToString("F2") + " 亿股";
             if (v >= 1e4) return (v.Value / 1e4).ToString("F2") + " 万股";
@@ -1102,69 +1002,68 @@ namespace StockPool
             _stockBasicLimitKpi.Controls.Clear();
             _stockBasicHolders.Rows.Clear();
 
-            object okv;
-            bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+bool ok = J.IsOk(j);
             if (!ok)
             {
-                string emsg = VStr(VSafe(j, "detail"));
+                string emsg = J.Str(J.Get(j, "detail"));
                 if (string.IsNullOrEmpty(emsg)) emsg = "加载失败";
                 _stockBasicStatus.Text = emsg;
                 _stockBasicStatus.Tag = "bad";
-                _stockBasicStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                _stockBasicStatus.ForeColor = C.UpErr;
                 return;
             }
 
-            string industry = VStr(VSafe(j, "industry"));
+            string industry = J.Str(J.Get(j, "industry"));
             AddKpi(_stockBasicKpi, "所属行业", string.IsNullOrEmpty(industry) ? "—" : industry,
-                "上市 " + (string.IsNullOrEmpty(VStr(VSafe(j, "listing_date"))) ? "—" : VStr(VSafe(j, "listing_date"))));
-            AddKpi(_stockBasicKpi, "总市值", FmtYi(VSafe(j, "total_mv_yi")),
-                "总股本 " + FmtShares(VSafe(j, "total_shares")));
-            AddKpi(_stockBasicKpi, "流通市值", FmtYi(VSafe(j, "float_mv_yi")),
-                "流通股本 " + FmtShares(VSafe(j, "float_shares")));
+                "上市 " + (string.IsNullOrEmpty(J.Str(J.Get(j, "listing_date"))) ? "—" : J.Str(J.Get(j, "listing_date"))));
+            AddKpi(_stockBasicKpi, "总市值", J.Yi(J.Get(j, "total_mv_yi")),
+                "总股本 " + FmtShares(J.Get(j, "total_shares")));
+            AddKpi(_stockBasicKpi, "流通市值", J.Yi(J.Get(j, "float_mv_yi")),
+                "流通股本 " + FmtShares(J.Get(j, "float_shares")));
 
-            string bus = VStr(VSafe(j, "main_business"));
+            string bus = J.Str(J.Get(j, "main_business"));
             _stockBasicBus.Text = string.IsNullOrEmpty(bus) ? "" : ("主营业务：" + bus);
 
-            var lu = VSafe(j, "limit_up") as Dictionary<string, object>;
+            var lu = J.Get(j, "limit_up") as Dictionary<string, object>;
             if (lu != null)
             {
-                double? lpct = VNum(VSafe(j, "limit_pct"));
-                string last = VStr(VSafe(lu, "last_date"));
+                double? lpct = J.NumOrNull(J.Get(j, "limit_pct"));
+                string last = J.Str(J.Get(lu, "last_date"));
                 string range = "";
-                var rArr = VArr(VSafe(lu, "max_range"));
-                if (rArr != null && rArr.Count >= 2) range = VStr(rArr[0]) + " ~ " + VStr(rArr[1]);
+                var rArr = J.Arr(J.Get(lu, "max_range"));
+                if (rArr != null && rArr.Count >= 2) range = J.Str(rArr[0]) + " ~ " + J.Str(rArr[1]);
                 AddKpi(_stockBasicLimitKpi, "上次涨停", string.IsNullOrEmpty(last) ? "—" : last,
                     lpct != null ? ("涨跌幅限制 " + lpct.Value + "%") : "");
                 AddKpi(_stockBasicLimitKpi, "历史最大连板",
-                    (VNum(VSafe(lu, "max_streak")) ?? 0) + " 板",
+                    (J.NumOrNull(J.Get(lu, "max_streak")) ?? 0) + " 板",
                     string.IsNullOrEmpty(range) ? "" : range);
                 AddKpi(_stockBasicLimitKpi, "涨停次数",
-                    (VNum(VSafe(lu, "total")) ?? 0).ToString(), "历史累计");
+                    (J.NumOrNull(J.Get(lu, "total")) ?? 0).ToString(), "历史累计");
             }
 
-            var holders = VArr(VSafe(j, "holders"));
+            var holders = J.Arr(J.Get(j, "holders"));
             if (holders != null)
             {
                 foreach (Dictionary<string, object> h in holders)
                 {
-                    double? pct = VNum(VSafe(h, "pct"));
+                    double? pct = J.NumOrNull(J.Get(h, "pct"));
                     _stockBasicHolders.Rows.Add(
-                        VStr(VSafe(h, "rank")),
-                        VStr(VSafe(h, "name")),
-                        VStr(VSafe(h, "share_type")),
-                        FmtShares(VSafe(h, "shares")),
+                        J.Str(J.Get(h, "rank")),
+                        J.Str(J.Get(h, "name")),
+                        J.Str(J.Get(h, "share_type")),
+                        FmtShares(J.Get(h, "shares")),
                         pct == null ? "—" : pct.Value.ToString("F2") + "%",
-                        VStr(VSafe(h, "change")),
-                        VStr(VSafe(h, "change_ratio")));
+                        J.Str(J.Get(h, "change")),
+                        J.Str(J.Get(h, "change_ratio")));
                 }
                 _stockBasicHolders.Fit(200, 620);
             }
 
-            var errs = VArr(VSafe(j, "errors"));
+            var errs = J.Arr(J.Get(j, "errors"));
             bool hasErr = errs != null && errs.Count > 0;
             _stockBasicStatus.Text = hasErr ? ("部分数据不可用：" + JoinErrs(errs)) : "加载完成";
             _stockBasicStatus.Tag = "muted";
-            _stockBasicStatus.ForeColor = hasErr ? Color.FromArgb(201, 133, 0) : Color.FromArgb(150, 158, 172);
+            _stockBasicStatus.ForeColor = hasErr ? C.Warn : C.Flat;
         }
 
         // ---- 筹码公式下拉：后端 /api/chip/dist/formulas 枚举 ----
@@ -1181,22 +1080,22 @@ namespace StockPool
                         || string.IsNullOrEmpty(body))
                         return;
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body);
-                    var items = VArr(VSafe(j, "items"));
+                    var items = J.Arr(J.Get(j, "items"));
                     var list = new List<ChipFormulaItem>();
                     if (items != null)
                     {
                         foreach (Dictionary<string, object> it in items)
                         {
-                            string fid = VStr(VSafe(it, "id"));
+                            string fid = J.Str(J.Get(it, "id"));
                             if (string.IsNullOrEmpty(fid)) continue;
                             list.Add(new ChipFormulaItem
                             {
                                 Id = fid,
-                                Name = VStr(VSafe(it, "name")) ?? fid,
+                                Name = J.Str(J.Get(it, "name")) ?? fid,
                             });
                         }
                     }
-                    string def = VStr(VSafe(j, "default"));
+                    string def = J.Str(J.Get(j, "default"));
                     Invoke((Action)delegate { StockRenderChipFormulas(list, def); });
                 }
                 catch { }
@@ -1222,18 +1121,10 @@ namespace StockPool
         /// <summary>滚轮缩放会连续改变可见根数，防抖后再重算筹码，避免每滚一格就发一次请求。</summary>
         private void ScheduleChipReload()
         {
-            if (_chipTimer == null)
+            Debounce(ref _chipTimer, 400, delegate
             {
-                _chipTimer = new System.Windows.Forms.Timer();
-                _chipTimer.Interval = 400;
-                _chipTimer.Tick += delegate
-                {
-                    _chipTimer.Stop();
-                    if (_stockCurrent != null) StockLoadChip(_stockCurrent);
-                };
-            }
-            _chipTimer.Stop();
-            _chipTimer.Start();
+                if (_stockCurrent != null) StockLoadChip(_stockCurrent);
+            });
         }
 
         private void StockLoadChip(string code)
@@ -1263,11 +1154,10 @@ namespace StockPool
                         return;
                     }
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body);
-                    object okv;
-                    bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+bool ok = J.IsOk(j);
                     if (!ok)
                     {
-                        string emsg = VStr(VSafe(j, "error"));
+                        string emsg = J.ErrMsg(j);
                         if (string.IsNullOrEmpty(emsg)) emsg = "筹码数据不可用";
                         string cap = emsg;
                         Invoke((Action)delegate
@@ -1289,8 +1179,8 @@ namespace StockPool
                     string note = "未做锁仓修正";
                     if (lockup)
                     {
-                        double lr = ChipNum(j, "lockup_ratio");
-                        double lf = ChipNum(j, "lockup_factor");
+                        double lr = J.NumAt(j, "lockup_ratio");
+                        double lf = J.NumAt(j, "lockup_factor");
                         note = string.Format("已做锁仓修正（占流通股 {0:F1}%，系数 {1:F3}）", lr * 100.0, lf);
                     }
                     Invoke((Action)delegate
@@ -1318,15 +1208,15 @@ namespace StockPool
         private static List<ChipBin> StockParseChipBins(Dictionary<string, object> j)
         {
             var bins = new List<ChipBin>();
-            var arr = VArr(VSafe(j, "bins"));
+            var arr = J.Arr(J.Get(j, "bins"));
             if (arr == null) return bins;
             foreach (Dictionary<string, object> d in arr)
             {
                 var b = new ChipBin();
-                b.Lo = VNum(VSafe(d, "lo")) ?? 0;
-                b.Hi = VNum(VSafe(d, "hi")) ?? 0;
-                b.Price = VNum(VSafe(d, "price")) ?? 0;
-                b.Pct = VNum(VSafe(d, "pct")) ?? 0;
+                b.Lo = J.NumOrNull(J.Get(d, "lo")) ?? 0;
+                b.Hi = J.NumOrNull(J.Get(d, "hi")) ?? 0;
+                b.Price = J.NumOrNull(J.Get(d, "price")) ?? 0;
+                b.Pct = J.NumOrNull(J.Get(d, "pct")) ?? 0;
                 bins.Add(b);
             }
             return bins;
@@ -1340,14 +1230,14 @@ namespace StockPool
         private static void StockParseChipFrames(Dictionary<string, object> j, List<ChipBin> bins,
             List<string> dates, List<double[]> frames, List<ChipStats> fstats)
         {
-            var frObj = VSafe(j, "frames") as Dictionary<string, object>;
+            var frObj = J.Get(j, "frames") as Dictionary<string, object>;
             if (frObj != null)
             {
-                var dArr = VArr(VSafe(frObj, "dates"));
+                var dArr = J.Arr(J.Get(frObj, "dates"));
                 if (dArr != null)
                     foreach (object o in dArr) dates.Add(Convert.ToString(o));
 
-                var pArr = VArr(VSafe(frObj, "pct"));
+                var pArr = J.Arr(J.Get(frObj, "pct"));
                 if (pArr != null)
                 {
                     foreach (object row in pArr)
@@ -1355,12 +1245,12 @@ namespace StockPool
                         var rl = row as System.Collections.ArrayList;
                         if (rl == null) continue;
                         var vals = new double[rl.Count];
-                        for (int k = 0; k < rl.Count; k++) vals[k] = VNum(rl[k]) ?? 0;
+                        for (int k = 0; k < rl.Count; k++) vals[k] = J.NumOrNull(rl[k]) ?? 0;
                         frames.Add(vals);
                     }
                 }
 
-                var sArr = VArr(VSafe(frObj, "stats"));
+                var sArr = J.Arr(J.Get(frObj, "stats"));
                 if (sArr != null)
                 {
                     foreach (object row in sArr)
@@ -1369,11 +1259,11 @@ namespace StockPool
                         var s = new ChipStats();
                         if (d != null)
                         {
-                            s.Close = VNum(VSafe(d, "close")) ?? 0;
-                            s.AvgCost = VNum(VSafe(d, "avg_cost"));
-                            s.PeakPrice = VNum(VSafe(d, "peak_price"));
-                            s.ProfitRatio = VNum(VSafe(d, "profit_ratio"));
-                            s.Scr90 = VNum(VSafe(d, "scr90"));
+                            s.Close = J.NumOrNull(J.Get(d, "close")) ?? 0;
+                            s.AvgCost = J.NumOrNull(J.Get(d, "avg_cost"));
+                            s.PeakPrice = J.NumOrNull(J.Get(d, "peak_price"));
+                            s.ProfitRatio = J.NumOrNull(J.Get(d, "profit_ratio"));
+                            s.Scr90 = J.NumOrNull(J.Get(d, "scr90"));
                         }
                         fstats.Add(s);
                     }
@@ -1384,16 +1274,16 @@ namespace StockPool
                 var vals = new double[bins.Count];
                 for (int i = 0; i < bins.Count; i++) vals[i] = bins[i].Pct;
                 frames.Add(vals);
-                dates.Add(VStr(VSafe(j, "as_of")));
+                dates.Add(J.Str(J.Get(j, "as_of")));
                 var s = new ChipStats();
-                var sObj = VSafe(j, "stats") as Dictionary<string, object>;
+                var sObj = J.Get(j, "stats") as Dictionary<string, object>;
                 if (sObj != null)
                 {
-                    s.Close = VNum(VSafe(j, "last_close")) ?? 0;
-                    s.AvgCost = VNum(VSafe(sObj, "avg_cost"));
-                    s.PeakPrice = VNum(VSafe(sObj, "peak_price"));
-                    s.ProfitRatio = VNum(VSafe(sObj, "profit_ratio"));
-                    s.Scr90 = VNum(VSafe(sObj, "scr90"));
+                    s.Close = J.NumOrNull(J.Get(j, "last_close")) ?? 0;
+                    s.AvgCost = J.NumOrNull(J.Get(sObj, "avg_cost"));
+                    s.PeakPrice = J.NumOrNull(J.Get(sObj, "peak_price"));
+                    s.ProfitRatio = J.NumOrNull(J.Get(sObj, "profit_ratio"));
+                    s.Scr90 = J.NumOrNull(J.Get(sObj, "scr90"));
                 }
                 fstats.Add(s);
             }
@@ -1436,7 +1326,7 @@ namespace StockPool
 
         // RPS 副图高亮阈值 M：本项目约定 M = 90（RPS ≥ 90 = 全市场前 10% 强势）。
         private const double RpsHiThreshold = 90.0;
-        private static readonly Color RpsHiRed = Color.FromArgb(239, 83, 80);
+        private static readonly Color RpsHiRed = C.Up;
 
         /// <summary>
         /// 按通达信 RPS 副图公式给序列配色：120 绿 / 250 白 / 50 黄 / 20 灰 / 10 浅青，
@@ -1447,11 +1337,11 @@ namespace StockPool
         {
             switch (s.Name)
             {
-                case "RPS120": s.Color = Color.FromArgb(63, 185, 80);   break;   // COLORGREEN
-                case "RPS250": s.Color = Color.FromArgb(238, 242, 248); break;   // COLORWHITE
-                case "RPS50": s.Color = Color.FromArgb(240, 200, 60);  break;    // COLORYELLOW
-                case "RPS20": s.Color = Color.FromArgb(150, 158, 172); break;    // COLORGRAY
-                case "RPS10": s.Color = Color.FromArgb(120, 220, 220); break;    // COLORLICYAN
+                case "RPS120": s.Color = C.Down;   break;   // COLORGREEN
+                case "RPS250": s.Color = C.RpsWhite; break;   // COLORWHITE
+                case "RPS50": s.Color = C.RpsYellow;  break;    // COLORYELLOW
+                case "RPS20": s.Color = C.Flat; break;    // COLORGRAY
+                case "RPS10": s.Color = C.RpsCyan; break;    // COLORLICYAN
                 default: s.Color = LineColor(s.Name); return;
             }
             s.Width = 2f;                       // LINETHICK2
@@ -1460,84 +1350,75 @@ namespace StockPool
             s.HiColor = RpsHiRed;
         }
 
-        /// <summary>从筹码接口响应里取一个数值字段（缺省 0；兼容 double / decimal）。</summary>
-        private static double ChipNum(Dictionary<string, object> j, string key)
-        {
-            object v;
-            if (j != null && j.TryGetValue(key, out v) && v != null)
-            {
-                try { return Convert.ToDouble(v); } catch (Exception) { }
-            }
-            return 0.0;
-        }
-
         private static Color LineColor(string name)
         {
             if (name != null)
             {
-                if (name.Contains("DIF")) return Color.FromArgb(240, 160, 60);
-                if (name.Contains("DEA")) return Color.FromArgb(57, 135, 229);
+                if (name.Contains("DIF")) return C.LineDif;
+                if (name.Contains("DEA")) return C.LineDea;
             }
-            return Color.FromArgb(144, 133, 233);
+            return C.LineViolet;
         }
 
         private void StockRenderHistory(Dictionary<string, object> j)
         {
-            object okv;
-            bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+bool ok = J.IsOk(j);
             if (!ok)
             {
-                string emsg = VStr(VSafe(j, "detail"));
-                if (emsg == "") emsg = VStr(VSafe(j, "error"));
-                if (emsg == "") emsg = "加载失败";
+                string emsg = J.ErrMsg(j);
+                if (string.IsNullOrEmpty(emsg)) emsg = "加载失败";
                 StockFail(emsg);
                 return;
             }
 
             // K 线（前复权）
             var bars = new List<KBar>();
-            var arr = VArr(VSafe(j, "bars"));
+            var arr = J.Arr(J.Get(j, "bars"));
             if (arr != null)
             {
                 foreach (Dictionary<string, object> d in arr)
                 {
                     var b = new KBar();
-                    b.Date = VStr(VSafe(d, "trade_date"));
-                    b.O = VNum(VSafe(d, "open")) ?? 0;
-                    b.C = VNum(VSafe(d, "close")) ?? 0;
-                    b.L = VNum(VSafe(d, "low")) ?? 0;
-                    b.H = VNum(VSafe(d, "high")) ?? 0;
-                    b.V = VNum(VSafe(d, "volume")) ?? 0;
+                    b.Date = J.Str(J.Get(d, "trade_date"));
+                    b.O = J.NumOrNull(J.Get(d, "open")) ?? 0;
+                    b.C = J.NumOrNull(J.Get(d, "close")) ?? 0;
+                    b.L = J.NumOrNull(J.Get(d, "low")) ?? 0;
+                    b.H = J.NumOrNull(J.Get(d, "high")) ?? 0;
+                    b.V = J.NumOrNull(J.Get(d, "volume")) ?? 0;
+                    // 跳过坏柱（bug-04）：O/H/L 缺失被补成 0 的柱会把价格刻度
+                    // 撑到负值（红烛从图例顶贯到绘图区底）。入库已在后端拒收，这里再兜一层。
+                    if (b.O <= 0 || b.H <= 0 || b.L <= 0 || b.C <= 0 || b.H < b.L) continue;
                     bars.Add(b);
                 }
             }
 
             // K 线（不复权原始价）
             var barsRaw = new List<KBar>();
-            var arrRaw = VArr(VSafe(j, "bars_raw"));
+            var arrRaw = J.Arr(J.Get(j, "bars_raw"));
             if (arrRaw != null)
             {
                 foreach (Dictionary<string, object> d in arrRaw)
                 {
                     var b = new KBar();
-                    b.Date = VStr(VSafe(d, "trade_date"));
-                    b.O = VNum(VSafe(d, "open")) ?? 0;
-                    b.C = VNum(VSafe(d, "close")) ?? 0;
-                    b.L = VNum(VSafe(d, "low")) ?? 0;
-                    b.H = VNum(VSafe(d, "high")) ?? 0;
-                    b.V = VNum(VSafe(d, "volume")) ?? 0;
+                    b.Date = J.Str(J.Get(d, "trade_date"));
+                    b.O = J.NumOrNull(J.Get(d, "open")) ?? 0;
+                    b.C = J.NumOrNull(J.Get(d, "close")) ?? 0;
+                    b.L = J.NumOrNull(J.Get(d, "low")) ?? 0;
+                    b.H = J.NumOrNull(J.Get(d, "high")) ?? 0;
+                    b.V = J.NumOrNull(J.Get(d, "volume")) ?? 0;
+                    if (b.O <= 0 || b.H <= 0 || b.L <= 0 || b.C <= 0 || b.H < b.L) continue;   // 坏柱（bug-04）
                     barsRaw.Add(b);
                 }
             }
 
             // 入池/出池轨迹
-            var pool = VMap(VSafe(j, "pool"));
-            var spans = VArr(pool != null ? VSafe(pool, "spans") : null);
+            var pool = J.Map(J.Get(j, "pool"));
+            var spans = J.Arr(pool != null ? J.Get(pool, "spans") : null);
             var spanList = new List<Dictionary<string, object>>();
             if (spans != null) foreach (Dictionary<string, object> s in spans) spanList.Add(s);
 
             // 消息面
-            var events = VArr(VSafe(j, "events"));
+            var events = J.Arr(J.Get(j, "events"));
 
             // 标记（入池/出池/事件）只取落在 K 线上的日期
             var dateSet = new HashSet<string>();
@@ -1545,30 +1426,38 @@ namespace StockPool
             var marks = new List<KMark>();
             foreach (Dictionary<string, object> s in spanList)
             {
-                string st = VStr(VSafe(s, "start"));
+                string st = J.Str(J.Get(s, "start"));
                 if (dateSet.Contains(st))
-                    marks.Add(new KMark { Date = st, Kind = "in", Color = Color.FromArgb(239, 83, 80), Text = "入" });
-                object openv = VSafe(s, "open");
+                    marks.Add(new KMark { Date = st, Kind = "in", Color = C.Up, Text = "入" });
+                object openv = J.Get(s, "open");
                 bool open = (openv is bool) && (bool)openv;
                 if (!open)
                 {
-                    string en = VStr(VSafe(s, "end"));
+                    string en = J.Str(J.Get(s, "end"));
                     if (dateSet.Contains(en))
-                        marks.Add(new KMark { Date = en, Kind = "out", Color = Color.FromArgb(125, 124, 120), Text = "出" });
+                        marks.Add(new KMark { Date = en, Kind = "out", Color = C.FlatWarm, Text = "出" });
                 }
             }
             if (events != null)
             {
                 foreach (Dictionary<string, object> ev in events)
                 {
-                    string dt = VStr(VSafe(ev, "published_at"));
+                    string dt = J.Str(J.Get(ev, "published_at"));
                     if (!dateSet.Contains(dt)) continue;
-                    string kind = VStr(VSafe(ev, "kind"));
-                    Color c = kind == "announcement" ? Color.FromArgb(201, 133, 0) : Color.FromArgb(57, 135, 229);
+                    string kind = J.Str(J.Get(ev, "kind"));
+                    Color c = kind == "announcement" ? C.Warn : C.LineDea;
                     marks.Add(new KMark { Date = dt, Kind = "event", Color = c, Text = kind == "announcement" ? "告" : "闻" });
                 }
             }
 
+            // ⭐ 自愈补染（bug：K 线图偶发整块变白，用户重启才能恢复）：
+            // 截图证据显示白块的图表控件处于「从未被 Skin 过」的默认配色（黑字白底图例），
+            // 而其左侧轴刻度仍是深色旧帧 —— 但静态排查未能确证是哪条路径漏染
+            // （Select(0) 会 Skin(page)、ApplyTheme 会递归已挂载控件，理论上都覆盖得到）。
+            // 与其继续猜根因，这里在**每次数据渲染前**重新断言一次主题：
+            // Skin 幂等（同色重设无视觉扰动），此后图表最多「白一帧」，不可能白到重启。
+            Skin(_stockKline);
+            Skin(_stockChip);
             _stockKline.Period = _stockPeriod;      // 图例显示 日K / 周K / 月K
             _stockKline.SetData(bars, barsRaw, marks);
             // SetData 不重置可见根数，这里按当前选中的「范围」按钮同步一次：
@@ -1582,14 +1471,14 @@ namespace StockPool
 
             // 状态：「更新至 …」栏与「前复权日K · …」统计文字已按需求移除，
             // 仅当有同步失败时在状态位提示，否则清空。
-            var sync = VMap(VSafe(j, "sync"));
-            var syncErrs = VArr(sync != null ? VSafe(sync, "errors") : null);
+            var sync = J.Map(J.Get(j, "sync"));
+            var syncErrs = J.Arr(sync != null ? J.Get(sync, "errors") : null);
             string errs = (syncErrs != null && syncErrs.Count > 0) ? "；部分失败：" + JoinErrs(syncErrs) : "";
             if (errs.Length > 0)
             {
                 _stockStatus.Text = "部分数据同步失败" + errs;
                 _stockStatus.Tag = "muted";
-                _stockStatus.ForeColor = Color.FromArgb(150, 158, 172);
+                _stockStatus.ForeColor = C.Flat;
             }
             else
             {
@@ -1600,7 +1489,7 @@ namespace StockPool
         private static string JoinErrs(System.Collections.ArrayList list)
         {
             var parts = new List<string>();
-            foreach (object o in list) parts.Add(VStr(o));
+            foreach (object o in list) parts.Add(J.Str(o));
             return string.Join("；", parts.ToArray());
         }
 
@@ -1617,15 +1506,15 @@ namespace StockPool
             for (int i = spans.Count - 1; i >= 0; i--)
             {
                 Dictionary<string, object> s = spans[i];
-                object openv = VSafe(s, "open");
+                object openv = J.Get(s, "open");
                 bool open = (openv is bool) && (bool)openv;
-                string end = open ? "至今" : VStr(VSafe(s, "end"));
-                int days = MktInt(VSafe(s, "days"));
+                string end = open ? "至今" : J.Str(J.Get(s, "end"));
+                int days = MktInt(J.Get(s, "days"));
                 int row = _stockTimeline.Rows.Add(
-                    VStr(VSafe(s, "start")), end, days + " 天", open ? "在榜" : "已出池");
-                _stockTimeline.Rows[row].Cells[2].Style.ForeColor = days >= 7 ? Color.FromArgb(239, 83, 80)
-                    : (days >= 3 ? Color.FromArgb(233, 154, 53) : Color.FromArgb(150, 158, 172));
-                _stockTimeline.Rows[row].Cells[3].Style.ForeColor = open ? Color.FromArgb(239, 83, 80) : Color.FromArgb(150, 158, 172);
+                    J.Str(J.Get(s, "start")), end, days + " 天", open ? "在榜" : "已出池");
+                _stockTimeline.Rows[row].Cells[2].Style.ForeColor = days >= 7 ? C.Up
+                    : (days >= 3 ? C.WarnMid : C.Flat);
+                _stockTimeline.Rows[row].Cells[3].Style.ForeColor = open ? C.Up : C.Flat;
             }
             _stockTimeline.Fit(180, 620);
         }
@@ -1658,16 +1547,16 @@ namespace StockPool
             panel.Margin = new Padding(0, 0, 0, 10);
             panel.Padding = new Padding(0);
 
-            string kind = VStr(VSafe(ev, "kind"));
-            string meta = VStr(VSafe(ev, "published_at")) + " · "
-                + (kind == "announcement" ? "公告" : "新闻") + " · " + VStr(VSafe(ev, "source"));
+            string kind = J.Str(J.Get(ev, "kind"));
+            string meta = J.Str(J.Get(ev, "published_at")) + " · "
+                + (kind == "announcement" ? "公告" : "新闻") + " · " + J.Str(J.Get(ev, "source"));
             var m = Mute(Lbl(meta));
             m.Dock = DockStyle.Top;
             m.Margin = new Padding(0, 0, 0, 2);
             panel.Controls.Add(m);
 
-            string url = VStr(VSafe(ev, "source_url"));
-            string title = VStr(VSafe(ev, "title"));
+            string url = J.Str(J.Get(ev, "source_url"));
+            string title = J.Str(J.Get(ev, "title"));
             bool goodUrl = Uri.IsWellFormedUriString(url, UriKind.Absolute);
             var t = goodUrl ? (Control)new LinkLabel() : (Control)new Label();
             t.Text = title;
@@ -1689,7 +1578,7 @@ namespace StockPool
             }
             panel.Controls.Add(t);
 
-            string summary = VStr(VSafe(ev, "summary"));
+            string summary = J.Str(J.Get(ev, "summary"));
             if (summary != "")
             {
                 var sm = Mute(Lbl(summary));
@@ -1707,7 +1596,7 @@ namespace StockPool
         {
             _stockSaoleiStatus.Text = "获取中…";
             _stockSaoleiStatus.Tag = "muted";
-            _stockSaoleiStatus.ForeColor = Color.FromArgb(150, 158, 172);
+            _stockSaoleiStatus.ForeColor = C.Flat;
             _stockSaoleiList.Controls.Clear();
             System.Threading.Tasks.Task.Run(delegate
             {
@@ -1733,18 +1622,18 @@ namespace StockPool
         {
             _stockSaoleiList.Controls.Clear();
 
-            int total = VIntOf(VSafe(j, "total"));
-            int risk = VIntOf(VSafe(j, "risk"));
-            int safe = VIntOf(VSafe(j, "safe"));
-            string date = VStr(VSafe(j, "date"));
-            var cats = VArr(VSafe(j, "categories"));
+            int total = VIntOf(J.Get(j, "total"));
+            int risk = VIntOf(J.Get(j, "risk"));
+            int safe = VIntOf(J.Get(j, "safe"));
+            string date = J.Str(J.Get(j, "date"));
+            var cats = J.Arr(J.Get(j, "categories"));
 
             _stockSaoleiStatus.Text = "总检查 " + total + " 项 · 风险项 " + risk + " 项 · 安全项 " + safe + " 项"
                 + (date != "" ? "（数据日期 " + date + "）" : "");
             _stockSaoleiStatus.Tag = "muted";
             _stockSaoleiStatus.ForeColor = risk > 0
-                ? Color.FromArgb(208, 57, 59)
-                : Color.FromArgb(150, 158, 172);
+                ? C.UpErr
+                : C.Flat;
 
             // ---- 四大类风险清单（财务 / 市场 / 交易 / ST，并排展示）----
             if (cats != null && cats.Count > 0)
@@ -1762,9 +1651,9 @@ namespace StockPool
                 for (int c = 0; c < cats.Count; c++)
                 {
                     grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-                    var cat = VMap(cats[c]);
+                    var cat = J.Map(cats[c]);
                     if (cat == null) continue;
-                    var blk = SaoleiCategory(VStr(VSafe(cat, "name")), VArr(VSafe(cat, "items")));
+                    var blk = SaoleiCategory(J.Str(J.Get(cat, "name")), J.Arr(J.Get(cat, "items")));
                     blk.Margin = new Padding(0, 0, 18, 0);
                     grid.Controls.Add(blk, c, 0);
                 }
@@ -1776,7 +1665,7 @@ namespace StockPool
             }
 
             // ---- 个股亮点（辅）----
-            var arr = VArr(VSafe(j, "highlights"));
+            var arr = J.Arr(J.Get(j, "highlights"));
             int n = arr == null ? 0 : arr.Count;
             var head = Lbl("个股亮点" + (n > 0 ? "（" + n + " 项）" : ""));
             head.Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold);
@@ -1791,10 +1680,10 @@ namespace StockPool
 
             for (int i = 0; i < n; i++)
             {
-                var ev = VMap(arr[i]);
+                var ev = J.Map(arr[i]);
                 if (ev == null) continue;
-                string name = VStr(VSafe(ev, "name"));
-                string desc = VStr(VSafe(ev, "desc"));
+                string name = J.Str(J.Get(ev, "name"));
+                string desc = J.Str(J.Get(ev, "desc"));
 
                 var panel = new Panel();
                 panel.AutoSize = true;
@@ -1830,7 +1719,7 @@ namespace StockPool
             {
                 foreach (object o in items)
                 {
-                    var m = VMap(o);
+                    var m = J.Map(o);
                     if (m != null) ok.Add(m);
                 }
             }
@@ -1868,14 +1757,14 @@ namespace StockPool
             {
                 for (int i = 0; i < ok.Count; i++)
                 {
-                    bool trig = VStr(VSafe(ok[i], "trig")) == "1";
-                    var nm = Lbl(VStr(VSafe(ok[i], "name")));
+                    bool trig = J.Str(J.Get(ok[i], "trig")) == "1";
+                    var nm = Lbl(J.Str(J.Get(ok[i], "name")));
                     nm.Margin = new Padding(0, 0, 12, 3);
                     var st = Lbl(trig ? "有" : "无");
                     st.Margin = new Padding(0, 0, 0, 3);
                     if (trig)
                     {
-                        st.ForeColor = Color.FromArgb(208, 57, 59);
+                        st.ForeColor = C.UpErr;
                         st.Font = new Font("Microsoft YaHei UI", 9f, FontStyle.Bold);
                     }
                     else
@@ -1896,7 +1785,7 @@ namespace StockPool
         private static int VIntOf(object o)
         {
             int v;
-            return int.TryParse(VStr(o), out v) ? v : 0;
+            return int.TryParse(J.Str(o), out v) ? v : 0;
         }
 
         private void StockSaoleiFail(string msg)
@@ -1904,7 +1793,7 @@ namespace StockPool
             _stockSaoleiList.Controls.Clear();
             _stockSaoleiStatus.Text = msg;
             _stockSaoleiStatus.Tag = "bad";
-            _stockSaoleiStatus.ForeColor = Color.FromArgb(208, 57, 59);
+            _stockSaoleiStatus.ForeColor = C.UpErr;
         }
 
         // ---- 估值（内联）----
@@ -1912,7 +1801,7 @@ namespace StockPool
         {
             _stockValStatus.Text = "计算中…";
             _stockValStatus.Tag = "muted";
-            _stockValStatus.ForeColor = Color.FromArgb(150, 158, 172);
+            _stockValStatus.ForeColor = C.Flat;
             System.Threading.Tasks.Task.Run(delegate
             {
                 try
@@ -1930,8 +1819,7 @@ namespace StockPool
                     {
                         Invoke((Action)delegate
                         {
-                            _stockValStatus.Text = "计算失败";
-                            _stockValStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                            SetErr(_stockValStatus, "计算失败");
                         });
                     }
                     catch (Exception) { }
@@ -1944,60 +1832,57 @@ namespace StockPool
             _stockValKpi.Controls.Clear();
             _stockValGrid.Rows.Clear();
 
-            object okv;
-            bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+bool ok = J.IsOk(j);
             if (!ok)
             {
-                string emsg = VStr(VSafe(j, "error"));
-                if (emsg == "") emsg = VStr(VSafe(j, "detail"));
-                if (emsg == "") emsg = "计算失败";
-                _stockValStatus.Text = emsg;
-                _stockValStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                string emsg = J.ErrMsg(j);
+                if (string.IsNullOrEmpty(emsg)) emsg = "计算失败";
+                SetErr(_stockValStatus, emsg);
                 return;
             }
 
-            var m = VMap(VSafe(j, "market"));
-            var f = VMap(VSafe(j, "finance"));
-            var g = VMap(VSafe(j, "growth"));
-            var a = VMap(VSafe(j, "assumptions"));
+            var m = J.Map(J.Get(j, "market"));
+            var f = J.Map(J.Get(j, "finance"));
+            var g = J.Map(J.Get(j, "growth"));
+            var a = J.Map(J.Get(j, "assumptions"));
 
-            AddKpi(_stockValKpi, "股票", VStr(VSafe(j, "name")), VStr(VSafe(j, "code")));
-            AddKpi(_stockValKpi, "当前股价", VFmt(VNum(VSafe(m, "price"))) + " 元", VStr(VSafe(m, "price_source")));
-            AddKpi(_stockValKpi, "期初净利润", VFmt(VNum(VSafe(f, "net_profit_base"))) + " 亿", VStr(VSafe(f, "indicator")));
-            double? cagr = VNum(VSafe(g, "cagr"));
+            AddKpi(_stockValKpi, "股票", J.Str(J.Get(j, "name")), J.Str(J.Get(j, "code")));
+            AddKpi(_stockValKpi, "当前股价", J.Fmt(J.NumOrNull(J.Get(m, "price"))) + " 元", J.Str(J.Get(m, "price_source")));
+            AddKpi(_stockValKpi, "期初净利润", J.Fmt(J.NumOrNull(J.Get(f, "net_profit_base"))) + " 亿", J.Str(J.Get(f, "indicator")));
+            double? cagr = J.NumOrNull(J.Get(g, "cagr"));
             object cons;
             bool fromC = (g != null && g.TryGetValue("from_consensus", out cons) && cons is bool && (bool)cons);
-            AddKpi(_stockValKpi, "复合增长率", cagr != null ? VFmtPct(cagr) : "走兜底",
+            AddKpi(_stockValKpi, "复合增长率", cagr != null ? J.Pct100(cagr) : "走兜底",
                 fromC ? "机构预测" : "按模板兜底");
-            AddKpi(_stockValKpi, "贴现率", VRate(VNum(VSafe(a, "discount_rate"))), "两段法 DCF");
+            AddKpi(_stockValKpi, "贴现率", J.Pct100Plain(J.NumOrNull(J.Get(a, "discount_rate"))), "两段法 DCF");
 
-            var scenarios = VArr(VSafe(j, "scenarios"));
+            var scenarios = J.Arr(J.Get(j, "scenarios"));
             if (scenarios != null)
             {
                 foreach (Dictionary<string, object> s in scenarios)
                 {
-                    string verdict = VStr(VSafe(s, "verdict"));
+                    string verdict = J.Str(J.Get(s, "verdict"));
                     string cls = (verdict == "低估" || verdict == "高估") ? verdict : "合理";
-                    double? rr = VNum(VSafe(s, "return_rate"));
+                    double? rr = J.NumOrNull(J.Get(s, "return_rate"));
                     int row = _stockValGrid.Rows.Add(
-                        VStr(VSafe(s, "label")),
-                        VFmtPct(VNum(VSafe(s, "growth"))),
-                        VFmt(VNum(VSafe(s, "value_per_share"))) + " 元",
-                        VFmt(VNum(VSafe(s, "undervalued_ratio")), 4),
+                        J.Str(J.Get(s, "label")),
+                        J.Pct100(J.NumOrNull(J.Get(s, "growth"))),
+                        J.Fmt(J.NumOrNull(J.Get(s, "value_per_share"))) + " 元",
+                        J.Fmt(J.NumOrNull(J.Get(s, "undervalued_ratio")), 4),
                         cls,
-                        VFmt(VNum(VSafe(s, "target_price"))) + " 元",
-                        VFmtPct(rr));
-                    _stockValGrid.Rows[row].Cells[4].Style.ForeColor = verdict == "低估" ? Color.FromArgb(63, 185, 80)
-                        : (verdict == "高估" ? Color.FromArgb(239, 83, 80) : Color.FromArgb(150, 158, 172));
+                        J.Fmt(J.NumOrNull(J.Get(s, "target_price"))) + " 元",
+                        J.Pct100(rr));
+                    _stockValGrid.Rows[row].Cells[4].Style.ForeColor = verdict == "低估" ? C.Down
+                        : (verdict == "高估" ? C.Up : C.Flat);
                     if (rr != null)
-                        _stockValGrid.Rows[row].Cells[6].Style.ForeColor = rr.Value > 0 ? Color.FromArgb(239, 83, 80) : (rr.Value < 0 ? Color.FromArgb(63, 185, 80) : Color.FromArgb(150, 158, 172));
+                        _stockValGrid.Rows[row].Cells[6].Style.ForeColor = rr.Value > 0 ? C.Up : (rr.Value < 0 ? C.Down : C.Flat);
                 }
             }
             _stockValGrid.Fit(150, 620);
 
-            _stockValStatus.Text = VStr(VSafe(j, "name")) + "（" + VStr(VSafe(j, "code")) + "）已计算";
+            _stockValStatus.Text = J.Str(J.Get(j, "name")) + "（" + J.Str(J.Get(j, "code")) + "）已计算";
             _stockValStatus.Tag = "muted";
-            _stockValStatus.ForeColor = Color.FromArgb(30, 126, 52);
+            _stockValStatus.ForeColor = C.DownDeep;
         }
 
         // ---- AI 分析（调 /api/stock/research，返回 AI 生成的 markdown）----
@@ -2007,7 +1892,7 @@ namespace StockPool
             {
                 _stockAiStatus.Text = force ? "AI 强制重新分析中…" : "AI 分析中…";
                 _stockAiStatus.Tag = "muted";
-                _stockAiStatus.ForeColor = Color.FromArgb(150, 158, 172);
+                _stockAiStatus.ForeColor = C.Flat;
             }
             _stockAiMarkdown = "";
             if (_stockAiBox != null) FillAiDoc(_stockAiBox, _stockAiMarkdown);
@@ -2031,8 +1916,7 @@ namespace StockPool
                         {
                             if (_stockAiStatus != null)
                             {
-                                _stockAiStatus.Text = "分析失败（网络/超时，确认后端已启动且配置了 LLM）";
-                                _stockAiStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                                SetErr(_stockAiStatus, "分析失败（网络/超时，确认后端已启动且配置了 LLM）");
                             }
                         });
                     }
@@ -2117,27 +2001,24 @@ namespace StockPool
         private void StockRenderAi(Dictionary<string, object> j)
         {
             if (_stockAiStatus == null || _stockAiBox == null) return;
-            object okv;
-            bool ok = (j != null && j.TryGetValue("ok", out okv) && okv is bool && (bool)okv);
+bool ok = J.IsOk(j);
             if (!ok)
             {
-                string emsg = VStr(VSafe(j, "error"));
-                if (emsg == "") emsg = VStr(VSafe(j, "detail"));
-                if (emsg == "") emsg = "分析失败";
-                _stockAiStatus.Text = emsg;
-                _stockAiStatus.ForeColor = Color.FromArgb(208, 57, 59);
+                string emsg = J.ErrMsg(j);
+                if (string.IsNullOrEmpty(emsg)) emsg = "分析失败";
+                SetErr(_stockAiStatus, emsg);
                 _stockAiMarkdown = "";
                 FillAiDoc(_stockAiBox, _stockAiMarkdown);
                 return;
             }
-            string md = VStr(VSafe(j, "markdown"));
+            string md = J.Str(J.Get(j, "markdown"));
             _stockAiMarkdown = md;
             object cached;
             bool isCached = (j.TryGetValue("cached", out cached) && cached is bool && (bool)cached);
-            string asOf = VStr(VSafe(j, "data_as_of"));
-            string d = VStr(VSafe(j, "depth"));
-            string h = VStr(VSafe(j, "horizon"));
-            var fobj = VSafe(j, "focus") as System.Collections.ArrayList;
+            string asOf = J.Str(J.Get(j, "data_as_of"));
+            string d = J.Str(J.Get(j, "depth"));
+            string h = J.Str(J.Get(j, "horizon"));
+            var fobj = J.Get(j, "focus") as System.Collections.ArrayList;
             string f = "";
             if (fobj != null)
             {
@@ -2150,7 +2031,7 @@ namespace StockPool
                 prefs = "  [偏好：" + (d != "" ? d : "?") + "/" + (h != "" ? h : "?") + (f != "" ? "/" + f : "") + "]";
             _stockAiStatus.Text = (isCached ? "（缓存）" : "已生成") + (asOf != "" ? " 数据截至 " + asOf : "") + prefs;
             _stockAiStatus.Tag = "muted";
-            _stockAiStatus.ForeColor = Color.FromArgb(30, 126, 52);
+            _stockAiStatus.ForeColor = C.DownDeep;
             FillAiDoc(_stockAiBox, _stockAiMarkdown);
         }
 
@@ -2268,7 +2149,7 @@ namespace StockPool
             foreach (KeyValuePair<Button, int> kv in _stockRangeMap)
             {
                 bool act = kv.Value == _stockRangeIdx;      // 比的是档位，不是根数
-                kv.Key.BackColor = act ? Color.FromArgb(64, 120, 192) : _cPanel;
+                kv.Key.BackColor = act ? C.Accent : _cPanel;
                 kv.Key.ForeColor = act ? Color.White : _cSub;
                 kv.Key.Invalidate();
             }
@@ -2301,7 +2182,7 @@ namespace StockPool
             foreach (KeyValuePair<Button, string> kv in _stockAdjustMap)
             {
                 bool act = kv.Value == _stockAdjust;
-                kv.Key.BackColor = act ? Color.FromArgb(64, 120, 192) : _cPanel;
+                kv.Key.BackColor = act ? C.Accent : _cPanel;
                 kv.Key.ForeColor = act ? Color.White : _cSub;
                 kv.Key.Invalidate();
             }
@@ -2312,7 +2193,7 @@ namespace StockPool
             foreach (KeyValuePair<Button, string> kv in _stockPeriodMap)
             {
                 bool act = kv.Value == _stockPeriod;
-                kv.Key.BackColor = act ? Color.FromArgb(64, 120, 192) : _cPanel;
+                kv.Key.BackColor = act ? C.Accent : _cPanel;
                 kv.Key.ForeColor = act ? Color.White : _cSub;
                 kv.Key.Invalidate();
             }
@@ -2417,11 +2298,11 @@ namespace StockPool
                 btn.TabStop = false;
                 btn.Tag = h.Code;
                 bool cur = (_stockCurrent == h.Code);
-                btn.BackColor = cur ? Color.FromArgb(64, 120, 192) : _cPanel;
+                btn.BackColor = cur ? C.Accent : _cPanel;
                 btn.ForeColor = cur ? Color.White : _cText;
                 string name = string.IsNullOrEmpty(h.Name) ? "" : ("  " + h.Name);
                 btn.Text = h.Code + name;
-                btn.Click += delegate { _stockCode.Text = h.Code; StockOpen(); StockSubSelect(0); };
+                btn.Click += delegate { _stockCode.Text = h.Code; StockOpen(); _stockStrip.Select(0); };
                 btn.MouseUp += delegate(object s, MouseEventArgs e)
                 {
                     if (e.Button == MouseButtons.Right) StockRemoveHistory(h.Code);
@@ -2445,8 +2326,16 @@ namespace StockPool
                 string from = _stockHistoryPath;
                 if (!File.Exists(from))
                 {
-                    string legacy = Path.Combine(ResolveDataDirSetting(), "history_stock_view.json");
-                    if (File.Exists(legacy)) from = legacy;
+                    // 老位置有两个：根目录（最早）与 config/（第 21 项分区后的位置），都试一遍
+                    string root = ResolveDataDirSetting();
+                    string[] legacyPaths = {
+                        Path.Combine(root, "history_stock_view.json"),
+                        Path.Combine(root, "config", "history_stock_view.json"),
+                    };
+                    foreach (string legacy in legacyPaths)
+                    {
+                        if (File.Exists(legacy)) { from = legacy; break; }
+                    }
                 }
                 if (File.Exists(from))
                 {
@@ -2457,8 +2346,8 @@ namespace StockPool
                         foreach (Dictionary<string, object> d in arr)
                         {
                             var it = new StockHistoryItem();
-                            it.Code = VStr(VSafe(d, "code"));
-                            it.Name = VStr(VSafe(d, "name"));
+                            it.Code = J.Str(J.Get(d, "code"));
+                            it.Name = J.Str(J.Get(d, "name"));
                             object ts;
                             if (d.TryGetValue("ts", out ts) && ts != null)
                             {
@@ -2524,11 +2413,11 @@ namespace StockPool
             // 个股页需要代码才能加载，进入时不自动拉取；仅确保图表按当前主题重绘。
             if (_stockKline != null) _stockKline.Invalidate();
             // 从别的顶级标签切进来时，重新挂载当前二级页并刷新，避免首屏不刷新
-            if (_stockSubBody != null)
+            if (_stockStrip != null)
             {
-                StockSubSelect(_stockSubIndex);
-                _stockSubBody.PerformLayout();
-                _stockSubBody.Invalidate(true);
+                _stockStrip.Select(_stockStrip.Index);
+                _stockStrip.Body.PerformLayout();
+                _stockStrip.Body.Invalidate(true);
             }
             StockRenderHistoryNav();   // 刷新左侧历史导航的当前项高亮
         }
@@ -2607,7 +2496,7 @@ namespace StockPool
         /// 故单独成一个窗口渲染，不走 KLineChart 的副图面板。
         /// 数据来自 GET /api/chip/dist（换手率衰减 + 三角形分布，见 chip_dist_service.py）。
         /// </summary>
-        private sealed class ChipPanel : Control
+        private sealed class ChipPanel : ChartControl
         {
             private const int LeftPad = 6;
             private const int RightPad = 8;
@@ -2626,8 +2515,7 @@ namespace StockPool
 
             public ChipPanel()
             {
-                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
-                    | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+                // SetStyle 已上移到基类 ChartControl（第 07 项）
                 DoubleBuffered = true;
                 Width = 172;
             }
@@ -2684,7 +2572,7 @@ namespace StockPool
             {
                 base.OnPaint(e);
                 var g = e.Graphics;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
+                BeginPaint(g);                 // 抗锯齿统一由基类设置（第 07 项）
                 bool dark = (BackColor.R + BackColor.G + BackColor.B) < 200;
                 Color grid = dark ? Color.FromArgb(54, 58, 68) : Color.FromArgb(222, 224, 228);
                 Color text = ForeColor;
@@ -2697,16 +2585,13 @@ namespace StockPool
                     // 标题右侧标出当前帧的日期：光标回溯时才知道看的是哪一天
                     if (_frame >= 0 && _frame < _dates.Count)
                     {
-                        using (var fmtR = new StringFormat { Alignment = StringAlignment.Far })
-                            g.DrawString(_dates[_frame], Font, tb, Width - RightPad, 3, fmtR);
+                        g.DrawString(_dates[_frame], Font, tb, Width - RightPad, 3, FmtRight);
                     }
                     if (_bins.Count == 0 || _frames.Count == 0)
                     {
-                        using (var mb = new SolidBrush(_failed ? Color.FromArgb(208, 57, 59) : text))
-                        using (var fmt = new StringFormat { Alignment = StringAlignment.Near })
+                        using (var mb = new SolidBrush(_failed ? C.UpErr : text))
                             g.DrawString(_status, Font, mb,
-                                new RectangleF(2, 22, Width - 4, Height - 24), fmt);
-                        return;
+                                new RectangleF(2, 22, Width - 4, Height - 24), FmtLeft);                        return;
                     }
 
                     // 价格轴：优先与 K 线完全一致（同一 lo/hi 映射到同一纵向区间）
@@ -2749,8 +2634,8 @@ namespace StockPool
                     double maxPct = 0;
                     for (int i = 0; i < pct.Length; i++) if (pct[i] > maxPct) maxPct = pct[i];
                     if (maxPct <= 0) maxPct = 1;
-                    Color profit = dark ? Color.FromArgb(228, 96, 84) : Color.FromArgb(216, 74, 62);
-                    Color locked = dark ? Color.FromArgb(72, 152, 214) : Color.FromArgb(52, 132, 194);
+                    Color profit = dark ? C.ProfitDark : C.ProfitLight;
+                    Color locked = dark ? C.LockedDark : C.LockedLight;
 
                     // 先收集价格轴内各分箱的「顶点」：(左侧轴 + 占比宽度, 该箱中心价)
                     var idxs = new List<int>();
@@ -2789,7 +2674,7 @@ namespace StockPool
                     }
 
                     // 当日收盘 / 平均成本参考线
-                    using (var penClose = new Pen(Color.FromArgb(240, 170, 60)))
+                    using (var penClose = new Pen(C.LineGold))
                     {
                         penClose.DashStyle = DashStyle.Dash;
                         int yc = (int)yOf(refClose);
@@ -2797,7 +2682,7 @@ namespace StockPool
                     }
                     if (st != null && st.AvgCost != null)
                     {
-                        using (var penAvg = new Pen(Color.FromArgb(150, 150, 160)))
+                        using (var penAvg = new Pen(C.FlatSoft))
                         {
                             penAvg.DashStyle = DashStyle.Dot;
                             int ya = (int)yOf(st.AvgCost.Value);
@@ -2818,10 +2703,9 @@ namespace StockPool
                             }
                         }
                         // 标签贴着横轴、右对齐（图形只到 Width-RightPad，不会压住最右侧一格）
-                        using (var fmtTick = new StringFormat { Alignment = StringAlignment.Far })
-                        using (var bTick = new SolidBrush(Color.FromArgb(150, 158, 172)))
+                        using (var bTick = new SolidBrush(C.Flat))
                             g.DrawString(maxPct.ToString("F2") + "%", Font, bTick,
-                                         Width - RightPad, bottom - 14, fmtTick);
+                                         Width - RightPad, bottom - 14, FmtRight);
                     }
 
                     // 统计区（价格区之下）：平均成本 / 获利比例 / 峰位 / 集中度
@@ -2839,7 +2723,7 @@ namespace StockPool
                     foreach (string s in lines)
                     {
                         using (var b2 = new SolidBrush(s == _note && !string.IsNullOrEmpty(_note)
-                            ? Color.FromArgb(150, 158, 172) : text))
+                            ? C.Flat : text))
                         {
                             g.DrawString(s, Font, b2, 2, y);
                         }
@@ -2850,7 +2734,7 @@ namespace StockPool
             }
         }
 
-        private sealed class KLineChart : Control
+        private sealed class KLineChart : ChartControl
         {
             private const int LeftPad = 54;
             private const int RightPad = 10;
@@ -2914,13 +2798,12 @@ namespace StockPool
 
             private static readonly int[] MaPeriods = new int[] { 5, 10, 20, 60 };
             private static readonly Color[] MaColors = new Color[] {
-                Color.FromArgb(240, 160, 60), Color.FromArgb(57, 135, 229),
-                Color.FromArgb(213, 81, 129), Color.FromArgb(144, 133, 233) };
+                C.LineDif, C.LineDea,
+                C.LinePink, C.LineViolet };
 
             public KLineChart()
             {
-                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
-                    | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+                // SetStyle 已上移到基类 ChartControl（第 07 项）
                 Height = 470;
                 _tip.AutoPopDelay = 5000;
                 _tip.InitialDelay = 120;
@@ -2937,6 +2820,9 @@ namespace StockPool
                 _marks.Clear();
                 if (marks != null) _marks.AddRange(marks);
                 _offset = 0;
+                // ⭐ 换股 / 刷新数据前关掉悬停浮窗：数据整批换掉后旧浮窗毫无意义，
+                // 且 _tip.Show 没给时长参数，不主动 Hide 会一直挂着（深色下即白块）。
+                _tip.Hide(this);
                 ApplyAdjust();
             }
 
@@ -2984,10 +2870,7 @@ namespace StockPool
                 return d;
             }
 
-            public override Size GetPreferredSize(Size proposedSize)
-            {
-                return new Size(proposedSize.Width, Height);
-            }
+            // GetPreferredSize 已上移到基类 ChartControl（第 07 项）
 
             private static List<List<double>> ComputeMA(List<KBar> bars)
             {
@@ -3110,6 +2993,10 @@ namespace StockPool
             {
                 int total = _bars.Count;
                 if (total == 0) return;
+                // ⭐ 悬停浮窗随缩放关闭（bug 修复）：_tip.Show 没给时长参数，会一直挂着；
+                // 缩放会改变每根 K 线的屏幕位置，不关的话浮窗就冻结在旧位置、显示旧数据，
+                // 在深色主题下就是一块醒目的白色小方块（用户报的「白块」症状之一）。
+                _tip.Hide(this);
                 int cur = _range > 0 ? _range : total;
                 int next = Math.Max(20, Math.Min(total, cur + step));
                 _range = (next >= total) ? 0 : next;
@@ -3227,7 +3114,7 @@ namespace StockPool
             {
                 base.OnPaint(e);
                 var g = e.Graphics;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
+                BeginPaint(g);                 // 抗锯齿统一由基类设置（第 07 项）
 
                 bool dark = (BackColor.R + BackColor.G + BackColor.B) < 200;
                 Color grid = dark ? Color.FromArgb(54, 58, 68) : Color.FromArgb(222, 224, 228);
@@ -3242,10 +3129,9 @@ namespace StockPool
                     ClearAxis();
                     DrawLegend(g, text, -1);
                     using (var b = new SolidBrush(text))
-                    using (var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
                     {
                         var area = new RectangleF(0, 24, Width, Height - 24);
-                        g.DrawString("请输入股票代码开始分析", Font, b, area, fmt);
+                        g.DrawString("请输入股票代码开始分析", Font, b, area, FmtCenter);
                     }
                     return;
                 }
@@ -3347,7 +3233,7 @@ namespace StockPool
                     KBar b = vis[i];
                     int x = (int)xOf(i);
                     bool up = b.C >= b.O;
-                    Color c = up ? Color.FromArgb(239, 83, 80) : Color.FromArgb(63, 185, 80);
+                    Color c = up ? C.Up : C.Down;
                     using (var pen = new Pen(c))
                     using (var br = new SolidBrush(c))
                     {
@@ -3404,7 +3290,7 @@ namespace StockPool
                     KBar b = vis[i];
                     int x = (int)xOf(i);
                     bool up = b.C >= b.O;
-                    Color c = up ? Color.FromArgb(239, 83, 80) : Color.FromArgb(63, 185, 80);
+                    Color c = up ? C.Up : C.Down;
                     using (var br = new SolidBrush(c))
                     {
                         int h = (int)(b.V / maxVol * (volBottom - volTop));
@@ -3456,7 +3342,7 @@ namespace StockPool
                                 double v = s.Data[gi];
                                 if (double.IsNaN(v)) continue;
                                 int x = (int)xOf(i);
-                                Color c = v >= 0 ? Color.FromArgb(239, 83, 80) : Color.FromArgb(63, 185, 80);
+                                Color c = v >= 0 ? C.Up : C.Down;
                                 using (var br = new SolidBrush(c))
                                 {
                                     int zero = (int)yInd(0);
@@ -3532,7 +3418,7 @@ namespace StockPool
                 if (_hoverIndex >= 0 && _hoverIndex < vis.Count)
                 {
                     int x = (int)xOf(_hoverIndex);
-                    using (var pen = new Pen(Color.FromArgb(150, 158, 172)))
+                    using (var pen = new Pen(C.Flat))
                         g.DrawLine(pen, x, plotTop, x, bottomMost);
                 }
 
@@ -3549,9 +3435,8 @@ namespace StockPool
                             string d = vis[idx].Date;
                             if (d.Length >= 5) d = d.Substring(5);   // MM-DD
                             int x = (int)xOf(idx);
-                            var fmt = new StringFormat { Alignment = StringAlignment.Center };
                             int labelW = step > 0 ? step : 1;   // 标签间距（根），避免矩形过窄被裁
-                            g.DrawString(d, Font, b3, new RectangleF((float)(x - labelW * slot / 2), (float)(bottomMost + 2), (float)(labelW * slot), (float)BottomPad), fmt);
+                            g.DrawString(d, Font, b3, new RectangleF((float)(x - labelW * slot / 2), (float)(bottomMost + 2), (float)(labelW * slot), (float)BottomPad), FmtCenter);
                         }
                     }
                 }

@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test plugins/*.test.mjs ../frontend/*.test.cjs"
+    "test": "node --test plugins/*.test.mjs ../frontend/shared/*.test.cjs"
   },
   "keywords": [],
   "author": "",

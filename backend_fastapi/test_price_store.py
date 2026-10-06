@@ -7,7 +7,7 @@ import pandas as pd
 import db
 import price_service
 import price_store
-from test_support import isolate_crypto
+from test_support import isolate_crypto, require_data_isolation
 
 
 class PriceStoreTest(unittest.TestCase):
@@ -18,6 +18,7 @@ class PriceStoreTest(unittest.TestCase):
         db.DB_PATH = Path(self.tmp.name) / "history.db"
         db.BARS_DIR = Path(self.tmp.name) / "bars"
         db.FACTORS_DB = db.BARS_DIR / "factors.db"
+        require_data_isolation(price_store, Path(self.tmp.name))
         price_store.init_db()
 
     def tearDown(self):
@@ -50,7 +51,7 @@ class PriceStoreTest(unittest.TestCase):
             {"date": "2024-12-31", "close": 10.0},
             {"date": "2025-06-30", "close": 11.0},
             {"date": "2026-01-05", "close": 12.0},
-        ], "raw")
+        ], "raw", validate=False)
 
         shards = sorted(p.name for p in db.BARS_DIR.glob("bars_*.db"))
         self.assertEqual(shards, ["bars_2024.db", "bars_2025.db", "bars_2026.db"])
@@ -76,7 +77,7 @@ class PriceStoreTest(unittest.TestCase):
             {"date": "2026-01-05", "close": 10.0},          # 除权前
             {"date": "2026-06-11", "close": 10.0},          # 除权日（10 送 10 → 因子翻倍）
             {"date": "2026-09-01", "close": 10.0},          # 除权后
-        ], "raw")
+        ], "raw", validate=False)
         price_store.upsert_factors("000001", [
             {"ex_date": "1900-01-01", "hfq_factor": 1.0},
             {"ex_date": "2026-06-11", "hfq_factor": 2.0},
@@ -117,14 +118,14 @@ class PriceStoreTest(unittest.TestCase):
 
     def test_missing_factor_falls_back(self):
         """缺因子时退化为原始价并标记 adjusted=False，避免静默给出看似正确的复权价。"""
-        price_store.upsert_bars("000002", [{"date": "2026-09-01", "close": 10.0}], "raw")
+        price_store.upsert_bars("000002", [{"date": "2026-09-01", "close": 10.0}], "raw", validate=False)
         bars = price_store.load_bars("000002", "hfq")
         self.assertFalse(bars[0]["adjusted"])
         self.assertAlmostEqual(bars[0]["close"], 10.0)
 
     def test_raw_needs_no_factor(self):
         """不复权口径不读因子，直接返回原始价。"""
-        price_store.upsert_bars("000003", [{"date": "2026-09-01", "close": 7.5}], "raw")
+        price_store.upsert_bars("000003", [{"date": "2026-09-01", "close": 7.5}], "raw", validate=False)
         bars = price_store.load_bars("000003", "raw")
         self.assertAlmostEqual(bars[0]["close"], 7.5)
         self.assertNotIn("adjusted", bars[0])

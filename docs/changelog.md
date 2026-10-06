@@ -6,6 +6,857 @@
 
 ### 变更
 
+- **修复：`.gitignore` 里有 3 条规则一直是失效的**（第 19 项，按五类重写时挖出）：
+  原文把 3 行写成了「规则 + **行尾注释**」形式（`.runtime/`、`cache/`、`dump-*.zip`）。
+  gitignore 只认**行首**的 `#`，行尾的 `#` 被当作**字面量** —— 整行模式变成
+  「路径 + `#` + 文字」，匹配不到任何东西。
+  - ⭐ `.runtime/` 之所以**看起来**在生效，是因为被 `.git/info/exclude` 兜住了
+    （`check-ignore -v` 报的是 `.git/info/exclude:9:/.runtime/`）。一旦那条被清掉，
+    `.runtime/` 就会突然开始暴露。
+  - 本项新加的 `cache/` 与 `dump-*.zip` 若带着行尾注释发出去，等于**没写**。
+  - **教训**：改 `.gitignore` 后必须跑**行为验证**（造临时文件 +
+    `git check-ignore -v` 看命中的规则行号）。只对比「跟踪文件数没变」会漏掉
+    「规则没生效」这一类 —— 前者查的是"没丢文件"，后者查的是"规则是否真的在起作用"。
+  - 另纠正原文两处误判：`agent_dsh/skills_library/*.skill` **不该忽略**
+    （三个都是手写技能定义、已被 git 跟踪，属源码；原文误当成运行期产物）；
+    `*.db` / `*.sqlite*` **不加**全局忽略（仓库里唯一的 db 已被
+    `backend_fastapi/data/` 覆盖，理由已写进文件防止以后被「补全」）。
+  - 补两条防御性规则 `cache/` `dump-*.zip`（目标当前都在仓库外，为防将来
+    产物落到源码树）；更新过时注释（`chip_formulas` 已于第 34 项搬入
+    `features/chip/formulas/`，补上第 18 项新增的 `AsyncKit.cs`）；
+    第 2 类记下一条实测结论：venv 有 9668 文件 / 230MB，若日后改目录名，
+    **venv 不要留在旧目录**（会让 venv 与源码分属两个目录，比现在更难维护）。
+  - 验证：`git ls-files` = 207 与改动前一致（没丢文件）；`check-ignore -v`
+    实测 `cache/`→`:110`、`dump-*.zip`→`:112`、`.runtime/`→`:47` 全部命中，
+    且 `_probe.db` 确认未被忽略；全文件行尾注释残留 0 处。
+
+- **评估：`backend_fastapi` 目录改名决定不做**（第 35 项，实测评估）：
+  实测引用面 —— 代码/脚本 **44 处 / 19 文件**、文档 **113 处 / 29 文件**、
+  venv **9668 文件 / 230MB**（`pyvenv.cfg` 硬编码绝对路径）。四条不做理由：
+  ① 验收要求「删 `.venv` 从零重装」，一旦某个包装不上用户系统直接不可用；
+  ② 待办自己建议的「venv 不动」折中方案**本身有害** —— 源码与 venv 分属两个
+  目录比现在更糟，等于必须整体迁移 9668 文件，**没有低成本版本**；
+  ③ 启动器 16 处 `Path.Combine` 拼路径，桌面 exe 是已编译产物，用户正运行时
+  覆盖会失败；④ 改名不解决真问题 —— 将来真换框架时 157 处照样要改，
+  **改名只是把成本提前支付**；真正的结构收益在 27~34 项按功能分层，已拿到。
+  **已交付其中低成本高价值部分**：`config.py` 三处用户可见提示文案硬编码
+  `backend_fastapi/.env`（漏改的后果是提示用户去不存在的路径填密钥，
+  用户照做后 LLM 依然不通且极难归因），改为 `_ENV_HINT = f"{PROG_DIR.name}/.env"`
+  动态派生 —— 现在改名只需移动目录，文案自动跟随。将来重做的 5 个前置条件
+  已记入当时工单（见 git 历史）。
+
+- **重构：异步加载骨架 `AsyncKit.RunUi`**（第 18 项，前端）：
+  `Task.Run(请求)+Invoke(渲染)` 这套骨架前端有 20+ 处。新增 `RunUi<T>(work,
+  onOk, onFail, stillValid)` —— **只负责线程，竞态守卫作为回调留在调用侧**。
+  ⭐ 守卫刻意不内置：本项目有三类互不相同的守卫（round 比对 / 代码比对 /
+  busy 标志），硬凑成一种必然出**交叉刷新**（旧请求后返回把新股票的数据盖掉）。
+  `stillValid` 固定在 **UI 线程**（`Invoke` 内部）求值 —— 守卫要读
+  `_stockCode.Text`，WinForms 控件只能在 UI 线程访问。迁移三类守卫各一个
+  代表点（`StockLoadHistory` round / `ScrLoadResult` busy /
+  `FetchStockName` 无守卫），其余 17 处保持原样 —— `StockLoadChip` 那类
+  三态分支要引入三态结果类型，属系统性重写时一起做。
+  验证：`csc` exit 0；用 `AsyncKit.cs` 逐字副本（仅把 `Invoke` 换成直接执行）
+  编译成控制台程序跑 5 场景 —— 其中「3 轮并发故意让第 1 个最后返回 →
+  只有 stock3 生效」是交叉刷新的直接反证；「守卫 false 时 onOk 与 onFail
+  都被丢弃」验证了失败路径同样受约束。GUI 连点未自动化，已在当时工单标注。
+  踩坑：`delegate(Exception){...}` 省略参数名在新版 csc 报 CS1001。
+
+- **重构：后复权与周/月分桶各收敛为一份实现**（第 17 项，`kline_service` 出口收口）：
+  待办指控 `kline_service` 自称「全项目唯一取数出口」但有 4 处绕过。
+  ① 宣传语改准确（「行情消费方唯一」）并登记两处**刻意**绕过
+  （`history.load_trusted_bars` 要捕获 `UntrustedDataError` 做全量重抓；
+  `stock.profile` 涨停统计日线专用）；② **后复权收敛**：`indicators/data.py::
+  _apply_hfq` 原先**自己复刻了一遍** `load_bars` 的 hfq 算法、两条链无交叉
+  验证，`price_store` 一改 RPS 就静默算错 —— 抽出 `hfq_steps(factors, dates)`
+  产出 (起始下标, 因子) 变化点供两侧共用（能共用是因为条数=事件数每票中位数
+  10 条而非天数，5585 列面板仅 0.61s）；③ 分桶共用：新增
+  `periods.bucket_last_indices`，但**保留**「只取每桶最后一行」的优化
+  （面板聚合 OHLCV 会慢一到两个数量级）。
+  验证：面板 vs `load_bars(hfq)` **10 票 × 250 日 = 2500 值零不符**；
+  RPS 面板用 `git stash` 回改动前采基线，日/周/月三期 × 1453 行 × 5585 列
+  **逐值一致**；57 测试全绿。
+  ⭐ 踩坑：`load_bars` 对价格 `round(...,4)`（JSON 展示口径）而面板保持全精度，
+  对拍时 601398 报 157 处「不符」，逐个查是 `18.361877` vs `18.3619` 的
+  **舍入差异而非算法分歧** —— 做逐值对拍前必须先确认两条链路的输出契约。
+
+- **评估：`market_symbol` 三份口径判定不统一，保持并存**（第 16 项）：
+  待办建议「收敛为一份」，评估后**不照做**：真实股票池 5585 只的 2 位前缀
+  只有 `00/30/60/68/92` 五种，三份实现**全量零分歧**；出现分歧的段（可转债、
+  B 股）实测 0.1s 内以 `ok=false` 提前结束，**根本走不到判市场那一步**。
+  且待办**低估分歧范围**（原文只说北交所，实测 70 个 2 位段两两不一致），
+  **没有一份在所有类别上都对**，「以谁为准」没有唯一答案 —— 这正是不能
+  取并集的理由。唯一真实风险：`valuation` 兜底 `sh`，北交所开新号段时会
+  判错，已写进它自己的 docstring。行为由 `test_market_symbol.py` 锁定。
+
+- **修复：周榜每次重算都在最后一步 `NameError`、结果永不落盘**（`bug-06`）：
+  用户报「SCR90 一直提示刷新本周」。根因是 payload 构造里一行引用了
+  **本模块里从来就不存在的变量**：`"names_resolved": sum(1 for r in rows if
+  r["name"])` —— `e706176` 删掉旧结构时漏改了引用它的这一行，于是**每次
+  周榜重算都在最后一步抛 NameError、结果文件永不写盘**。症状极具误导性：
+  status 里 `done=100%` 但 `computed=0`/`error=None`，因为异常发生在状态更新
+  之前的 payload 构造里，except 把它记成 error 后 `status()` 又因文件不存在
+  改写成 idle，**把真正的错误信息盖掉了** —— 从接口上完全看不出出了错。
+  只要结果文件在（跨周重算前）就一直能读，一旦需要重算就永远失败 ——
+  这才是「一直提示刷新本周」的长期成因。修法：按注释原意统计 `names`
+  里非空的条数。同批提交第 13 项（ParamSpec 三份合一，见下）。
+
+- **重构：`ParamSpec` 三份合一**（第 13 项）：三处**逐字段相同**的 dataclass
+  收敛到 `core/paramspec.py`。放 `core/` 而非待办建议的 `common/spec.py`，
+  因为它必须**零依赖**（只 import 标准库），否则三边 import 它会构成循环依赖。
+  ⚠️ `strategies/core/` 与 `features/chip/formulas/core/` 里的 `core` 指各自
+  子包，故三处 import 一律用**绝对路径**；写相对导入会去子包里找不存在的模块。
+  三处再导出按待办要求保留（合并的是定义，不是名字）。
+  验证：7 个 import 路径拿到**同一个类对象**（`is` 为真）、字段顺序不变、
+  位置与关键字两种调用形式都正常、三个注册中心 `invalid=0`、全仓只剩 1 处定义。
+
+- **重构：筹码阈值常量接上引用、去掉内联 makedirs**（第 12+14 项）：
+  `DEFAULT_WEEKS`/`DEFAULT_LAUNCH` 改为**直接引用** `scr_service` 的常量
+  （改上游会联动，实测验证），「对齐 chip_service」的人工承诺注释归零。
+  ⭐ **`DEFAULT_CHG_DAYS` 判定「不该对齐」** —— 待办建议在 `scr_service` 补
+  `CHG_DAYS_DEFAULT` 再引用，**照做会造一个自己零调用点的骗人常量**：
+  本侧的 30 是**交易日窗口**（`s.iloc[-1-days]`），`scr_service` 的 `chg30`
+  是**导出文件里现成的列名**「30日涨幅%」（行情软件口径，本项目无从控制，
+  且它根本没有「天数」参数）。数值同为 30 纯属巧合。理由就地写在代码里。
+  ⚠️ **本项实测教训**：验证「删 processed 能否自动重建」时误删了**生产数据盘**
+  的 `<data>/chip/processed/`，清空了用户周榜缓存 —— 正是 `bug-04`（测试夹具
+  污染生产库）同形态的错误。已触发 force 重算恢复。**教训：验证「目录能自动
+  重建」前，先问「删的是谁的数据」。**
+
+- **重构：路由错误体形状统一**（第 11 项，后端+前端）：
+  统一为 `{ok:false, detail, error:{code,message}}`；状态码不动（「状态码=请求
+  是否合法 / ok=业务是否成功」二分），周榜仍恒 200。新增 `apiutil.py`
+  （`ok/fail/soft_fail/guard/http_error/install`）。
+  ⭐ 主力杠杆是 `install(app)` 挂**全局异常处理器** —— 全仓 90 余处
+  `raise HTTPException(detail=…)` **一行未改**即生效（待办只列了 4~5 个路由
+  文件，实际遍布 5 个 features 包）。`detail` 字段必须保留：前端 8 处直接读它。
+  ⭐ 必须注册 `starlette.exceptions.HTTPException` 而非 fastapi 的：404/405
+  抛的是 starlette 版（fastapi 的是其子类），只注册 fastapi 的会漏出去又是
+  裸 `{detail:"Not Found"}`。422 校验错误一并接管。
+  ⭐ **真实踩坑**：`raise apiutil.fail(...)` 是错的 —— `fail()` 返回
+  JSONResponse 不是 Exception，raise 它会让 FastAPI 落到兜底处理器回
+  `500 Internal Server Error`（比改前更糟，连错误体都没有）；正确是
+  `return apiutil.fail(...)`。
+  前端：新增 `J.ErrMsg()` 兼容三种形状（error 对象/字符串/只有 detail），
+  替换 9 处。`J.Str()` 拿到 Dictionary 会输出**类型名垃圾串**，必须先判类型。
+  验证：8 类失败（400×5、422×2、404×1）全部带统一形状；成功路径 5 条
+  响应体零变化；`csc` exit 0；52 测试全绿。
+
+- **修复：筹码分布接口 500**（`bug-05`）：
+  上一版把 `_percentile` 收进 `scr.py` 时删了定义，`base.py` 的 `compute()`
+  里还有 5 处调用没跟着删 → `NameError` → `/api/chip/dist` 直接 500。
+  关键判断：那 5 个分位值和局部 `scr()` **从未写进返回字典**，是死代码，
+  直接删除而非把分位计算搬回来。只有走 `base.compute` 的 dist 接口受影响，
+  走 `scr_series` 的周榜与策略一直是好的 —— 这解释了「只有筹码无响应」。
+  环境无 pyflakes/ruff，写了 AST 扫描找同类「删定义漏删调用」，全仓 12 处
+  疑似点逐条核对均为误报。验证：dist 三种口径正常、JSON 序列化 70 万字符
+  通过（bug-04 当年就崩在这步）、scr 内核四条路径全通、52 测试全绿。
+
+
+  新增 `features/chip/formulas/core/scr.py`（107 行），**四处调用方共用**
+  （周榜 `rank_service` / 策略 `strategies/scr90.py` / 副图 `indicators/chip_scr.py` /
+  单帧统计 `formulas/core/base.py`）—— 原先是 2 份**逐字符雷同** + 2 份各自实现，
+  函数体**净删约 45 行**。
+  - `scr_series`（**NaN** 语义，给序列类消费者）与 `scr_frame`（**None** 语义，给要
+    JSON 序列化的单帧统计）**刻意不同** —— JSON 里没有 NaN，`null` 比 NaN 诚实。
+  - **只合并算法内核，调用参数一律不动**：周榜与策略用 `offline=True`（无锁仓修正），
+    副图与单帧用 qfq（带锁仓修正），这是**业务口径差异**，内核 docstring 用表格写明，
+    并注明「合并时把参数也统一会让数值整体偏移」。
+  - ⭐ **修掉判空缺陷** `if p5 and p95` → `den == 0`：分位价格**可以是 0**
+    （分箱下沿正好落在 0 的低价股），旧写法为假 → 静默返回 `None`。
+    对照实验：同一输入（`P5=0.0`、`P95=1.8`）旧逻辑给 `None`、新内核给 `1.0`（正确值）；
+    另三个极端样本与 1252 日副图序列的 `None` 分布**全部与修复前一致**，无新增 null。
+  - 验证：周榜 `/api/chip/rank?weeks=1` **100 条逐行逐值零差异**（含 rank 列）；
+    进程内对 600519/000002/000001 做 120 帧序列的首 5 / 末 5 / NaN 数 / nansum 对比全一致；
+    策略 `/api/strategies/recommend` 8 只票端到端正常（持仓 3、买卖 0）；
+    `chip_scr` 真实入口 1252 点非空；`validation_report()` invalid=0
+    （`scr.py` 在 `core/` 下被注册器 `_EXCLUDE` 正确排除，不会被当成公式）；
+    `/health` 无模块错误、integrity 无 issues；52 个单元测试全绿。
+
+- **修复：污染清理时挖出两层更深的数据污染**（`bug-04` 续集，见该文档）：
+  - `adjust_factors` / `dividends` 里还有 **4 行夹具**（同源、同污染时段），
+    其中 **`000001 / 2026-06-11 / hfq_factor=2.0` 会让后复权从该日起价格翻倍** ——
+    **第一轮只扫了 `daily_bars`，没扫 factors 库**，已全部删除。
+  - `000001` 有 **177 行 `close=8888.0`**（O/H/L 正常，close 单独错位）——
+    腾讯接口在某次拉取返回的临时异常值，**今天重拉已正常**。第一轮扫描条件
+    （空值 / 非正数）**一条都不匹配**这种行，靠「close 必须落在 [low, high] 区间」
+    才挖出来。已用 `price_service.fetch_daily` 重拉 2026 全年覆盖（181 行），畸形归零。
+  - 因此把 `_bad_bar` **加严一档**：新增一致性检查「开收盘必须落在当日高低区间内」，
+    拒收 `close=8888` 型字段错位（实测拒收并给出区间诊断信息）。
+  - 用裸 sqlite3 删 factors 夹具会绕过 `_meta` 记账，已用 `db.meta_set` 补记，
+    integrity 恢复 `ok=True`（该坑与第 32 项的 `-wal` 误报同源）。
+  - 教训补一条：**清理污染时扫描条件要按「数据的物理约束」写，不能按「我这次知道的
+    症状」写** —— 第一轮按症状写，漏掉了「字段错位」与「另一个库」两类。
+
+
+- **修复：测试夹具曾污染生产数据库，000002 图表坏柱与「筹码接口无响应」**（`bug-04`，
+  bug-03 修复后用户回访截图引出）：
+  - 现象：000002 万科 A 图表一根红竖线贯穿、纵轴最底刻度 **-0.28**、
+    右侧筹码面板「筹码接口无响应」，该股怎么操作都不恢复（其他票正常）。
+  - **根因是第 27 项首跑的兼容转发（`import *` 副本）令测试隔离静默失效**：
+    `setUp` 的路径重绑打在副本上，测试夹具（`upsert_bars("000002", [{"date":
+    "2026-09-01", "close": 10.0}] …)`）**直接写进了用户真实分片库**——
+    7 根夹具柱（含 close=8888 的指纹篡改测试行）+ 池成员「测试」×3 +
+    「测试新闻」事件×1，`fetched_at` 与第 27 项首跑时刻吻合。
+    随后别名转发重跑全绿，但**坏那次写入的行没人清理**。
+  - 危害链：前端把 NULL 解析成 0 → 价格刻度被撑到负值（红烛贯图）；
+    `turnover=None→NaN` 传染筹码全部 240 个字段 → `json.dumps` 抛
+    `ValueError: Out of range float values are not JSON compliant` → **HTTP 500**
+    → 前端「筹码接口无响应」。
+  - 修复：① `price_store` 新增 `_bad_bar()` 入库校验（缺 O/H/L/C 或价格非正拒收，
+    `upsert_bars`/`overwrite_bars` 加 `validate=True`，测试显式关）；
+    ② dist 路由出口 `_finite()` 净化 NaN/Inf（接口不再 500）；
+    ③ 前端 K 线解析跳过坏柱；④ `test_support.require_data_isolation()` ——
+    三个 DB 测试 setUp 断言**实现模块自己持有的 `db.DB_PATH`** 在临时目录内，
+    转发方式再怎么变，隔离失效当场报错。
+  - **数据修复**：7 根夹具柱删除（走 `db.connect` 事务 + 逐码 `refresh_digest`），
+    池成员/事件夹具删除，**6 个空洞用真实行情定向回补**
+    （000002/2026-09-01 真实值 O=3.10 H=3.19 L=3.10 C=3.16）。
+    清理后全分片可疑行 **0**、integrity 无 issues。
+  - 验证：000002 K 线 1252 根坏柱 0、最低价 2.88（正值）；筹码分布 **ok=true**
+    （1.3s，之前 500）；000001 同过；52 个单元测试全绿，
+    **测试跑完后真实库可疑行仍为 0**（隔离断言有效）。
+  - 教训：**「测试全绿」必须附带「生产库没被写」的核对**——隔离失效的危害不在
+    测试失败，而在它失败的方式是写穿到生产；store 层要设最低入库标准，
+    不能只靠 service 层的校验「有的调用方会调」。
+
+- **修复：K 线图偶发整块变白、重启才恢复**（`bug-03`，用户报告附截图）：
+  深色主题下图表整块变白（黑字白底图例 = 控件处于**从未被换肤**的默认配色），
+  左轴两套刻度叠印、09-04 巨红柱为旧帧残影；点「分析」切股票后偶发、几天一次。
+  排查把线程竞争 / 叠加控件 / 绘制逻辑 / ResizeRedraw 全部排除，卡在
+  「`Select(0)` 会 `Skin(page)`」与「实际未换肤」的矛盾上，**无法静态确证漏染路径**，
+  转为「保险丝 + 证据 + 硬化」三层修复（详见 git 历史中的 bug-03 工单，已归档）：
+  - **保险丝**：`StockRenderHistory` 每次数据渲染前对 `_stockKline` / `_stockChip`
+    补一次 `Skin`（幂等）—— 无论根因是什么，图表最多白一帧，不可能白到重启。
+  - **对称补齐**：顶层 `SelectTab` 原先只切 `Visible` 从不重染（二级页挂载会 Skin、
+    顶层不会）—— 页内**后加**的控件永远漏染。现在切页即 `Skin(_tabPages[index])`。
+  - **实锤 bug ①**：每次点「分析」都会异步重建指标勾选框（`BuildIndicatorToggles`），
+    `Check()` 不设 BackColor（默认白底）、`Lbl()` 硬编码黑字 —— 之前无人补染，
+    深色下「主图：/副图：」标签直接不可见。重建后补 `Skin(_stockIndFlow)`。
+  - **实锤 bug ②**：悬停 OHLC 浮窗 `_tip.Show(text, this, x, y)` **没给时长参数**，
+    滚轮缩放（`Zoom`）与换股（`SetData`）都不关 —— 浮窗冻结在旧位置显示旧数据，
+    深色下就是白色小方块（用户「白块」症状之一）。两处补 `_tip.Hide(this)`。
+  - **取证 + 硬化**：`Skin` 拆出 `SkinColors`，染色与逐子递归全部 try/catch ——
+    任何控件换肤抛异常只牺牲自己、不再拖累**排在后面的兄弟控件**漏染（正是
+    「图表未换肤」的候选机制），并落 `launcher 目录 skin_error.log`（已被 `*.log` 忽略）。
+    若根因再现，日志里有控件类型与堆栈。
+  - 验证：`csc` exit 0、无 lint；实跑 45 秒窗口正常、无 .NET Runtime 事件、
+    正常关闭后 8000 随之释放；期间 `skin_error.log` 未生成（换肤路径无误报）。
+    待用户实跑数日观察。
+
+- **筹码体系归位 `features/chip/`**（待办 34，**阶段 C 收官**，全仓耦合面最大、所以最后搬）：
+  ```
+  features/chip/
+  ├─ __init__.py
+  ├─ scr_service.py    <- 原 chip_service.py       SCR 导入/合并/三档分类（529 行）
+  ├─ rank_service.py   <- 原 chip_rank_service.py  SCR90 周级三档（439 行）
+  ├─ scr_routes.py     <- 原 chip_routes.py        /api/chip/scr/*
+  ├─ dist_routes.py    <- 原 chip_dist_routes.py   /api/chip/dist/*
+  ├─ rank_routes.py    <- 原 chip_rank_routes.py   /api/chip/rank/*
+  └─ formulas/         <- 原 chip_formulas/ 整包（含 ARCHITECTURE.md，7 个 .py）
+  ```
+  顶层保留 **6 个别名转发**。**5 个模块改名**（三个 routes 否则会撞名），
+  但**转发名一律保持原样** —— `main.py` 的 `ROUTE_MODULES` 字符串引用与
+  `cleanup.py:140` / `dumplog.py:141` 等既有调用方**一行都不用改**。
+  - ⭐ **发现「转发做不到的事」（本项最关键的认知）**：
+    `sys.modules` 别名转发能覆盖「import 该模块后用它的公开名」，
+    但**覆盖不了「按包名动态导入它的子模块」**。
+    `formulas/core/registry.py:34` 原本**硬编码** `_FORMULA_PACKAGE = "chip_formulas"`，
+    `:69` 用 `importlib.import_module(f"{_FORMULA_PACKAGE}.{mod_name}")` 拼公式子模块名。
+    硬编码在搬家后会去 import 一个已不存在的顶层命名空间；
+    而只靠转发的话，`importlib.import_module("chip_formulas.tri_decay")`
+    会因父模块被换成别名对象而**把同一个文件当成两个模块各加载一次**
+    （`sys.modules` 出现两个键，公式注册表与 `__module__` 全乱）。
+    改为 **`_FORMULA_PACKAGE = __package__.rsplit(".", 1)[0]`**（本文件位于 `<包>.core`，
+    去掉最后一段即包名）—— **以后再搬也不必手工同步**。
+    验证：公式 `__module__` 由 `chip_formulas.tri_decay` 变为
+    `features.chip.formulas.tri_decay`，**这正是修复生效的证据**。
+  - **函数体零改动**：12 个搬入文件里 **11 个零差异**；唯一改动是上面那个常量
+    （+4 行注释）。`formulas/` 其余 6 个 .py 与 `ARCHITECTURE.md` 原样迁移，
+    注册机制（`@chip_formula` / 文件名即 id / LOAD 五步校验）完全未动。
+  - **周口径权威定义方仍是 `scr_service`**：`MARKET_CLOSE_HOUR=15` / `_as_moment` /
+    `week_start` / `expected_weeks` —— `week_start` 5 个样本、`expected_weeks(3)`/`(5)`、
+    函数签名、9 个模块级常量（含 `MIN_MARKET` / `LAUNCH_THRESHOLD`）**全部与基线一致**。
+    `rank_service._week_nodes` 仍走 `scr_service.expected_weeks`（源码断言），未改成各算一份。
+    *文档小误*：它说 `_as_date` 也是薄封装，实际 `_as_date` 只是 `datetime→date` 转换器
+    （`dt.date.fromisoformat`），从不调 `_as_moment` —— 原有实现，未改动。
+  - **三方依赖零循环导入**：`rank_service` 的 `:52` 依赖 `strategies.core.data`、
+    `:54` **模块级**读 `chip_service.PROCESSED_DIR`（实测与 `scr_service` 同一值）、
+    `:140` **函数内**延迟 import `strategies.core.backtest` —— **刻意没提到顶层**
+    （`strategies.scr90` 依赖 `chip_formulas`，提到顶层会立刻成环）。
+    11 个引用方逐个单独导入全部 OK。
+  - **`indicators/data.py:190` 的延迟 import 一个字没动**（踩坑点 5）——
+    提到顶层会立刻触发它与 `formulas/core/data.py` 的循环依赖。
+  - 验收实测：`/api/chip/rank/status` → **`state=ready`**；
+    `/api/chip/rank?weeks=1` → 100 条字段完整（`week=2026-09-28`）；
+    `/api/chip/dist?code=600519` → 80 分箱 × **1252 帧**、峰位 `1299.84`（高于收盘 `1235.58`，
+    三角形峰形合理）、峰占比 `6.51%`、**锁仓已应用**（`ratio=0.544991`）；
+    `strategies.scr90` 导入正常；`/api/chip/*` **12 条路由全挂上**；
+    `validation_report()` → `total=1 valid=1 invalid=0`；
+    `/health` 无模块错误、11/11 路由、stderr 无告警。
+  - **筹码矩阵用加权校验和验证，不是抽样** —— 13 个统计量
+    （`pct.shape` / `pct.max` / **`pct.hash` 加权校验和** / `centers.hash` /
+    `close.hash` / `turnover.hash` / `float_shares` / `lockup_ratio` /
+    `lockup_factor` / `warm` / `dates.len` …）**与基线零差异**，
+    避免「形状对、数值错」的漏网。
+  - 全仓 **132 个** `.py` 三引号成对 + `ast.parse` 全部通过；52 个单元测试全绿；
+    `.env` 未被改动；HTTP 路径零变化（三组 prefix 各自不变）。
+  - **转发暂不删**：`indicators/data.py` / `indicators/registry.py` / `strategies/scr90.py`
+    三个**尚未搬**的模块仍 import `chip_formulas`，转发要继续服役；
+    等它们各自搬家时改指 `features.chip.formulas` 后再删。
+  - 执行方式：按原建议 4 步走（formulas 整包 → scr_service → rank_service → 三个 routes），
+    **每步搬完立刻验证再继续**，每步的验证结果都记进了待办文档。
+
+- **大佬策略实验室归位 `features/mentor/`**（待办 33，后端按功能搬家倒数第 2 项）：
+  ```
+  features/mentor/
+  ├─ __init__.py
+  ├─ routes.py       <- 原 mentor_routes.py  15 条路由，前缀 /api/mentor
+  ├─ store.py        <- 原 mentor_store.py   人物/素材/技能/评估（321 行）
+  ├─ collectors.py   <- 原 collectors.py     东财摘要等采集
+  └─ llm_client.py   <- 原 llm_client.py     LLM 调用封装
+  ```
+  - ⭐ **原文档漏列了 `store.py`**（`mentor_store`，321 行）。它显然属于本功能 ——
+    `main.py:30` 模块级 import、`:175` 调 `init_db()`（失败以「大佬策略实验室（本地库初始化）」
+    为 label 记入 `_module_errors`），`mentor_routes.py:14` 与 `test_mentor_store.py:8` 也 import 它。
+    按 4 模块搬，否则顶层会留一个孤立文件。
+  - **函数体零改动** —— difflib 逐行对比 HEAD：7 个文件 20 行差异**全是 import**。
+  - ⭐ **`collectors` 与 `llm_client` 是跨功能共享的**（个股页 / 股票池历史 / 盘面页都在用），
+    **3 个已搬文件**（`features/history/service.py`、`features/market/routes.py`、
+    `features/stock/routes.py`）共 4 处引用**一并改到规范位置**。理由：这些文件已经在
+    `features/` 里，再指向顶层转发等于**在新架构内部留反向依赖**；趁本项清掉只有 3 行。
+  - ⭐ **原文档踩坑点 1 写错了位置**：`_ai_cache` / `_ai_cache_lock` / `AI_CACHE_TTL = 600`
+    在 **`features/market/routes.py:37-39`**（**盘面页**），**不在** `mentor_routes`；
+    全仓在 `mentor_routes` 里搜不到这两个名字。实验室页**根本没有 AI 缓存**。
+    两套 TTL 实现（market 的进程内 600s vs `board_service._TTL_HOURS` 的 DB 持久化）
+    在**第 28 项**就已按「不统一」原则原样保留，本项无需处理。
+    故原验收「`force` 绕过 AI 缓存」改为**对第 28 项做回归**。
+  - 踩坑点 2（超时语义）：`call_llm(prompt, timeout=180)` **显式传 timeout** 给
+    `core.httpclient.post`（后者 timeout 是必填参数，正是为了防止误用行情口径）。
+    本项只改 `import config` 的指向，**一个字没动 timeout**。
+  - 踩坑点 3（不打印密钥）：`config.LLM_API_KEY` 只进 Authorization 头。
+    验证方式：把真实密钥取出来在启动日志里全文检索 —— **0 处命中**。
+  - 踩坑点 4：`agent_dsh/` **在本仓库不存在**（原文档提到它含 node_modules 32843 文件），
+    本项无对象、未移动任何目录。
+  - 验收实测：**真实调了一次 LLM**，`call_llm('只回复两个字：收到')` **2.5 秒**返回 `'收到'`；
+    `/api/mentor/list` `ok=true`（1 个人物）、`/api/mentor/state` `ok=true`；
+    **第 28 项回归三连**：`force=false` 首调 `cached=false` 52.9s → 再调 `cached=true` **0.0s**
+    → `force=true` `cached=false` 54.8s，把缓存语义钉死。
+    基线逐项对照**零差异**（15 条路由 / `mentor_store` 44 个公开名 / `collectors` 26 个 /
+    `llm_client` 5 个 / `call_llm` 签名 / LLM 配置状态）。
+    4 个转发与实现是同一对象；13 个模块全部导入成功；11/11 路由挂载、stderr 无告警；
+    全仓 .py 三引号成对 + `ast.parse` 全部通过；52 个单元测试全绿；`.env` 未被改动。
+
+- **系统设置 / 完整性 / 修复归位 `features/system/`**（待办 32，后端按功能搬家第 5 项）：
+  ```
+  features/system/
+  ├─ __init__.py
+  ├─ routes.py     <- 原 system_routes.py   数据目录/存储信息/完整性/诊断包/重建
+  ├─ integrity.py  <- 原 integrity.py       启动期数据完整性校验
+  └─ repair.py     <- 原 repair_digests.py  指纹修复（独立 CLI）
+  ```
+  - **函数体零改动** —— difflib 逐行对比 HEAD：18 行差异**全是 import**，0 行非 import：
+    `integrity.py` 的 `crypto`/`db`/L215 函数内 `price_store` → `core`；
+    `routes.py` 的 `config`/`crypto`/`storage`/L138 函数内 `price_service` → `core`，
+    `integrity` → 同包；`repair.py` 的 `price_store` → `core`。
+    `import dumplog` 不动（`dumplog` 还在顶层）。
+  - ⭐ **`repair_digests.py` 是独立 CLI，转发额外带 `__main__` 守卫**：
+    全仓无人 import 它，它原本靠 `__main__` 跑，docstring 记载了
+    `python backend_fastapi/repair_digests.py [--apply]`。
+    **只做别名转发会让这条已写进文档的用法静默失效**，所以比第 27 项 `storage.py`
+    多做一步。实测干跑输出「失配 1 处」、`--help` 的 prog 名仍是 `repair_digests.py`、`EXIT=0`。
+  - 踩坑点四条：① `main.py:28` 的模块级 `import integrity` 走转发拿到同一模块对象，
+    `_integrity_state` 仍是「启动算一次并缓存」，实测 `/health` 的 `integrity.ok=True`；
+    ② `APIRouter(prefix="/api/system")` 一字未改，启动器
+    `StockPoolLauncher.cs:1535/1576/1589` 的 `Probe`/`PostJson` 照旧可用；
+    ③ 启动器 `storage.py --set-data-dir-base64` 那条离线链路（第 27 项的 core）
+    实测 `EXIT=0`；④ `POST /api/system/storage` 幂等实测 `ok=true`，`.env` 值未变。
+  - 基线逐项对照全部一致：`STATE_DIR` / `ENV_PATH` / `DB_PATH` / `storage.STATE_DIR` /
+    `integrity.ensure_signed()` / `router prefix` / **11 条路由清单** /
+    **`integrity` 全部公开名（含 `_all_targets` 等 3 个私有名）**。
+  - ⚠️ **排查出一处既有误报并证明与本项无关**：核对基线时 `integrity.summary()` 报
+    「`bars_2021` 文件修改时间明显晚于程序记录」。用 `git stash` 回到搬家前
+    （HEAD = 第 31 项、本项零改动）跑同样调用，**稳定复现同一条**（4/4 次）；
+    真实服务端流程下 `/health` 的 `integrity.ok=True`。
+    成因是 `integrity.py` **自己 docstring 就写明**的陷阱 —— 打开 WAL 库会创建 `-wal`，
+    其 mtime 是「此刻」，若在连接之后取值会把「打开库」误判成「被外部写入」。
+    属既有时效性敏感点，**不在纯搬家项里修**，需单独立项。
+  - 流程教训两条：① 转发生成器首版把「转发名」当「实现文件名」（`repair_digests` 的实现是
+    `repair.py`），**`ast.parse` 查不出**（运行期 `ImportError`），靠导入自检才暴露
+    —— **语法校验必须再配一个导入自检**；
+    ② import 扫描器的判据不该是我记得的那几个模块名，应对照「所有项目内模块」的完整清单
+    （先前漏掉了 `routes.py` 的 `crypto` 与 L138 的 `price_service`）。
+  - 验证：10 个模块全部导入成功；3 个转发与实现是同一对象；11/11 路由挂载、
+    stderr 无告警；全仓 .py 三引号成对 + `ast.parse` 全部通过；52 个单元测试全绿。
+
+- **下载与调度归位 `features/download/`**（待办 31，后端按功能搬家第 4 项）：
+  ```
+  features/download/
+  ├─ __init__.py
+  ├─ service.py   <- 原 download_service.py  任务引擎 + 调度循环（975 行）
+  ├─ store.py     <- 原 download_store.py    任务落库、断点续跑、暂停/继续/取消
+  └─ routes.py    <- 原 download_routes.py
+  ```
+  - **函数体零改动** —— `git diff` 只有 **9 行 import**：
+    `service.py` 的 `db`/`price_service`/`price_store`/`tdx_reader` 改指 `core`、
+    `download_store` 改指同包、`history_store` 改指 `features.history.store`、
+    `from market_service import _ak` 改指 `features.market.service`；
+    `routes.py` 的 `download_service` 改指同包；`store.py` 的 `db` 改指 `core.db`。
+    L682 函数内 `import cleanup` 不动（`cleanup.py` 仍在顶层）。
+  - ⭐ **踩坑点 1「模块级 `_start_background()`」是本项最大风险**，用**两条独立证据**验住：
+    ① 沿转发链导入后进程内出现 **`Thread-1 (_scheduler_loop)`** 线程；
+    ② 把 `download_store` 的 `last_cleanup_date` **清空**再起后端，
+    **85 秒内被调度线程写回 `2026-10-06`**（`SCHEDULER_INTERVAL = 60`）——
+    不只是"线程在"，而是真的跑完一轮并触发了 `cleanup.schedule_tick()`。
+    **这同时也证通了第 24 项的定时清理链路**（`cleanup.py` 本身未搬动）。
+    触发链一环未改：`main.py` 的 `ROUTE_MODULES` 字符串 `"download_routes"` → 转发 →
+    `features.download.routes` → import service → 模块级 `_start_background()`。
+  - ⭐ **先查后搬**：三个文件里 `__file__` / `Path()` / `os.path` 检索为**空**。
+    这是第 27 项 `config.PROG_DIR` 踩过的坑（多退一级否则静默指错目录），本项提前排除。
+    DB 路径来自 `core/db.py` 的 `config.STATE_DIR`，落在数据盘
+    `E:\stockanaly-data\state\stock_history.db`，搬家前后一致 ——
+    **运行中的任务不会因搬家"丢失"**（`download_tasks` 25 行 / `download_settings` 8 行健在）。
+  - **下载页任务引擎完整跑通一遍生命周期**：
+    `新建 → queued(total=100)` → `进度 → running` → `暂停 → paused` → `进度 → paused` →
+    `继续 → running` → `取消 → cancelled`，每步 `ok=true`
+    （用 `scope=pool` + `mode=incremental` + `source=tdx` 本机数据，不打外网）。
+  - **`recover_stale()` 单独构造实验**：把任务在库里写回 `running`（模拟进程被强杀、
+    内存 worker 已消失），调 `recover_stale()` 返回 **1**、状态变回 **`paused`**。
+  - 启动器退出码文案（`requirements.txt` / `.venv` 硬编码路径）属第 35 项，本次**不含任何 .cs**。
+  - 按数据源并发（`ThreadPoolExecutor(max_workers=len(jobs))`，5 个 block 各一线程）
+    与第 07 项的按标的批量并发语义不同，本项只改 import、未触碰该段。
+  - 验证：10 个模块全部导入成功（含 `cleanup`、`core.db`、`test_settings_download`、`main`）；
+    3 个转发与实现是同一对象；`settings_map` 8 个键**零差异**；
+    全仓 .py 三引号成对 + `ast.parse` 全部通过；4 个只读端点全 `ok=true`；
+    `/health` 无模块错误、11/11 路由挂载、stderr 无告警；52 个单元测试全绿。
+
+- **股票池历史归位 `features/history/`**（待办 30，后端按功能搬家第 3 项）：
+  ```
+  features/history/
+  ├─ __init__.py
+  ├─ service.py   <- 原 history_service.py   （K线 / 入池出池轨迹 / 消息面）
+  ├─ store.py     <- 原 history_store.py     （pool_snapshots 快照）
+  └─ routes.py    <- 原 history_routes.py
+  ```
+  - **只改了因搬家失效的 import，函数体一行未动**：`service.py` 的 `history_store`
+    改指包内、`kline_service`/`price_service`/`price_store` 改指 `core`；
+    `routes.py` 的 `periods` 改指 `core.periods`；`store.py` 的 `db` 改指 `core.db`。
+    `from collectors import ...` 未动（`collectors` 还在顶层）。
+  - 顶层保留 3 个**别名转发**（`sys.modules[__name__] = _impl`），其中 `history_routes`
+    尤其关键 —— `main.py` 的 `ROUTE_MODULES` 与 `/health` 模块清单都按**字符串**
+    `"history_routes"` 引用它。
+  - ⭐ **踩坑点 1 用源码断言验住**（而不只是"没改"）：
+    `load_trusted_bars` 里 `price_store.load_bars` 仍在（True）、
+    `UntrustedDataError` 捕获仍在（True）、**`kline_service.get_bars` 不在**（True）
+    —— 「脏数据自动重抓」能力完整保留，没有被"顺手优化"掉。
+    周/月合样仍走 `kline_service.resample`（已断言）。
+  - **HTTP 路径零变化**：prefix 仍是 `/api/history`。
+  - ⚠️ **发现一处层级倒置（未修）**：`core/db.py` 的 `init_db()` 里有函数内
+    `import history_store`（原注释「避免与 db 形成模块级循环依赖」），
+    本项之后它指向 `features.history.store` —— 变成 **core 依赖 features**。
+    这是既有状况（`db.init_db()` 本就要编排上层三家的建表），本项只做位置移动、
+    `core/db.py` 一行未改。要治需把「建表编排」挪出 `core/db.py`，
+    属职责边界变更，不该塞进纯搬家项。
+  - 验证：11 个模块全部导入成功（含 `core.db`、`download_service`、两个测试模块、`main`）；
+    3 个转发与实现是同一对象；**日线 1252 根 / 周线 264 根 / 月线 62 根**，
+    `events` 73 项（轨迹/消息面）、`pool` 字段齐全；
+    `/api/history/download/universe`（`latest_snapshot_codes()` 唯一的消费方）`ok=true`；
+    `/health` 无模块错误、11 个路由全挂载、stderr 无告警；52 个单元测试全绿。
+  - 流程改进已见效：第 29 项连续踩三次 PowerShell here-string 吞掉 docstring 收尾的坑，
+    本项**全程改用 Python 脚本 + 脚本内自带双校验**（`"""` 个数为偶 + `ast.parse` 通过）
+    才落盘，**一次事故都没出**；事后另跑全仓 `.py` 扫描确认 0 问题文件。
+
+- **个股 / 估值 / 板块归位 `features/stock/`**（待办 29，后端按功能搬家第 2 项）：
+  ```
+  features/stock/
+  ├─ __init__.py
+  ├─ profile.py       <- 原 stock_profile.py
+  ├─ routes.py        <- 原 stock_routes.py
+  ├─ valuation.py     <- 原 valuation_service.py
+  └─ board_index.py   <- 原 board_service.py
+  ```
+  - **只改了因搬家失效的 import，函数体一行未动**：
+    `profile.py` 的 `price_service/price_store/share_service` 改指 `core`（第 27 项已搬）、
+    `_ak` 改指 `features.market.service`；`valuation.py` 的 `ms` 同理；
+    `board_index.py` 的 `db` 改指 `core`；
+    `routes.py` 顶部 `valuation_service` 与**两处函数内延迟导入**
+    （`stock_profile` / `board_service`）改为包内引用。
+  - **待办 5 个踩坑点逐条遵守**：没有重构 `stock_profile` 任何函数（第 09/10 项的事）；
+    没有统一 `_cached`（失败也缓存）与 `lockup_ratio`（失败不缓存）的矛盾语义；
+    没有动估值出口清洗（第 09 项已补）；没有统一三份 market 前缀规则（第 16 项）；
+    `board_index` 的 TTL 仍是 **DB 持久化**（`_TTL_HOURS=24`），没改成进程内缓存。
+  - **转发必须用别名的理由多了一条**：除下划线私有名外，`stock_profile` 还有模块级
+    可变状态 `_CACHE`（6 小时 TTL 的股东/行业缓存）。`from x import *` 复制出的名字
+    **不含同一份缓存**，`clear_cache()` 就清不到实现里那份、缓存永远清不掉。
+    已验证 `stock_profile._CACHE is features.stock.profile._CACHE` 为 `True`。
+  - **HTTP 路径零变化**：`router` 的 prefix 仍是 `/api/stock`，
+    `main.py` 仍按字符串 `"stock_routes"` 引用（靠转发），启动器与网页端不需要改。
+  - 验证：10 个模块全部导入成功（含 `chip_formulas.core.data`、`main`）；
+    4 个转发与实现是**同一对象**；私有名 `lockup_ratio` / `_market_prefix` / `_TTL_HOURS` 照常可见；
+    个股页 4 条验收全通（基本信息 1.2s / 所属板块 0.0s / 重取名称 0.3s / 筹码分布 1.0s
+    且 `lockup_applied=true`）；估值三档情景齐全 0.7s；连带回归 K线 0.4s、盘面板块β 1.0s；
+    `/health` 无模块错误、stderr 无告警；52 个单元测试全绿。
+  - 踩坑：同一个 PowerShell here-string 陷阱连续踩三次（docstring 收尾 `"""` 缺失），
+    其中一次还用 `.Replace()` 把 `valuation.py` 整个改成
+    `rrom __ruture__ mmport annotatmons`（`f`/`i`/`c` 被系统性替换），靠 `git diff` 才发现。
+    **改进已落实**：批量生成/修改 Python 文件的脚本自带两道检查（`"""` 个数为偶 +
+    `ast.parse` 通过）才落盘，事后又跑全仓 .py 扫描确认 0 个问题文件。
+    > 结论：在这个环境里改 Python **不要用 PowerShell 的 `.Replace()`** ——
+    > 它的编码/转义处理已坏过两次；用 Python 脚本替换并在脚本内自带校验。
+
+- **盘面/板块归位 `features/market/`**（待办 28，后端按功能搬家的第一项）：
+  ```
+  backend_fastapi/features/
+  ├─ __init__.py
+  └─ market/
+     ├─ __init__.py     说明这一层定位 + 为什么旧路径必须留别名转发
+     ├─ service.py   ← 原 market_service.py   （纯 rename，内容零改动）
+     └─ routes.py    ← 原 market_routes.py    （只改 1 行 import）
+  ```
+  - **`service.py` 是纯移动**：`git diff --stat -M` 显示为 `} | 0`。
+    它唯一的项目内 import `from core import httpclient` 是绝对导入，搬后仍可用；
+    TTL 缓存范式（`_cached` / `_ttl` 盘后延长到 23:59:59）**原样保留，未顺手「统一」**；
+    `_MARKET_CLOSE_MIN = 15*60` 与 `chip_service.MARKET_CLOSE_HOUR` 的两份定义
+    也按待办要求**留给第 12/16 项**。
+  - `routes.py` 只改 1 行：`import market_service` → `from features.market import service as market_service`。
+  - **顶层保留别名转发**（`sys.modules[__name__] = _impl`）—— 待办预警的坑成立：
+    `_ak` 是下划线私有名，`from x import *` **不会**导出，那 7 处会全部 AttributeError。
+    用别名后 **7 个依赖方一行都不用改**（6 处 `from market_service import _ak`
+    + 1 处 `valuation_service` 的 `ms._ak(ms.ak...)` 属性访问），已逐个验证。
+  - **HTTP 路径没有任何变化**：`router` 的 `prefix` 仍是 `/api/market`；
+    `main.py` 的 `ROUTE_MODULES` 仍按**字符串** `"market_routes"` 引用（靠转发），
+    启动器与网页端不需要改。
+  - `board_service.py`（板块成分股索引）**留在顶层**：它服务个股页的 `/api/stock/boards`，
+    只在 `stock_routes` 里被调用，归给第 29 项（features/stock）更合适。
+    待办提到的 `bars.py` 不存在 —— `MktBars` / `MktRatioBar` 是启动器里的**前端控件**。
+  - 验证：8 个模块（含 `main`）全部导入成功、`ms is features.market.service` 为 `True`；
+    盘面 5 个接口全 `ok=true`（外围环境 0.6s / 大盘资金 14.3s / 板块β 0.8s /
+    连板 0.6s / 涨跌停炸板 0.6s）；连带回归筹码分布、基本信息、个股板块、K线均正常；
+    `/health` 无模块错误、11 个路由全挂载、stderr 无 import 错误；52 个单元测试全绿。
+  - 踩坑：PowerShell here-string 吞掉了 `features/market/__init__.py` docstring 的闭合 `"""`，
+    导致 `import market_service` 直接 SyntaxError。批量写 Python 文件时
+    应加「三引号成对 + `ast.parse`」两道自动检查。
+
+- **系统性排查并硬化「多数据源串行回退」**（`bug-02`，`bug-01` 的同类模式）：
+  `bug-01` 修的是 `stock_profile` 两处，但根因是一类模式 —— 「多源 / 多报告期**串行**回退，
+  每源各自带超时、整条链没有**总时间预算**」。代码里几乎所有降级注释都写着
+  「失败一律回退，不该拖垮主流程」，但那只防住了「**失败**」，没防住「**变慢**」。
+  - ⭐ **排查后必修项从 10 处缩到 3 处** —— 立项清单是 AST 扫的**候选**
+    （「同一函数里有 ≥2 个 `_ak` 调用」），逐处读控制流后发现**一半不是串行回退**：
+    - `market_service._hist_frame` 是 `source` 的**互斥分支**（us/hk/ff 三选一）且**不在循环里**；
+    - `core/price_service.fetch_daily` 的北交所 / 其余分支也是**互斥**，
+      每次只跑 2 源 → 最坏 **65s** 而非估算的 130s；
+    - `strategies/core/data.list_universe_codes` **读本地库**，本就不是数据源回退。
+    > AST 只能回答「函数里有几个 `_ak` 调用」，**回答不了「它们会不会串行执行」**。
+    > 我自己立的规矩「待查项必须实测确认，不许照抄估算」，这次先遵守了才算数。
+  - 单次上限用 `_uses_v8()` **实测**判定：依赖 py_mini_racer 的接口走 60s、其余 15s；
+    **19 个接口里 6 个走 V8**，且 `stock_fund_flow_*` 全是 V8 —— 意味着「并行发起」也会因
+    `_V8_LOCK` 全局锁而退化成排队串行。
+  - **新增公共件 `core/fallback.py`**：`first_ok(sources, budget, per_call, is_ok)`
+    给出**与源数量无关的总时间预算**，每次实际传 `min(per_call, 剩余预算)`；
+    预算用尽立即停并由调用方按**既有约定**降级（本次未改变任何降级语义）。
+  - 接入 3 处：`download_service._universe_codes`（**180s → 20s**）、
+    `core/price_service.fetch_daily`（**65s → 45s**）、
+    `stock_profile` 两个报告期遍历（bug-01 已加预算，本次**并入公共件**、删掉手写那份）。
+  - **低于阈值的一律不改并写明理由**：`company_info` 40s、盘面各接口 30~40s
+    （调用方 `VRequest` 默认 90s）、`sector_beta` **早已有 35s deadline**（别人修过）、
+    `board_service._sync_worker` 在**后台线程**不阻塞 HTTP。
+  - 另发现未修（需独立决策）：后台板块重建可能跑数十分钟且期间索引一直是旧的；
+    V8 全局锁让并行退化、两处各写一遍 `join` 土办法没有公共件；
+    `first_ok` 只解决串行，不覆盖「多线程 + 逐个 join」形态。
+  - 验证：公共件 6 项单元测试（含**断言每次收到的 timeout 递减** ——
+    这是预算能传导到底层 `_ak` 的唯一途径，第一版测试漏了这项）；
+    真实上游 6 个函数全部正常（0.36~10.7s，取数与改动前一致）；
+    接口冒烟 8 条全 `ok=true`；`/health` 无模块错误、stderr 无告警；52 个单元测试全绿。
+
+- **`_json_safe` 提公共层 + 给缺清洗的出口补调用**（待办 09）：
+  NaN / ±Inf / numpy 标量一旦到达响应层，FastAPI 的 `JSONResponse` 是严格模式
+  （`allow_nan=False`），会抛 `ValueError: Out of range float values are not JSON compliant`，
+  Starlette 兜底返回**纯文本 500** —— 前端只看到「无效的 JSON 基元: Internal」，
+  完全指不到真正出问题的字段。
+  - ⭐ **关键发现：待办的建议做法照原样做是空操作。**
+    `_json_safe` 遇到 `dict` / `list` 是**原样返回**（`float(dict)` 抛 TypeError，
+    走 `return v if isinstance(v, (list, dict)) else None`）——
+    实测 `out is body` 为 `True`、嵌套 NaN 全部保留。
+    现有代码一直是**逐字段**调用（`stock_profile` 12 处，全在列表推导里），所以从未暴露；
+    一旦按建议改成「整块清洗」，会得到一个**看起来加了、实际没加**的假修复。
+    故新增**递归版** `json_safe_deep` 供 HTTP 出口用，并在注释里写明两者分工
+    （`json_safe` 单值 / 对 dict 恒等映射；`json_safe_deep` 整块 / 递归）。
+  - 新增 `core/jsonutil.py` + 旧路径 `jsonutil.py` 别名转发；
+    `stock_profile._json_safe` 改为薄封装，12 处既有调用一行未改。
+  - **7 个 HTTP 出口**接入递归清洗：`/api/stock/valuation`、`/api/stock/quote`、
+    盘面 5 个 GET（global / capital / sectors / limit-up / big-loss）。
+  - 另统一 2 处**语义等价**的半成品：`core/kline_service.to_records`（内联 `pd.isna`）
+    与 `indicators/base.py` 指标序列。
+  - **两处刻意不统一**（待办归类有误，已在文件里说明）：
+    `strategies/core/stats.py:_num` 带 `round(f, 3)`，替换会悄悄丢掉四舍五入；
+    `chip_service.py` 那 4 处内联是**输入侧解析守卫**（`clean_code` 命中 NaN 返回 `""`
+    而不是 `None`），不是出口清洗，替换会改变其返回值。
+  - 踩坑点落实：`int` 分支仍在 `float` 之前（就地注释说明 numpy `bool_` 的原因）；
+    只在出口洗一次、service 层不动；对已 JSON 安全的值是恒等映射。
+  - 验证：6 类异常值（嵌套 NaN/Inf、numpy 标量、顶层 NaN、list 内 NaN、tuple、正常响应）
+    用 `json.dumps(allow_nan=False)` 验证**全部由非法变合法**；
+    9 个接口改前/改后逐字段对比，**确定性接口 `kline`/`profile`/`quote` 完全一致**。
+    > 取证方法记档：盘面是实时数据，改前/改后快照的 24 处差异**不能**直接当成回归 ——
+    > 另抓一份**噪声基线**（同代码、间隔 20s、自比）得到 17 处差异，位置与之完全重合，
+    > 证明那些是数据源波动。验证「输出没变」必须先建立噪声基线。
+    > 另发现**第二个失败模式**：numpy 标量在严格序列化下是 `TypeError` 而非 `ValueError`。
+
+- **修复：筹码分布偶发「筹码接口无响应」**（`bug-01`）：
+  个股页 K 线正常但筹码区域报红字「筹码接口无响应」，**重开即不复现**，后端日志无任何错误。
+  - **根因**：`/api/chip/dist` 的冷路径上，锁仓修正要取「十大流通股东」，
+    而 `stock_profile.free_top_holders` 是**无上限的串行回退** ——
+    `_report_periods()` 给 **8 个**报告期，每期 `_ak(..., timeout=20)` 由看门狗硬切断，
+    **串行累加最坏 8×20 = 160s**，而启动器只等 **30s**（`StockPage.cs:1147`）。
+    平时第一个报告期就命中（实测 0.4~0.9s）所以看不出；只有东财股东接口**变慢或返空**时
+    才逐期往后试，耗时堆过 30s 被判「无响应」。后端仍会跑完并写入
+    `stock_profile._CACHE`（TTL 6 小时）——**这就是重开即好的原因**。
+  - 值得注意的是 `lockup_ratio` 的注释本就声明「失败一律回退 (0.0, 1.0)，
+    任何异常都不该拖垮筹码主流程」，但它只防住了「失败」、没防住「变慢」：
+    上游卡住时不抛异常也不返回 None，只是每次都慢 20 秒，保护形同虚设。
+  - **修法**：新增 `_walk_report_periods(fetch, budget)`，为「往回试报告期」加
+    **总时间预算** `_HOLDERS_BUDGET = 6.0s`，每期实际超时取 `min(20, 剩余预算)`，
+    预算用尽立即停并按既有约定降级（筹码页不做锁仓修正、系数 1.0）。
+  - **同形态的第二个受害者** `top_holders`（十大股东，供 `/api/stock/profile`）
+    是一模一样的 8 期 × 20s 结构，一并修掉。
+  - 验证：模拟上游每期都卡满 20s 时，`free_top_holders` / `top_holders` / `lockup_ratio`
+    均收敛到 **6.0s**（改前最坏 160s）并正确回退 `ratio=0 factor=1`；
+    真实上游 3 只票仍 **0.39s** 命中首期、锁仓系数照常算出；
+    冷启动后首次 `/api/chip/dist` **0.8s**、`lockup_applied=true`；
+    52 个单元测试全绿；`/health` 无模块错误。
+  - **验证时踩的坑（已记档）**：第一次 mock「数据源卡死」时写成「无视 timeout 睡死 20s」，
+    预算没生效 —— 真实 `_ak` 是按传入 timeout 硬切断的，mock 没对齐这个语义，
+    等于测了个不存在的行为。改成「按传入 timeout 睡满」后才忠实还原。
+
+- **raw HTTP 收敛为 `core/httpclient.py`**（待办 15）：改之前 raw HTTP 有 **6 份**独立实现
+  （待办只记了 4 份），UA **4 个变体**混用（Chrome `120.0`、`120.0.0.0`、`124.0.0` ×2），
+  只有盘面那一份有重试 + 退避，也只有它复用连接。
+  - 新增 `core/httpclient.py`（98 行）：UA / referer 常量唯一、进程内共用 `requests.Session`、
+    `get()` 带重试与线性退避、`post()` 的超时必填。旧路径留 `httpclient.py` 别名转发。
+  - 6 处接入：`market_service._http_get`（→ `retries=3`，全仓唯一允许重试的调用点）、
+    `valuation_service._get`（→ 默认 `retries=1`）、`core/share_service` 内联、
+    `collectors` 内联（东财公告）、`stock_routes` 的通达信扫雷宝 GET + POST、`llm_client`。
+    原先各自携带的 UA 副本与常量的重复定义全部删除。
+  - **akshare 侧按要求未动** —— `market_service._ak` 已是唯一封装、7 个模块在用。
+  - ⭐ **`retries` 默认定 1 而不是 3**：待办点出的风险（估值页最坏耗时 12s → 38.5s）已规避。
+    反过来让调用方**显式**传 3，这样「默认重试」这个坑不会再被无意踩到。
+  - **`post` 的 `timeout` 必填、无默认值** —— LLM 是分钟级语义，与行情十秒级完全不同，
+    强制显式传参是唯一可靠的防呆手段。
+  - **顺带修掉改的过程中自己引入的一处行为回退**：`httpclient.post` 最初没加 `referer`，
+    接过去后通达信扫雷宝的 `Referer` 头丢了（该接口要求 referer 带 code），已补上并复验。
+  - 验证：改前/改后**逐个数据源实况对照**，7 条链路取值完全一致
+    （新浪 200/570 字符、估值 price 1258.62 & shares 12.5008、
+    流通股本 1,250,081,836 & turnover 0.31、东财公告 6 条、东财新闻 9 条、
+    通达信 JSON 4 键 + POST 正常）；`/health` 无模块错误、stderr 无告警；
+    接口冒烟 8 条全 `ok=true`；**单元测试 52 个全绿**；真实 `.env` 未被改动。
+
+- **后端新增 `core/` 子包，基础设施层归位**（待办 27，后端搬家的第一步）：
+  `backend_fastapi/` 原为扁平结构（约 87 个 `.py` 同层），现把**依赖图底部**的 14 个模块
+  `git mv` 进 `core/`（保住历史）：`config` `crypto` `dpapi` `envfile` `storage` `db`
+  `instance_lock` `logutil` `periods` `tdx_reader` `share_service` `price_store`
+  `price_service` `kline_service`。
+  - **比原清单多收 `crypto`**：`db` 与 `price_store` 都依赖它、它只依赖 `config`/`dpapi`/`envfile`，
+    留在外层会让 core 反过来依赖顶层。
+  - core 内部 17 处 import 改**相对导入**（`from . import config`）。
+  - **踩坑点 1（最大的雷）**：`config.py` 移进子包后 `Path(__file__).parent` 变成了 `core/`。
+    真正会静默出错的不只 `BASE_DIR` —— `ENV_PATH` 在文件顶部**直接**用
+    `Path(__file__).resolve().parent` 取值、并不经过 `BASE_DIR`；漏改它会导致
+    **`.env` 找不到、LLM 配置全丢且毫无报错**。修法是新增
+    `PROG_DIR = Path(__file__).resolve().parent.parent`，让 `ENV_PATH` 与 `BASE_DIR`
+    都由它派生，「多退一级」全文件只出现一次。
+  - ⭐ **兼容转发用 `sys.modules` 别名，而不是 `from core.x import *`**（与原建议不同）：
+    `import *` 只是**复制**一份名字，而测试里大量 `patch.object(config, "DATA_DIR", ...)`、
+    `patch.object(storage, "ENV_PATH", ...)` —— 补丁打在**副本**上、实现仍读真实值，
+    **补丁静默失效**。实测后果是 52 个测试里 26 个失败，且 `update_data_dir` 去改**真实 `.env`**，
+    把临时目录路径写了进去（`.env` 与 `.env.bak` 双双被污染、`DATA_DIR` 一度指向已删除的 Temp 目录）。
+    改成别名（`sys.modules[__name__] = _impl`）后 52 个全过，且下划线私有名自动可见
+    （`price_store._shard_years`、`crypto._key` 这 4 处跨模块引用不必再手工补清单）。
+  - **踩坑点 3**：启动器把 `backend_fastapi/storage.py` 当脚本跑
+    （`--set-data-dir-base64`，`StockPoolLauncher.cs:1579` 路径写死），故该文件保留同名入口，
+    `__main__` 分支显式调 `_impl.main()`；实测合法值返回 `ok:true`/退出 0、非法路径 `ok:false`/退出 1。
+  - **踩坑点 2**：`main.py` 的 `ROUTE_MODULES` 里 11 项全是 `*_routes`，不含任何 core 模块。
+  - 已知**反向依赖 1 条**（不影响运行，因 `market_service` 是叶子模块、不成环）：
+    `core/price_service.py` 的 `from market_service import _ak`。
+    顺带发现 `_ak` 其实是通用的 akshare 调用包装（带超时与降级），被从盘面页借走属于放错位置 ——
+    **第 28 项搬 `market_service` 时必须一并处理**。
+  - 验证：搬家前落 57 项基线（全部路径常量 / 分区目录 / 库常量 / `.env` 读取结果 /
+    跨模块私有名 / 各模块公开名清单），搬家后**零差异**；`/health` 无模块错误、11 个路由全挂载；
+    个股 / 盘面 / 下载三页冒烟全 `ok=true`；**单元测试 52 个全绿**；
+    测试前后真实 `.env` 哈希一致。
+
+- **日志保留期文档纠错**：第 22 / 24 项文档里写的「保留 14 天」与代码不符 ——
+  `logutil.KEEP_DAYS` 与 `cleanup.DEFAULT_RETAIN_DAYS` **都是 7**（注释明确要求两者同口径）。
+  已把 4 处「14 天」改为「7 天」。注意别与 `price_service.OVERLAP_DAYS = 14`
+  （增量同步的重叠窗口）混淆，那是另一个常量。
+
+- **后端日志落盘到 `<data>/logs/`**（待办 22）：原先全仓没有用 `logging`，后端靠
+  `print(..., file=sys.stderr)` 输出，启动器一关窗口日志就没了、事后无法回溯。
+  - 新增 `logutil.py`：具名 logger `stockpool` **双写** —— stderr 保持原样
+    （启动器按输出流打 `[err]` 标签的行为不变）+ `<data>/logs/backend.log`（INFO+）
+    与 `<data>/logs/uvicorn-error.log`（WARNING+），按天轮转、保留 7 天、UTF-8。
+    日志文件不可写时**降级为只写 stderr**，不让日志拖垮启动。
+  - `main.py` 11 处 `print` 换成 `logger.info/warning/critical`；`_record_error` 改带
+    `exc_info=True`，**异常堆栈随之进文件**（原先只 `traceback.print_exc()` 打到 stderr）。
+  - 用具名 logger + `propagate=False` 而非直接配 root：uvicorn 的 `--log-config` 会调
+    `dictConfig`，其配置不动 root 且带 `disable_existing_loggers: false`，因此不会被冲掉。
+  - 启动器**零改动**：`backend_fastapi/uvicorn-error.log` 旧路径保持不变（兼容方案 A）。
+  - 约定文档：`backend_fastapi/README.md` 新增「十一、数据盘与日志约定」，一次写全
+    第 21~24 项共用的那份契约 —— 数据根目录解析优先级、分区表（各放什么 / 谁在写 / 能否重建）、
+    迁移规则（非破坏、幂等、执行顺序）、日志规则（位置 / 双写 / 轮转 7 天 / 级别 / 禁止写入内容）、
+    新模块打日志的写法。该节**只做导航**，权威细节仍以 `config.py` / `storage.py` / `logutil.py`
+    的注释为准，避免变成第二份需要同步的真相。
+
+- **二级页机制收成 `SubTabStrip` 控件**（待办 05）：个股页 / 盘面页 / 策略页原先各写一套
+  「顶部一排小按钮 + 一个内容容器」，`Add` / `Select` / 换肤循环三份近乎逐字重复，
+  外加三份几乎一样的字段组与标签栏搭建代码。现收成 `launcher/SubTabStrip.cs` 一个控件
+  （持有 bar / body / btns / pages / index），三页各持一个实例。
+  - **`Add` 两个重载都保留**：`Add(title, Panel)` 供个股页（7 个子页外部先建好再传入，
+    不改成委托式，否则要动 7 个调用点）；`Add(title, Action<TLP>)` 供盘面 / 策略（内部套 Stack）。
+  - **两处懒加载特例靠 `OnSelected` 钩子承载**，不写死进 `Select`：
+    盘面页「AI 分析」子页首次切到才生成（避免应用启动瞬间抢跑请求后端）、
+    个股页切到 K 线子页把键盘焦点交给图表。钩子设计不到位 AI 页就会在启动时开始生成。
+  - ⭐ **顺手修 bug**：`ApplyTheme()` 原先只调 `SkinMktSubTabs()` + `SkinStockSubTabs()`，
+    **漏了策略页** —— 策略页二级页按钮在浅色↔深色切换后不会重新上色。现三条都挂上。
+  - 策略页按钮原先误用 `"mkt-subtab"` 作 `Tag`（复制粘贴错标），改为 `"st-subtab"`；
+    已确认全仓对这两个 `Tag` **只赋值、从不读取**（`Skin()` 只按 `"muted"` 分支），零影响。
+  - **两处刻意保留的差异**（文档未记，实际存在）：策略页按钮没设 `AutoSize/Height/Width`，
+    走默认紧凑形态；其内容容器另有 `AutoScroll = true`。统一前者会让策略页按钮整体变大，
+    属视觉变化，故各留一个开关（`FixedButtonSize` / `BodyAutoScroll`）并注释「不要顺手统一」。
+  - `build_exe.bat` 源文件清单加入 `SubTabStrip.cs`。
+
+- **股票名称获取合一**（待办 04）：新增 `Http.FetchStockName(code, onOk, onFail)` 与
+  `PriceSuffix(price)`，个股页 `StockLoadName` 与估值页 `ValuationLookupName`
+  由各 32 行降到各 15 行，`api/stock/quote?code=` 全仓只剩一处。
+  - **三处差异按踩坑点全部留在调用方**：竞态守卫（各自比自己的输入框 `_stockCode` / `_vCode`）、
+    估值页独有的失败兜底「未找到该代码对应的股票」、个股页的副作用 `StockAddHistory(code, name)`。
+  - **一处有意偏离建议做法**：回调签名由 `(name, price)` 改为 `(name, display)` ——
+    「名称 + `  ` + 现价 + ` 元`」这段拼接格式两处也逐字相同，收进共享方法才真正消除最后一点重复；
+    现价已格式化进 `display`，两个调用方都没单独用到裸 `price`，不损失信息。
+  - 归位到 `Http.cs`：那里已有 `Probe`/`GetText`/`PostJson`，加业务级请求属同一层；
+    `VRequest` 本身也是 HTTP 封装（只是"抛异常"那一 flavor），不算跨层。
+
+- **小样板合集（3/6 类）**（待办 08）：`J.IsOk`(12 处) + `J.IsFailed`(3 处)、
+  `UiKit.SetErr`(20 处)、`UiKit.Debounce`(2 处)。
+  - ⚠️ **策略页那 3 处刻意没有合并**：它们是**取反且不容错**的写法
+    （`TryGetValue` + `!(bool)okv`），与 `!IsOk(j)` 不等价 —— `ok` 字段缺失时
+    `IsOk` 返回 false、取反就变成「失败」，而原写法不成立。故另给 `J.IsFailed(j)`。
+  - `SetErr` 只替换**严格同构**的 20 处（`.Text = X;` 紧邻 `.ForeColor = C.UpErr;`）；
+    剩下 8 处中间夹 `Tag = "bad"` 或是表格单元格（还要改字体），逐处判断风险大于收益，保留。
+  - **另 3 类经核查判定不该做**：`ErrOf`（前提已被第 02 项改变 —— 那些地方现在已是单键读取，
+    再抽会**给没有兜底的路径加上兜底 = 改变行为**）、`ToggleVisible`（收益低、控件类型不同）、
+    `FlatBtn`（3 个 subtab 按钮形态确实不同，策略页走默认 `AutoSize`，强行统一会改变外观；
+    且第 05 项 SubTab 抽取会一并吃掉）。
+
+- **自绘表面抽公共基类 `ChartControl`**（待办 07）：新增 `launcher/ChartKit.cs`，
+  `MktBars` / `MktRatioBar` / `ChipPanel` / `KLineChart` 改为继承它。
+  - `SetStyle(...)` 从 4 份逐字相同 → 1 处（基类）；`GetPreferredSize` 3 份 → 1 处。
+  - **抗锯齿现在 5 个表面全开** —— 原先只有 K 线与筹码面板开，条形图 / 分段条 / 净值曲线没开，
+    观感不一致。这是本项**唯一有意的视觉变化**。
+  - `StringFormat` 全部改用基类的 3 个静态缓存（`StockPage` 原先每帧 new 5 处 → 0）。
+    踩坑点提醒过：静态缓存是**正确**写法（`StringFormat` 不可变但非线程安全），别改回每帧 new。
+  - `StEquityPaint` 是 `PictureBox` 的事件处理器、不是 `Control` 子类，进不了基类，
+    按文档例外处理：手工设一次 `SmoothingMode`。
+  - **价格轴协作未被打断**：`ChipPanel` 依赖 `KLineChart` 的 `TryGetPriceAxis` /
+    `PriceAxisChanged` 来对齐，两处一行未改。
+  - 网格色 / 值域映射 / min-max 扫描**按建议不收**（网格色两套深色值差 4，留给调色板统一）。
+  - 附注：`sealed` 不影响「继承基类」（它禁止的是被继承），4 个控件的 `sealed` 全部保留。
+
+- **HTTP 封装补齐三行配置 + 归位到 `Http.cs`**（待办 03）：新增 `launcher/Http.cs`，
+  `Probe`(×3) / `GetText` / `PostJson` 从骨架文件原样搬入，并补齐缺失的配置。
+  - **修一个真 bug**：`GetText` 以前只设了 `Timeout`，而 `Timeout` **只保护到「收到响应头」**，
+    之后读取响应体完全不受保护 —— 请求 `/api/chip/rank?limit=100` 这类大响应时，
+    服务端中途卡住会一直挂着。补上 `ReadWriteTimeout` 后才与 `VRequest` 对齐。
+  - 另补 `Proxy = null`（本机直连，绕开系统代理 / PAC 自动发现，否则同一台机器上
+    一半请求走代理一半不走）与 `Expect100Continue = false`（少一个往返）。
+    `GetText` 补 3 处，`PostJson` 补 2 处。
+  - **刻意不做**：统一「抛异常 vs 返回 bool」的错误契约 —— 要动 20 余处错误处理分支，
+    改动面最大，须单列评估。`VRequest` 把 4xx/5xx 响应体当正常返回的语义完整保留。
+    超时值仍由调用方显式传入（15s/30s/120s/300s 各有业务原因，不设默认值）。
+  - 留了一处不一致待定：`Probe` 仍缺 `Proxy = null`（本项收窄范围），它打的是本机健康检查。
+
+- **KPI 卡片公共件归位**（待办 06）：新增 `launcher/Cards.cs`，
+  `VKpiRow` / `AddKpi` 从 `ValuationPage.cs` **原样搬入**（`ValuationPage.cs` 722 → 593 行）。
+  - **零行为改动**：两个函数自包含，且是 `partial class MainForm` 成员，
+    **调用点一行未改**。调用数量与搬家前完全一致：`AddKpi` 24 处、`VKpiRow` 7 处。
+  - 保留了 `card.Tag = "kpi"` —— `Skin()` 靠它给卡片上底色，丢了卡片就没底色。
+  - **刻意不并入**：`StKpiCard` / `StCardRow`（150×66、**有边框**、值在上标签在下，
+    并进来会让原本无边框的 24 张卡长出边框，42 处调用点视觉回归）、`MktRow`（单行形态不同）。
+    两个行容器的 `WrapContents` / `MaximumSize` 差异是有意的，未统一。
+
+- **启动器 JSON 工具收敛**（待办 02）：新增 `launcher/J.cs`（20 个方法），
+  **删除 27 个重复定义、替换 829 处调用点**。
+  - 4 份逐字等价的取键（`VSafe`/`StGet`/`DictVal`/`DlVal`）→ `J.Get` / `J.GetFrom`；
+    6 份转 double → `J.NumOrNull` / `J.NumOr` / `J.Num` / `J.NumAt`；
+    3 份转 int → `J.Int`；4 份转 string → `J.Str` / `J.StrOr` / `J.StrAt`；
+    4 份百分比 → 3 个口径函数；金额/亿 → `J.Money` / `J.Yi` / `J.YiSigned`。
+  - `VArr` 也一并搬进 `J.Arr`：它当时住在 `ValuationPage.cs` 却被 4 个文件使用，
+    属于第 26 项说的「公共件住在页面文件里」，纯搬家、逻辑未变。
+  - **三处故意不合并**（合并就是改口径）：`NumOrNull` 的 `null` 语义（估值页靠它显示「—」）、
+    `PctRaw` **不乘 100**（盘面涨跌幅本身已是百分数，乘 100 会静默放大 100 倍）、
+    `VNum` 对 `decimal` 的显式分支（JavaScriptSerializer 会把 JSON 小数解成 decimal）。
+  - 一处有意的口径统一：转 double 统一用 `InvariantCulture`（原先只有下载页这么做；
+    JSON 数字与数字字符串一律以 `.` 作小数点，zh-CN 下行为完全相同）。
+  - 逐文件替换：StockPage 320、MarketPage 206、ValuationPage 132、StrategyPage 88、
+    DownloadPage 45、ChipRankPage 32、StockPoolLauncher 6。`csc` 一次编译通过。
+
+- **启动器色彩常量集中**（待办 01）：新增 `launcher/Palette.cs`（`internal static class C`），
+  **31 个语义色常量**，硬编码 `Color.FromArgb(r,g,b)` 从 **171 处降到 37 处**（减少 134）。
+  - 覆盖涨/跌、平/灰、警告、主题蓝、副图指标线（RPS / DIF / DEA）、筹码峰深浅七组。
+  - **视觉零变化且可证明**：替换前先校验「常量取值 == 原字面量」，再按字面量精确匹配替换；
+    事后逐文件核对「替换处数 == `C.xxx` 引用数」，全部对应。
+  - **刻意没做**：① 没有把同语义的多套值合并（`Up` 与 `UpErr` 都是红的）——
+    统一成一个值就是**改设计**，需要另外决策；好处是从此改一处即可全局生效。
+    ② 没有纳入 `BuildPalette()` 换肤（语义色与主题底色仍是两套，互不影响）。
+    ③ `Skin()` 里 `tag == "mkt-dir"` 那个跳过换肤的分支没动 —— 它保涨跌色，动不得。
+  - 剩余 37 处都是应该留的：`BuildPalette()` 换肤底色 31、图表网格线 4、`Color.FromArgb(0)` 透明占位 1、
+    以及 1 处既有的 `C.ToString` 链式调用。
+
+- **启动器公共件归位 · 新增 `launcher/UiKit.cs`**（待办 26）：把散在骨架文件里的
+  页面骨架与控件工厂搬到独立文件，`StockPoolLauncher.cs` 由 2778 → 2606 行。
+  - 搬出 11 个方法：`NewPage` `Stack` `AddRow` `Row` `Group` `Dot` `Mute` `Lbl`
+    `MiniBtn`(×2) `Check` —— 即「页面骨架 + 控件工厂」。
+  - **零风险**：这些都是 `partial class MainForm` 的成员，**调用点一行没改**；
+    唯一动的是 `build_exe.bat`（新增文件必须登记才参与编译）。以 `csc` exit 0 验证。
+  - **刻意没建** `Palette.cs` / `J.cs` / `Http.cs` / `Cards.cs`：本项踩坑点明确说
+    「别做这一项搬空壳」，它们分别是第 01/02/03/06 项的落点，做那几项时顺手落。
+- **合并分支 `refactor/ui-grid-kit`**：`GridKit.cs`（`StockGrid` + `GridColumn`，
+  13 张表统一、删除 9 份重复实现）此前**只存在于那条分支**、不在本分支，
+  而待办 README 却把它记为「已完成」。按「所有改动放在一个分支」的要求合并进来
+  （仅 exe 二进制冲突，按 ours 解决后重新编译）。
+
+- **`frontend/` 按页面分子目录**（待办 25）：从「7 个文件平铺」改为
+  `home/` `mentor-lab/` `chip-scr/`（各目录下统一 `index.html`）+ `shared/`（共享 js）。
+  - 用 `git mv` 移动，git 状态显示为 `R`，**文件历史完整保留**。
+  - `analysis-engine.js` 先确认过引用关系：被 `index` 与 `mentor-lab` **两个**页面引用，
+    故放 `shared/`（不是盲目归类）；`theme.js` / `theme-state.js` 同样共享。
+  - 同步改的引用（4 类）：HTML 内 `src=` → `../shared/...`；启动器 C# 四处
+    （`OpenWebPage` 签名由「文件名」改「子目录名」、`OpenWeb()`、**`FindRoot()` 根目录探测**、
+    `ToggleTheme()` 写主题状态）；`.gitignore` 的 `frontend/theme-state.js` → `shared/`；
+    以及两处原计划外但必须改的 —— `启动系统.bat` 直接 `start` 打开 `index.html`、
+    `agent_dsh/package.json` 的测试 glob `../frontend/*.test.cjs`（不改会因 glob 失配而**静默不执行**）。
+  - 三份 README（根 / backend_fastapi / agent_dsh）的路径引用一并更新。exe 已重新编译。
+  - 注：`chip-scr` 里指向 `stock-analysis.html` 的链接是**历史死链**
+    （该页在 `3ed9e6f` 改为原生实现时已删除），非本次引入，未擅自改动。
+
+- **数据盘按用途分区 + 一次性自动迁移**（`config/ state/ logs/ cache/`，待办 21）：
+  原先用户配置、数据库、锁文件全部平铺在数据根目录，现在分区存放：
+  `config/`（用户配置）、`state/`（库与单实例锁）、`logs/`、`cache/`；
+  `bars/`（行情分片，2 GB）与 `chip/` **刻意留在根目录不搬**（体积大、搬动易中断且无收益）。
+  - 分区常量集中在 `config.py`（`CONFIG_DIR / STATE_DIR / LOGS_DIR / CACHE_DIR`），
+    各模块一律引用常量，不再各自拼路径。
+  - 新增 `storage.migrate_to_subdirs()`：启动时**一次性、非破坏**搬迁 ——
+    仅当「源存在 **且** 目标不存在」时搬，先复制 → 校验（大小一致 + SQLite `quick_check`）
+    → 才删源，库文件连同 `-wal` / `-shm` 一起搬；任一步失败就保留原状。
+    数据盘在仓库外、不受 git 跟踪，老用户升级**只能靠这段逻辑**完成搬迁。
+  - `stock_history.db`、`mentor_lab.db` 与单实例锁均落到 `state/`；
+    根目录的陈旧 `instance.lock` 在拿到 `state/` 新锁后自动清理。
+  - `/api/system/storage` 新增 `dirs` 分区一览，`items` 路径同步为 `state/...`。
+  - **顺带修 bug**：`mentor_store.py` 原先指向**项目内** `backend_fastapi/data/`，
+    实测那是一份**空库**、真数据在数据盘 → 大佬实验室看起来是空的、数据被孤立。
+    改到 `state/` 后两边归一，迁移前后逐表行数一致
+    （1 位导师 / 1 份材料 / 1 份提取 / 1 份评估 / 1 个技能版本）。
+  - 启动器「最近查看」的遗留读取同步加上 `<data>/config/` 候选位置（该文件本身已迁到
+    `%APPDATA%\StockPoolLauncher\`，数据盘这份是旧版遗留但予以保留）。
+
 - **筹码峰接入「锁仓修正」**：`k = 换手率 × 衰减系数 × 锁仓系数` 里的锁仓系数不再固定 1.0。
   口径对齐「原则上扣除前十大流通股东超 5% 的即可」：r = 前十大**流通**股东中
   「占流通股比例 > 5%」者的合计占比，锁仓系数 = 1/(1-r)
@@ -70,6 +921,39 @@
   统一由 `NameColumn()` 提供（点击跳转 + 92px 下限），周榜 / 策略 / 盘面各表的名称列都用它。
 
 ### 新增
+
+- **清理：手动脚本 + 定时调用同一套逻辑**（待办 24）：按你的意见**先做「手动清理」本体，
+  定时只是调用它** —— 定时清理跑在后端进程里，程序起不来时它根本没机会执行，
+  而「程序打不开」恰恰最需要清理。
+  - 新增 `cleanup.py`：**零业务依赖**（不 import FastAPI / main / 任何 service），
+    连 `config` 都读不了时退回默认数据目录照常工作，因此**后端完全起不来也能跑**。
+    清理对象：轮转旧日志 / 旧诊断包（均保留 7 天）、`cache/`（可重建，全清）、
+    跨周周榜结果（**当前周那份保留**）。每一项独立 try/except，单项失败不影响其它，
+    支持 `--dry-run` 先预览。
+  - 新增 `清理日志与缓存.bat`（GBK 编码）：双击 = 预览，加 `--go` = 真删。
+  - 定时：`download_service._scheduler_tick()` 里每天调一次 `cleanup.schedule_tick()`，
+    按**日期**去重（不是每 tick）；调用位置**刻意放在 tick 最前面**，
+    否则会被长时间运行的下载任务「饿死」，而有任务时最该清日志。
+  - 保留天数统一为 **7 天**：`logutil.KEEP_DAYS` 由 14 改为 7，
+    与 `cleanup.DEFAULT_RETAIN_DAYS` 对齐（两处必须一起改，已写进注释）。
+  - `bars/*.db.bak`（6 个、**1.02 GB**）**默认不动**，仅 `--bak` 显式清：
+    查过全仓当前代码不生成它（应是早期分片迁移遗留），是迁移失败时唯一的回滚退路。
+  - **永不清理** `state/` / `config/` / `bars/*.db` / `chip/raw` / `chip/meta.json`
+    —— 宁可多占空间，也不能让清理变成数据事故。
+
+- **dumplog 诊断包：一键导出排障信息**（待办 23）：`POST /api/system/dump` 生成
+  `<data>/logs/dump-<YYYYMMDD-HHMMSS>.zip`（实测 2.8 KB，8 项）——
+  两类日志末尾各 500 行、`system.json`（数据目录 + 完整性）、`health.json`（模块挂载错误）、
+  **脱敏** `config.json`、`env.txt`（Python + `pip freeze`）、`chip_rank_status.json`、`meta.json`（含 git commit）。
+  - **密钥扫描兜底**：打包前对每份待写入文本扫 `sk-` / `LLM_API_KEY=` / `LLM_API_KEY_SEALED=` /
+    `DATA_SECRET` / `api_key=`，命中即**拒绝生成整个包**并返回 500 说明命中位置 ——
+    不能只靠「记得脱敏」，因为日志内容是别的模块写进去的、本模块控制不了。
+    `sk-` 带左边界且要求长度 ≥16，否则 `task-` / `disk-` / `risk-` 会被误判导致永远导不出包。
+  - **只写状态不写值**：密钥只出现 `llm_key_state()` 的三态；`crypto.seal_state()` 的
+    `error` 详情刻意不带（DPAPI 异常信息可能含密文片段）。
+  - **修掉一个自身缺陷**：初版拒绝生成时把命中的**密钥样本**写进了日志，
+    等于把密钥从一个地方抄到另一个地方；现只记录「哪个文件命中哪类模式」，绝不回显值。
+  - 不含数据库文件（只记录路径与体积）；启动器按钮等第 26/35 项编译 exe 时再加。
 
 - **筹码体系 · SCR90 周级三档**：本机用**本地日线**给全市场算筹码分布，按 SCR90 升序
   每期取前 100，**按周**做三档分析（新增原生表格页签）。

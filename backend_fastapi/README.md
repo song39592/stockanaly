@@ -25,7 +25,7 @@
 
 ## 三、启动
 
-推荐一键启动：双击项目根目录的 `启动系统.bat`，它会自动启动后端（最小化窗口）并打开 `frontend/index.html`，
+推荐一键启动：双击项目根目录的 `启动系统.bat`，它会自动启动后端（最小化窗口）并打开 `frontend/home/index.html`，
 且后端已在运行时不会重复启动。
 
 手动启动（调试用）：
@@ -269,3 +269,116 @@ GET  /api/history/download/tdx/status       通达信目录检测
   大盘资金在东财接口不可用时自动切换为同花顺汇总口径，并在 `main_flow.source` 中说明。
 - 缓存：进程内 60–120 秒，`?force=1` 强制刷新；`limit-up` / `big-loss` 的 `date` 参数可指定 `YYYYMMDD`，
   留空时自动回溯到最近一个有涨停数据的交易日。
+
+## 十一、数据盘与日志约定
+
+> 本节只做**导航**。权威细节在代码注释里（`config.py` / `storage.py` / `logutil.py`），
+> 改实现时请改那里，本节不复制规则，免得变成第二份需要同步的真相。
+
+### 1. 数据根目录怎么定
+
+解析优先级（见 `config._resolve_data_dir`）：
+
+```
+环境变量 STOCK_DATA_DIR  >  环境变量 DATA_DIR  >  默认 <仓库上一级>/stockanaly-data
+```
+
+默认值取自**程序自身位置**，不依赖盘符，整个目录换机器 / 移动都不受影响。
+用户可在设置页或直接写 `.env` 的 `DATA_DIR` 改到别处（`storage.update_data_dir`，改完需重启）。
+
+⚠️ 数据盘在**仓库外、不受 git 跟踪**：老用户升级后要拿到新结构，**只能靠启动时的自动迁移**，
+不能指望「提交里带上新目录」。这是下面迁移规则存在的原因。
+
+### 2. 分区表
+
+| 分区 | 放什么 | 谁在写 | 丢了能重建吗 |
+|---|---|---|---|
+| `config/` | 用户可手工改的配置 json | 迁移逻辑 | ❌ 属用户数据 |
+| `state/` | SQLite 库、单实例锁 | `db.py` / `mentor_store.py` / `instance_lock.py` | ❌ |
+| `logs/` | 日志（见下） | `logutil.py` | ✅ 只是没历史 |
+| `cache/` | 可重建缓存 | 尚未使用（为诊断包与定时清理预留） | ✅ |
+| `bars/` | 行情分片 `bars_YYYY.db` + `factors.db` | `price_store.py` | ⚠️ 能但要重下（约 2 GB） |
+| `chip/` | SCR 原始文件与计算结果 | `chip_service.py` / `chip_rank_service.py` | ✅ 重算即可 |
+
+`bars/` 与 `chip/` **刻意留在根目录不搬进子目录**：`bars/` 体积占绝对多数，搬动既慢又易中断且无收益。
+
+新增分区的做法：在 `config.py` 加常量 → 加进 `storage.ensure_dirs()` → 各模块**引用常量**，不要自己拼路径。
+
+### 3. 迁移规则（一次性、非破坏）
+
+由 `storage.migrate_to_subdirs()` 在启动时执行：
+
+- **仅当「源存在且目标不存在」时才搬** —— 目标已有则一律不动，绝不用旧文件覆盖可能更新的数据。
+- 先复制 → 校验（大小一致 + SQLite `quick_check`）→ 通过才删源；任一步失败保留原状并记进 `errors`。
+- 库文件连同 `-wal` / `-shm` 一起搬，避免 WAL 未落盘导致库不完整。
+- **幂等**：可重复执行。
+- 另有 `migrate_legacy()` 把项目内旧位置 `backend_fastapi/data/` 的数据补进 `state/`（只复制、不删源）。
+
+执行顺序是**先 `migrate_to_subdirs()` 再 `migrate_legacy()`**，不能反：
+迁移语义是「目标已有就不动」，必须让根目录的真数据先落位，否则项目内的旧副本会把它顶掉
+（实测 `mentor_lab.db` 就出现过「项目内是空库、数据盘才是真数据」的分叉）。
+
+### 4. 日志规则
+
+- **位置**：`<data>/logs/backend.log`（INFO 及以上）、`<data>/logs/uvicorn-error.log`（WARNING 及以上）。
+- **双写，不能只写文件**：stderr **必须保留** —— 启动器按输出流实时捕获并打 `[err]` 标签，
+  停掉 stderr 界面上就什么都看不到了。文件只是给事后回溯用的副本。
+- **轮转**：按天轮转、保留 **7 天**（`logutil.KEEP_DAYS`，与 `cleanup.DEFAULT_RETAIN_DAYS`
+  是同一个口径 —— 两个数字必须一起改）。跨分区的过期清理由 `cleanup.py` 负责，见下节。
+- **级别**：`info` 常规流程 / `warning` 降级与异常（带 `exc_info=True` 让堆栈一起进文件）/
+  `critical` 致命（打到 stderr 显示为 `[fatal]`）。
+- **禁止写入**：密钥、`LLM_API_KEY`、DPAPI 密封值、`.env` 全文 —— 只写「已配置 / 未配置」这类状态。
+- **为什么用具名 logger `stockpool` 而不是配 root**：uvicorn 用 `--log-config` 调
+  `logging.config.dictConfig()`，其配置不动 root 且带 `disable_existing_loggers: false`；
+  自建具名 logger 并设 `propagate=False` 才不会被冲掉。**别改成直接配 root。**
+- **日志不可写时降级为只写 stderr**，绝不让日志拖垮启动。
+- **排障导出**：`POST /api/system/dump` 一键打包诊断信息到 `logs/dump-<时间戳>.zip`
+  （含日志末尾与**脱敏**配置）。打包前会做密钥扫描，命中即拒绝生成 —— 详见 `dumplog.py`。
+
+### 5. 新模块要打日志时怎么写
+
+```python
+import logutil
+
+logger = logutil.logger
+
+logger.info("已为 %d 只股票补算数据指纹", n)
+try:
+    ...
+except Exception as exc:
+    logger.warning("某某模块不可用：%s", exc, exc_info=True)   # 堆栈进文件
+```
+
+**不要**再写 `print(..., file=sys.stderr)` —— 那样只会打到控制台，关掉窗口就没了。
+
+### 6. 启动器侧的兼容
+
+启动器「读取错误日志」按钮硬编码读**旧路径** `backend_fastapi/uvicorn-error.log`。
+该路径**保持原样不动**（仍由 uvicorn 的重定向写入），`<data>/logs/` 下的同名文件只是副本，
+所以启动器无需改动。等下次因其它原因重新编译 exe 时再考虑切换。
+
+### 7. 清理（`cleanup.py`）
+
+清理逻辑**刻意与「谁触发它」解耦**：定时清理跑在后端进程里，而「程序打不开」恰恰最需要
+清理（日志撑爆、缓存损坏）—— 那时定时器根本没机会执行。所以 `cleanup.py` 做成
+**零业务依赖**（不 import FastAPI / main / 任何 service），后端完全起不来也能跑。
+
+| 对象 | 默认策略 |
+|---|---|
+| `logs/*.log.<日期>`（轮转旧日志） | 超过 7 天删除 |
+| `logs/dump-*.zip`（诊断包） | 超过 7 天删除 |
+| `cache/**` | 全部可清（定义上就能重建） |
+| `chip/processed/scr90_rank_*.json` | **非当前周**删除，当前周那份保留 |
+| `bars/*.db.bak`（约 1 GB） | **默认不动**，需显式 `--bak` —— 它是迁移失败时唯一的回滚退路，删了不可逆 |
+
+**永不清理**：`state/`（库与锁）、`config/`（用户配置）、`bars/*.db`（行情分片）、
+`chip/raw`、`chip/meta.json`。宁可多占空间，也不能让清理变成数据事故。
+
+三种触发方式：
+- **手动救急**：双击 `backend_fastapi/清理日志与缓存.bat`（默认预览，加 `--go` 才真删）；
+  或直接 `python cleanup.py --dry-run` / `--go` / `--bak` / `--days N`。
+- **定时**：`download_service._scheduler_tick()` 每天调一次 `cleanup.schedule_tick()`，
+  内部按**日期**去重（不是每 tick），60 秒一轮也不会重复扫描目录。
+- 清理放在 tick 的**最前面**：否则会被长时间运行的下载任务「饿死」，而有任务时最该清日志。
+
+每一项独立 try/except：日志清不掉也继续清缓存；`--dry-run` 可先看会删什么。

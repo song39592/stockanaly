@@ -1,9 +1,80 @@
-# ==================== 隐私 / 密钥（禁止提交）====================
-# 真实密钥只放 .env，绝不提交；只提交 .env.example 模板
+# =====================================================================
+# .gitignore —— 按「职责」分五类，而不是按技术栈堆
+#   1) 源码            —— 全部跟踪（本节只是说明）
+#   2) 依赖声明与锁文件 —— 声明/锁文件跟踪；虚拟环境与依赖目录忽略
+#   3) 可重建的构建缓存
+#   4) 配置与凭据       —— 模板跟踪，真实值忽略
+#   5) 日志与持久化状态
+#
+# ⚠️ 改完必须验证：已跟踪文件一个都不能变少（否则等于静默丢文件）。
+#    命令：`git ls-files | Measure-Object -Line` 前后对比，
+#    再看 `git status --porcelain` 是否与改动前一致。
+# =====================================================================
+
+
+# -------------------- 1) 源码（不忽略任何东西）--------------------
+# 说明：代码属于仓库，全部跟踪。这里只登记目录归属，方便后续分类对照。
+#
+#   backend_fastapi/    后端源码：core/（基础设施）+ features/（按功能分包
+#                       market / stock / history / download / system / mentor
+#                       / chip）+ indicators/ + strategies/ + 顶层兼容转发
+#                       （chip_formulas 已于第 34 项搬入 features/chip/formulas/）
+#   launcher/           前端原生启动器（按页面 StockPage / StrategyPage / MarketPage /
+#                       ValuationPage / DownloadPage / ChipRankPage，
+#                       公共件 UiKit / GridKit / ChartKit / Cards / J / Http /
+#                       AsyncKit / Palette / SubTabStrip）
+#   frontend/           前端网页（按页面分目录，shared 放共享 js）
+#   agent_dsh/          dsh agent（其 node_modules 由第 2 类统一忽略）
+#
+# 本类**不要**在这里写任何忽略规则。
+# ----------------------------------------------------------
+
+
+# -------------------- 2) 依赖声明与锁文件 --------------------
+# ✅ 跟踪：requirements.txt / requirements.lock.txt /
+#         package.json / package-lock.json
+# ❌ 忽略：虚拟环境、依赖目录
+venv/
+.venv/
+env/
+ENV/
+node_modules/
+# 本机 Node 运行时，可重新下载
+# ⚠️ 注释必须写在**上一行**：gitignore 不支持行尾注释 —— 行首的 `#` 才是注释，
+#    行尾的 `#` 会被当成**字面量**，整行模式变成「路径 + # + 文字」而匹配不到任何东西。
+#    （第 19 项实测：`.runtime/` 曾因写成行尾注释而一直失效，实际是 .git/info/exclude
+#     在兜底；一旦那条被清掉就会突然开始暴露 .runtime/。）
+.runtime/
+# 第 19 项实测：venv 有 9668 个文件 / 230MB。若日后考虑把 backend_fastapi
+# 改名为 backend，**venv 不要留在旧目录** —— 那会让 venv 与源码分属两个目录，
+# 比现在更难维护（探测要试两个位置、安装脚本跨目录）。要么整体迁移，
+# 要么就别改这个名。
+# ----------------------------------------------------------
+
+
+# -------------------- 3) 可重建的构建缓存 ------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+*.tmp
+*.temp
+*.cache
+*.pid
+cordis.runtime.yml
+# ----------------------------------------------------------
+
+
+# -------------------- 4) 配置与凭据 ----------------------
 .env
 .env.*
 !.env.example
-# 其他常见密钥文件：证书 / 私钥 / 凭据
 *.key
 *.pem
 *.p12
@@ -12,54 +83,47 @@ secrets.*
 credentials.*
 *apikey*
 *api_key*
-!.env.example
+*.token
+# 启动器生成的主题状态（本机状态，页面读它决定浅色/深色，不进版本库）
+frontend/shared/theme-state.js
+# ⚠️ `!.env.example` 是**唯一**允许提交的凭据模板，删掉会让新机器无法初始化。
+# ⚠️ 别给 theme-state.js 加 `!` 反向规则 —— 它是运行期生成的本机状态，
+#    反向规则会把每次切主题都变成一次提交噪声。
+# ----------------------------------------------------------
 
-# ==================== Python ====================
-__pycache__/
-*.py[cod]
-*.pyo
-venv/
-.venv/
-*.egg-info/
-dist/
-build/
 
-# ==================== Node ====================
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# ==================== OS 生成文件 ====================
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# ==================== 日志 / 缓存 / 临时 ====================
+# -------------------- 5) 日志与持久化状态 ----------------
 logs/
 *.log
-*.tmp
-*.temp
-*.cache
-*.pid
-cordis.runtime.yml
-# 运行期数据（股票池库 / 实验室库 / SCR 数据）现已集中存放在项目外的数据目录，
-# 默认 D:\stockanaly-data，可用 .env 的 DATA_DIR 修改；下面两项为遗留与回退位置兜底
+# 后端运行期数据（旧位置回退兜底；现默认在项目外）
 backend_fastapi/data/
+# SCR 数据旧位置（现集中在数据盘 chip/ 下）
 backend_fastapi/chip_data/
-agent_dsh/skills_library/mentor-*.skill
-uvicorn.log
-
-# ==================== 编辑器 / 本地工具配置 ====================
-.vscode/
-.idea/
-.claude/
-
-# ==================== 启动器生成 ====================
-# 浅色 / 深色主题状态，由启动器窗口上的「主题」按钮写入，页面读取它
-frontend/theme-state.js
-
-# ==================== 策略校验缓存（运行时自动生成）====================
-# registry.scan() 在导入时生成，记录各策略文件的校验结果，不可提交
+instance.lock
+# 策略 / 筹码公式的运行时校验缓存（自动生成，不可提交）
 backend_fastapi/strategies/_validated.json
+
+# ---- 以下两条是**防御性规则**：它们的匹配目标当前并不在仓库内 ----
+# 加它们不是为现在，而是为「以后有人把产物生成到源码树里」时能自动挡住
+# （与上面的 instance.lock 同思路）。数据盘在仓库外，所以平时用不上。
+# 将来的磁盘缓存目录（<data>/cache/）
+cache/
+# dumplog 诊断包（第 23 项，实际落在 <data>/logs/）
+dump-*.zip
+
+# ⚠️ **故意不加**的两条，理由写在这里防止以后被人「补全」：
+#
+#   *.db / *.sqlite*            —— 不做全局忽略。仓库里可能出现需要提交的
+#                                 示例/测试库，一刀切会静默吞掉它们。数据盘的
+#                                 DB 本来就在仓库外；源码树里若真出现临时库，
+#                                 上面的 backend_fastapi/data/ 已覆盖。
+#
+#   agent_dsh/skills_library/*.skill
+#                              —— **不要**忽略。这三个（bft / general /
+#                                 short-trader-01）是**手写的技能定义**，属第 1 类
+#                                 源码，已被 git 跟踪。第 19 项原文把它们当成
+#                                 「运行期产物」，是误判：运行期生成的是
+#                                 agent_dsh/.env 与 dsh.log（前两个规则已覆盖），
+#                                 skills_library 是版本化资产。给已跟踪文件加
+#                                 忽略规则不生效，还会误导后来人以为它不该进库。
+# ----------------------------------------------------------

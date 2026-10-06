@@ -31,30 +31,8 @@ import numpy as np
 import pandas as pd
 
 import chip_formulas
+from features.chip.formulas.core import scr
 from .core.base import strategy, ParamSpec, Signal
-
-
-def _scr90_series(res) -> pd.Series:
-    """把筹码矩阵逐帧换算成 SCR90 序列（索引 = 交易日）。
-
-    逐帧线性插值取 P5 / P95；某帧筹码全空时留 NaN（该日不参与排名）。
-    """
-    pct = res.pct
-    centers = res.centers
-    out = np.full(pct.shape[0], np.nan)
-    for i in range(pct.shape[0]):
-        row = pct[i]
-        total = float(row.sum())
-        if total <= 0:
-            continue
-        cum = np.cumsum(row) / total
-        p5 = float(np.interp(0.05, cum, centers))
-        p95 = float(np.interp(0.95, cum, centers))
-        den = p95 + p5
-        if den == 0:
-            continue
-        out[i] = (p95 - p5) / den
-    return pd.Series(out, index=list(res.dates))
 
 
 @strategy(
@@ -105,7 +83,7 @@ def scr90(ctx, top_n: int = 100, rebalance: int = 5, window: int = 250,
                 adjust=ctx.adjust, bins=bins, offline=True)
         except Exception:                        # noqa: BLE001 - 单只失败不拖垮整批
             continue
-        s = _scr90_series(res)
+        s = scr.scr_series_pd(res)
         if win_start:
             s = s[s.index >= win_start]         # 预热段不参与选股
         s = s.dropna()

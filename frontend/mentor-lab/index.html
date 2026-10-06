@@ -13,8 +13,8 @@ html[data-theme=light] .btn:hover{border-color:rgba(11,11,11,.3)}
 html[data-theme=light] .tag{background:rgba(11,11,11,.06)}
 </style>
 <!-- 浅色 / 深色：由启动器窗口顶部的「主题」按钮控制，页面跟随 -->
-<script src="theme-state.js"></script>
-<script src="theme.js"></script>
+<script src="../shared/theme-state.js"></script>
+<script src="../shared/theme.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -52,7 +52,7 @@ html[data-theme=light] .tag{background:rgba(11,11,11,.06)}
 <div id="reviewModal" class="modal"><div class="dialog"><h2 id="reviewTitle">人工审核</h2><div class="desc">请修改任何提炼错误后再批准。批准内容才会进入下一版Skill。</div><textarea id="reviewJson" rows="28"></textarea><div class="row"><input id="reviewNote" placeholder="审核备注"><button id="approveReview" class="btn good">批准</button><button id="rejectReview" class="btn bad">拒绝</button><button id="closeReview" class="btn">关闭</button></div></div></div>
 <div id="jsonModal" class="modal"><div class="dialog"><h2 id="jsonTitle">内容</h2><textarea id="jsonContent" rows="32" readonly></textarea><div class="row"><button id="closeJson" class="btn">关闭</button></div></div></div>
 
-<script src="analysis-engine.js"></script>
+<script src="../shared/analysis-engine.js"></script>
 <script>
 'use strict';
 const API_PORT=new URLSearchParams(location.search).get('api_port')||'8000';

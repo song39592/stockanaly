@@ -14,20 +14,7 @@ import pandas as pd
 
 from .base import ParamSpec, indicator, series_line
 from .data import chip_rows_of
-
-
-def _percentile(centers: np.ndarray, row: np.ndarray, q: float) -> float:
-    """按累计筹码取价格分位（线性插值）。"""
-    total = float(row.sum())
-    if total <= 0:
-        return float("nan")
-    return float(np.interp(q / 100.0, np.cumsum(row) / total, centers))
-
-
-def _scr(low: float, high: float) -> float:
-    if not np.isfinite(low) or not np.isfinite(high) or (high + low) == 0:
-        return float("nan")
-    return (high - low) / (high + low)
+from features.chip.formulas.core import scr
 
 
 @indicator(
@@ -42,15 +29,11 @@ def _scr(low: float, high: float) -> float:
 def chip_scr(df: pd.DataFrame, formula: str = "tri_decay") -> dict:
     rows, frames = chip_rows_of(df, formula_id=formula)
     centers = frames.centers
-    s90, s70 = [], []
-    for i in range(len(rows)):
-        row = rows[i]
-        if np.all(np.isnan(row)):
-            s90.append(float("nan"))
-            s70.append(float("nan"))
-            continue
-        s90.append(_scr(_percentile(centers, row, 5), _percentile(centers, row, 95)))
-        s70.append(_scr(_percentile(centers, row, 15), _percentile(centers, row, 85)))
+    # 第 10 项：SCR90 / SCR70 都走统一内核（NaN 语义），本地 _percentile / _scr 已删。
+    # 口径不变：仍是 chip_rows_of 的**带锁仓修正**数据，与周榜/策略的 offline 口径不同。
+    matrix = np.asarray(rows, dtype=float)
+    s90 = scr.scr_series(matrix, centers, 5, 95)
+    s70 = scr.scr_series(matrix, centers, 15, 85)
     index = df.index
     return {"series": [
         series_line("集中度90", pd.Series(s90, index=index)),

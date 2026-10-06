@@ -10,7 +10,7 @@ import db
 import history_store
 import integrity
 import price_store
-from test_support import isolate_crypto
+from test_support import isolate_crypto, require_data_isolation
 
 
 class IntegrityTest(unittest.TestCase):
@@ -22,13 +22,14 @@ class IntegrityTest(unittest.TestCase):
         db.DB_PATH = base / "history.db"
         db.BARS_DIR = base / "bars"
         db.FACTORS_DB = db.BARS_DIR / "factors.db"
+        require_data_isolation(price_store, Path(self.tmp.name))
         crypto.ENV_PATH = base / ".env"          # 隔离：不要写真实的 .env
         crypto._key = None
         os.environ["DATA_SECRET"] = "unit-test-secret"
         price_store.init_db()
         history_store.init_db()
         # 写入一点数据，触发元信息记录
-        price_store.upsert_bars("000001", [{"date": "2026-09-01", "close": 10.0}], "raw")
+        price_store.upsert_bars("000001", [{"date": "2026-09-01", "close": 10.0}], "raw", validate=False)
         history_store.save_snapshot("2026-09-01", [{"code": "000001", "name": "测试"}])
 
     def tearDown(self):
@@ -87,7 +88,7 @@ class IntegrityTest(unittest.TestCase):
 
     def test_program_writes_keep_time_consistent(self):
         """程序自己的写入会同步刷新记录时间，因此不会误报。"""
-        price_store.upsert_bars("000001", [{"date": "2026-09-03", "close": 11.0}], "raw")
+        price_store.upsert_bars("000001", [{"date": "2026-09-03", "close": 11.0}], "raw", validate=False)
         result = integrity.check_library("日K分片", db.bars_db(2026), ("daily_bars",))
         self.assertEqual(result["issues"], [], result["issues"])
 
@@ -120,7 +121,7 @@ class IntegrityTest(unittest.TestCase):
             price_store.load_bars("000001", "raw")
 
         # 模拟日常增量同步：只补最新一天，碰不到被改的那行
-        price_store.upsert_bars("000001", [{"date": "2026-09-02", "close": 11.0}], "raw")
+        price_store.upsert_bars("000001", [{"date": "2026-09-02", "close": 11.0}], "raw", validate=False)
 
         # 修复后：仍必须拒绝；此处若不抛异常，说明篡改被同一次写入洗白了
         with self.assertRaises(price_store.UntrustedDataError):
@@ -128,7 +129,7 @@ class IntegrityTest(unittest.TestCase):
 
     def test_clean_incremental_write_still_refreshes(self):
         """数据未被改动时，增量写入仍应正常刷新指纹（不能因噎废食）。"""
-        price_store.upsert_bars("000001", [{"date": "2026-09-02", "close": 11.0}], "raw")
+        price_store.upsert_bars("000001", [{"date": "2026-09-02", "close": 11.0}], "raw", validate=False)
         self.assertEqual(len(price_store.load_bars("000001", "raw")), 2)
 
     def test_deep_check_lists_untrusted(self):

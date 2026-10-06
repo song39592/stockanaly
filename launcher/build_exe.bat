@@ -29,6 +29,14 @@ echo 正在编译原生窗口程序...
   "/r:%FW%System.Web.dll" ^
   "/r:%FW%System.Web.Extensions.dll" ^
   "%SRC%" ^
+  "%~dp0UiKit.cs" ^
+  "%~dp0Cards.cs" ^
+  "%~dp0ChartKit.cs" ^
+  "%~dp0SubTabStrip.cs" ^
+  "%~dp0AsyncKit.cs" ^
+  "%~dp0Http.cs" ^
+  "%~dp0J.cs" ^
+  "%~dp0Palette.cs" ^
   "%~dp0ValuationPage.cs" ^
   "%~dp0MarketPage.cs" ^
   "%~dp0StockPage.cs" ^

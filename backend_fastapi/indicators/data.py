@@ -23,14 +23,13 @@ from __future__ import annotations
 import dataclasses as dc
 import datetime as dt
 import threading
-from bisect import bisect_left
 from functools import lru_cache
 
 import kline_service
 import numpy as np
 import pandas as pd
 import price_store          # 仅用于读股本（share_capital），K 线本身走 kline_service
-from periods import bucket_key, normalize
+from periods import bucket_last_indices, normalize
 
 _MIN_ROWS = 2  # 少于此行数视为数据不足，技术指标无法计算
 _OHLCV = ("open", "high", "low", "close", "volume")
@@ -251,40 +250,33 @@ def period_of(df: pd.DataFrame) -> str:
 def _apply_hfq(panel: pd.DataFrame) -> pd.DataFrame:
     """把原始收盘价宽表按**后复权因子**缩放（只影响价格，用于跨除权的收益比较）。
 
-    与 load_bars 的 hfq 口径一致：某交易日的因子 = ex_date ≤ 该日的**最近一条**因子；
-    早于首条因子的事件前保持原始价（与 load_bars 的 adjusted=False 分支一致）。
-    因子库很小（全市场约 6~7 万行），逐事件对「ex_date 起的该列」赋值即可。
-    """
-    if panel is None or panel.empty:
-        return panel if panel is not None else pd.DataFrame()
-    factors = price_store.load_all_factors()
-    if not factors:
-        return panel
+    第 17 项：实现已收回 `price_store.apply_hfq_factors`。这里原先**自己复制了
+    一遍 `load_bars` 的 hfq 算法**（自己算「哪天起该乘哪个因子」），两条链之间
+    没有任何交叉验证 —— 一旦 `price_store` 改复权规则，RPS 排名会**静默算错**
+    且无人察觉。现在生效区间的判定只有 `price_store.hfq_steps` 一份。
 
-    col_of = {c: j for j, c in enumerate(panel.columns)}
-    idx = [str(d)[:10] for d in panel.index]
-    base = panel.to_numpy(dtype="float64", copy=True)
-    adj = base.copy()
-    for row in factors:                       # 已按 code, ex_date 升序
-        j = col_of.get(row["code"])
-        if j is None:
-            continue
-        fac = row["hfq_factor"]
-        if fac is None:
-            continue
-        pos = bisect_left(idx, str(row["ex_date"])[:10])
-        if pos < len(idx):
-            adj[pos:, j] = base[pos:, j] * float(fac)
-    return pd.DataFrame(adj, index=panel.index, columns=panel.columns)
+    本函数保留为薄封装：调用点（`_build_market_panel`）零改动，且不改变
+    「面板不做指纹校验」这一原有特性 —— `load_market_close` 读回的就是未复权
+    收盘价，本函数只负责缩放，两件事分开。
+    """
+    return price_store.apply_hfq_factors(panel)
 
 
 def _resample_panel(panel: pd.DataFrame, period: str) -> pd.DataFrame:
-    """把日线宽表合样到周 / 月：每桶取**最后一个交易日**那一行（口径同 periods.resample_bars）。"""
+    """把日线宽表合样到周 / 月：每桶取**最后一个交易日**那一行。
+
+    第 17 项：桶的判定已改为复用 `periods.bucket_last_indices`（与
+    `periods.resample_bars` 同一份 `bucket_key` 规则），不再自己手写一遍
+    「下一个 key 变了就取这一根」的判断。
+
+    ⚠️ 性能：这里**只取每桶最后一根**，不做 OHLCV 聚合 —— 面板是
+    5585 列 × 多年 的宽表，RPS 只需要收盘价。改用通用 `resample_bars`
+    会把成本提高一到两个数量级，所以保留这个优化，只把**分桶规则**共用。
+    """
     if panel.empty or period == "day":
         return panel
     labels = [str(d)[:10] for d in panel.index]
-    keys = [bucket_key(d, period) for d in labels]
-    keep = [i for i in range(len(keys)) if i == len(keys) - 1 or keys[i + 1] != keys[i]]
+    keep = bucket_last_indices(labels, period)
     sub = panel.iloc[keep]
     sub.index = [labels[i] for i in keep]
     return sub

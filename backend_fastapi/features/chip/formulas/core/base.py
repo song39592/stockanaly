@@ -23,23 +23,14 @@ from typing import Any, Callable
 
 import numpy as np
 
+from core.paramspec import ParamSpec         # 第 13 项：定义收敛到 core/paramspec.py
+
 from . import data
+from . import scr
 
 FORMULAS: dict[str, "ChipFormulaMeta"] = {}
 DEFAULT_FORMULA_ID = "tri_decay"        # 未指定公式时用它；被删改则由调用方显式指定
 DEFAULT_BINS = 80
-
-
-@dc.dataclass
-class ParamSpec:
-    """公式参数规格：供前端渲染控件 + 后端填充默认值 / 校验范围。"""
-    name: str
-    type: str                 # "int" | "float" | "choice"
-    default: Any
-    min: float | None = None
-    max: float | None = None
-    choices: list | None = None
-    label: str = ""
 
 
 @dc.dataclass
@@ -145,15 +136,6 @@ def _normalize_rows(matrix: np.ndarray) -> np.ndarray:
     return matrix / safe[:, None] * 100.0
 
 
-def _percentile(centers: np.ndarray, pct: np.ndarray, q: float) -> float | None:
-    """按累计筹码取价格分位（线性插值）。"""
-    total = float(pct.sum())
-    if total <= 0:
-        return None
-    cum = np.cumsum(pct) / total
-    return float(np.interp(q / 100.0, cum, centers))
-
-
 def _stats_of(pct: np.ndarray, centers: np.ndarray, close_i: float) -> dict:
     """某一帧的统计（供光标回溯；字段精简以控响应体积）。
 
@@ -164,11 +146,11 @@ def _stats_of(pct: np.ndarray, centers: np.ndarray, close_i: float) -> dict:
         return {"close": round(close_i, 4), "avg_cost": None, "peak_price": None,
                 "peak_pct": None, "profit_ratio": None, "scr90": None}
     idx = int(np.argmax(pct))
-    p5 = _percentile(centers, pct, 5)
-    p95 = _percentile(centers, pct, 95)
-    scr90 = None
-    if p5 and p95 and (p95 + p5) != 0:
-        scr90 = round((p95 - p5) / (p95 + p5), 6)
+    # 第 10 项：SCR90 改走统一内核 scr.scr_frame（None 语义）。
+    # 顺带修掉原判空缺陷 `if p5 and p95` —— 分位价格**可以是 0**（低价股 / 分箱下沿在 0），
+    # 那种情况下原写法为假 → 静默返回 scr90=null，内核按 `den == 0` 才是对的。
+    scr90 = scr.scr_frame(pct, centers)
+    scr90 = None if scr90 is None else round(scr90, 6)
     return {
         "close": round(close_i, 4),
         "avg_cost": round(float((centers * pct).sum() / 100.0), 4),
@@ -261,16 +243,11 @@ def compute(code: str, formula_id: str | None = None, params: dict | None = None
                    for i in range(win)]
     last_close = float(res.close[-1])
     centers = res.centers
-    p5 = _percentile(centers, pct, 5)
-    p15 = _percentile(centers, pct, 15)
-    p50 = _percentile(centers, pct, 50)
-    p85 = _percentile(centers, pct, 85)
-    p95 = _percentile(centers, pct, 95)
-
-    def scr(a: float | None, b: float | None) -> float | None:
-        if not a or not b or (a + b) == 0:
-            return None
-        return round((b - a) / (b + a), 6)
+    # 第 10 项曾在这里留过一份分位计算（P5/P15/P50/P85/P95）+ 局部 scr()，但它们
+    # **从未写进下面的返回字典** —— 响应里的 SCR90 由 _stats_of 走 scr.scr_frame 给出，
+    # 是一段没人读的死代码。上一版把 _percentile 收进 scr.py 时删了定义却漏删调用，
+    # 于是 /api/chip/dist 直接 NameError -> 500（前端显示「筹码接口无响应」）。
+    # 既然没人读，连同局部 scr() 一起删掉，不要为了「也许以后要用」把分位计算搬回来。
 
     return {
         "ok": True,

@@ -7,7 +7,7 @@
 ## 一、架构与数据流
 
 ```
-frontend/index.html（前端 UI）
+frontend/home/index.html（前端 UI）
    │  ①创建会话  ②上传快照  ③发送问题
    ▼
 dsh 服务（Node，127.0.0.1:3080，webui 同端口）
@@ -32,11 +32,11 @@ frontend 用 marked 渲染
 
 ## 三、启动
 
-1. **FastAPI 后端**：双击根目录 `启动系统.bat`（会同时打开 `frontend/index.html`），
+1. **FastAPI 后端**：双击根目录 `启动系统.bat`（会同时打开 `frontend/home/index.html`），
    或手动 `D:/ai/backend_fastapi/venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000`。
 2. **dsh 服务**：双击 `D:\ai\agent_dsh\start-dsh.bat`（等于 `cd D:\ai\agent_dsh && npx dsh web --patch cordis.patch.yml`）。
    看到 `dsh web: http://127.0.0.1:3080` 即成功。
-3. 打开 `frontend/index.html`，点右下角 🐂 开始对话。
+3. 打开 `frontend/home/index.html`，点右下角 🐂 开始对话。
 
 ## 四、调试（看 Agent 轨迹）
 

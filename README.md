@@ -25,7 +25,7 @@
   用两段法（前 5 年净利润贴现 + 永续增长，贴现率 10%）给出乐观 / 中性 / 悲观三档每股价值、
   股价/价值（低估程度）、预测 N 年价与收益率，并逐步展示计算过程；对应 `POST /api/stock/valuation`。
   机构预测第 N 年净利润为可选：提供时三档为乐观 ×1.5 / 中性 ×1 / 悲观固定 5%，未提供则兜底 25% / 10% / 5%。
-- **SCR 选股（筹码体系）**（`frontend/chip-scr.html`，从股票池页「筹码体系 · SCR 选股」进入）：
+- **SCR 选股（筹码体系）**（`frontend/chip-scr/index.html`，从股票池页「筹码体系 · SCR 选股」进入）：
   导入行情软件导出的多期「临时条件股YYYYMMDD.xls」（文件名日期自动解析、可在页面手改），
   跨期合并做周级三档分类：磨主峰（连续 N 期全勤 ∩ 流通市值 100–800 亿 ∩ PE>0）/ 向下破位离榜 / 启动型离榜；
   阈值可调，点「🔄 刷新计算」手动触发；计算需**最近 5 周**数据（按周归组，周中执行时最新一期为上一周，
@@ -43,7 +43,7 @@
 ## 系统架构
 
 ```
-frontend/index.html（原生 HTML/JS 单页，浏览器本地 localStorage 存数据）
+frontend/home/index.html（原生 HTML/JS 单页，浏览器本地 localStorage 存数据）
    │  Excel 导入 / 图表 / 个股调研弹窗 / 红色小牛聊天窗
    ├──────────────► backend_fastapi（FastAPI，:8000）
    │                  GET  /health
@@ -78,7 +78,8 @@ stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
 ├── launcher/                     # 上述 EXE 的源码：主窗体 StockPoolLauncher.cs + 各业务标签页
 │                                 #   （MarketPage / StockPage / ValuationPage / DownloadPage.cs）、
 │                                 #   构建脚本 build_exe.bat、环境安装脚本 install_env.bat
-├── frontend/                     # index.html（股票池）/ mentor-lab.html（大佬策略实验室）/ chip-scr.html（SCR 选股）/ stock-analysis.html（个股分析）
+├── frontend/                     # 按页面分目录：home/（股票池）、mentor-lab/（大佬策略实验室）、
+│                                 # chip-scr/（SCR 选股），每个目录下都是 index.html；shared/ 放共享 js
 ├── backend_fastapi/              # FastAPI 后端（业务模块化：*_routes.py 管 HTTP、*_service.py 管逻辑）
 │   ├── main.py                   # 应用入口：容错挂载各模块路由 + /health（单模块故障不影响其他模块）
 │   ├── chip_routes.py            # 筹码体系 · SCR 选股接口
@@ -110,7 +111,7 @@ stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
    - dsh：`agent_dsh/.env` 填 `DEEPSEEK_API_KEY`（模板见 `.env.example`），并已执行
      `cd D:\ai\agent_dsh && npm install`（依赖 `@deepseek-ai/dsh`）。
 2. **一键启动**：双击根目录 `启动系统.bat` —— 自动拉起 FastAPI 后端（:8000）与 dsh 服务（:3080，
-   已运行则跳过），随后打开 `frontend/index.html`。
+   已运行则跳过），随后打开 `frontend/home/index.html`。
    - 也可以用原生窗口程序：双击 `launcher\build_exe.bat` 生成根目录 `股票池追踪系统.exe`
      （调用系统自带 `csc.exe` 编译，离线、零第三方依赖），之后双击该 EXE：
      **自带 WinForms 窗口**（服务控制台 / 个股查询 / 运行日志 / 设置），内嵌拉起两个服务、
@@ -123,7 +124,7 @@ stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
    - 后端：`backend_fastapi\start_backend.bat`，或手动
      `D:/ai/backend_fastapi/venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000`；
    - dsh：`agent_dsh\start-dsh.bat`，看到 `dsh web: http://127.0.0.1:3080` 即成功。
-4. 打开 `frontend/index.html`，右下角 🐂 开始对话；调试 Agent 轨迹看 `http://127.0.0.1:3080` webui。
+4. 打开 `frontend/home/index.html`，右下角 🐂 开始对话；调试 Agent 轨迹看 `http://127.0.0.1:3080` webui。
 
 > 启动脚本与 `cordis.patch.yml` 中硬编码了 `D:\ai` 绝对路径，若移动项目目录需同步修改这些文件。
 
@@ -201,7 +202,7 @@ C:\Users\Admin\Desktop\stockanaly-main\agent_dsh\.env         →  DEEPSEEK_API_
 
 ## 策略评分与复盘（v2）
 
-- `frontend/analysis-engine.js` 计算市场温度、候选评分、正反证据与数据质量；生成信号时只读取目标日及之前的数据。
+- `frontend/shared/analysis-engine.js` 计算市场温度、候选评分、正反证据与数据质量；生成信号时只读取目标日及之前的数据。
 - 历史复盘按后续第 1/3/5/10 个已导入数据日的同股价格计算，缺价、出池和样本不足均不填补；不包含交易成本、复权和停牌处理。
 - 每日分析快照保存在 `stockPool.analysis.v1`，导出备份时会与股票池数据一并导出。
 - Skill v2 支持 `strategyType`、`parameters`、`riskRules` 和 `ruleContent`，仍兼容旧版 Skill。

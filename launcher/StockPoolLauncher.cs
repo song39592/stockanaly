@@ -598,7 +598,7 @@ namespace StockPool
                         SelectTab(_stockTabIndex);
                         _stockCode.Text = code;
                         StockOpen();
-                        StockSubSelect(0);
+                        _stockStrip.Select(0);
                         HideQuickSearch();
                     }
                     else
@@ -672,52 +672,6 @@ namespace StockPool
 
         #region 页面构建
 
-        private Panel NewPage(string title)
-        {
-            int index = _tabPages.Count;
-
-            var p = new Panel();
-            p.Dock = DockStyle.Fill;
-            p.Visible = (index == 0);
-            p.AutoScroll = true;
-            // AutoScroll 容器里 AutoSize 的子控件偶尔比客户区宽 1px，会凭空冒出系统滚动条
-            // （深色主题下是一片浅色）；这里把宽度上限钉住。
-            p.Resize += delegate
-            {
-                foreach (Control child in p.Controls)
-                    child.MaximumSize = new Size(Math.Max(160, p.ClientSize.Width - p.Padding.Horizontal - 2), 0);
-            };
-            p.Padding = new Padding(16, 12, 16, 16);
-            p.Margin = new Padding(0);
-            p.Tag = "tabpage";
-            _tabPages.Add(p);
-            _tabBody.Controls.Add(p);
-
-            var b = new Button();
-            b.Text = title;
-            b.Tag = "tabbtn";
-            b.AutoSize = false;
-            b.Height = 30;
-            b.Width = Math.Max(74, TextRenderer.MeasureText(title, Font).Width + 26);
-            b.FlatStyle = FlatStyle.Flat;
-            b.FlatAppearance.BorderSize = 0;
-            b.Font = new Font("Microsoft YaHei UI", 9f);
-            b.TabStop = false;
-            b.Margin = new Padding(0, 0, 2, 0);
-            int idx = index;
-            b.Click += delegate { SelectTab(idx); };
-            b.Paint += delegate(object s, PaintEventArgs e)
-            {
-                if (idx != _tabIndex) return;
-                var btn = (Control)s;
-                using (var pen = new Pen(Color.FromArgb(64, 120, 192), 2f))
-                    e.Graphics.DrawLine(pen, 0, btn.Height - 1, btn.Width, btn.Height - 1);
-            };
-            _tabBtns.Add(b);
-            _tabBar.Controls.Add(b);
-            return p;
-        }
-
         /// <summary>切换标签：只显示对应页面，并刷新标签行配色。</summary>
         private void SelectTab(int index)
         {
@@ -725,6 +679,11 @@ namespace StockPool
             HideQuickSearch();
             _tabIndex = index;
             for (int i = 0; i < _tabPages.Count; i++) _tabPages[i].Visible = (i == index);
+            // ⭐ 补染（bug 修复）：顶层页只切 Visible、从不重染 —— 页内**后来才加**的控件
+            // （如每次点「分析」都异步重建的指标勾选框）会永远停留在默认配色。
+            // 二级页 SubTabStrip.Select 挂载时会 Skin(page)，顶层这里补齐同样的行为，
+            // Skin 幂等、开销毫秒级，切页即自愈。
+            Skin(_tabPages[index]);
             SkinTabs();
             if (index == _mktTabIndex) MktOnEnter();   // 进入盘面页自动拉最新数据
             if (index == _stockTabIndex) StockOnEnter();
@@ -745,68 +704,6 @@ namespace StockPool
                 _tabBtns[i].FlatAppearance.MouseOverBackColor = sel ? _cPanel : _cPanel;
                 _tabBtns[i].Invalidate();
             }
-        }
-
-        /// <summary>纵向堆叠容器：单列、宽度撑满内容区、行高自动。</summary>
-        private static TableLayoutPanel Stack()
-        {
-            var t = new TableLayoutPanel();
-            t.ColumnCount = 1;
-            t.AutoSize = true;
-            t.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            t.Dock = DockStyle.Top;
-            t.Margin = new Padding(0);
-            t.Padding = new Padding(0);
-            t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-            return t;
-        }
-
-        private static void AddRow(TableLayoutPanel t, Control row)
-        {
-            row.Margin = new Padding(0, 0, 0, 8);
-            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            t.Controls.Add(row);
-        }
-
-        /// <summary>横向排布一行控件（不换行，随内容自适应）。</summary>
-        private static FlowLayoutPanel Row(params Control[] items)
-        {
-            var f = new FlowLayoutPanel();
-            f.FlowDirection = FlowDirection.LeftToRight;
-            f.WrapContents = false;
-            f.AutoSize = true;
-            f.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            f.Margin = new Padding(0);
-            f.Padding = new Padding(0);
-            foreach (var c in items)
-            {
-                c.Margin = new Padding(0, 0, 8, 0);
-                f.Controls.Add(c);
-            }
-            return f;
-        }
-
-        /// <summary>自适应宽度分组框，body 为其内部纵向堆叠容器。</summary>
-        private static GroupBox Group(string title, out TableLayoutPanel body)
-        {
-            var g = new GroupBox();
-            g.Text = title;
-            g.AutoSize = true;
-            g.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            g.Dock = DockStyle.Top;
-            g.Margin = new Padding(0);
-            g.Padding = new Padding(12, 6, 12, 10);
-
-            body = new TableLayoutPanel();
-            body.ColumnCount = 1;
-            body.AutoSize = true;
-            body.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            body.Dock = DockStyle.Fill;
-            body.Margin = new Padding(0);
-            body.Padding = new Padding(0);
-            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-            g.Controls.Add(body);
-            return g;
         }
 
         private Panel BuildServicePage()
@@ -869,11 +766,12 @@ namespace StockPool
             return p;
         }
 
-        /// <summary>用独立窗口打开 frontend 下的页面（带上当前主题）。</summary>
-        private void OpenWebPage(string fileName, string title)
+        /// <summary>用独立窗口打开 frontend 下的页面（带上当前主题）。
+        /// `page` 是**子目录名**：第 25 项起网页按页面分目录，页面统一叫 `index.html`。</summary>
+        private void OpenWebPage(string page, string title)
         {
-            var f = Path.Combine(_root, "frontend", fileName);
-            if (!File.Exists(f)) { Msg("未找到 frontend\\" + fileName); return; }
+            var f = Path.Combine(_root, "frontend", page, "index.html");
+            if (!File.Exists(f)) { Msg("未找到 frontend\\" + page + "\\index.html"); return; }
             WebWindow.Show(title, UrlWithTheme(new Uri(f).AbsoluteUri));
         }
 
@@ -892,14 +790,15 @@ namespace StockPool
             if (_btnTheme != null) _btnTheme.Text = _light ? "主题：浅色" : "主题：深色";
             Skin(this);
             SkinTabs();
-            if (_mktSubBtns != null && _mktSubBtns.Count > 0) SkinMktSubTabs();
-            if (_stockSubBtns != null && _stockSubBtns.Count > 0) SkinStockSubTabs();
+            if (_mktStrip != null && _mktStrip.HasTabs) _mktStrip.SkinTabs();
+            if (_stockStrip != null && _stockStrip.HasTabs) _stockStrip.SkinTabs();
+            if (_stStrip != null && _stStrip.HasTabs) _stStrip.SkinTabs();   // 原先漏了策略页
             if (_stockHistoryList != null) StockRenderHistoryNav();
             if (_stockRangeMap != null && _stockRangeMap.Count > 0) StockSetRangeActive();
             if (_stockAdjustMap != null && _stockAdjustMap.Count > 0) StockSetAdjustActive();
             try
             {
-                var f = Path.Combine(_root, "frontend", "theme-state.js");
+                var f = Path.Combine(_root, "frontend", "shared", "theme-state.js");
                 File.WriteAllText(f,
                     "/* Generated by StockPoolLauncher: light/dark theme follows the launcher button. */\r\n"
                     + "window.__LAUNCHER_THEME__ = \"" + (_light ? "light" : "dark") + "\";\r\n",
@@ -932,7 +831,7 @@ namespace StockPool
                 _cBg = Color.FromArgb(30, 32, 38);
                 _cPanel = Color.FromArgb(38, 41, 48);
                 _cText = Color.FromArgb(224, 228, 235);
-                _cSub = Color.FromArgb(150, 158, 172);
+                _cSub = C.Flat;
                 _cInput = Color.FromArgb(45, 49, 57);
                 _cInputText = Color.FromArgb(224, 228, 235);
                 _cHead = Color.FromArgb(24, 26, 32);
@@ -945,10 +844,29 @@ namespace StockPool
             }
         }
 
-        /// <summary>按当前配色给窗口及其所有控件上色（递归）。</summary>
+        /// <summary>按当前配色给窗口及其所有控件上色（递归）。
+        /// 自身染色与逐子递归都带容错（见循环处的说明），异常只牺牲出错控件自己。</summary>
         private void Skin(Control c)
         {
             if (c == null) return;
+            try { SkinColors(c); }
+            catch (Exception ex) { LogSkinFault(c, ex); }
+
+            // ⭐ 逐子容错（bug 修复：K 线图偶发整块变白、重启才恢复）：
+            // 原来整条递归一条道走到黑 —— 任何一个子控件在换肤时抛异常，
+            // 排在它**后面**的兄弟控件就全漏染（图表控件变默认白底黑字，正是
+            // 用户截图里那块「未换肤的白图」）。改为逐子 try/catch：
+            // 出错的控件只影响自己并留下日志证据，兄弟控件照常染色。
+            foreach (Control child in c.Controls)
+            {
+                try { Skin(child); }
+                catch (Exception ex) { LogSkinFault(child, ex); }
+            }
+        }
+
+        /// <summary>Skin 的染色主体（原 Skin 的 if-else 链，被 Skin 包了容错）。</summary>
+        private void SkinColors(Control c)
+        {
             string tag = c.Tag as string;
 
             if (tag == "dot")
@@ -1002,7 +920,7 @@ namespace StockPool
             }
             else if (c is Button)
             {
-                c.BackColor = Color.FromArgb(64, 120, 192);
+                c.BackColor = C.Accent;
                 c.ForeColor = Color.White;
             }
             else if (c is Label)
@@ -1034,7 +952,7 @@ namespace StockPool
                 dgv.EnableHeadersVisualStyles = false;
                 dgv.BackgroundColor = _cBg;
                 dgv.GridColor = _light ? Color.FromArgb(222, 224, 228) : Color.FromArgb(58, 62, 72);
-                Color sel = Color.FromArgb(64, 120, 192);
+                Color sel = C.Accent;
                 // 单元格样式优先级：Cell > Row > RowsDefault > AlternatingRows > Column > DefaultCellStyle
                 // 只设 DefaultCellStyle 会被上层压制，这里逐层显式设置，保证行底色跟随主题
                 dgv.DefaultCellStyle.BackColor = _cPanel;
@@ -1079,8 +997,30 @@ namespace StockPool
                 c.BackColor = _cBg;
                 c.ForeColor = _cText;
             }
+        }
 
-            foreach (Control child in c.Controls) Skin(child);
+        /// <summary>换肤单个控件失败时落日志（launcher 目录 skin_error.log）。
+        /// 纯诊断用途：出现该文件即说明有控件在换肤时抛异常，内容含控件类型与堆栈。</summary>
+        private static void LogSkinFault(Control c, Exception ex)
+        {
+            try
+            {
+                string path = System.IO.Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory, "skin_error.log");
+                string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+                    + "  " + (c == null ? "<null>" : (c.GetType().Name + " '" + SafeCtlName(c) + "' tag=" + (c.Tag == null ? "-" : c.Tag.ToString())))
+                    + "  " + ex.GetType().Name + ": " + ex.Message
+                    + "  @ " + (ex.StackTrace == null ? "?" : ex.StackTrace.Replace("\r\n", " | "))
+                    + "\r\n";
+                System.IO.File.AppendAllText(path, line);
+            }
+            catch (Exception) { }          // 日志失败绝不能反过来打断换肤
+        }
+
+        private static string SafeCtlName(Control c)
+        {
+            try { return string.IsNullOrEmpty(c.Name) ? "-" : c.Name; }
+            catch (Exception) { return "-"; }
         }
 
         /// <summary>网页地址带上当前主题，页面一打开就是正确的颜色。</summary>
@@ -1193,7 +1133,7 @@ namespace StockPool
                 null, "盘面及板块分析", onEnter: delegate { SelectTab(_mktTabIndex); }));
             AddRow(stack, ToolCard("🧠", "大佬策略实验室",
                 "把大佬公开资料交给 AI 提炼，人工审核后生成每日观点，沉淀为可回测的候选策略。",
-                "mentor-lab.html", "大佬策略实验室"));
+                "mentor-lab", "大佬策略实验室"));      // 子目录名，不是文件名
             AddRow(stack, ToolCard("📈", "股票估值计算",
                 "输入标的与假设，按多种估值模型测算内在价值区间，辅助判断高估 / 低估。",
                 null, "股票估值计算", onEnter: delegate { SelectTab(_valTabIndex); }));
@@ -1418,70 +1358,6 @@ namespace StockPool
 
         #region 控件小工具
 
-        private static Label Dot(Control parent, string text)
-        {
-            var l = new Label();
-            l.Text = "● " + text;
-            l.AutoSize = true;
-            l.ForeColor = Color.Gray;
-            l.Tag = "dot";
-            l.Font = new Font("Microsoft YaHei UI", 9.5f);
-            l.Margin = new Padding(0, 4, 14, 0);
-            parent.Controls.Add(l);
-            return l;
-        }
-
-        /// <summary>标记为次要说明文字：换肤时用它对应的弱色。</summary>
-        private static Label Mute(Label l)
-        {
-            l.Tag = "muted";
-            return l;
-        }
-
-        private static Label Lbl(string text)
-        {
-            var l = new Label();
-            l.Text = text;
-            l.AutoSize = true;
-            l.ForeColor = Color.Black;
-            l.Margin = new Padding(0, 5, 8, 0);
-            return l;
-        }
-
-        private static Button MiniBtn(string text, EventHandler click)
-        {
-            return MiniBtn(text, click, 0);
-        }
-
-        private static Button MiniBtn(string text, EventHandler click, int width)
-        {
-            var b = new Button();
-            b.Text = text;
-            b.Height = 26;
-            b.FlatStyle = FlatStyle.Flat;
-            b.BackColor = Color.FromArgb(64, 120, 192);
-            b.ForeColor = Color.White;
-            b.FlatAppearance.BorderSize = 0;
-            b.AutoSize = (width <= 0);
-            b.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            if (width > 0) b.Width = width;
-            b.MinimumSize = new Size(64, 26);
-            b.Padding = new Padding(6, 0, 6, 0);
-            b.Margin = new Padding(0, 0, 8, 0);
-            b.Click += click;
-            return b;
-        }
-
-        private static CheckBox Check(string text, bool value)
-        {
-            var c = new CheckBox();
-            c.Text = text;
-            c.AutoSize = true;
-            c.Checked = value;
-            c.Margin = new Padding(0, 4, 8, 0);
-            return c;
-        }
-
         #endregion
 
         #region 路径与设置
@@ -1493,7 +1369,8 @@ namespace StockPool
             var d = new DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
             for (int i = 0; i < 6 && d != null; i++)
             {
-                if (File.Exists(Path.Combine(d.FullName, "frontend", "index.html"))
+                // ⚠️ 这是**项目根目录探测**：路径错了启动器就找不到整个项目，改这里要格外小心
+                if (File.Exists(Path.Combine(d.FullName, "frontend", "home", "index.html"))
                     && Directory.Exists(Path.Combine(d.FullName, "backend_fastapi")))
                     return d.FullName;
                 d = d.Parent;
@@ -1822,15 +1699,15 @@ namespace StockPool
                     {
                         if (_tbTdx == null || _lbTdx == null) return;
                         _lastTdxStatus = root;
-                        var configured = Convert.ToString(DictVal(root, "configured") ?? "");
-                        var auto = Convert.ToString(DictVal(root, "auto_detected") ?? "");
+                        var configured = Convert.ToString(J.Get(root, "configured") ?? "");
+                        var auto = Convert.ToString(J.Get(root, "auto_detected") ?? "");
                         bool valid = false;
-                        try { valid = Convert.ToBoolean(DictVal(root, "valid")); }
+                        try { valid = Convert.ToBoolean(J.Get(root, "valid")); }
                         catch { }
                         int codes = 0;
-                        try { codes = Convert.ToInt32(DictVal(root, "codes")); }
+                        try { codes = Convert.ToInt32(J.Get(root, "codes")); }
                         catch { }
-                        var sample = Convert.ToString(DictVal(root, "sample") ?? "");
+                        var sample = Convert.ToString(J.Get(root, "sample") ?? "");
                         if (_tbTdx.Text.Length == 0) _tbTdx.Text = configured.Length > 0 ? configured : auto;
                         if (valid) _lbTdx.Text = string.Format("可用：{0} 只，{1}", codes, sample);
                         else if (auto.Length > 0) _lbTdx.Text = "未配置（检测到 " + auto + "）";
@@ -1848,16 +1725,10 @@ namespace StockPool
         private void DetectTdx()
         {
             if (_lastTdxStatus == null) { RefreshTdx(); return; }
-            var auto = Convert.ToString(DictVal(_lastTdxStatus, "auto_detected") ?? "");
+            var auto = Convert.ToString(J.Get(_lastTdxStatus, "auto_detected") ?? "");
             if (string.IsNullOrEmpty(auto)) { Msg("本机没有检测到通达信目录，请手动浏览选择"); return; }
             _tbTdx.Text = auto;
             SaveTdxPath();
-        }
-
-        private static object DictVal(Dictionary<string, object> dict, string key)
-        {
-            object value;
-            return (dict != null && dict.TryGetValue(key, out value)) ? value : null;
         }
 
         #endregion
@@ -2410,7 +2281,7 @@ namespace StockPool
                 }
                 var ver = JsonValue(body, "api_version");
                 var detail = JsonValue(body, "backend_detail");
-                SetDot(_lbBackendDot, Color.FromArgb(46, 204, 113), "后端 :8000 · 正常");
+                SetDot(_lbBackendDot, C.OkGreen, "后端 :8000 · 正常");
                 if (_lbBackendState != null) _lbBackendState.Text = "状态：运行中" + (_backend.Owned ? "（本程序启动）" : "（其他进程启动）");
                 if (_lbApiVer != null) _lbApiVer.Text = "接口版本 v" + (ver ?? "-");
                 if (_lbBackendDetail != null) _lbBackendDetail.Text = "后端 " + (detail ?? "-");
@@ -2430,7 +2301,7 @@ namespace StockPool
 
             if (aOk)
             {
-                SetDot(_lbAiDot, Color.FromArgb(46, 204, 113), "AI 服务 :3080 · 正常");
+                SetDot(_lbAiDot, C.OkGreen, "AI 服务 :3080 · 正常");
                 if (_lbAiState != null) _lbAiState.Text = "状态：运行中";
             }
             else if (_dsh != null && (_dsh.Alive || _dsh.Starting))
@@ -2463,48 +2334,6 @@ namespace StockPool
             lb.Text = "● " + text;
         }
 
-        private static bool Probe(string url)
-        {
-            return Probe(url, 1500);
-        }
-
-        private static bool Probe(string url, int timeoutMs)
-        {
-            string body;
-            return Probe(url, timeoutMs, out body);
-        }
-
-        private static bool Probe(string url, int timeoutMs, out string body)
-        {
-            body = "";
-            HttpWebResponse resp = null;
-            try
-            {
-                var req = (HttpWebRequest)WebRequest.Create(url);
-                req.Method = "GET";
-                req.Timeout = timeoutMs;
-                req.ReadWriteTimeout = timeoutMs;
-                req.KeepAlive = false;
-                resp = (HttpWebResponse)req.GetResponse();
-                using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
-                {
-                    body = sr.ReadToEnd();
-                }
-                return (int)resp.StatusCode < 400;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                if (resp != null)
-                {
-                    try { resp.Close(); } catch { }
-                }
-            }
-        }
-
         private static string JsonValue(string json, string key)
         {
             if (string.IsNullOrEmpty(json)) return null;
@@ -2518,84 +2347,6 @@ namespace StockPool
                 return Convert.ToString(v);
             }
             catch { return null; }
-        }
-
-        private static bool PostJson(string url, string json, int timeoutMs, out string body)
-        {
-            body = "";
-            HttpWebResponse resp = null;
-            try
-            {
-                var req = (HttpWebRequest)WebRequest.Create(url);
-                req.Method = "POST";
-                req.ContentType = "application/json; charset=utf-8";
-                req.Timeout = timeoutMs;
-                req.ReadWriteTimeout = timeoutMs;
-                req.KeepAlive = false;
-                var bytes = Encoding.UTF8.GetBytes(json);
-                req.ContentLength = bytes.Length;
-                using (var s = req.GetRequestStream())
-                    s.Write(bytes, 0, bytes.Length);
-                resp = (HttpWebResponse)req.GetResponse();
-                using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
-                    body = sr.ReadToEnd();
-                return (int)resp.StatusCode < 400;
-            }
-            catch (WebException ex)
-            {
-                try
-                {
-                    if (ex.Response != null)
-                        using (var sr = new StreamReader(ex.Response.GetResponseStream(), Encoding.UTF8))
-                            body = sr.ReadToEnd();
-                }
-                catch { }
-                return false;
-            }
-            catch { return false; }
-            finally
-            {
-                if (resp != null)
-                {
-                    try { resp.Close(); } catch { }
-                }
-            }
-        }
-
-        private static bool GetText(string url, int timeoutMs, out string body)
-        {
-            body = "";
-            HttpWebResponse resp = null;
-            try
-            {
-                var req = (HttpWebRequest)WebRequest.Create(url);
-                req.Method = "GET";
-                req.Timeout = timeoutMs;
-                req.KeepAlive = false;
-                resp = (HttpWebResponse)req.GetResponse();
-                using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
-                    body = sr.ReadToEnd();
-                return (int)resp.StatusCode < 400;
-            }
-            catch (WebException ex)
-            {
-                try
-                {
-                    if (ex.Response != null)
-                        using (var sr = new StreamReader(ex.Response.GetResponseStream(), Encoding.UTF8))
-                            body = sr.ReadToEnd();
-                }
-                catch { }
-                return false;
-            }
-            catch { return false; }
-            finally
-            {
-                if (resp != null)
-                {
-                    try { resp.Close(); } catch { }
-                }
-            }
         }
 
         #endregion
@@ -2648,8 +2399,8 @@ namespace StockPool
 
         private void OpenWeb()
         {
-            var f = Path.Combine(_root, "frontend", "index.html");
-            if (!File.Exists(f)) { Msg("未找到 frontend\\index.html"); return; }
+            var f = Path.Combine(_root, "frontend", "home", "index.html");
+            if (!File.Exists(f)) { Msg("未找到 frontend\\home\\index.html"); return; }
             WebWindow.Show("股票池追踪系统", UrlWithTheme(new Uri(f).AbsoluteUri));
         }
 

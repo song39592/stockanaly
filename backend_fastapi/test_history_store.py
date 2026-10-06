@@ -4,7 +4,7 @@ from pathlib import Path
 
 import db
 import history_store
-from test_support import isolate_crypto
+from test_support import isolate_crypto, require_data_isolation
 
 
 class HistoryStoreTest(unittest.TestCase):
@@ -13,6 +13,7 @@ class HistoryStoreTest(unittest.TestCase):
         isolate_crypto(self, Path(self.tmp.name))
         db.DATA_DIR = Path(self.tmp.name)
         db.DB_PATH = Path(self.tmp.name) / "history.db"
+        require_data_isolation(history_store, Path(self.tmp.name))
         history_store.init_db()
 
     def tearDown(self):
