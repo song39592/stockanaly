@@ -328,9 +328,8 @@ bool ok = J.IsOk(j);
                 _vStatusResult.Text = "待补充参数";
                 _vStatusResult.ForeColor = C.WarnDeep;
                 var sb = new StringBuilder();
-                string emsg = J.Str(J.Get(j, "error"));
-                if (emsg == "") emsg = J.Str(J.Get(j, "detail"));
-                if (emsg == "" && !string.IsNullOrEmpty(raw))
+                string emsg = J.ErrMsg(j);
+                if (string.IsNullOrEmpty(emsg) && !string.IsNullOrEmpty(raw))
                     emsg = raw.Length > 300 ? raw.Substring(0, 300) : raw;
                 if (emsg == "") emsg = "计算失败";
                 sb.AppendLine(emsg);

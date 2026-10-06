@@ -851,9 +851,8 @@ namespace StockPool
 bool ok = J.IsOk(j);
             if (!ok)
             {
-                string emsg = J.Str(J.Get(j, "error"));
-                if (emsg == "") emsg = J.Str(J.Get(j, "detail"));
-                if (emsg == "") emsg = "分析失败";
+                string emsg = J.ErrMsg(j);
+                if (string.IsNullOrEmpty(emsg)) emsg = "分析失败";
                 SetErr(_mktAiStatus, emsg);
                 _mktAiMarkdown = "";
                 FillAiDoc(_mktAiBox, "");

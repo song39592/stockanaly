@@ -196,7 +196,7 @@ namespace StockPool
                         }
                         else
                         {
-                            onFail(J.Str(J.Get(j, "error")));
+                            onFail(J.ErrMsg(j));
                         }
                     });
                 }

@@ -15,8 +15,9 @@ main.py 只需 import 本模块并 include_router。
 """
 import json
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 
+import apiutil
 from features.chip import formulas as chip_formulas
 from core.periods import normalize
 
@@ -67,29 +68,31 @@ def chip_dist(code: str = Query(..., min_length=6, max_length=6,
     数据不足 / 缺流通股本时返回 200 + ok=false（便于前端在窗口内直接显示原因）。
     """
     if adjust not in ("qfq", "hfq", "raw"):
-        raise HTTPException(status_code=400, detail=f"不支持的复权口径：{adjust}")
+        return apiutil.fail(f"不支持的复权口径：{adjust}")
     try:
         period = normalize(period)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        return apiutil.fail(str(exc))
     parsed = None
     if params:
         try:
             parsed = json.loads(params)
         except ValueError:
-            raise HTTPException(status_code=400, detail="params 不是合法的 JSON 对象")
+            return apiutil.fail("params 不是合法的 JSON 对象")
         if not isinstance(parsed, dict):
-            raise HTTPException(status_code=400, detail="params 必须是 JSON 对象")
+            return apiutil.fail("params 必须是 JSON 对象")
     try:
         return _finite(chip_formulas.compute(
             code, formula_id=formula, params=parsed, start=start, end=end,
             adjust=adjust, days=days or None, bins=bins, period=period))
     except KeyError as exc:                     # 公式 id 不存在
-        raise HTTPException(status_code=400, detail=str(exc).strip("'"))
+        return apiutil.fail(str(exc).strip("'"))
     except RuntimeError as exc:                 # 行情不足 / 缺流通股本：业务性失败
-        return {"ok": False, "code": code, "error": str(exc)}
+        # ⚠️ 外层 `code` 是**股票代码**（前端按它回填输入框），不是错误码 ——
+        # 错误码在 `error.code` 里，两者不冲突，别把外层 code 覆盖掉。
+        return {"code": code, **apiutil.soft_fail(str(exc), "NO_DATA")}
     except Exception as exc:                    # noqa: BLE001 - 其余按服务端错误暴露
-        raise HTTPException(status_code=500, detail=f"筹码分布计算失败：{exc}")
+        return apiutil.fail(f"筹码分布计算失败：{exc}", "SERVER_ERROR", 500)
 
 
 @router.get("/float/{code}")
@@ -97,5 +100,5 @@ def chip_float_shares(code: str, force: bool = False):
     """查询 / 强制刷新某只股票的流通股本（单位股）。"""
     result = chip_formulas.float_shares_info(code, force=force)
     if not result.get("ok"):
-        raise HTTPException(status_code=404, detail=result.get("error"))
+        return apiutil.fail(result.get("error") or "查不到流通股本", "NO_DATA", 404)
     return result

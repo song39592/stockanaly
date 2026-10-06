@@ -37,7 +37,7 @@
 | 08 ◐ | [08-前端-小样板合集.md](08-前端-小样板合集.md) | 前端 | IsOk / ErrOf / SetErr / ToggleVisible / Debounce / FlatBtn | ★★ / ★☆☆ —— **部分完成 3/6** |
 | 09 ✅ | [09-后端-json_safe公共化.md](09-后端-json_safe公共化.md) | 后端 | 唯一写对的 NaN 清洗只服务 1 个模块 | ★★★★★ / ★☆☆ —— **已完成** |
 | 10 ✅ | [10-后端-scr90_series合并.md](10-后端-scr90_series合并.md) | 后端 | 2 份逐字符雷同的 SCR90 序列 + 1 个判空缺陷 | ★★★★ / ★☆（须在 00 之后）—— **已完成** | |
-| 11 | [11-后端-错误体形状统一.md](11-后端-错误体形状统一.md) | 后端 | 4 种路由错误风格 → 统一 error 形状（不动状态码） | ★★★★ / ★★ |
+| 11 ✅ | [11-后端-错误体形状统一.md](11-后端-错误体形状统一.md) | 后端 | 4 种路由错误风格 → 统一 error 形状（不动状态码） | ★★★★ / ★★ —— **已完成** |
 | 12 | [12-后端-阈值常量与chip_service对齐.md](12-后端-阈值常量与chip_service对齐.md) | 后端 | 三档阈值靠注释同步 → 改成代码引用 | ★★★ / ★ |
 | 13 | [13-后端-ParamSpec三份合并.md](13-后端-ParamSpec三份合并.md) | 后端 | 三处 `ParamSpec` 字段逐字符相同 | ★★★ / ★☆ |
 | 14 | [14-后端-ensure_dirs复用.md](14-后端-ensure_dirs复用.md) | 后端 | 已 import 却自写一行 makedirs | ★★ / ☆ |
@@ -106,6 +106,21 @@
 先修完再搬，动的文件少、回归面小。
 
 ## 已完成的项
+- **11** 路由错误体形状统一：新增 `apiutil.py`（`ok/fail/soft_fail/guard/http_error/install`），
+  形状统一为 `{"ok":false,"detail":…,"error":{"code","message"}}`。
+  ⭐ 主力杠杆是**全局异常处理器**—— 全仓 90 余处 `raise HTTPException(detail=…)`
+  **一行未改**即生效（原文档只列了 4~5 个路由文件，实际遍布 5 个 features 包）。
+  ⭐ `detail` 必须保留：前端 8 处直接读它，它是**向后兼容锚点**，不是冗余字段。
+  ⭐ 必须注册 `starlette.exceptions.HTTPException`（**不是** fastapi 那个）——
+  404/405 抛的是 starlette 版，只注册 fastapi 的会漏出去又是裸 `{"detail":"Not Found"}`。
+  ⭐ 真实踩坑：`raise apiutil.fail(...)` 是错的，`fail()` 返回 JSONResponse 不是 Exception，
+  raise 它会回 `500 Internal Server Error`（比改前更糟）；正确是 `return apiutil.fail(...)`。
+  ⭐ 前端必须同步适配：`J.Str()` 拿到 Dictionary 会输出**类型名垃圾串**，所以新增
+  `J.ErrMsg()` 先判类型再取值，兼容三种形状；`ChipRankPage` 那处改前读字符串改后读对象，
+  不改就会显示垃圾。`guard` 的 `code` 支持 str/dict/None，dict 用于保住 `UNKNOWN_STRATEGY`
+  这类更具体的码（用默认会降级成通用 `UNKNOWN_KEY`）。
+  验证：8 类失败全部带 `ok:false` + `error{code,message}`；成功路径 5 条响应体零变化；
+  `csc` exit 0；52 个单元测试全绿。
 - **10** SCR90 序列计算收成单一内核 `features/chip/formulas/core/scr.py`：
   周榜 / 策略 / 副图 / 单帧统计**四处共用**（原先 2 份逐字符雷同 + 2 份各自实现），
   函数体净删约 45 行。`scr_series` 用 NaN 语义（序列）、`scr_frame` 用 None 语义（JSON）——

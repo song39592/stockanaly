@@ -22,6 +22,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import config
+import apiutil
 import crypto
 import db
 import instance_lock
@@ -54,6 +55,11 @@ def _git_commit():
 _GIT_COMMIT = _git_commit()
 
 app = FastAPI(title="个股时效性调研")
+
+# 第 11 项：把 FastAPI 默认的 {"detail": …} 规范化成统一错误体
+# （{"ok": false, "detail": …, "error": {"code","message"}}）。
+# 挂这一处，全仓 90 余处 raise HTTPException 无需改动即生效。
+apiutil.install(app)
 
 # 允许跨域：前端通过 file:// 打开（Origin 为 null），需放开 CORS
 app.add_middleware(

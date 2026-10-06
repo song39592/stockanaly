@@ -225,7 +225,10 @@ namespace StockPool
                     bool ok = j.ContainsKey("ok") && j["ok"] is bool && (bool)j["ok"];
                     if (!ok)
                     {
-                        ScrSetStatus(J.StrAt(j, "error"), true);
+                        // 第 11 项：周榜恒 200，error 现已是 {"code","message"} 对象
+                        // （改前是字符串），必须走 ErrMsg 取值，否则会显示类型名垃圾串。
+                        string emsg = J.ErrMsg(j);
+                        ScrSetStatus(string.IsNullOrEmpty(emsg) ? "本周尚未计算" : emsg, true);
                         return;
                     }
                     _scrPayload = j;

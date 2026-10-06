@@ -149,6 +149,51 @@ namespace StockPool
             return j != null && j.TryGetValue("ok", out v) && v is bool && !(bool)v;
         }
 
+        // ---------------- 错误文案（第 11 项）----------------
+
+        /// <summary>取错误提示文案，**兼容后端三种形状**（第 11 项统一后端错误体）。
+        ///
+        /// 后端统一为 {"ok":false,"detail":…,"error":{"code","message"}}，
+        /// 但历史上有三种形状共存，取值优先级：
+        /// <list type="number">
+        /// <item>error 是<b>对象</b> → 取 message（新的统一形状）</item>
+        /// <item>error 是<b>字符串</b> → 直接用（周榜等仍在用的旧形状）</item>
+        /// <item>都没有 → 取 detail（FastAPI 默认形状 / apiutil 的兼容锚点）</item>
+        /// </list>
+        /// ⚠️ 必须先判类型再取值：<c>Str()</c> 拿到 Dictionary 会
+        /// <c>Convert.ToString</c> 成类型名垃圾串（"System.Collections…"）。
+        /// </summary>
+        public static string ErrMsg(Dictionary<string, object> j)
+        {
+            if (j == null) return "";
+            object err;
+            if (j.TryGetValue("error", out err) && err != null)
+            {
+                var ed = err as Dictionary<string, object>;
+                if (ed != null)
+                {
+                    object msg;
+                    if (ed.TryGetValue("message", out msg) && msg != null)
+                    {
+                        string s = Convert.ToString(msg);
+                        if (!string.IsNullOrEmpty(s)) return s;
+                    }
+                    return "";
+                }
+                string direct = Convert.ToString(err);
+                if (!string.IsNullOrEmpty(direct)) return direct;
+            }
+            object detail;
+            if (j.TryGetValue("detail", out detail) && detail != null)
+            {
+                string s = Convert.ToString(detail);
+                // detail 可能是数组（FastAPI 422 校验错误），数组没有可读文案
+                if (!string.IsNullOrEmpty(s) && s != "[System.Collections.ArrayList]")
+                    return s;
+            }
+            return "";
+        }
+
         // ---------------- 百分比（三个口径，别混用）----------------
 
         /// <summary>带符号百分数：v 是小数（0.1 转 +10.00%）。</summary>

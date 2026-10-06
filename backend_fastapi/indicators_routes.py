@@ -19,20 +19,21 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import indicators
+import apiutil
 from periods import normalize
 
 router = APIRouter(prefix="/api/indicators", tags=["技术指标"])
 
-# 指标计算可能抛出的异常 → (错误码, HTTP 状态码)
+# 第 11 项：`_CODE_ERR` / `_err` 已并入 apiutil（与 strategies_routes 共用一份）。
+# 这里只保留本域用到的更具体的码：未知指标 id 报 UNKNOWN_INDICATOR 而不是通用
+# UNKNOWN_KEY —— 前端只读 message，但日志与排障时这个码更可读。
+_UNKNOWN = (apiutil.CODE_UNKNOWN_INDICATOR, 400)
 _CODE_ERR = {
-    KeyError: ("UNKNOWN_INDICATOR", 400),
+    KeyError: _UNKNOWN,
     ValueError: ("BAD_PARAM", 400),
     RuntimeError: ("NO_DATA", 404),
 }
-
-
-def _err(code: str, message: str, status: int) -> JSONResponse:
-    return JSONResponse(status_code=status, content={"error": {"code": code, "message": message}})
+_err = apiutil.fail                      # (message, code, status)
 
 
 def _compute_or_error(code: str, id: str, params, period: str = "day") -> dict | JSONResponse:
@@ -40,7 +41,7 @@ def _compute_or_error(code: str, id: str, params, period: str = "day") -> dict |
         return indicators.compute(code, id, params or {}, period=period)
     except (KeyError, ValueError, RuntimeError) as exc:
         err_code, status = _CODE_ERR[type(exc)]
-        return _err(err_code, str(exc), status)
+        return _err(str(exc), err_code, status)
 
 
 def _safe_compute(code: str, id: str, params, period: str = "day") -> dict:
@@ -72,12 +73,12 @@ def compute_indicator(code: str, id: str, params: Optional[str] = None,
     try:
         p = json.loads(params) if params else {}
         if not isinstance(p, dict):
-            return _err("BAD_PARAM", "params 必须是 JSON 对象", 400)
+            return _err("params 必须是 JSON 对象", "BAD_PARAM", 400)
         normalize(period)
     except json.JSONDecodeError:
-        return _err("BAD_PARAM", "params 不是合法 JSON", 400)
+        return _err("params 不是合法 JSON", "BAD_PARAM", 400)
     except ValueError as exc:
-        return _err("BAD_PARAM", str(exc), 400)
+        return _err(str(exc), "BAD_PARAM", 400)
     return _compute_or_error(code, id, p, period=period)
 
 
@@ -98,6 +99,6 @@ def batch(req: BatchRequest):
     try:
         period = normalize(req.period)
     except ValueError as exc:
-        return _err("BAD_PARAM", str(exc), 400)
+        return _err(str(exc), "BAD_PARAM", 400)
     return {"items": [_safe_compute(req.code, it.id, it.params, period=period)
                       for it in req.items]}

@@ -47,6 +47,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+import apiutil
 from features.chip import formulas as chip_formulas
 from features.chip.formulas.core import scr
 from features.chip import scr_service as chip_service
@@ -356,14 +357,15 @@ def result(limit: int | None = None) -> dict:
     path = _result_path(week)
     limit = int(limit) if limit else DEFAULT_TOP
     if not os.path.exists(path):
-        return {"ok": False, "week": week.strftime("%Y-%m-%d"),
-                "error": "本周尚未计算，请先点「刷新本周」"}
+        return {"week": week.strftime("%Y-%m-%d"),
+                **apiutil.soft_fail("本周尚未计算，请先点「刷新本周」", "NOT_COMPUTED")}
     try:
         with open(path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
     except Exception as exc:                             # noqa: BLE001 - 坏文件按未算过处理
-        return {"ok": False, "week": week.strftime("%Y-%m-%d"),
-                "error": f"结果缓存损坏：{type(exc).__name__}: {exc}"}
+        return {"week": week.strftime("%Y-%m-%d"),
+                **apiutil.soft_fail(f"结果缓存损坏：{type(exc).__name__}: {exc}",
+                                    "CACHE_CORRUPT")}
 
     for i, it in enumerate(payload.get("current") or []):
         it["rank"] = i + 1
@@ -383,14 +385,15 @@ def fill_names() -> dict:
     week = _week_nodes(1)[0]
     path = _result_path(week)
     if not os.path.exists(path):
-        return {"ok": False, "week": week.strftime("%Y-%m-%d"),
-                "error": "本周尚未计算，请先点「刷新本周」"}
+        return {"week": week.strftime("%Y-%m-%d"),
+                **apiutil.soft_fail("本周尚未计算，请先点「刷新本周」", "NOT_COMPUTED")}
     try:
         with open(path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
     except Exception as exc:                             # noqa: BLE001
-        return {"ok": False, "week": week.strftime("%Y-%m-%d"),
-                "error": f"结果缓存损坏：{type(exc).__name__}: {exc}"}
+        return {"week": week.strftime("%Y-%m-%d"),
+                **apiutil.soft_fail(f"结果缓存损坏：{type(exc).__name__}: {exc}",
+                                    "CACHE_CORRUPT")}
 
     groups = [payload.get("current") or []]
     for tier in (payload.get("tiers") or {}).values():
@@ -411,7 +414,8 @@ def fill_names() -> dict:
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
     except Exception as exc:                             # noqa: BLE001
-        return {"ok": False, "week": week.strftime("%Y-%m-%d"),
-                "error": f"写回失败：{type(exc).__name__}: {exc}"}
+        return {"week": week.strftime("%Y-%m-%d"),
+                **apiutil.soft_fail(f"写回失败：{type(exc).__name__}: {exc}",
+                                    "WRITE_FAILED")}
     return {"ok": True, "week": week.strftime("%Y-%m-%d"),
             "total": len(codes), "names_resolved": resolved}

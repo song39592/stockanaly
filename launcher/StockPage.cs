@@ -891,7 +891,7 @@ namespace StockPool
 bool ok = J.IsOk(j);
             if (!ok)
             {
-                string emsg = J.Str(J.Get(j, "detail"));
+                string emsg = J.ErrMsg(j);
                 _stockBlocks.Text = string.IsNullOrEmpty(emsg) ? "板块标注不可用" : emsg;
                 _stockBlocks.ForeColor = muted;
                 return;
@@ -1162,7 +1162,7 @@ bool ok = J.IsOk(j);
 bool ok = J.IsOk(j);
                     if (!ok)
                     {
-                        string emsg = J.Str(J.Get(j, "error"));
+                        string emsg = J.ErrMsg(j);
                         if (string.IsNullOrEmpty(emsg)) emsg = "筹码数据不可用";
                         string cap = emsg;
                         Invoke((Action)delegate
@@ -1370,9 +1370,8 @@ bool ok = J.IsOk(j);
 bool ok = J.IsOk(j);
             if (!ok)
             {
-                string emsg = J.Str(J.Get(j, "detail"));
-                if (emsg == "") emsg = J.Str(J.Get(j, "error"));
-                if (emsg == "") emsg = "加载失败";
+                string emsg = J.ErrMsg(j);
+                if (string.IsNullOrEmpty(emsg)) emsg = "加载失败";
                 StockFail(emsg);
                 return;
             }
@@ -1841,9 +1840,8 @@ bool ok = J.IsOk(j);
 bool ok = J.IsOk(j);
             if (!ok)
             {
-                string emsg = J.Str(J.Get(j, "error"));
-                if (emsg == "") emsg = J.Str(J.Get(j, "detail"));
-                if (emsg == "") emsg = "计算失败";
+                string emsg = J.ErrMsg(j);
+                if (string.IsNullOrEmpty(emsg)) emsg = "计算失败";
                 SetErr(_stockValStatus, emsg);
                 return;
             }
@@ -2011,9 +2009,8 @@ bool ok = J.IsOk(j);
 bool ok = J.IsOk(j);
             if (!ok)
             {
-                string emsg = J.Str(J.Get(j, "error"));
-                if (emsg == "") emsg = J.Str(J.Get(j, "detail"));
-                if (emsg == "") emsg = "分析失败";
+                string emsg = J.ErrMsg(j);
+                if (string.IsNullOrEmpty(emsg)) emsg = "分析失败";
                 SetErr(_stockAiStatus, emsg);
                 _stockAiMarkdown = "";
                 FillAiDoc(_stockAiBox, _stockAiMarkdown);

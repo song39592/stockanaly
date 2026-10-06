@@ -8,16 +8,17 @@
                                     "start","end","initial_capital","commission","benchmark"}
     GET  /backtest/trades  逐笔明细：?rid=<result_id>&code=<代码>（回测后按需展开）
 
-错误统一返回 {"ok": False, "error": {"code", "message"}}（HTTP 400）。
+错误统一返回 {"ok": false, "detail": …, "error": {"code", "message"}}（HTTP 400，
+形状由 apiutil 统一；见第 11 项）。
 """
 from __future__ import annotations
 
 from typing import Optional
 
 from fastapi import APIRouter
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+import apiutil
 import strategies
 import strategies.core.backtest as backtest
 import strategies.core.data as sdata
@@ -65,30 +66,29 @@ class BacktestRequest(BaseModel):
 
 
 _CODE_ERR = {
-    KeyError: "UNKNOWN_STRATEGY",
+    KeyError: apiutil.CODE_UNKNOWN_STRATEGY,
     ValueError: "BAD_PARAM",
     RuntimeError: "NO_DATA",
 }
 
+_guard = apiutil.guard
+
 
 @router.post("/backtest")
+@_guard(code=_CODE_ERR)
 def do_backtest(req: BacktestRequest):
     codes = [str(c).strip() for c in (req.codes or []) if str(c).strip()]
     if req.use_all:
         codes = sdata.list_universe_codes()
-    try:
-        # window 交给编排层处理（取数会额外向前预热，只统计最近 N 日）
-        return backtest.run_backtest(
-            req.strategy_id, req.params, codes, req.start, req.end,
-            req.initial_capital, req.commission, req.benchmark, req.window,
-        )
-    except (KeyError, ValueError, RuntimeError) as exc:
-        code = _CODE_ERR[type(exc)]
-        return JSONResponse(status_code=400,
-                            content={"ok": False, "error": {"code": code, "message": str(exc)}})
+    # window 交给编排层处理（取数会额外向前预热，只统计最近 N 日）
+    return backtest.run_backtest(
+        req.strategy_id, req.params, codes, req.start, req.end,
+        req.initial_capital, req.commission, req.benchmark, req.window,
+    )
 
 
 @router.post("/recommend")
+@_guard(code=_CODE_ERR)
 def do_recommend(req: BacktestRequest):
     """当前策略推荐：按最新一日信号给出买入 / 卖出 / 持股三档建议。
 
@@ -97,26 +97,18 @@ def do_recommend(req: BacktestRequest):
     codes = [str(c).strip() for c in (req.codes or []) if str(c).strip()]
     if req.use_all:
         codes = sdata.list_universe_codes()
-    try:
-        return backtest.run_recommend(
-            req.strategy_id, req.params, codes, req.start, req.end,
-            req.initial_capital, req.commission,
-        )
-    except (KeyError, ValueError, RuntimeError) as exc:
-        code = _CODE_ERR[type(exc)]
-        return JSONResponse(status_code=400,
-                            content={"ok": False, "error": {"code": code, "message": str(exc)}})
+    return backtest.run_recommend(
+        req.strategy_id, req.params, codes, req.start, req.end,
+        req.initial_capital, req.commission,
+    )
 
 
 @router.get("/backtest/trades")
+@_guard(code=apiutil.CODE_EXPIRED)
 def do_backtest_trades(rid: str, code: str):
     """单只股票的逐笔交易明细（前端展开个股行时按需调用）。
 
     价格为原始收盘（未复权）、收益为后复权口径；rid 对应最近一次回测，
     过期返回 400（前端提示重跑）。
     """
-    try:
-        return {"ok": True, "code": code, "trades": backtest.trades_for(rid, code)}
-    except ValueError as exc:
-        return JSONResponse(status_code=400,
-                            content={"ok": False, "error": {"code": "EXPIRED", "message": str(exc)}})
+    return {"ok": True, "code": code, "trades": backtest.trades_for(rid, code)}
