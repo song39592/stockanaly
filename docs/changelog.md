@@ -6,6 +6,46 @@
 
 ### 变更
 
+- **大佬策略实验室归位 `features/mentor/`**（待办 33，后端按功能搬家倒数第 2 项）：
+  ```
+  features/mentor/
+  ├─ __init__.py
+  ├─ routes.py       <- 原 mentor_routes.py  15 条路由，前缀 /api/mentor
+  ├─ store.py        <- 原 mentor_store.py   人物/素材/技能/评估（321 行）
+  ├─ collectors.py   <- 原 collectors.py     东财摘要等采集
+  └─ llm_client.py   <- 原 llm_client.py     LLM 调用封装
+  ```
+  - ⭐ **原文档漏列了 `store.py`**（`mentor_store`，321 行）。它显然属于本功能 ——
+    `main.py:30` 模块级 import、`:175` 调 `init_db()`（失败以「大佬策略实验室（本地库初始化）」
+    为 label 记入 `_module_errors`），`mentor_routes.py:14` 与 `test_mentor_store.py:8` 也 import 它。
+    按 4 模块搬，否则顶层会留一个孤立文件。
+  - **函数体零改动** —— difflib 逐行对比 HEAD：7 个文件 20 行差异**全是 import**。
+  - ⭐ **`collectors` 与 `llm_client` 是跨功能共享的**（个股页 / 股票池历史 / 盘面页都在用），
+    **3 个已搬文件**（`features/history/service.py`、`features/market/routes.py`、
+    `features/stock/routes.py`）共 4 处引用**一并改到规范位置**。理由：这些文件已经在
+    `features/` 里，再指向顶层转发等于**在新架构内部留反向依赖**；趁本项清掉只有 3 行。
+  - ⭐ **原文档踩坑点 1 写错了位置**：`_ai_cache` / `_ai_cache_lock` / `AI_CACHE_TTL = 600`
+    在 **`features/market/routes.py:37-39`**（**盘面页**），**不在** `mentor_routes`；
+    全仓在 `mentor_routes` 里搜不到这两个名字。实验室页**根本没有 AI 缓存**。
+    两套 TTL 实现（market 的进程内 600s vs `board_service._TTL_HOURS` 的 DB 持久化）
+    在**第 28 项**就已按「不统一」原则原样保留，本项无需处理。
+    故原验收「`force` 绕过 AI 缓存」改为**对第 28 项做回归**。
+  - 踩坑点 2（超时语义）：`call_llm(prompt, timeout=180)` **显式传 timeout** 给
+    `core.httpclient.post`（后者 timeout 是必填参数，正是为了防止误用行情口径）。
+    本项只改 `import config` 的指向，**一个字没动 timeout**。
+  - 踩坑点 3（不打印密钥）：`config.LLM_API_KEY` 只进 Authorization 头。
+    验证方式：把真实密钥取出来在启动日志里全文检索 —— **0 处命中**。
+  - 踩坑点 4：`agent_dsh/` **在本仓库不存在**（原文档提到它含 node_modules 32843 文件），
+    本项无对象、未移动任何目录。
+  - 验收实测：**真实调了一次 LLM**，`call_llm('只回复两个字：收到')` **2.5 秒**返回 `'收到'`；
+    `/api/mentor/list` `ok=true`（1 个人物）、`/api/mentor/state` `ok=true`；
+    **第 28 项回归三连**：`force=false` 首调 `cached=false` 52.9s → 再调 `cached=true` **0.0s**
+    → `force=true` `cached=false` 54.8s，把缓存语义钉死。
+    基线逐项对照**零差异**（15 条路由 / `mentor_store` 44 个公开名 / `collectors` 26 个 /
+    `llm_client` 5 个 / `call_llm` 签名 / LLM 配置状态）。
+    4 个转发与实现是同一对象；13 个模块全部导入成功；11/11 路由挂载、stderr 无告警；
+    全仓 .py 三引号成对 + `ast.parse` 全部通过；52 个单元测试全绿；`.env` 未被改动。
+
 - **系统设置 / 完整性 / 修复归位 `features/system/`**（待办 32，后端按功能搬家第 5 项）：
   ```
   features/system/

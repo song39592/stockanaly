@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 import config
 from features.market import service as market_service
 from core.jsonutil import json_safe_deep      # 第 09 项：出口清洗
-from llm_client import call_llm, llm_error_detail
+from features.mentor.llm_client import call_llm, llm_error_detail
 
 router = APIRouter(prefix="/api/market", tags=["盘面及板块分析"])
 

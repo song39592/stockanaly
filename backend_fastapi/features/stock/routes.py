@@ -18,11 +18,11 @@ import config
 from features.stock import valuation as valuation_service
 from core import httpclient
 from core.jsonutil import json_safe_deep
-from collectors import (
+from features.mentor.collectors import (
     get_basic_info_evidence, get_announcements, fetch_notice_content, get_news,
     evidence_search_url, event_signal, _clip, SLEEP_NOTICE,
 )
-from llm_client import call_llm, llm_error_detail
+from features.mentor.llm_client import call_llm, llm_error_detail
 
 router = APIRouter(prefix="/api/stock", tags=["个股调研与股票估值"])
 

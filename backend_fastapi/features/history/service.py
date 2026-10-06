@@ -18,7 +18,7 @@ from features.history import store as history_store
 from core import kline_service
 from core import price_service
 from core import price_store
-from collectors import get_announcements, get_news
+from features.mentor.collectors import get_announcements, get_news
 
 EVENT_TTL_HOURS = 12
 _jobs_lock = threading.Lock()

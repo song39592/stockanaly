@@ -69,7 +69,7 @@
 | 30 ✅ | [30-后端-features-history.md](30-后端-features-history.md) | 股票池历史搬到 `features/history/` | ★★★ / ★★☆（依赖 27）—— **已完成** |
 | 31 ✅ | [31-后端-features-download.md](31-后端-features-download.md) | 下载与调度搬到 `features/download/` | ★★★ / ★★★（依赖 27）—— **已完成** |
 | 32 ✅ | [32-后端-features-system.md](32-后端-features-system.md) | 系统设置/完整性/修复搬到 `features/system/` | ★★ / ★★☆（依赖 27）—— **已完成** |
-| 33 | [33-后端-features-mentor.md](33-后端-features-mentor.md) | 大佬策略实验室搬到 `features/mentor/` | ★★ / ★★☆（依赖 27） |
+| 33 ✅ | [33-后端-features-mentor.md](33-后端-features-mentor.md) | 大佬策略实验室搬到 `features/mentor/` | ★★ / ★★☆（依赖 27）—— **已完成** |
 | 34 | [34-后端-features-chip.md](34-后端-features-chip.md) | 筹码体系（**被依赖最多，最后搬**） | ★★★★ / ★★★★（依赖 27~33） |
 | 35 | [35-后端-目录改名与路径同步.md](35-后端-目录改名与路径同步.md) | 可选：`backend_fastapi` 改名 → 同步启动器/脚本/文案 | ★★ / ★★★★（**依赖全部**） |
 
@@ -106,6 +106,14 @@
 先修完再搬，动的文件少、回归面小。
 
 ## 已完成的项
+- **33** 大佬策略实验室归位 `features/mentor/`（**4 个**模块）：**函数体零改动**（20 行 import 差异）。
+  ⭐ **文档漏列了 `store.py`**（`mentor_store`，321 行，被 `main.py:30/:175`、`mentor_routes`、
+  `test_mentor_store` 依赖）—— 按 4 模块搬，否则顶层会留一个孤立文件。
+  ⭐ **`collectors` 与 `llm_client` 是跨功能共享的**（个股页/股票池历史/盘面页都用），
+  3 个**已搬**文件共 4 处引用一并改到规范位置 —— 清掉了「新架构内部反向依赖顶层转发」。
+  ⭐ **原文档踩坑点 1 写错了位置**：`_ai_cache`/`AI_CACHE_TTL=600` 在 `features/market/routes.py`
+  （盘面页），**不在** `mentor_routes`；实验室页根本没有 AI 缓存。
+  验收里「`force` 绕过缓存」改为**对第 28 项做回归**（0.0s 命中 / 54.8s 绕过，语义钉死）。
 - **32** 系统设置/完整性/修复归位 `features/system/`（`routes` / `integrity` / `repair`）：
   **函数体零改动**（difflib 逐行核对：18 行差异全是 import）。
   ⭐ `repair_digests.py` 是**独立 CLI**（全仓无人 import），别名转发**额外带 `__main__` 守卫**，
