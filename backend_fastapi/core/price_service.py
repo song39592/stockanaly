@@ -38,7 +38,7 @@ def market_symbol(code: str) -> str:
     ⚠️ **第 16 项：这里与 `share_service.market_symbol` /
     `features.stock.valuation._market_prefix` 是三份不同的规则集，刻意不统一。**
 
-    评估结论（`docs/todo/16-后端-market_symbol三份口径.md`）：真实股票池
+    评估结论（`docs/changelog.md（第 16 项条目）`）：真实股票池
     5585 只的 2 位前缀只有 `00/30/60/68/92` 五种，三份在这五种上**完全一致**；
     出现分歧的段（沪市可转债 `11`、B 股 `900`/`200`、北交所白名单外的新号段）
     **都不在股票池里**——它们不是股票，本模块也不为它们准备数据源。

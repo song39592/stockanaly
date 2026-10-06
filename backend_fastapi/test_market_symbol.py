@@ -130,7 +130,7 @@ class MarketSymbolTest(unittest.TestCase):
         self.assertFalse(
             bad,
             "股票池中有 %d 只代码三份判定不一致，前几只：%s —— "
-            "说明口径需要重新评估（见 docs/todo/16-后端-market_symbol三份口径.md）"
+            "说明口径需要重新评估（见 docs/changelog.md（第 16 项条目））"
             % (len(bad), bad[:10]))
 
 

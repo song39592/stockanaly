@@ -6,7 +6,128 @@
 
 ### 变更
 
-- **SCR90 序列计算收成单一内核**（待办 10，阶段 D 第 24 步）：
+- **评估：`backend_fastapi` 目录改名决定不做**（第 35 项，实测评估）：
+  实测引用面 —— 代码/脚本 **44 处 / 19 文件**、文档 **113 处 / 29 文件**、
+  venv **9668 文件 / 230MB**（`pyvenv.cfg` 硬编码绝对路径）。四条不做理由：
+  ① 验收要求「删 `.venv` 从零重装」，一旦某个包装不上用户系统直接不可用；
+  ② 待办自己建议的「venv 不动」折中方案**本身有害** —— 源码与 venv 分属两个
+  目录比现在更糟，等于必须整体迁移 9668 文件，**没有低成本版本**；
+  ③ 启动器 16 处 `Path.Combine` 拼路径，桌面 exe 是已编译产物，用户正运行时
+  覆盖会失败；④ 改名不解决真问题 —— 将来真换框架时 157 处照样要改，
+  **改名只是把成本提前支付**；真正的结构收益在 27~34 项按功能分层，已拿到。
+  **已交付其中低成本高价值部分**：`config.py` 三处用户可见提示文案硬编码
+  `backend_fastapi/.env`（漏改的后果是提示用户去不存在的路径填密钥，
+  用户照做后 LLM 依然不通且极难归因），改为 `_ENV_HINT = f"{PROG_DIR.name}/.env"`
+  动态派生 —— 现在改名只需移动目录，文案自动跟随。将来重做的 5 个前置条件
+  已记入当时工单（见 git 历史）。
+
+- **重构：异步加载骨架 `AsyncKit.RunUi`**（第 18 项，前端）：
+  `Task.Run(请求)+Invoke(渲染)` 这套骨架前端有 20+ 处。新增 `RunUi<T>(work,
+  onOk, onFail, stillValid)` —— **只负责线程，竞态守卫作为回调留在调用侧**。
+  ⭐ 守卫刻意不内置：本项目有三类互不相同的守卫（round 比对 / 代码比对 /
+  busy 标志），硬凑成一种必然出**交叉刷新**（旧请求后返回把新股票的数据盖掉）。
+  `stillValid` 固定在 **UI 线程**（`Invoke` 内部）求值 —— 守卫要读
+  `_stockCode.Text`，WinForms 控件只能在 UI 线程访问。迁移三类守卫各一个
+  代表点（`StockLoadHistory` round / `ScrLoadResult` busy /
+  `FetchStockName` 无守卫），其余 17 处保持原样 —— `StockLoadChip` 那类
+  三态分支要引入三态结果类型，属系统性重写时一起做。
+  验证：`csc` exit 0；用 `AsyncKit.cs` 逐字副本（仅把 `Invoke` 换成直接执行）
+  编译成控制台程序跑 5 场景 —— 其中「3 轮并发故意让第 1 个最后返回 →
+  只有 stock3 生效」是交叉刷新的直接反证；「守卫 false 时 onOk 与 onFail
+  都被丢弃」验证了失败路径同样受约束。GUI 连点未自动化，已在当时工单标注。
+  踩坑：`delegate(Exception){...}` 省略参数名在新版 csc 报 CS1001。
+
+- **重构：后复权与周/月分桶各收敛为一份实现**（第 17 项，`kline_service` 出口收口）：
+  待办指控 `kline_service` 自称「全项目唯一取数出口」但有 4 处绕过。
+  ① 宣传语改准确（「行情消费方唯一」）并登记两处**刻意**绕过
+  （`history.load_trusted_bars` 要捕获 `UntrustedDataError` 做全量重抓；
+  `stock.profile` 涨停统计日线专用）；② **后复权收敛**：`indicators/data.py::
+  _apply_hfq` 原先**自己复刻了一遍** `load_bars` 的 hfq 算法、两条链无交叉
+  验证，`price_store` 一改 RPS 就静默算错 —— 抽出 `hfq_steps(factors, dates)`
+  产出 (起始下标, 因子) 变化点供两侧共用（能共用是因为条数=事件数每票中位数
+  10 条而非天数，5585 列面板仅 0.61s）；③ 分桶共用：新增
+  `periods.bucket_last_indices`，但**保留**「只取每桶最后一行」的优化
+  （面板聚合 OHLCV 会慢一到两个数量级）。
+  验证：面板 vs `load_bars(hfq)` **10 票 × 250 日 = 2500 值零不符**；
+  RPS 面板用 `git stash` 回改动前采基线，日/周/月三期 × 1453 行 × 5585 列
+  **逐值一致**；57 测试全绿。
+  ⭐ 踩坑：`load_bars` 对价格 `round(...,4)`（JSON 展示口径）而面板保持全精度，
+  对拍时 601398 报 157 处「不符」，逐个查是 `18.361877` vs `18.3619` 的
+  **舍入差异而非算法分歧** —— 做逐值对拍前必须先确认两条链路的输出契约。
+
+- **评估：`market_symbol` 三份口径判定不统一，保持并存**（第 16 项）：
+  待办建议「收敛为一份」，评估后**不照做**：真实股票池 5585 只的 2 位前缀
+  只有 `00/30/60/68/92` 五种，三份实现**全量零分歧**；出现分歧的段（可转债、
+  B 股）实测 0.1s 内以 `ok=false` 提前结束，**根本走不到判市场那一步**。
+  且待办**低估分歧范围**（原文只说北交所，实测 70 个 2 位段两两不一致），
+  **没有一份在所有类别上都对**，「以谁为准」没有唯一答案 —— 这正是不能
+  取并集的理由。唯一真实风险：`valuation` 兜底 `sh`，北交所开新号段时会
+  判错，已写进它自己的 docstring。行为由 `test_market_symbol.py` 锁定。
+
+- **修复：周榜每次重算都在最后一步 `NameError`、结果永不落盘**（`bug-06`）：
+  用户报「SCR90 一直提示刷新本周」。根因是 payload 构造里一行引用了
+  **本模块里从来就不存在的变量**：`"names_resolved": sum(1 for r in rows if
+  r["name"])` —— `e706176` 删掉旧结构时漏改了引用它的这一行，于是**每次
+  周榜重算都在最后一步抛 NameError、结果文件永不写盘**。症状极具误导性：
+  status 里 `done=100%` 但 `computed=0`/`error=None`，因为异常发生在状态更新
+  之前的 payload 构造里，except 把它记成 error 后 `status()` 又因文件不存在
+  改写成 idle，**把真正的错误信息盖掉了** —— 从接口上完全看不出出了错。
+  只要结果文件在（跨周重算前）就一直能读，一旦需要重算就永远失败 ——
+  这才是「一直提示刷新本周」的长期成因。修法：按注释原意统计 `names`
+  里非空的条数。同批提交第 13 项（ParamSpec 三份合一，见下）。
+
+- **重构：`ParamSpec` 三份合一**（第 13 项）：三处**逐字段相同**的 dataclass
+  收敛到 `core/paramspec.py`。放 `core/` 而非待办建议的 `common/spec.py`，
+  因为它必须**零依赖**（只 import 标准库），否则三边 import 它会构成循环依赖。
+  ⚠️ `strategies/core/` 与 `features/chip/formulas/core/` 里的 `core` 指各自
+  子包，故三处 import 一律用**绝对路径**；写相对导入会去子包里找不存在的模块。
+  三处再导出按待办要求保留（合并的是定义，不是名字）。
+  验证：7 个 import 路径拿到**同一个类对象**（`is` 为真）、字段顺序不变、
+  位置与关键字两种调用形式都正常、三个注册中心 `invalid=0`、全仓只剩 1 处定义。
+
+- **重构：筹码阈值常量接上引用、去掉内联 makedirs**（第 12+14 项）：
+  `DEFAULT_WEEKS`/`DEFAULT_LAUNCH` 改为**直接引用** `scr_service` 的常量
+  （改上游会联动，实测验证），「对齐 chip_service」的人工承诺注释归零。
+  ⭐ **`DEFAULT_CHG_DAYS` 判定「不该对齐」** —— 待办建议在 `scr_service` 补
+  `CHG_DAYS_DEFAULT` 再引用，**照做会造一个自己零调用点的骗人常量**：
+  本侧的 30 是**交易日窗口**（`s.iloc[-1-days]`），`scr_service` 的 `chg30`
+  是**导出文件里现成的列名**「30日涨幅%」（行情软件口径，本项目无从控制，
+  且它根本没有「天数」参数）。数值同为 30 纯属巧合。理由就地写在代码里。
+  ⚠️ **本项实测教训**：验证「删 processed 能否自动重建」时误删了**生产数据盘**
+  的 `<data>/chip/processed/`，清空了用户周榜缓存 —— 正是 `bug-04`（测试夹具
+  污染生产库）同形态的错误。已触发 force 重算恢复。**教训：验证「目录能自动
+  重建」前，先问「删的是谁的数据」。**
+
+- **重构：路由错误体形状统一**（第 11 项，后端+前端）：
+  统一为 `{ok:false, detail, error:{code,message}}`；状态码不动（「状态码=请求
+  是否合法 / ok=业务是否成功」二分），周榜仍恒 200。新增 `apiutil.py`
+  （`ok/fail/soft_fail/guard/http_error/install`）。
+  ⭐ 主力杠杆是 `install(app)` 挂**全局异常处理器** —— 全仓 90 余处
+  `raise HTTPException(detail=…)` **一行未改**即生效（待办只列了 4~5 个路由
+  文件，实际遍布 5 个 features 包）。`detail` 字段必须保留：前端 8 处直接读它。
+  ⭐ 必须注册 `starlette.exceptions.HTTPException` 而非 fastapi 的：404/405
+  抛的是 starlette 版（fastapi 的是其子类），只注册 fastapi 的会漏出去又是
+  裸 `{detail:"Not Found"}`。422 校验错误一并接管。
+  ⭐ **真实踩坑**：`raise apiutil.fail(...)` 是错的 —— `fail()` 返回
+  JSONResponse 不是 Exception，raise 它会让 FastAPI 落到兜底处理器回
+  `500 Internal Server Error`（比改前更糟，连错误体都没有）；正确是
+  `return apiutil.fail(...)`。
+  前端：新增 `J.ErrMsg()` 兼容三种形状（error 对象/字符串/只有 detail），
+  替换 9 处。`J.Str()` 拿到 Dictionary 会输出**类型名垃圾串**，必须先判类型。
+  验证：8 类失败（400×5、422×2、404×1）全部带统一形状；成功路径 5 条
+  响应体零变化；`csc` exit 0；52 测试全绿。
+
+- **修复：筹码分布接口 500**（`bug-05`）：
+  上一版把 `_percentile` 收进 `scr.py` 时删了定义，`base.py` 的 `compute()`
+  里还有 5 处调用没跟着删 → `NameError` → `/api/chip/dist` 直接 500。
+  关键判断：那 5 个分位值和局部 `scr()` **从未写进返回字典**，是死代码，
+  直接删除而非把分位计算搬回来。只有走 `base.compute` 的 dist 接口受影响，
+  走 `scr_series` 的周榜与策略一直是好的 —— 这解释了「只有筹码无响应」。
+  环境无 pyflakes/ruff，写了 AST 扫描找同类「删定义漏删调用」，全仓 12 处
+  疑似点逐条核对均为误报。验证：dist 三种口径正常、JSON 序列化 70 万字符
+  通过（bug-04 当年就崩在这步）、scr 内核四条路径全通、52 测试全绿。
+
+
   新增 `features/chip/formulas/core/scr.py`（107 行），**四处调用方共用**
   （周榜 `rank_service` / 策略 `strategies/scr90.py` / 副图 `indicators/chip_scr.py` /
   单帧统计 `formulas/core/base.py`）—— 原先是 2 份**逐字符雷同** + 2 份各自实现，
@@ -79,7 +200,7 @@
   左轴两套刻度叠印、09-04 巨红柱为旧帧残影；点「分析」切股票后偶发、几天一次。
   排查把线程竞争 / 叠加控件 / 绘制逻辑 / ResizeRedraw 全部排除，卡在
   「`Select(0)` 会 `Skin(page)`」与「实际未换肤」的矛盾上，**无法静态确证漏染路径**，
-  转为「保险丝 + 证据 + 硬化」三层修复（详见 `docs/todo/bug-03-*.md`）：
+  转为「保险丝 + 证据 + 硬化」三层修复（详见 git 历史中的 bug-03 工单，已归档）：
   - **保险丝**：`StockRenderHistory` 每次数据渲染前对 `_stockKline` / `_stockChip`
     补一次 `Skin`（幂等）—— 无论根因是什么，图表最多白一帧，不可能白到重启。
   - **对称补齐**：顶层 `SelectTab` 原先只切 `Visible` 从不重染（二级页挂载会 Skin、

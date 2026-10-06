@@ -40,7 +40,7 @@ def market_symbol(code: str) -> str:
     `features.stock.valuation._market_prefix` 是三份不同的规则集，刻意不统一。**
     分歧段（可转债 / B 股 / 北交所白名单外新号段）都不在股票池里，
     真实池 5585 只的三份判定完全一致。评估与理由见
-    `docs/todo/16-后端-market_symbol三份口径.md`，行为由
+    `docs/changelog.md（第 16 项条目）`，行为由
     `test_market_symbol.py` 锁定 —— 改这里前先看那份文档。
 
     与另两处的实际差异只有两处，且都不可达：
