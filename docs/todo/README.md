@@ -64,7 +64,7 @@
 | 25 ✅ | [25-前端-网页按页面分子目录.md](25-前端-网页按页面分子目录.md) | 3 个 HTML + 共享 js → 按页面分目录 | ★★★ / ★★☆ —— **已完成** |
 | 26 ✅ | [26-前端-启动器公共件归位.md](26-前端-启动器公共件归位.md) | GridKit/Cards/J/C 等公共件集中，别散在各页 | ★★★ / ★☆☆ —— **已完成** |
 | 27 ✅ | [27-后端-core子包.md](27-后端-core子包.md) | 基础设施层先归位（后端搬家**第一步**） | ★★★★ / ★★★（依赖 19）—— **已完成** |
-| 28 | [28-后端-features-market.md](28-后端-features-market.md) | 盘面/板块搬到 `features/market/` | ★★★ / ★★★（依赖 27） |
+| 28 ✅ | [28-后端-features-market.md](28-后端-features-market.md) | 盘面/板块搬到 `features/market/` | ★★★ / ★★★（依赖 27）—— **已完成** |
 | 29 | [29-后端-features-stock.md](29-后端-features-stock.md) | 个股/估值/板块索引搬到 `features/stock/` | ★★★ / ★★★（依赖 27） |
 | 30 | [30-后端-features-history.md](30-后端-features-history.md) | 股票池历史搬到 `features/history/` | ★★★ / ★★☆（依赖 27） |
 | 31 | [31-后端-features-download.md](31-后端-features-download.md) | 下载与调度搬到 `features/download/` | ★★★ / ★★★（依赖 27） |
@@ -106,6 +106,10 @@
 先修完再搬，动的文件少、回归面小。
 
 ## 已完成的项
+- **28** 盘面/板块归位 `features/market/`：`service.py` 是**纯 rename**（内容零改动，
+  TTL 缓存与盘后延长原样保留）、`routes.py` 只改 1 行 import。顶层留**别名转发**，
+  7 处 `from market_service import _ak` 与 `main.py` 的字符串 `"market_routes"` **一行未改**。
+  **HTTP 路径不变**（`prefix` 仍是 `/api/market`），启动器与网页端无需改动。
 - **bug-02** 多源串行回退硬化：新增 `core/fallback.py` 的 `first_ok`（总时间预算）。逐处读控制流实测 13 处 —— **必修从 10 处缩到 3 处**：`_universe_codes`(180s) / `fetch_daily`(65s) 已加预算；`sector_beta` 早已有 35s deadline；另有 3 处是 AST 误报（互斥分支 / 读本地库）。
 - **09** `_json_safe` 公共化 → `core/jsonutil.py`。**关键发现**：原 `_json_safe` 对 dict/list 是
   **恒等映射**，照待办原样在出口清洗等于**空操作**（`out is body` 为 True），故新增递归版

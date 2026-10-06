@@ -6,6 +6,39 @@
 
 ### 变更
 
+- **盘面/板块归位 `features/market/`**（待办 28，后端按功能搬家的第一项）：
+  ```
+  backend_fastapi/features/
+  ├─ __init__.py
+  └─ market/
+     ├─ __init__.py     说明这一层定位 + 为什么旧路径必须留别名转发
+     ├─ service.py   ← 原 market_service.py   （纯 rename，内容零改动）
+     └─ routes.py    ← 原 market_routes.py    （只改 1 行 import）
+  ```
+  - **`service.py` 是纯移动**：`git diff --stat -M` 显示为 `} | 0`。
+    它唯一的项目内 import `from core import httpclient` 是绝对导入，搬后仍可用；
+    TTL 缓存范式（`_cached` / `_ttl` 盘后延长到 23:59:59）**原样保留，未顺手「统一」**；
+    `_MARKET_CLOSE_MIN = 15*60` 与 `chip_service.MARKET_CLOSE_HOUR` 的两份定义
+    也按待办要求**留给第 12/16 项**。
+  - `routes.py` 只改 1 行：`import market_service` → `from features.market import service as market_service`。
+  - **顶层保留别名转发**（`sys.modules[__name__] = _impl`）—— 待办预警的坑成立：
+    `_ak` 是下划线私有名，`from x import *` **不会**导出，那 7 处会全部 AttributeError。
+    用别名后 **7 个依赖方一行都不用改**（6 处 `from market_service import _ak`
+    + 1 处 `valuation_service` 的 `ms._ak(ms.ak...)` 属性访问），已逐个验证。
+  - **HTTP 路径没有任何变化**：`router` 的 `prefix` 仍是 `/api/market`；
+    `main.py` 的 `ROUTE_MODULES` 仍按**字符串** `"market_routes"` 引用（靠转发），
+    启动器与网页端不需要改。
+  - `board_service.py`（板块成分股索引）**留在顶层**：它服务个股页的 `/api/stock/boards`，
+    只在 `stock_routes` 里被调用，归给第 29 项（features/stock）更合适。
+    待办提到的 `bars.py` 不存在 —— `MktBars` / `MktRatioBar` 是启动器里的**前端控件**。
+  - 验证：8 个模块（含 `main`）全部导入成功、`ms is features.market.service` 为 `True`；
+    盘面 5 个接口全 `ok=true`（外围环境 0.6s / 大盘资金 14.3s / 板块β 0.8s /
+    连板 0.6s / 涨跌停炸板 0.6s）；连带回归筹码分布、基本信息、个股板块、K线均正常；
+    `/health` 无模块错误、11 个路由全挂载、stderr 无 import 错误；52 个单元测试全绿。
+  - 踩坑：PowerShell here-string 吞掉了 `features/market/__init__.py` docstring 的闭合 `"""`，
+    导致 `import market_service` 直接 SyntaxError。批量写 Python 文件时
+    应加「三引号成对 + `ast.parse`」两道自动检查。
+
 - **系统性排查并硬化「多数据源串行回退」**（`bug-02`，`bug-01` 的同类模式）：
   `bug-01` 修的是 `stock_profile` 两处，但根因是一类模式 —— 「多源 / 多报告期**串行**回退，
   每源各自带超时、整条链没有**总时间预算**」。代码里几乎所有降级注释都写着
