@@ -28,6 +28,9 @@
 """
 from __future__ import annotations
 
+import datetime as dt
+import json
+import threading
 import time
 import uuid
 
@@ -71,12 +74,14 @@ def _load_names(codes: list[str]) -> dict[str, str]:
 
 
 def _prepare(codes: list[str], start: str | None, end: str | None,
-             adjust: str = "hfq") -> tuple[dict, list[str]]:
+             adjust: str = "hfq", progress=None) -> tuple[dict, list[str]]:
     """预检取数：返回 (可用标的 {code: DataFrame}, 跳过说明列表)。
 
     回测与推荐共用——同一份底层缓存（data.load_bars 逐标的缓存），不重复 I/O。
+    `progress(done, total)` 用于回测进度条（可选，不给就不报）。
     """
-    bars = data.load_bars(codes, start, end, fields=["close"], adjust=adjust)
+    bars = data.load_bars(codes, start, end, fields=["close"], adjust=adjust,
+                          progress=progress)
     usable: dict[str, object] = {}
     errors: list[str] = []
     for code in codes:
@@ -93,7 +98,8 @@ def _prepare(codes: list[str], start: str | None, end: str | None,
 def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                  start: str | None, end: str | None,
                  initial_capital: float = 100000.0, commission: float = 0.0003,
-                 benchmark: str | None = None, window: int | None = None) -> dict:
+                 benchmark: str | None = None, window: int | None = None,
+                 progress=None) -> dict:
     """执行回测，返回标准化结果字典。异常由路由层转成错误响应。
 
     不设标的上限：「全部本地」（5000+ 只）全量跑——数据层 load_bars
@@ -113,11 +119,18 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
         if len(days) >= window + 2:
             start, end = days[0], days[-1]
 
-    usable, errors = _prepare(codes, start, end)
+    usable, errors = _prepare(codes, start, end, progress=progress)
     if not usable:
         raise RuntimeError("所选范围内没有可用数据，无法回测")
 
-    # 策略自行拉取所需字段（inputs），这里只把范围交出去。
+    # 取数完了，进入策略计算。策略函数是自己遍历 ctx.codes 的（见 base.run），
+    # 外部插不进逐票回调，故这一段只能报**阶段**、不能报「已测只数」——
+    # 进度条上要把「加载数据」与「计算信号」区分开，否则用户会以为卡住了。
+    if progress is not None:
+        try:
+            progress(-1, -1)          # 哨兵：-1 表示进入不可细分的阶段
+        except Exception:
+            pass
     ctx = base.StrategyContext(codes=list(usable.keys()), start=start, end=end, adjust="hfq")
     signals = base.run(strategy_id, ctx, params)
 
@@ -144,10 +157,31 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
     for item in per_stock:
         item["name"] = names.get(item["code"]) or None
 
-    global _BT_CTX
+    # 全市场逐笔「一买一卖」明细：给**回测报告**落盘用。
+    # 价格要「原始收盘」（未复权，用户看得懂、股数能对上行情软件），需再取一次
+    # raw 口径 —— 与上面 hfq 那次同构、且 data.load_bars 有缓存，额外开销主要是
+    # 一次批量变换。band 用等权资金带，与 run_recommend 的金额口径一致。
+    trades: list[dict] = []
+    try:
+        raw_bars = data.load_bars(list(usable.keys()), start, end,
+                                  fields=["close"], adjust="raw",
+                                  progress=progress)
+        raw_close = {c: df["close"] for c, df in raw_bars.items()
+                     if df is not None and "close" in df}
+        band = initial_capital / max(1, len(usable))
+        trades = stats.all_trades_detail(positions, close_by_code, raw_close, band=band)
+        for t in trades:
+            t["name"] = names.get(t["code"]) or None
+    except Exception as exc:                   # noqa: BLE001 - 明细不该拖垮回测
+        errors.append(f"逐笔明细生成失败：{type(exc).__name__}: {exc}")
+        trades = []
+
+    global _BT_CTX, _BT_TRADES
     rid = uuid.uuid4().hex[:12]
     _BT_CTX = {"rid": rid, "positions": positions, "close": close_by_code,
                "start": start, "end": end, "names": names}
+    # 逐笔明细**只**给报告落盘用，**不进 HTTP 响应**（见返回字典处注释）
+    _BT_TRADES = trades
 
     return {
         "ok": True,
@@ -171,6 +205,9 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
         "equity_benchmark": core["equity_benchmark"],
         "metrics": core["metrics"],
         "per_stock": per_stock,
+        # ⚠️ **逐笔明细刻意不在这里**（第 18 项实测后才补上的约定）：全市场一次回测
+        # 15 万+ 笔，随响应下发是 24 MB JSON、取结果要 10 秒；前端展开某只票时
+        # 走 /backtest/trades 按需现算即可。报告要用的话从 `last_trades()` 取。
         "data_errors": errors[:20],
     }
 
@@ -293,6 +330,121 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
         },
         "data_errors": errors[:20],
     }
+
+
+# ---- 异步回测任务（第 18 项）：解决「全市场回测必定超时」----
+# 全市场 5000+ 只冷缓存读库要几分钟，而前端是**一次同步请求 + 固定超时**
+# （实测 5585 只直接「请求被中止：操作超时」）。这不是网络问题，是结构上必然超时
+# —— 把超时从 90 秒调到 10 分钟只会让用户对着白屏干等，且中途看不到任何进展。
+# 改成与 SCR90 周榜同一套模式：start 立即返回 -> progress 轮询 -> result 取结果。
+_BT_TASK: dict = {
+    "state": "idle",       # idle / running / ready / error
+    "phase": "",           # loading（可细分）/ running（策略计算，不可细分）/ done
+    "done": 0, "total": 0,
+    "strategy_id": "", "strategy_name": "", "codes_count": 0,
+    "started_at": None, "finished_at": None, "elapsed": 0.0, "error": None,
+}
+_BT_LOCK = threading.Lock()
+_BT_RESULT: dict | None = None
+# 最近一次回测的逐笔明细：**只**给报告落盘用（`last_trades()`），不进 HTTP 响应。
+# 全市场一次回测能到十几万笔（实测 15 万+），随响应下发就是 24 MB JSON、
+# 取结果要 10 秒 —— 而前端只在展开某只票时才需要明细（走 /backtest/trades 按需取）。
+_BT_TRADES: list = []
+
+
+def last_trades() -> list:
+    """最近一次回测的逐笔明细（供报告落盘；不下发给前端）。"""
+    return _BT_TRADES
+
+
+def task_state() -> dict:
+    """当前任务状态（供轮询）：深拷贝，不暴露内部可变对象。
+
+    `elapsed` 在**运行中也要有值** —— 只在结束时写的话，进度条旁边的时间会一直
+    显示 0s，用户以为卡住了。这里按 `started_at` 实时算。
+    """
+    with _BT_LOCK:
+        snap = json.loads(json.dumps(_BT_TASK))
+    if snap.get("started_at") and snap.get("state") == "running":
+        try:
+            t0 = dt.datetime.strptime(snap["started_at"], "%Y-%m-%d %H:%M:%S")
+            snap["elapsed"] = int((dt.datetime.now() - t0).total_seconds())
+        except Exception:
+            pass
+    return snap
+
+
+def task_result() -> dict | None:
+    """最近一次**已完成**回测的完整结果（没有则 None）。"""
+    return _BT_RESULT
+
+
+def start_task(strategy_id: str, params: dict | None, codes: list[str],
+               start: str | None, end: str | None,
+               initial_capital: float = 100000.0, commission: float = 0.0003,
+               benchmark: str | None = None, window: int | None = None) -> dict:
+    """启动一次后台回测并**立即返回**；已有任务在跑时返回 ok=false（不排队）。
+
+    并发上限为 1：两个全市场回测并行会把 CPU 与 SQLite 读盘打满，反而比串行更慢，
+    且用户界面一次也只看不了两个结果。
+    """
+    global _BT_RESULT
+    with _BT_LOCK:
+        if _BT_TASK["state"] == "running":
+            return {"ok": False, "error": "已有回测在运行，请等它结束或先点「停止」",
+                    "state": task_state()}
+        _BT_RESULT = None
+        try:
+            name = base.REGISTRY[strategy_id].name
+        except Exception:
+            name = strategy_id
+        _BT_TASK.update({
+            "state": "running", "phase": "loading", "done": 0,
+            "total": len(codes or []), "strategy_id": strategy_id,
+            "strategy_name": name, "codes_count": len(codes or []),
+            "started_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "finished_at": None, "elapsed": 0.0, "error": None,
+        })
+
+    def _on_progress(done: int, total: int):
+        with _BT_LOCK:
+            if done < 0:                 # 哨兵：进入不可细分的策略计算阶段
+                _BT_TASK["phase"] = "running"
+            else:
+                _BT_TASK["phase"] = "loading"
+                _BT_TASK["done"] = int(done)
+                if total:
+                    _BT_TASK["total"] = int(total)
+
+    def _work():
+        t0 = time.time()
+        try:
+            out = run_backtest(strategy_id, params, codes, start, end,
+                               initial_capital, commission, benchmark, window,
+                               progress=_on_progress)
+            global _BT_RESULT
+            _BT_RESULT = out
+            try:
+                from strategies import report as _report
+                saved = _report.save_report(out)
+                out["report"] = {"saved": bool(saved.get("ok")),
+                                 "path": saved.get("path"),
+                                 "error": saved.get("error")}
+            except Exception as exc:
+                out["report"] = {"saved": False, "path": None, "error": str(exc)}
+            with _BT_LOCK:
+                _BT_TASK.update(state="ready", phase="done", done=_BT_TASK["total"],
+                                finished_at=dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                elapsed=round(time.time() - t0, 1), error=None)
+        except Exception as exc:                # noqa: BLE001 - 后台线程要把错误带出去
+            with _BT_LOCK:
+                _BT_TASK.update(state="error", phase="done",
+                                finished_at=dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                elapsed=round(time.time() - t0, 1),
+                                error=f"{type(exc).__name__}: {exc}")
+
+    threading.Thread(target=_work, name="backtest-task", daemon=True).start()
+    return {"ok": True, "state": task_state()}
 
 
 def trades_for(rid: str, code: str) -> list[dict]:

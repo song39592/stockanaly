@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import apiutil
@@ -23,6 +24,7 @@ import strategies
 import strategies.core.backtest as backtest
 import strategies.core.data as sdata
 import strategies.core.registry as registry
+from strategies import report
 
 router = APIRouter(prefix="/api/strategies", tags=["策略回测"])
 
@@ -81,10 +83,75 @@ def do_backtest(req: BacktestRequest):
     if req.use_all:
         codes = sdata.list_universe_codes()
     # window 交给编排层处理（取数会额外向前预热，只统计最近 N 日）
-    return backtest.run_backtest(
+    result = backtest.run_backtest(
         req.strategy_id, req.params, codes, req.start, req.end,
         req.initial_capital, req.commission, req.benchmark, req.window,
     )
+    # 回测跑完**自动落盘一份报告**（策略 + 覆盖范围 + 指标 + 逐票汇总），
+    # 便于事后对比不同策略 / 不同区间 —— 原来结果只在一次响应里，关掉就没了。
+    # ⚠️ 写盘失败绝不影响这次回测的结果返回（report.save_report 内部全 try）。
+    saved = report.save_report(result)
+    result["report"] = {"saved": bool(saved.get("ok")),
+                        "path": saved.get("path"),
+                        "error": saved.get("error")}
+    return result
+
+
+@router.post("/backtest/start")
+@_guard(code=_CODE_ERR)
+def do_backtest_start(req: BacktestRequest):
+    """**启动后台回测并立即返回**（跑全市场请用这个）。
+
+    为什么要有这个：全市场 5000+ 只冷缓存读库要几分钟，而 `/backtest` 是一次
+    同步请求 + 前端固定超时 —— 必然「请求被中止：操作超时」。本接口立即返回，
+    由前端轮询 `/backtest/progress` 看**已测只数 / 总数**，完成后用
+    `/backtest/result` 取结果。
+
+    同一时间只允许一个任务（两个全市场并行会互相拖慢）。小股票池仍可用同步
+    的 `/backtest`，更快。
+    """
+    codes = [str(c).strip() for c in (req.codes or []) if str(c).strip()]
+    if req.use_all:
+        codes = sdata.list_universe_codes()
+    if not codes:
+        raise ValueError("股票池为空，请先选择回测范围")
+    out = backtest.start_task(
+        req.strategy_id, req.params, codes, req.start, req.end,
+        req.initial_capital, req.commission, req.benchmark, req.window,
+    )
+    if not out.get("ok"):
+        return JSONResponse(status_code=409,
+                            content={"ok": False,
+                                     "error": {"code": "BUSY",
+                                               "message": out.get("error") or "已有回测在运行"}})
+    return out
+
+
+@router.get("/backtest/progress")
+def do_backtest_progress():
+    """轮询回测进度：阶段 + 已测/总数 + 耗时。
+
+    `phase=loading` 时 done/total 是**准确的已测只数**（取数逐票回调）；
+    `phase=running` 是策略计算阶段 —— 策略函数自己遍历标的、外部无法细分，
+    此时 done 保持 total，**不给假的百分比**。
+    """
+    return {"ok": True, "state": backtest.task_state()}
+
+
+@router.get("/backtest/result")
+def do_backtest_result():
+    """取最近一次**已完成**的回测结果；还在跑 / 从未跑过则 ok=false。"""
+    out = backtest.task_result()
+    if out is None:
+        return {"ok": False, "state": backtest.task_state(),
+                "error": {"code": "NOT_READY", "message": "还没有已完成的回测结果"}}
+    return out
+
+
+@router.get("/backtest/reports")
+def list_backtest_reports(limit: int = 50):
+    """已保存的回测报告索引（新到旧）：横向对比历史回测用。"""
+    return report.list_reports(limit)
 
 
 @router.post("/recommend")
