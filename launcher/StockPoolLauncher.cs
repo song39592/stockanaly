@@ -964,6 +964,13 @@ namespace StockPool
                 if (tag == "doc-rps") FillRpsDoc((RichTextBox)c);
                 else if (tag == "doc-ai") FillAiDoc((RichTextBox)c, (c == _mktAiBox ? _mktAiMarkdown : _stockAiMarkdown));
             }
+            else if (c is ProgressBar)
+            {
+                // 回测进度条（第 18 项）：不设的话深色主题下会用系统默认的
+                // 亮绿色块，与整页配色打架。这里只定底色，填充色由 Style 决定。
+                c.BackColor = _cPanel;
+                c.ForeColor = C.Accent;
+            }
             else if (c is DataGridView)
             {
                 var dgv = (DataGridView)c;

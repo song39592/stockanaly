@@ -43,6 +43,14 @@ namespace StockPool
 
         // ③ 回测结果
         private Label _stResultHeader, _stResultStatus;
+        // 回测进度（第 18 项）：全市场回测要几分钟，改后台任务 + 轮询，
+        // 进度条显示「已测只数 / 总数」。_stPollRunId 用来丢弃**旧任务**的轮询响应
+        // （用户可能在跑的过程中又点了一次「运行」，否则旧任务的进度会盖掉新的）。
+        private ProgressBar _stProgress;
+        private Label _stProgressText;
+        private Timer _stPollTimer;
+        private int _stPollRunId;
+        private bool _stPollBusy;      // 上一次轮询没回来就不发下一次
         private FlowLayoutPanel _stMetricCards;
         private PictureBox _stEquityBox;
         private StockGrid _stPerStockGrid;
@@ -153,7 +161,7 @@ namespace StockPool
             _stList.Font = new Font("Microsoft YaHei UI", 10f);
             _stList.SelectedIndexChanged += delegate { StOnSelectStrategy(); };
             AddRow(b, Row(_stList,
-                Mute(Lbl("选一个策略；右侧可编辑其参数。新增策略请在后端 strategies/ 加 <id>.py 文件。"))));
+                Mute(Lbl("单选：一次只运行列表里选中的那一个策略（不是全列表一起跑）。右侧可编辑其参数。新增策略请在后端 strategies/ 加 <id>.py 文件。"))));
             AddRow(stack, g1);
 
             var g2 = Group("策略说明与参数", out b);
@@ -372,7 +380,17 @@ namespace StockPool
             _stResultHeader.Margin = new Padding(0, 0, 0, 8);
             AddRow(stack, _stResultHeader);
 
-            AddRow(stack, Row(MiniBtn("运行回测", delegate { StRunBacktest(); }, 120), _stResultStatus = Mute(Lbl("尚未回测"))));
+            AddRow(stack, Row(MiniBtn("运行回测（选中策略）", delegate { StRunBacktest(); }, 160), _stResultStatus = Mute(Lbl("尚未回测"))));
+
+            // 进度条：默认隐藏，跑起来才显示（_stProgress.Visible 控制）
+            _stProgress = new ProgressBar();
+            _stProgress.Height = 14;
+            _stProgress.Dock = DockStyle.Top;
+            _stProgress.Visible = false;
+            _stProgressText = Mute(Lbl(""));
+            _stProgressText.Visible = false;
+            AddRow(stack, _stProgress);
+            AddRow(stack, _stProgressText);
 
             _stMetricCards = new FlowLayoutPanel();
             _stMetricCards.FlowDirection = FlowDirection.LeftToRight;
@@ -752,27 +770,169 @@ namespace StockPool
                 + start + "~" + end + " · 初始 " + (cap / 10000).ToString("F1") + "万 · 佣金 "
                 + J.NumOr(_stComm.Text, 0.0003).ToString("P4").Replace(" ", "");
 
-            _stResultStatus.Text = "回测中…";
+            _stResultStatus.Text = "回测中：" + J.StrOr(meta["name"], sid) + "…";
             _stResultStatus.ForeColor = _cSub;
             string body = new JavaScriptSerializer().Serialize(req);
+            int myRun = ++_stPollRunId;      // 本次运行的编号：用来丢弃旧轮询响应
+            StShowProgress(0, 0, "正在启动…");
 
+            // 第 18 项：改**后台任务 + 轮询**。原来是一次同步请求 + 10 分钟超时，
+            // 全市场（5000+ 只）冷缓存实测要 7 分钟以上，结构上仍会超时，
+            // 而且中途白屏、看不到任何进展。现在启动接口 2 秒内返回，
+            // 进度由 /backtest/progress 逐票汇报。
             System.Threading.Tasks.Task.Run(delegate
             {
                 try
                 {
-                    // 全量（5000+ 只）冷缓存也要几十秒，超时放宽到 10 分钟
-                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest", body, 600000);
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/start",
+                                           body, 60000);
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    Invoke((Action)(() => StRenderResult(j)));
+                    Invoke((Action)(() =>
+                    {
+                        if (myRun != _stPollRunId) return;      // 已被新一轮取代
+                        if (J.IsFailed(j))                       // 例如「已有回测在运行」
+                        {
+                            StStopProgress();
+                            SetErr(_stResultStatus, "回测失败：" + J.ErrMsg(j));
+                            return;
+                        }
+                        StPollResult(myRun);
+                    }));
                 }
                 catch (Exception ex)
                 {
                     Invoke((Action)(() =>
                     {
+                        if (myRun != _stPollRunId) return;
+                        StStopProgress();
                         SetErr(_stResultStatus, "回测失败：" + ex.Message);
                     }));
                 }
             });
+        }
+
+        /// <summary>进度条 / 进度文字的显示与更新。</summary>
+        private void StShowProgress(int done, int total, string text)
+        {
+            if (_stProgress == null) return;
+            _stProgress.Visible = true;
+            _stProgressText.Visible = true;
+            _stProgress.Maximum = Math.Max(1, total);
+            _stProgress.Value = Math.Min(Math.Max(0, done), Math.Max(1, total));
+            _stProgressText.Text = text;
+        }
+
+        private void StStopProgress()
+        {
+            if (_stPollTimer != null)
+            {
+                _stPollTimer.Stop();
+                _stPollTimer.Dispose();
+                _stPollTimer = null;
+            }
+            if (_stProgress != null) _stProgress.Visible = false;
+            if (_stProgressText != null)
+            {
+                _stProgressText.Visible = false;
+                _stProgressText.Text = "";
+            }
+        }
+
+        /// <summary>轮询一次进度；state 变成ready/error 时取结果（或报错）并停表。</summary>
+        private void StPollResult(int myRun)
+        {
+            StStopProgress();                        // 先清掉旧的（可能还在跑）
+            _stPollTimer = new Timer();
+            _stPollTimer.Interval = 900;
+            _stPollTimer.Tick += delegate { StPollTick(myRun); };
+            _stPollTimer.Start();
+            StPollTick(myRun);                       // 立刻打一次，别等第一个周期
+        }
+
+        private void StPollTick(int myRun)
+        {
+            if (myRun != _stPollRunId) return;       // 旧任务，直接不响应
+            if (_stPollBusy) return;                 // 上一次还没回来
+            _stPollBusy = true;
+            RunUi<Dictionary<string, object>>(
+                delegate
+                {
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/progress", null, 30000);
+                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                },
+                delegate(Dictionary<string, object> j)
+                {
+                    _stPollBusy = false;
+                    if (myRun != _stPollRunId) return;
+                    StApplyProgress(j, myRun);
+                },
+                delegate(Exception ex)
+                {
+                    _stPollBusy = false;
+                    if (myRun != _stPollRunId) return;
+                    // 单次轮询失败（后端忙）不致命：让表继续打，下一次再说
+                    if (_stProgressText != null)
+                        _stProgressText.Text = "进度查询失败，正在重试…" + ex.Message;
+                },
+                null);
+        }
+
+        /// <summary>把 /backtest/progress 的状态画到进度条上；完成则取结果。</summary>
+        private void StApplyProgress(Dictionary<string, object> j, int myRun)
+        {
+            if (J.IsFailed(j)) { StStopProgress(); return; }
+            var st = J.Get(j, "state") as Dictionary<string, object>;
+            if (st == null) return;
+            string state = J.Str(J.Get(st, "state"));
+            string phase = J.Str(J.Get(st, "phase"));
+            int done = (int)J.NumAt(st, "done");
+            int total = (int)J.NumAt(st, "total");
+            double elapsed = J.NumAt(st, "elapsed");
+            string err = J.Str(J.Get(st, "error"));
+
+            if (state == "running")
+            {
+                string text;
+                if (phase == "loading")
+                    text = "加载数据 " + done + " / " + total + "只（已用 "
+                           + ((int)elapsed) + " 秒）";
+                else
+                    text = "计算信号中…" + done + " / " + total + "只（已用 "
+                           + ((int)elapsed) + " 秒）";
+                StShowProgress(total > 0 ? done : 0, total, text);
+                return;
+            }
+
+            // ready / error：停表，取结果
+            StStopProgress();
+            if (state == "error")
+            {
+                SetErr(_stResultStatus, "回测失败：" + (string.IsNullOrEmpty(err) ? "未知错误" : err));
+                return;
+            }
+            StFetchResult(myRun);
+        }
+
+        private void StFetchResult(int myRun)
+        {
+            RunUi<Dictionary<string, object>>(
+                delegate
+                {
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/result", null, 120000);
+                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                },
+                delegate(Dictionary<string, object> j)
+                {
+                    if (myRun != _stPollRunId) return;
+                    if (J.IsFailed(j)) { SetErr(_stResultStatus, "取结果失败：" + J.ErrMsg(j)); return; }
+                    StRenderResult(j);
+                },
+                delegate(Exception ex)
+                {
+                    if (myRun != _stPollRunId) return;
+                    SetErr(_stResultStatus, "取结果失败：" + ex.Message);
+                },
+                null);
         }
 
         private void StRenderResult(Dictionary<string, object> j)
@@ -1114,7 +1274,12 @@ namespace StockPool
                         _stList.Items.Clear();
                         foreach (var m in list) _stList.Items.Add(J.StrOr(m["name"], J.StrOr(m["id"], "?")));
                         if (_stCodeHint != null) _stCodeHint.Text = "本地共 " + cnt + " 只，填入代码（逗号/空格分隔，最多 800 只）";
-                        _stResultStatus.Text = "清单已加载（" + list.Count + " 个策略 / " + cnt + " 只本地股票）";
+                        // 文案别写成「清单已加载（N 个策略 / M 只股票）」—— 那个「N 个策略」
+// 紧挨着「运行回测」按钮，读起来像是「本次要跑 N 个策略」。实际是**单选**：
+// 一次只跑列表里选中的那一个。策略页的 ListBox 是单选、后端 BacktestRequest
+// 也只接一个 strategy_id。
+                        _stResultStatus.Text = "已加载 " + list.Count
+                            + " 个策略供选择 · 一次只运行选中的 1 个 · 本地股票 " + cnt + " 只";
                         _stResultStatus.ForeColor = _cSub;
                         if (_stList.Items.Count > 0) _stList.SelectedIndex = 0;
                         _stLoaded = true;

@@ -110,6 +110,10 @@ CONFIG_DIR = DATA_DIR / "config"
 STATE_DIR = DATA_DIR / "state"
 LOGS_DIR = DATA_DIR / "logs"
 CACHE_DIR = DATA_DIR / "cache"
+# 回测报告：**刻意不放logs/ 也不放 cache/** ——
+#   logs/   语义是日志，且定时任务会清*.log.* 与 dump-*.zip（cleanup._clean_dumps）；
+#   cache/  清理策略是「全部可清」（定义上可重建）—— 报告丢了就没了。
+REPORTS_DIR = DATA_DIR / "backtests"
 
 
 def llm_ready() -> bool:

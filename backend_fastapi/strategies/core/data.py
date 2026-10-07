@@ -42,7 +42,8 @@ _IO_WORKERS = 6   # 并行读库线程数：SQLite WAL + 每线程独立连接�
 
 
 def load_bars(codes, start: str | None = None, end: str | None = None,
-              fields: list[str] | None = None, adjust: str = "hfq") -> dict[str, pd.DataFrame]:
+              fields: list[str] | None = None, adjust: str = "hfq",
+              progress=None) -> dict[str, pd.DataFrame]:
     """批量取数：返回 {code: DataFrame[fields]}（只含成功加载的标的）。
 
     参数：
@@ -79,13 +80,31 @@ def load_bars(codes, start: str | None = None, end: str | None = None,
 
     missing = [(c, (c, start, end, adjust)) for c in codes
                if (c, start, end, adjust) not in _PER_CACHE]
+    # 进度回调（第 18 项回测进度条）：`ex.map` 是**惰性**的、按提交顺序 yield，
+    # 所以每取完一只就报一次「已测/总数」，不用改线程池逻辑。
+    # 缓存命中的票瞬间完成（done 一次到位），故基数用 missing 而非全部 codes ——
+    # 否则冷热混跑时进度会「先跳一段再慢慢爬」。
+    total = len(missing)
+    done = 0
+
+    def _tick():
+        nonlocal done
+        done += 1
+        if progress is not None:
+            try:
+                progress(done, total)
+            except Exception:            # 进度回调不该影响取数
+                pass
+
     if len(missing) > 1:
         with ThreadPoolExecutor(max_workers=_IO_WORKERS) as ex:
             for (code, key), df in zip(missing, ex.map(_fetch, [m[0] for m in missing])):
                 _PER_CACHE[key] = df
+                _tick()
     elif missing:
         code, key = missing[0]
         _PER_CACHE[key] = _fetch(code)
+        _tick()
 
     for code in codes:
         df = _PER_CACHE.get((code, start, end, adjust))

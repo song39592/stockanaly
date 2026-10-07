@@ -41,7 +41,8 @@ def _native(series: pd.Series):
 
 
 def trade_detail(pos: pd.Series, close: pd.Series,
-                 raw_close: pd.Series | None = None) -> list[dict]:
+                 raw_close: pd.Series | None = None,
+                 band: float | None = None) -> list[dict]:
     """从目标仓位序列提取逐笔「一买一卖」明细，供前端展开查看。
 
     仓位口径与收益统计一致：w_t 在 t 日收盘生成、次日承担收益，成交价即
@@ -49,7 +50,24 @@ def trade_detail(pos: pd.Series, close: pd.Series,
     价格展示优先用 **原始收盘**（未复权，用户看得懂），收益一律用
     后复权序列计算（消除除权跳空的假盈亏）。未平仓段 sell 为 null。
 
-    返回 [{buy_date, buy_price, sell_date, sell_price, ret}, ...]（时间升序）。
+    返回 [{buy_date, buy_price, sell_date, sell_price, ret, shares, pnl}, ...]（时间升序）。
+
+    `band` = **每只标的的资金带**（`initial_capital / 有效标的数`，与
+    `run_recommend` 的金额口径一致）。给了它才输出 `shares` / `pnl`：
+      · shares = band × 买入时仓位权重 ÷ **原始**买入价 → 折算成真实股数
+        （用原始价才与行情软件显示的股数对得上，便于人工核对）；
+      · pnl    = shares × **原始买价** × ret（ret 是**后复权**收益率）→ 真实盈亏。
+
+    ⚠️ pnl **不是** `shares × 后复权价差`：后复权价可能远高于原始价（多次送转后
+    能差十倍，如哈药股份 2025-01-03 的 4.30 ↔ 45.44），拿它做价差会让金额凭空放大
+    十倍。ret 用后复权是为了**消除除权跳空的假盈亏**，但**金额必须回到原始价口径**——
+    两者相乘才是真实盈亏，且 `pnl ÷ (shares × buy_price) ≡ ret`，三者自洽可交叉核对。
+    未平仓段 shares 有值、pnl 为 null（还没卖，盈亏定不了）。
+
+    ⚠️ 这两个是**折算值**，不是模拟下单的结果：回测的净值口径是「收益率叠加」
+    （见 `compute`：`w_prev * ret − turnover * commission`），全程**没有**按金额
+    分配资金、不产生真实成交，故不存在唯一的股数与盈亏金额。这里按等权资金带
+    换算成可读数值，**口径必须在报告里写明**，否则会被当成实测成交额。
     """
     w = pos.reindex(close.index).fillna(0.0).astype(float)
     price = raw_close if raw_close is not None and len(raw_close) else close
@@ -65,6 +83,32 @@ def trade_detail(pos: pd.Series, close: pd.Series,
         p = _num(price.iloc[i]) if i < len(price) else None
         return p if p is not None else _num(close.iloc[i])
 
+    def _shares_pnl(open_i: int, i: int | None):
+        """折算股数与盈亏；band 缺失 / 价格无效时返回 (None, None)。
+
+        pnl = shares × **原始买价** × 后复权收益率（不是 shares × 后复权价差——
+        后复权价可能远高于原始价，用价差会让金额凭空放大十倍）。
+        """
+        if not band or band <= 0:
+            return None, None
+        bp = _num(price.iloc[open_i]) if open_i < len(price) else None
+        if not bp or bp <= 0:
+            return None, None
+        try:
+            sh = int(round(band * float(w.iloc[open_i]) / bp))
+        except (TypeError, ValueError, OverflowError):
+            return None, None
+        if sh <= 0:
+            return 0, 0.0
+        if i is None:                      # 未平仓：盈亏还定不了
+            return sh, None
+        b_adj = float(close.iloc[open_i])
+        if not b_adj:
+            return sh, None
+        # 与 all_trades_detail 一致：ret 先取整，让 pnl 能用报告字段复算出来
+        ret = round(float(close.iloc[i]) / b_adj - 1.0, 4)
+        return sh, round(sh * float(bp) * ret, 2)
+
     out: list[dict] = []
     open_i: int | None = None
     for i in range(len(w)):
@@ -73,17 +117,97 @@ def trade_detail(pos: pd.Series, close: pd.Series,
             open_i = i
         elif cur <= 0.0 and open_i is not None:
             ret = float(close.iloc[i] / close.iloc[open_i] - 1.0)
+            sh, pnl = _shares_pnl(open_i, i)
             out.append({
                 "buy_date": str(w.index[open_i])[:10], "buy_price": _price(open_i),
                 "sell_date": str(w.index[i])[:10], "sell_price": _price(i),
-                "ret": round(ret, 4),
+                "ret": round(ret, 4), "shares": sh, "pnl": pnl,
             })
             open_i = None
     if open_i is not None:
+        sh, pnl = _shares_pnl(open_i, None)
         out.append({
             "buy_date": str(w.index[open_i])[:10], "buy_price": _price(open_i),
             "sell_date": None, "sell_price": None, "ret": None,
+            "shares": sh, "pnl": pnl,
         })
+    return out
+
+
+def all_trades_detail(positions_by_code: dict, close_by_code: dict,
+                      raw_by_code: dict | None = None,
+                      band: float | None = None) -> list[dict]:
+    """**全市场**逐笔「一买一卖」明细，供回测报告落盘（向量化实现）。
+
+    与逐票的 `trade_detail` 结果一致，但**不复用它的循环** —— 全市场 5000+ 只 ×
+    每年 700+ 交易日是 400 万次Python 迭代，报告生成会卡到不可接受。这里用
+    向量化先定位「仓位由0 变正」/「由正变 0」的转折下标，只对转折点做 Python
+    迭代，成本降到每只票两次 numpy 比较。
+
+    `band` / `shares` / `pnl` 的口径见 `trade_detail` 的 docstring（折算值，
+    非模拟成交）。返回按 code、再按时间升序。
+    """
+    out: list[dict] = []
+    for code, pos in (positions_by_code or {}).items():
+        close = close_by_code.get(code)
+        if close is None or len(close) < 2:
+            continue
+        w = pos.reindex(close.index).fillna(0.0).astype(float)
+        raw = (raw_by_code or {}).get(code)
+        price = raw if (raw is not None and len(raw)) else close
+
+        prev = w.shift(1).fillna(0.0)
+        open_at = [i for i in np.flatnonzero((w > 0.0).to_numpy()
+                                             & (prev <= 0.0).to_numpy())]
+        close_at = [i for i in np.flatnonzero((w <= 0.0).to_numpy()
+                                              & (prev > 0.0).to_numpy())]
+        if not open_at:
+            continue
+        dates = [str(x)[:10] for x in w.index]
+
+        def _px(i, series):
+            return float(series.iloc[i]) if i < len(series) else None
+
+        def _emit(o: int, c: int | None):
+            bp, sp = _px(o, price), (None if c is None else _px(c, price))
+            b_adj, s_adj = _px(o, close), (None if c is None else _px(c, close))
+            # ⚠️ ret 先取整再往下算：报告里给的是取整后的 ret，若 pnl 用未取整的值，
+            # 拿报告字段复算会对不上（实测差 0.09 元）。取整后
+            # pnl ≡ shares × 买价 × ret 严格自洽 ——「可交叉核对」这句话才成立。
+            ret = None if c is None or not b_adj else round(s_adj / b_adj - 1.0, 4)
+            item = {
+                "code": code,
+                "buy_date": dates[o],
+                "buy_price": None if bp is None else round(bp, 3),
+                "sell_date": None if c is None else dates[c],
+                "sell_price": None if sp is None else round(sp, 3),
+                "ret": ret,
+                "shares": None,
+                "pnl": None,
+            }
+            if band and band > 0 and bp and bp > 0:
+                sh = int(round(band * float(w.iloc[o]) / bp))
+                item["shares"] = sh if sh > 0 else 0
+                # ⚠️ pnl = shares × **原始买价** × 后复权收益率，**不是** shares × 后复权价差。
+                # 后复权价可能远高于原始价（多次送转后能差十倍，如哈药股份 4.30 ↔ 45.44），
+                # 用它做价差会让金额凭空放大十倍 —— 实测就踩到过：3876 股亏 26626 元，
+                # 而真实亏损只有 2519 元。ret 必须用后复权（消除除权跳空的假盈亏），
+                # 但**金额要回到原始价口径**，两者相乘才是真实盈亏，且
+                # pnl / (shares × buy_price) ≡ ret，三者自洽可交叉核对。
+                if sh > 0 and c is not None and ret is not None:
+                    item["pnl"] = round(sh * bp * ret, 2)
+            out.append(item)
+
+        # 配对：每个开仓点配「其后的第一个平仓点」；配不上的（区间结束仍未平）
+        # 记为未平仓 —— 与 trade_detail 的逐日扫描语义一致。
+        oi = 0
+        for c in close_at:
+            if oi < len(open_at) and open_at[oi] < c:
+                _emit(open_at[oi], c)
+                oi += 1
+        while oi < len(open_at):
+            _emit(open_at[oi], None)
+            oi += 1
     return out
 
 
