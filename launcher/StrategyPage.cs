@@ -73,6 +73,13 @@ namespace StockPool
         private List<string> _stEqDates;
         private List<double?> _stEq;
         private List<double?> _stEqBench;
+        // 全市场推荐要跑好几分钟（实测 5585 只需 418.7s），已改为后端异步任务，
+        // 这里用轮询跟进进度。⚠️ _stRecoBusy 是**必需**的：原来完全没有守卫，
+        // 用户等不及再点一次就会叠加多个全市场计算互相拖慢。
+        private Timer _stRecoTimer;
+        private bool _stRecoBusy;
+        private bool _stRecoPollBusy;      // 有一次轮询请求在飞（防 tick 重叠）
+        private int _stRecoRunId;          // 每次启动 +1：陈旧响应据此丢弃（同回测 _stPollRunId）
 
         private sealed class StParamEditor
         {
@@ -585,31 +592,152 @@ namespace StockPool
 
         private void StRunReco()
         {
+            // ⚠️ 守卫必需：原来这里完全没有，用户等不及再点一次就会叠加多个
+            // 全市场计算（后端并发上限 1，第二个会被拒，但两个都得等）。
+            if (_stRecoBusy) return;
             if (_stStrategies == null || _stList.SelectedIndex < 0)
             {
                 SetErr(_stRecoStatus, "请先在「策略选择与编辑」里选一个策略");
                 return;
             }
+            _stRecoBusy = true;
+            int myRun = ++_stRecoRunId;
             var req = StRequest(0);
-            _stRecoStatus.Text = "计算中…";
-            _stRecoStatus.ForeColor = _cSub;
+            SetErr(_stRecoStatus, "正在提交…（全市场约 7~10 分钟，可随时切走）");
             string body = new JavaScriptSerializer().Serialize(req);
             System.Threading.Tasks.Task.Run(delegate
             {
                 try
                 {
-                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/recommend", body, 600000);
+                    // 只等「启动」这一下（实测0.01s返回），不再等算完
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/recommend", body, 30000);
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    Invoke((Action)(() => StRenderReco(j)));
+                    Invoke((Action)(() =>
+                    {
+                        if (myRun != _stRecoRunId) return;      // 已被新一轮取代
+                        if (J.IsFailed(j))
+                        {
+                            _stRecoBusy = false;
+                            SetErr(_stRecoStatus, "无法启动：" + StErrMsg(j));
+                            return;
+                        }
+                        var st = (Dictionary<string, object>)J.Get(j, "state");
+                        int tot = st == null ? 0 : J.Int(st["total"]);
+                        SetErr(_stRecoStatus, string.Format(
+                            "计算中 0/{0}（0.0%）…", tot <= 0 ? "?" : tot.ToString()));
+                        if (_stRecoTimer == null)
+                        {
+                            _stRecoTimer = new Timer();
+                            _stRecoTimer.Interval = 2000;
+                            _stRecoTimer.Tick += delegate { StRecoPoll(); };
+                        }
+                        _stRecoTimer.Start();
+                    }));
                 }
                 catch (Exception ex)
                 {
                     string msg = ex.Message;
                     Invoke((Action)(() =>
                     {
-                        SetErr(_stRecoStatus, "计算失败：" + msg);
+                        if (myRun != _stRecoRunId) return;
+                        // ⚠️ 失败路径也必须复位，否则按钮点一次之后永久卡死
+                        _stRecoBusy = false;
+                        SetErr(_stRecoStatus, "无法启动：" + msg);
                     }));
                 }
+            });
+        }
+
+        /// <summary>轮询推荐进度；完成后停表并取结果。</summary>
+        private void StRecoPoll()
+        {
+            // ⚠️ 这里**不能**拿 _stRecoBusy 做防重入：它是「整个流程在跑」的标志。
+            // 若在此清掉，下一个 tick 会被 if(!_stRecoBusy) return 挡掉，轮询就自停了
+            //（单次请求一旦超过 Interval 2 秒就必然发生）。
+            // 正确分工：_stRecoPollBusy 管「本次请求在飞」，_stRecoBusy 全程保持 true
+            //——它必须一直为 true，用户才点不动第二次。
+            if (_stRecoPollBusy) return;
+            _stRecoPollBusy = true;
+            int myRun = _stRecoRunId;
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/recommend/progress", null, 15000);
+                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    Invoke((Action)(() =>
+                    {
+                        _stRecoPollBusy = false;
+                        if (myRun != _stRecoRunId) return;      // 已被新一轮取代
+                        var st = (Dictionary<string, object>)J.Get(j, "state");
+                        string state = st == null ? "" : J.StrAt(st, "state");
+                        string phase = st == null ? "" : J.StrAt(st, "phase");
+                        int done = st == null ? 0 : J.Int(st["done"]);
+                        int tot = st == null ? 0 : J.Int(st["total"]);
+                        double sec = st == null ? 0 : J.Num(st["elapsed"]);
+
+                        if (state == "error")
+                        {
+                            if (_stRecoTimer != null) _stRecoTimer.Stop();
+                            _stRecoBusy = false;
+                            SetErr(_stRecoStatus, "计算失败：" + J.StrAt(st, "error"));
+                            return;
+                        }
+                        if (state == "running")
+                        {
+                            if (phase == "running")
+                                // 策略计算阶段外部无法细分（done 已置满），别编百分比
+                                SetErr(_stRecoStatus, string.Format(
+                                    "计算中（{0}/{1}，正在算策略信号，已用 {2:F0} 秒）…",
+                                    done, tot, sec));
+                            else
+                                SetErr(_stRecoStatus, string.Format(
+                                    "读取数据中 {0}/{1}（{2:F1}%），已用 {3:F0} 秒…",
+                                    done, tot, tot > 0 ? done * 100.0 / tot : 0, sec));
+                            return;
+                        }
+
+                        // ready：停表，取结果（_stRecoBusy 保持 true 直到渲染完）
+                        if (_stRecoTimer != null) _stRecoTimer.Stop();
+                        StRecoFetchResult(myRun);
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    string msg = ex.Message;
+                    Invoke((Action)(() =>
+                    {
+                        _stRecoPollBusy = false;
+                        if (myRun != _stRecoRunId) return;
+                        if (_stRecoTimer != null) _stRecoTimer.Stop();
+                        _stRecoBusy = false;
+                        SetErr(_stRecoStatus, "读取进度失败：" + msg);
+                    }));
+                }
+            });
+        }
+
+        private void StRecoFetchResult(int myRun)
+        {
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                string resp = null, emsg = "";
+                Dictionary<string, object> j = null;
+                try
+                {
+                    resp = VRequest("http://127.0.0.1:8000/api/strategies/recommend/result", null, 60000);
+                    j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                }
+                catch (Exception ex) { emsg = ex.Message; }
+                var jj = j;
+                var ee = emsg;
+                Invoke((Action)(() =>
+                {
+                    if (myRun != _stRecoRunId) return;
+                    _stRecoBusy = false;
+                    if (jj == null) { SetErr(_stRecoStatus, "读取结果失败：" + ee); return; }
+                    StRenderReco(jj);
+                }));
             });
         }
 

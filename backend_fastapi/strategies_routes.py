@@ -157,17 +157,51 @@ def list_backtest_reports(limit: int = 50):
 @router.post("/recommend")
 @_guard(code=_CODE_ERR)
 def do_recommend(req: BacktestRequest):
-    """当前策略推荐：按最新一日信号给出买入 / 卖出 / 持股三档建议。
+    """当前策略推荐：**启动后台任务并立即返回**（入参与 /backtest 一致，window 除外）。
 
-    入参与 /backtest 一致（window 除外，本接口不用于短窗口回测）。
+    为什么不再同步返回：全市场 5585 只需 418.7s（实测），冷缓存更久，
+    而前端是一次同步请求 + 600s 固定超时 —— 结构上必然「请求被中止：操作超时」，
+    且途中零反馈。与 `/backtest/task` 同一套模式：轮询 `/recommend/progress`，
+    完成后用 `/recommend/result` 取结果。
+
+    同一时间只允许一个任务（两个全市场并行互相拖慢）。
     """
     codes = [str(c).strip() for c in (req.codes or []) if str(c).strip()]
     if req.use_all:
         codes = sdata.list_universe_codes()
-    return backtest.run_recommend(
+    if not codes:
+        raise ValueError("股票池为空，请先选择回测范围")
+    out = backtest.start_reco_task(
         req.strategy_id, req.params, codes, req.start, req.end,
         req.initial_capital, req.commission,
     )
+    if not out.get("ok"):
+        return JSONResponse(status_code=409,
+                            content={"ok": False,
+                                     "error": {"code": "BUSY",
+                                               "message": out.get("error") or "已有推荐在运行"}})
+    return out
+
+
+@router.get("/recommend/progress")
+def do_recommend_progress():
+    """轮询推荐进度：阶段 + 已测/总数 + 耗时。
+
+    `phase=loading` 时 done/total 是**准确的已测只数**；`phase=running` 是策略
+    计算阶段（策略函数自己遍历标的、外部无法细分），此时 done 保持 total，
+    **不给假的百分比** —— 宁可停在 100% 也不要显示一个编出来的 63%。
+    """
+    return {"ok": True, "state": backtest.reco_task_state()}
+
+
+@router.get("/recommend/result")
+def do_recommend_result():
+    """取最近一次**已完成**的推荐结果；还在跑 / 从未跑过则 ok=false。"""
+    out = backtest.reco_result()
+    if out is None:
+        return {"ok": False, "state": backtest.reco_task_state(),
+                "error": {"code": "NOT_READY", "message": "还没有已完成的推荐结果"}}
+    return out
 
 
 @router.get("/backtest/trades")

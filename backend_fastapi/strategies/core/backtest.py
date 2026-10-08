@@ -215,7 +215,7 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
 def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
                   start: str | None = None, end: str | None = None,
                   initial_capital: float = 100000.0, commission: float = 0.0003,
-                  lookback: int = 250) -> dict:
+                  lookback: int = 250, progress=None) -> dict:
     """当前策略推荐：按**最新一日**的目标仓位给出买入 / 卖出 / 持股三档。
 
     与回测共用同一套信号与 T+1 口径，只是不统计历史净值，只回答「今天怎么做」：
@@ -229,6 +229,10 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
     金额口径：等权资金带 `band = initial_capital / 有效标的数`，与回测的
     组合口径一致；盈亏用**后复权**序列算（消除除权的假盈亏），
     价格展示用原始收盘（不复权，用户看得懂）。
+
+    `progress(done, total)` 与 `run_backtest` 同义（哨兵 done=-1 表示进入
+    不可细分的策略计算阶段）——原先这里没往下传，导致异步化之后进度条
+    永远停在 0%。
     """
     codes = [str(c).strip() for c in (codes or []) if str(c).strip()]
     if not codes:
@@ -239,9 +243,11 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
         if len(days) >= 2:
             start, end = days[0], days[-1]
 
-    usable, errors = _prepare(codes, start, end)
+    usable, errors = _prepare(codes, start, end, progress=progress)
     if not usable:
         raise RuntimeError("所选范围内没有可用数据，无法生成推荐")
+    if progress is not None:
+        progress(-1, len(codes))     # 哨兵：进入不可细分的策略计算阶段
 
     ctx = base.StrategyContext(codes=list(usable.keys()), start=start, end=end, adjust="hfq")
     signals = base.run(strategy_id, ctx, params)
@@ -332,6 +338,120 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
     }
 
 
+# ---- 异步推荐任务：与下面的异步回测同一套模式 ----
+# 同样是「全市场必然超时」：实测 5585 只要 **418.7s**（冷缓存更久，实测
+# n=3000 已经276.0s，约 88ms/只），而原前端是**一次同步请求 + 600s 固定超时**，
+# 途中零反馈。更糟的是它连 busy 守卫都没有 —— 用户等不及再点一次，就叠了两个
+# 全市场计算互相拖慢。改成 start -> progress 轮询 -> result。
+#
+# 与回测任务**各自独立**的状态槽：两者的阶段语义与结果类型都不同，
+# 挤进一份状态会让前端得同时理解两套字段。
+_RECO_TASK: dict = {
+    "state": "idle",       # idle / running / ready / error
+    "phase": "",           # loading（可细分）/ running（策略计算，不可细分）/ done
+    "done": 0, "total": 0,
+    "strategy_id": "", "strategy_name": "", "codes_count": 0,
+    "started_at": None, "finished_at": None, "elapsed": 0.0, "error": None,
+}
+_RECO_LOCK = threading.Lock()
+_RECO_RESULT: dict | None = None
+
+
+def _reco_state_locked() -> dict:
+    """`_RECO_TASK` 的深拷贝快照。**调用方必须已持有 `_RECO_LOCK`。**
+
+    单独拆出来是因为 `threading.Lock` **不可重入**：若在持锁期间调用
+    又会去加同一把锁的 `reco_task_state()`，线程会永久死锁 —— 而这把锁同时
+    守着 `reco_task_state` / `reco_result`，一旦锁死，**进度轮询与取结果会一起
+    超时**，整个接口看上去就是「启动后什么都不返回」。
+    """
+    snap = json.loads(json.dumps(_RECO_TASK))
+    if snap.get("started_at") and snap.get("state") == "running":
+        try:
+            t0 = dt.datetime.strptime(snap["started_at"], "%Y-%m-%d %H:%M:%S")
+            snap["elapsed"] = int((dt.datetime.now() - t0).total_seconds())
+        except Exception:
+            pass
+    return snap
+
+
+def reco_task_state() -> dict:
+    """当前推荐任务状态（供轮询）：语义与 `task_state` 一致，深拷贝。"""
+    with _RECO_LOCK:
+        return _reco_state_locked()
+
+
+def reco_result() -> dict | None:
+    """最近一次**已完成**的推荐结果；还在跑 / 从未跑过则None。"""
+    with _RECO_LOCK:
+        return json.loads(json.dumps(_RECO_RESULT)) if _RECO_RESULT else None
+
+
+def start_reco_task(strategy_id: str, params: dict | None, codes: list[str],
+                    start: str | None = None, end: str | None = None,
+                    initial_capital: float = 100000.0,
+                    commission: float = 0.0003) -> dict:
+    """启动一次后台推荐并**立即返回**；已有任务在跑时返回 ok=false（不排队）。
+
+    并发上限为 1，与回测任务同理由：两个全市场并行会把 CPU 与 SQLite 读盘打满，
+    而且前端一次也只看不了两个结果。
+    """
+    global _RECO_RESULT
+    with _RECO_LOCK:
+        if _RECO_TASK["state"] == "running":
+            # ⚠️ 必须用 `_reco_state_locked()`，不能用 reco_task_state()——
+            # 后者会再去加同一把不可重入的锁，当前线程会永久死锁。
+            return {"ok": False, "error": "已有推荐在运行，请等它结束",
+                    "state": _reco_state_locked()}
+        _RECO_RESULT = None
+        try:
+            name = base.REGISTRY[strategy_id].name
+        except Exception:
+            name = strategy_id
+        _RECO_TASK.update({
+            "state": "running", "phase": "loading", "done": 0,
+            "total": len(codes or []), "strategy_id": strategy_id,
+            "strategy_name": name, "codes_count": len(codes or []),
+            "started_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "finished_at": None, "elapsed": 0.0, "error": None,
+        })
+
+    def _on_progress(done: int, total: int):
+        with _RECO_LOCK:
+            if done < 0:                 # 哨兵：进入不可细分的策略计算阶段
+                _RECO_TASK["phase"] = "running"
+                _RECO_TASK["done"] = _RECO_TASK["total"]
+            else:
+                _RECO_TASK["phase"] = "loading"
+                _RECO_TASK["done"] = int(done)
+                if total:
+                    _RECO_TASK["total"] = int(total)
+
+    def _work():
+        t0 = time.time()
+        try:
+            out = run_recommend(strategy_id, params, codes, start, end,
+                               initial_capital, commission,
+                               progress=_on_progress)
+            global _RECO_RESULT
+            _RECO_RESULT = out
+            with _RECO_LOCK:
+                _RECO_TASK.update(
+                    state="ready", phase="done", done=_RECO_TASK["total"],
+                    finished_at=dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    elapsed=round(time.time() - t0, 1), error=None)
+        except Exception as exc:                # noqa: BLE001 - 后台线程要把错误带出去
+            with _RECO_LOCK:
+                _RECO_TASK.update(
+                    state="error", phase="done",
+                    finished_at=dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    elapsed=round(time.time() - t0, 1),
+                    error=f"{type(exc).__name__}: {exc}")
+
+    threading.Thread(target=_work, name="recommend-task", daemon=True).start()
+    return {"ok": True, "state": reco_task_state()}
+
+
 # ---- 异步回测任务（第 18 项）：解决「全市场回测必定超时」----
 # 全市场 5000+ 只冷缓存读库要几分钟，而前端是**一次同步请求 + 固定超时**
 # （实测 5585 只直接「请求被中止：操作超时」）。这不是网络问题，是结构上必然超时
@@ -357,14 +477,14 @@ def last_trades() -> list:
     return _BT_TRADES
 
 
-def task_state() -> dict:
-    """当前任务状态（供轮询）：深拷贝，不暴露内部可变对象。
+def _bt_state_locked() -> dict:
+    """`_BT_TASK` 的深拷贝快照。**调用方必须已持有 `_BT_LOCK`。**
 
-    `elapsed` 在**运行中也要有值** —— 只在结束时写的话，进度条旁边的时间会一直
-    显示 0s，用户以为卡住了。这里按 `started_at` 实时算。
+    拆出来的原因同 `_reco_state_locked`：`threading.Lock` 不可重入，
+    持锁期间调用会再加锁的 `task_state()` 会永久死锁；而这把锁同时守着
+    `task_state` / `task_result`，锁死之后**进度轮询与取结果会一起超时**。
     """
-    with _BT_LOCK:
-        snap = json.loads(json.dumps(_BT_TASK))
+    snap = json.loads(json.dumps(_BT_TASK))
     if snap.get("started_at") and snap.get("state") == "running":
         try:
             t0 = dt.datetime.strptime(snap["started_at"], "%Y-%m-%d %H:%M:%S")
@@ -372,6 +492,16 @@ def task_state() -> dict:
         except Exception:
             pass
     return snap
+
+
+def task_state() -> dict:
+    """当前任务状态（供轮询）：深拷贝，不暴露内部可变对象。
+
+    `elapsed` 在**运行中也要有值** —— 只在结束时写的话，进度条旁边的时间会一直
+    显示 0s，用户以为卡住了。这里按 `started_at` 实时算。
+    """
+    with _BT_LOCK:
+        return _bt_state_locked()
 
 
 def task_result() -> dict | None:
@@ -391,8 +521,10 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
     global _BT_RESULT
     with _BT_LOCK:
         if _BT_TASK["state"] == "running":
+            # ⚠️ 必须用 `_bt_state_locked()`，不能用 task_state()——后者会再去加
+            # 同一把不可重入的锁，导致本线程（连带所有轮询）永久死锁。
             return {"ok": False, "error": "已有回测在运行，请等它结束或先点「停止」",
-                    "state": task_state()}
+                    "state": _bt_state_locked()}
         _BT_RESULT = None
         try:
             name = base.REGISTRY[strategy_id].name
