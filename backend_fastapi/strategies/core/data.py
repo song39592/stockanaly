@@ -114,6 +114,36 @@ def load_bars(codes, start: str | None = None, end: str | None = None,
     return out
 
 
+def release_cache(codes: list[str], adjust: str | None = None,
+                  start: str | None = None, end: str | None = None) -> int:
+    """释放指定标的在**逐标的缓存**里的条目，返回释放条数。
+
+    为什么需要（第 21 项的内存实测）：`_PER_CACHE` 是**进程级**、**无上限**的，
+    全市场一次 recommend/backtest 就会把 5000+ 只 × 250 天的 OHLCV 全留在内存里
+    —— 实测后端常驻内存涨到 2GB、系统只剩 3.1GB 可用，于是 GC 与换页把
+    「小样本实测 444s」的耗时放大到实测 946s。缓存本身是对的（复用、免重复读盘），
+    问题只在于**没人控制它的体量**。
+
+    因此分批处理某个大任务时，取完一批就调它把这一批还回去：
+    缓存的收益（同一批内不重复读）完全保留，跨批的占用则被压住。
+
+    `adjust` / `start` / `end` 传None 表示该维度不限（只按 code 匹配）。
+    ⚠️ 释放后若别处仍需要这些标的，`load_bars` 会**重新读盘**（结果一致，
+    只是多花时间）——所以只在"确定后面不再用"的批次边界调用。
+    """
+    want = set(str(c).strip() for c in codes)
+    if not want:
+        return 0
+    drop = [k for k in _PER_CACHE
+            if k[0] in want
+            and (adjust is None or k[3] == adjust)
+            and (start is None or k[1] == start)
+            and (end is None or k[2] == end)]
+    for k in drop:
+        _PER_CACHE.pop(k, None)
+    return len(drop)
+
+
 def list_universe_codes() -> list[str]:
     """列出本地已下载（有日 K）的全部股票代码，供「回测范围」选股票池。"""
     return sorted(price_store.code_latest_dates("raw").keys())

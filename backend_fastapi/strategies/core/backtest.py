@@ -212,6 +212,26 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
     }
 
 
+# ---- 第 21 项：全市场推荐的内存与耗时 ----
+# 分批大小。取 500 是权衡：一批 500 只 × 250 天的 OHLCV 约 180MB，
+# 远小于全市场一次性驻留的 2GB；又不至于太小以致线程池反复起停。
+_RECO_BATCH = 500
+
+
+class _IdxOnly:
+    """只有日期索引的「伪行情」。
+
+    `signals_to_positions` 只读 `close.index`（把信号对齐到该标的的交易日），
+    **从不碰价格**。所以算仓位时用这个代替整份 DataFrame，内存从
+    O(全市场 × 天数 × 一行 OHLCV) 降到 O(全市场 × 天数 × 一个字符串)。
+    """
+
+    __slots__ = ("index",)
+
+    def __init__(self, idx):
+        self.index = idx
+
+
 def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
                   start: str | None = None, end: str | None = None,
                   initial_capital: float = 100000.0, commission: float = 0.0003,
@@ -243,7 +263,27 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
         if len(days) >= 2:
             start, end = days[0], days[-1]
 
-    usable, errors = _prepare(codes, start, end, progress=progress)
+    # ---- 第 1 遍：分批预检，**只留日期索引**，不留行情本体----
+    # 为什么分批（第 21 项实测）：`_prepare` 一次性把全市场 5585 只 × 250 天
+    # 的 OHLCV 塞进 `_PER_CACHE`（进程级、无上限），实测后端常驻内存涨到 2GB、
+    # 系统只剩 3.1GB 可用，于是 GC 与换页把小样本实测的444s 放大到实测 **946s**。
+    # 取完一批就`release_cache` 还回去，缓存的「批内不重复读」收益全保留，
+    # 跨批占用被压住。
+    #
+    # 为什么只留索引：`signals_to_positions` 只用 `close.index`（对齐信号日期），
+    # **从不读价格**。所以这一步没必要留着整份 DataFrame。
+    idx_by_code: dict[str, list[str]] = {}
+    errors: list[str] = []
+    for i in range(0, len(codes), _RECO_BATCH):
+        batch = codes[i:i + _RECO_BATCH]
+        part, errs = _prepare(batch, start, end, progress=progress)
+        errors.extend(errs)
+        for c, df in part.items():
+            idx_by_code[c] = [str(d)[:10] for d in df.index]
+        del part
+        data.release_cache(batch, adjust="hfq")
+    usable = idx_by_code
+
     if not usable:
         raise RuntimeError("所选范围内没有可用数据，无法生成推荐")
     if progress is not None:
@@ -251,29 +291,49 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
 
     ctx = base.StrategyContext(codes=list(usable.keys()), start=start, end=end, adjust="hfq")
     signals = base.run(strategy_id, ctx, params)
-    close_by_code = {c: usable[c]["close"] for c in usable}
+    close_by_code = {c: _IdxOnly(ix) for c, ix in idx_by_code.items()}
     positions = base.signals_to_positions(signals, close_by_code)
+    # 第 1 遍的索引已不再需要（后面只用需要的标的的行情），尽早释放
+    del idx_by_code, close_by_code
 
-    raw_bars: dict = {}
+    # ---- 第 2 遍：**只给「非空仓」标的取价**（第 A 项）----
+    # 原实现在这里对**全市场**再读一遍raw（`adjust="raw"` 与上面 hfq 是两套独立
+    # 缓存，实测 108.8s / 5585 只），可它只为「买 / 卖 / 持」三档取两个**展示价**。
+    # 而三档只覆盖 `prev>0 or cur>0` 的标的 —— 实测全市场 5585 只里只有
+    # 107 只（买 9 + 卖 5 + 持 93）进得去，其余 5478 只的 raw 纯属白读。
+    # 空仓的票三个分支都进不去，一个价格都用不到，直接跳过。
+    priced: dict[str, tuple[float, float]] = {}
+    for code, w in positions.items():
+        if len(w) < 2:
+            continue
+        prev, cur = float(w.iloc[-2]), float(w.iloc[-1])
+        if prev <= 0.0 and cur <= 0.0:
+            continue
+        priced[code] = (prev, cur)
+    need = list(priced.keys())
+
+    hfq_bars = data.load_bars(need, start, end, fields=["close"], adjust="hfq")
     try:
-        raw_bars = data.load_bars(list(usable.keys()), start, end,
-                                  fields=["close"], adjust="raw")
+        raw_bars = data.load_bars(need, start, end, fields=["close"], adjust="raw")
     except Exception:                            # noqa: BLE001 - 原始价拿不到就用复权价展示
         raw_bars = {}
+    data.release_cache(need)      # 两种口径都取完即还回去，别把内存挂在 107 只上
 
-    names = _load_names(list(usable.keys()))
+    names = _load_names(list(priced.keys()))
     band = initial_capital / len(usable)
 
     buy: list[dict] = []
     sell: list[dict] = []
     hold: list[dict] = []
     for code, w in positions.items():
-        close = close_by_code.get(code)
-        if close is None or len(w) < 2:
+        if code not in priced:            # 空仓：买/卖/持都进不去，无需任何价格
             continue
-        prev, cur = float(w.iloc[-2]), float(w.iloc[-1])
+        prev, cur = priced[code]
+        hfq = hfq_bars.get(code)
+        if hfq is None or len(hfq) < 2:
+            continue
         raw = raw_bars.get(code)
-        px = float(raw["close"].iloc[-1]) if (raw is not None and len(raw)) else float(close.iloc[-1])
+        px = float(raw["close"].iloc[-1]) if (raw is not None and len(raw)) else float(hfq["close"].iloc[-1])
         nm = names.get(code) or None
 
         if cur > 0.0 and prev <= 0.0:                       # 建仓
@@ -288,8 +348,8 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
                 if float(w.iloc[i]) <= 0.0:
                     break
                 open_i = i
-            hfq_buy = float(close.iloc[open_i])
-            hfq_now = float(close.iloc[-1])
+            hfq_buy = float(hfq["close"].iloc[open_i])
+            hfq_now = float(hfq["close"].iloc[-1])
             pnl_pct = (hfq_now / hfq_buy - 1.0) if hfq_buy else 0.0
             amount = band * cur
             cost = float(raw["close"].iloc[open_i]) if (raw is not None and len(raw) > open_i) else hfq_buy
@@ -307,9 +367,9 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
     hold.sort(key=lambda x: -x["pnl"])
 
     date = ""
-    for c in close_by_code.values():
-        if len(c):
-            d = str(c.index[-1])[:10]
+    for ix in positions.values():
+        if len(ix):
+            d = str(ix.index[-1])[:10]
             if d > date:
                 date = d
 
