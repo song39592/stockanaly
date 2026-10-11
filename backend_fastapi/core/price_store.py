@@ -162,7 +162,7 @@ def _checksum(rows) -> str:
     字段顺序沿用 `_DIGEST_FIELDS`，因此调整该元组即为改变算法，必须同时 +1 `DIGEST_VERSION`。
     """
     payload = "\n".join(
-        "|".join("" if row[field] is None else str(row[field]) for field in _DIGEST_FIELDS)
+        "|".join("" if v is None else str(v) for v in row)
         for row in rows)
     return crypto.sign(payload)
 
@@ -540,14 +540,31 @@ def ensure_digests() -> dict:
 
 
 def list_bars(code: str, start: str | None = None, end: str | None = None,
-              adjust: str = "raw", verify: bool = True) -> list[dict[str, Any]]:
+              adjust: str = "raw", verify: bool = True,
+              fields: list[str] | None = None) -> list[dict[str, Any]]:
     """按**存储口径**读取原始价；跨年自动逐库查询后合并排序。复权价请用 load_bars()。
 
     `verify=True`（默认）时先比对按股指纹：不一致说明数据被改动过，
     此时**抛出 `UntrustedDataError` 拒绝返回**，不把可疑数据交给上层计算。
+
+    `fields`（第 22 项）：只读这些**行情列**，显著减少从磁盘取的列数与
+    pandas 要构造的数组宽度。原实现恒为 `SELECT *`（15 列），而调用方
+    （策略 / recommend）几乎都只要 `close` 1 列 —— 多读的 14 列既费IO 又让
+    `pd.DataFrame` 多分配十几次。`trade_date` / `adjust` 是**元信息**，始终读取，
+    否则上层无法建索引、也无法标注口径。给 `None`（默认）时行为与从前完全一致。
+
+    ⚠️ 指纹校验仍需**全 13 列**（checksum 按 `_DIGEST_SELECT` 定义），因此
+    下推 `fields` 省不掉那一遍 —— 那一遍要靠 `verified_cache` 之类的机制处理。
     """
     store_adjust = _store_adjust(adjust)
-    sql = "SELECT * FROM daily_bars WHERE code=? AND adjust=?"
+    if fields:
+        want = [c.strip() for c in fields if c and c.strip()]
+        cols = [c for c in ("trade_date", "adjust") if c not in want]
+        cols += [c for c in want if c not in cols]
+        select = ",".join(cols)
+    else:
+        select = "*"
+    sql = f"SELECT {select} FROM daily_bars WHERE code=? AND adjust=?"
     params: list[Any] = [code, store_adjust]
     if start:
         sql += " AND trade_date>=?"
@@ -928,18 +945,26 @@ def apply_hfq_factors(panel: "pd.DataFrame") -> "pd.DataFrame":
 
 
 def load_bars(code: str, adjust: str = "qfq", start: str | None = None,
-              end: str | None = None, as_of: str | None = None) -> list[dict[str, Any]]:
+              end: str | None = None, as_of: str | None = None,
+              fields: list[str] | None = None) -> list[dict[str, Any]]:
     """按口径读取日 K，复权价**现算**。
 
     参数：
       adjust  qfq（默认，展示用）/ hfq（回测用）/ raw（不复权）
       as_of   **复权基准日**，仅对 qfq 生效；缺省为区间内最后一个交易日。
               回测请传回测起点，使历史价格不含未来信息（滚动复权）。
+      fields  第22 项：只要这些行情列，连`SELECT *` 一起下推到 SQL。
+              给 None（默认）时行为与从前一致。
     返回项附 `adjusted` 标记；缺少因子时退化为原始价并置 `adjusted=False`，
     避免在因子缺失时静默给出看似正确的复权价。
+
+    ⚠️ 复权只缩放**价格列**（见下方注释），所以下推 fields 不会影响换算结果：
+    未请求的价格列在原始 dict 里不存在，换算时会得到None，与「该列本来就是
+    NULL」在下游无法区分 —— 但也只有在调用方明确不要该列时才会发生。
     """
     store_adjust = _store_adjust(adjust)
-    raw = list_bars(code, start, end, "raw")
+    # 复权要缩放价格列，若调用方要的是价格列就必须读它；否则照读即可。
+    raw = list_bars(code, start, end, "raw", fields=fields)
     if store_adjust == "raw" or not raw:
         return raw
 
@@ -969,14 +994,17 @@ def load_bars(code: str, adjust: str = "qfq", start: str | None = None,
             out.append({**bar, "adjust": store_adjust, "adjusted": False})
             continue
         scale = current / base_factor
+        # 只缩放**实际读到的**价格列（第 22 项）。原来无条件写 open/high/low/
+        # close 四个键，调用方只要 close 时也会凭空多出 3 个None 键 ——
+        # 值没错，但 250 行 × 3 个键的白开销与「列裁剪没生效」是同一回事。
+        _adj = {key: (None if bar.get(key) is None else round(bar[key] * scale, 4))
+                for key in ("open", "high", "low", "close") if key in bar}
         out.append({
             **bar,
             "adjust": store_adjust,
             "adjusted": True,
             "factor": round(scale, 10),
-            # 只有价格需要复权；成交量 / 成交额 / 换手率 / 涨跌幅不受复权影响
-            **{key: (None if bar.get(key) is None else round(bar[key] * scale, 4))
-               for key in ("open", "high", "low", "close")},
+            **_adj,
         })
     return out
 

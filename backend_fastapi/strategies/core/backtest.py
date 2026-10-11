@@ -212,10 +212,30 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
     }
 
 
+# ---- 第 21 项：全市场推荐的内存与耗时 ----
+# 分批大小。取 500 是权衡：一批 500 只 × 250 天的 OHLCV 约 180MB，
+# 远小于全市场一次性驻留的 2GB；又不至于太小以致线程池反复起停。
+_RECO_BATCH = 500
+
+
+class _IdxOnly:
+    """只有日期索引的「伪行情」。
+
+    `signals_to_positions` 只读 `close.index`（把信号对齐到该标的的交易日），
+    **从不碰价格**。所以算仓位时用这个代替整份 DataFrame，内存从
+    O(全市场 × 天数 × 一行 OHLCV) 降到 O(全市场 × 天数 × 一个字符串)。
+    """
+
+    __slots__ = ("index",)
+
+    def __init__(self, idx):
+        self.index = idx
+
+
 def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
                   start: str | None = None, end: str | None = None,
                   initial_capital: float = 100000.0, commission: float = 0.0003,
-                  lookback: int = 250) -> dict:
+                  lookback: int = 250, progress=None) -> dict:
     """当前策略推荐：按**最新一日**的目标仓位给出买入 / 卖出 / 持股三档。
 
     与回测共用同一套信号与 T+1 口径，只是不统计历史净值，只回答「今天怎么做」：
@@ -229,6 +249,10 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
     金额口径：等权资金带 `band = initial_capital / 有效标的数`，与回测的
     组合口径一致；盈亏用**后复权**序列算（消除除权的假盈亏），
     价格展示用原始收盘（不复权，用户看得懂）。
+
+    `progress(done, total)` 与 `run_backtest` 同义（哨兵 done=-1 表示进入
+    不可细分的策略计算阶段）——原先这里没往下传，导致异步化之后进度条
+    永远停在 0%。
     """
     codes = [str(c).strip() for c in (codes or []) if str(c).strip()]
     if not codes:
@@ -239,35 +263,77 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
         if len(days) >= 2:
             start, end = days[0], days[-1]
 
-    usable, errors = _prepare(codes, start, end)
+    # ---- 第 1 遍：分批预检，**只留日期索引**，不留行情本体----
+    # 为什么分批（第 21 项实测）：`_prepare` 一次性把全市场 5585 只 × 250 天
+    # 的 OHLCV 塞进 `_PER_CACHE`（进程级、无上限），实测后端常驻内存涨到 2GB、
+    # 系统只剩 3.1GB 可用，于是 GC 与换页把小样本实测的444s 放大到实测 **946s**。
+    # 取完一批就`release_cache` 还回去，缓存的「批内不重复读」收益全保留，
+    # 跨批占用被压住。
+    #
+    # 为什么只留索引：`signals_to_positions` 只用 `close.index`（对齐信号日期），
+    # **从不读价格**。所以这一步没必要留着整份 DataFrame。
+    idx_by_code: dict[str, list[str]] = {}
+    errors: list[str] = []
+    for i in range(0, len(codes), _RECO_BATCH):
+        batch = codes[i:i + _RECO_BATCH]
+        part, errs = _prepare(batch, start, end, progress=progress)
+        errors.extend(errs)
+        for c, df in part.items():
+            idx_by_code[c] = [str(d)[:10] for d in df.index]
+        del part
+        data.release_cache(batch, adjust="hfq")
+    usable = idx_by_code
+
     if not usable:
         raise RuntimeError("所选范围内没有可用数据，无法生成推荐")
+    if progress is not None:
+        progress(-1, len(codes))     # 哨兵：进入不可细分的策略计算阶段
 
     ctx = base.StrategyContext(codes=list(usable.keys()), start=start, end=end, adjust="hfq")
     signals = base.run(strategy_id, ctx, params)
-    close_by_code = {c: usable[c]["close"] for c in usable}
+    close_by_code = {c: _IdxOnly(ix) for c, ix in idx_by_code.items()}
     positions = base.signals_to_positions(signals, close_by_code)
+    # 第 1 遍的索引已不再需要（后面只用需要的标的的行情），尽早释放
+    del idx_by_code, close_by_code
 
-    raw_bars: dict = {}
+    # ---- 第 2 遍：**只给「非空仓」标的取价**（第 A 项）----
+    # 原实现在这里对**全市场**再读一遍raw（`adjust="raw"` 与上面 hfq 是两套独立
+    # 缓存，实测 108.8s / 5585 只），可它只为「买 / 卖 / 持」三档取两个**展示价**。
+    # 而三档只覆盖 `prev>0 or cur>0` 的标的 —— 实测全市场 5585 只里只有
+    # 107 只（买 9 + 卖 5 + 持 93）进得去，其余 5478 只的 raw 纯属白读。
+    # 空仓的票三个分支都进不去，一个价格都用不到，直接跳过。
+    priced: dict[str, tuple[float, float]] = {}
+    for code, w in positions.items():
+        if len(w) < 2:
+            continue
+        prev, cur = float(w.iloc[-2]), float(w.iloc[-1])
+        if prev <= 0.0 and cur <= 0.0:
+            continue
+        priced[code] = (prev, cur)
+    need = list(priced.keys())
+
+    hfq_bars = data.load_bars(need, start, end, fields=["close"], adjust="hfq")
     try:
-        raw_bars = data.load_bars(list(usable.keys()), start, end,
-                                  fields=["close"], adjust="raw")
+        raw_bars = data.load_bars(need, start, end, fields=["close"], adjust="raw")
     except Exception:                            # noqa: BLE001 - 原始价拿不到就用复权价展示
         raw_bars = {}
+    data.release_cache(need)      # 两种口径都取完即还回去，别把内存挂在 107 只上
 
-    names = _load_names(list(usable.keys()))
+    names = _load_names(list(priced.keys()))
     band = initial_capital / len(usable)
 
     buy: list[dict] = []
     sell: list[dict] = []
     hold: list[dict] = []
     for code, w in positions.items():
-        close = close_by_code.get(code)
-        if close is None or len(w) < 2:
+        if code not in priced:            # 空仓：买/卖/持都进不去，无需任何价格
             continue
-        prev, cur = float(w.iloc[-2]), float(w.iloc[-1])
+        prev, cur = priced[code]
+        hfq = hfq_bars.get(code)
+        if hfq is None or len(hfq) < 2:
+            continue
         raw = raw_bars.get(code)
-        px = float(raw["close"].iloc[-1]) if (raw is not None and len(raw)) else float(close.iloc[-1])
+        px = float(raw["close"].iloc[-1]) if (raw is not None and len(raw)) else float(hfq["close"].iloc[-1])
         nm = names.get(code) or None
 
         if cur > 0.0 and prev <= 0.0:                       # 建仓
@@ -282,8 +348,8 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
                 if float(w.iloc[i]) <= 0.0:
                     break
                 open_i = i
-            hfq_buy = float(close.iloc[open_i])
-            hfq_now = float(close.iloc[-1])
+            hfq_buy = float(hfq["close"].iloc[open_i])
+            hfq_now = float(hfq["close"].iloc[-1])
             pnl_pct = (hfq_now / hfq_buy - 1.0) if hfq_buy else 0.0
             amount = band * cur
             cost = float(raw["close"].iloc[open_i]) if (raw is not None and len(raw) > open_i) else hfq_buy
@@ -301,9 +367,9 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
     hold.sort(key=lambda x: -x["pnl"])
 
     date = ""
-    for c in close_by_code.values():
-        if len(c):
-            d = str(c.index[-1])[:10]
+    for ix in positions.values():
+        if len(ix):
+            d = str(ix.index[-1])[:10]
             if d > date:
                 date = d
 
@@ -332,6 +398,127 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
     }
 
 
+# ---- 异步推荐任务：与下面的异步回测同一套模式 ----
+# 同样是「全市场必然超时」：实测 5585 只要 **418.7s**（冷缓存更久，实测
+# n=3000 已经276.0s，约 88ms/只），而原前端是**一次同步请求 + 600s 固定超时**，
+# 途中零反馈。更糟的是它连 busy 守卫都没有 —— 用户等不及再点一次，就叠了两个
+# 全市场计算互相拖慢。改成 start -> progress 轮询 -> result。
+#
+# 与回测任务**各自独立**的状态槽：两者的阶段语义与结果类型都不同，
+# 挤进一份状态会让前端得同时理解两套字段。
+_RECO_TASK: dict = {
+    "state": "idle",       # idle / running / ready / error
+    "phase": "",           # loading（可细分）/ running（策略计算，不可细分）/ done
+    "done": 0, "total": 0,
+    "strategy_id": "", "strategy_name": "", "codes_count": 0,
+    "started_at": None, "finished_at": None, "elapsed": 0.0, "error": None,
+}
+_RECO_LOCK = threading.Lock()
+_RECO_RESULT: dict | None = None
+
+
+def _reco_state_locked() -> dict:
+    """`_RECO_TASK` 的深拷贝快照。**调用方必须已持有 `_RECO_LOCK`。**
+
+    单独拆出来是因为 `threading.Lock` **不可重入**：若在持锁期间调用
+    又会去加同一把锁的 `reco_task_state()`，线程会永久死锁 —— 而这把锁同时
+    守着 `reco_task_state` / `reco_result`，一旦锁死，**进度轮询与取结果会一起
+    超时**，整个接口看上去就是「启动后什么都不返回」。
+    """
+    snap = json.loads(json.dumps(_RECO_TASK))
+    if snap.get("started_at") and snap.get("state") == "running":
+        try:
+            t0 = dt.datetime.strptime(snap["started_at"], "%Y-%m-%d %H:%M:%S")
+            snap["elapsed"] = int((dt.datetime.now() - t0).total_seconds())
+        except Exception:
+            pass
+    return snap
+
+
+def reco_task_state() -> dict:
+    """当前推荐任务状态（供轮询）：语义与 `task_state` 一致，深拷贝。"""
+    with _RECO_LOCK:
+        return _reco_state_locked()
+
+
+def reco_result() -> dict | None:
+    """最近一次**已完成**的推荐结果；还在跑 / 从未跑过则None。"""
+    with _RECO_LOCK:
+        return json.loads(json.dumps(_RECO_RESULT)) if _RECO_RESULT else None
+
+
+def start_reco_task(strategy_id: str, params: dict | None, codes: list[str],
+                    start: str | None = None, end: str | None = None,
+                    initial_capital: float = 100000.0,
+                    commission: float = 0.0003) -> dict:
+    """启动一次后台推荐并**立即返回**；已有任务在跑时返回 ok=false（不排队）。
+
+    并发上限为 1，与回测任务同理由：两个全市场并行会把 CPU 与 SQLite 读盘打满，
+    而且前端一次也只看不了两个结果。
+    """
+    global _RECO_RESULT
+    with _RECO_LOCK:
+        if _RECO_TASK["state"] == "running":
+            # ⚠️ 必须用 `_reco_state_locked()`，不能用 reco_task_state()——
+            # 后者会再去加同一把不可重入的锁，当前线程会永久死锁。
+            return {"ok": False, "error": "已有推荐在运行，请等它结束",
+                    "state": _reco_state_locked()}
+        _RECO_RESULT = None
+        try:
+            name = base.REGISTRY[strategy_id].name
+        except Exception:
+            name = strategy_id
+        _RECO_TASK.update({
+            "state": "running", "phase": "loading", "done": 0,
+            "total": len(codes or []), "strategy_id": strategy_id,
+            "strategy_name": name, "codes_count": len(codes or []),
+            "started_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "finished_at": None, "elapsed": 0.0, "error": None,
+        })
+
+    def _on_progress(done: int, total: int):
+        with _RECO_LOCK:
+            if done < 0:                 # 哨兵：进入不可细分的策略计算阶段
+                _RECO_TASK["phase"] = "running"
+                _RECO_TASK["done"] = _RECO_TASK["total"]
+            else:
+                _RECO_TASK["phase"] = "loading"
+                #⚠️ `done` / `total` 是**当前批次**的计数（`run_recommend` 分批
+                # 预检，第 21 项为了压内存峰值引入的），不是整个股票池的。
+                # 这里必须换算成全局进度，否则：
+                #   * 直接写 total 会把「总只数」改成「本批只数」——
+                #     1000 只的池会被显示成 500，进度条永远到不了 100%；
+                #   * 直接写 done 会让进度在批与批之间**倒退**。
+                # 已完成的批数 = 总数 - 本批总数，本批已完成 done。
+                overall = _RECO_TASK["total"]
+                left = max(0, int(total) - int(done))
+                _RECO_TASK["done"] = max(0, min(overall, overall - left))
+
+    def _work():
+        t0 = time.time()
+        try:
+            out = run_recommend(strategy_id, params, codes, start, end,
+                               initial_capital, commission,
+                               progress=_on_progress)
+            global _RECO_RESULT
+            _RECO_RESULT = out
+            with _RECO_LOCK:
+                _RECO_TASK.update(
+                    state="ready", phase="done", done=_RECO_TASK["total"],
+                    finished_at=dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    elapsed=round(time.time() - t0, 1), error=None)
+        except Exception as exc:                # noqa: BLE001 - 后台线程要把错误带出去
+            with _RECO_LOCK:
+                _RECO_TASK.update(
+                    state="error", phase="done",
+                    finished_at=dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    elapsed=round(time.time() - t0, 1),
+                    error=f"{type(exc).__name__}: {exc}")
+
+    threading.Thread(target=_work, name="recommend-task", daemon=True).start()
+    return {"ok": True, "state": reco_task_state()}
+
+
 # ---- 异步回测任务（第 18 项）：解决「全市场回测必定超时」----
 # 全市场 5000+ 只冷缓存读库要几分钟，而前端是**一次同步请求 + 固定超时**
 # （实测 5585 只直接「请求被中止：操作超时」）。这不是网络问题，是结构上必然超时
@@ -357,14 +544,14 @@ def last_trades() -> list:
     return _BT_TRADES
 
 
-def task_state() -> dict:
-    """当前任务状态（供轮询）：深拷贝，不暴露内部可变对象。
+def _bt_state_locked() -> dict:
+    """`_BT_TASK` 的深拷贝快照。**调用方必须已持有 `_BT_LOCK`。**
 
-    `elapsed` 在**运行中也要有值** —— 只在结束时写的话，进度条旁边的时间会一直
-    显示 0s，用户以为卡住了。这里按 `started_at` 实时算。
+    拆出来的原因同 `_reco_state_locked`：`threading.Lock` 不可重入，
+    持锁期间调用会再加锁的 `task_state()` 会永久死锁；而这把锁同时守着
+    `task_state` / `task_result`，锁死之后**进度轮询与取结果会一起超时**。
     """
-    with _BT_LOCK:
-        snap = json.loads(json.dumps(_BT_TASK))
+    snap = json.loads(json.dumps(_BT_TASK))
     if snap.get("started_at") and snap.get("state") == "running":
         try:
             t0 = dt.datetime.strptime(snap["started_at"], "%Y-%m-%d %H:%M:%S")
@@ -372,6 +559,16 @@ def task_state() -> dict:
         except Exception:
             pass
     return snap
+
+
+def task_state() -> dict:
+    """当前任务状态（供轮询）：深拷贝，不暴露内部可变对象。
+
+    `elapsed` 在**运行中也要有值** —— 只在结束时写的话，进度条旁边的时间会一直
+    显示 0s，用户以为卡住了。这里按 `started_at` 实时算。
+    """
+    with _BT_LOCK:
+        return _bt_state_locked()
 
 
 def task_result() -> dict | None:
@@ -391,8 +588,10 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
     global _BT_RESULT
     with _BT_LOCK:
         if _BT_TASK["state"] == "running":
+            # ⚠️ 必须用 `_bt_state_locked()`，不能用 task_state()——后者会再去加
+            # 同一把不可重入的锁，导致本线程（连带所有轮询）永久死锁。
             return {"ok": False, "error": "已有回测在运行，请等它结束或先点「停止」",
-                    "state": task_state()}
+                    "state": _bt_state_locked()}
         _BT_RESULT = None
         try:
             name = base.REGISTRY[strategy_id].name

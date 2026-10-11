@@ -73,6 +73,18 @@ namespace StockPool
         private List<string> _stEqDates;
         private List<double?> _stEq;
         private List<double?> _stEqBench;
+        // 全市场推荐要跑好几分钟（实测 5585 只需 418.7s），已改为后端异步任务，
+        // 这里用轮询跟进进度。⚠️ _stRecoBusy 是**必需**的：原来完全没有守卫，
+        // 用户等不及再点一次就会叠加多个全市场计算互相拖慢。
+        private Timer _stRecoTimer;
+        private bool _stRecoBusy;
+        private bool _stRecoPollBusy;      // 有一次轮询请求在飞（防tick 重叠）
+        private int _stRecoRunId;          // 每次启动 +1：陈旧响应据此丢弃（同回测 _stPollRunId）
+        // 当前选中的策略名（第 23 项）。放在**顶部操作区**而不是「策略选择与编辑」
+        // 子页里 —— 因为所有「运行回测 / 生成推荐」都读列表选中项，跑错策略时用户
+        // 在别的子页看不到自己选了什么。顶部常驻，任何子页都一眼可见。
+        private Label _stCurStrategy;
+        private Label _stRecoTitle;         // 第 23 项：「当前策略推荐」页顶部的策略名说明
 
         private sealed class StParamEditor
         {
@@ -114,6 +126,12 @@ namespace StockPool
             var head = Stack();
             TableLayoutPanel b0;
             var g0 = Group("操作", out b0);
+            // 第 23 项：第一行常驻显示「当前策略」。策略名要显眼（用户在「回测结果」
+            // 或「当前策略推荐」页按下运行时，真正跑的是列表里选中那个 —— 不显示
+            // 名字就很容易以为在跑另一个。空选中时显示提示而不是留白。
+            _stCurStrategy = Lbl("—");
+            _stCurStrategy.Font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold);
+            AddRow(b0, Row(Lbl("当前策略"), _stCurStrategy));
             _stResultStatus = Mute(Lbl("进入本页自动加载策略清单"));
             AddRow(b0, Row(Lbl("策略回测"), MiniBtn("刷新清单", delegate { StLoadStrategies(); }, 90), _stResultStatus));
             AddRow(head, g0);
@@ -182,6 +200,15 @@ namespace StockPool
 
         private void StOnSelectStrategy()
         {
+            StRefreshCurStrategy();          // 第 23 项：顶部「当前策略」随选中即时更新
+            // 第 23 项：回测结果页的标题也跟着换。**只在「尚未回测」时改**——
+            // 一旦跑过，那行标题描述的是上一次回测的范围与参数，换策略后
+            // 若无条件覆盖会把「上一次跑的是哪个策略」这段历史信息抹掉，
+            // 那正是回测后核对结果最需要的。跑完再切回本页会由
+            // StRunBacktest 自己填上新的完整标题。
+            if (_stResultHeader != null && _stResultHeader.Text.Contains("尚未回测"))
+                _stResultHeader.Text = "策略：" + StCurStrategyName() + " ·尚未回测";
+            StRefreshRecoTitle();
             if (_stList.SelectedIndex < 0 || _stStrategies == null) return;
             var meta = _stStrategies[_stList.SelectedIndex];
             _stDesc.Text = J.StrOr(meta["description"], "（无说明）");
@@ -203,6 +230,41 @@ namespace StockPool
             if (_stParamEditors.Count == 0)
                 _stParamPanel.Controls.Add(Mute(Lbl("该策略无可调参数。")));
             Skin(_stParamPanel);
+        }
+
+        /// <summary>当前选中策略的显示名（顶部、回测结果、推荐三处共用一个口径）。</summary>
+private string StCurStrategyName()
+        {
+            if (_stStrategies == null || _stList == null || _stList.SelectedIndex < 0)
+                return "未选择";
+            var meta = _stStrategies[_stList.SelectedIndex];
+            return J.StrOr(meta["name"], J.StrOr(meta["id"], "—"));
+        }
+
+        /// <summary>
+        /// 第 23 项：刷新顶部「当前策略」显示。
+        /// 由 StOnSelectStrategy 调用（切换策略即时生效），并且页面构建时
+        /// 也会先用一次初始值。
+        /// </summary>
+private void StRefreshCurStrategy()
+        {
+            if (_stCurStrategy == null) return;
+            if (_stStrategies == null || _stList == null || _stList.SelectedIndex < 0)
+            {
+                _stCurStrategy.Text = "未选择";
+                _stCurStrategy.ForeColor = _cSub;
+                return;
+            }
+            _stCurStrategy.Text = StCurStrategyName();
+            _stCurStrategy.ForeColor = C.DownSoft;
+        }
+
+        /// <summary>第 23 项：刷新「当前策略推荐」页顶部的说明行。</summary>
+private void StRefreshRecoTitle()
+        {
+            if (_stRecoTitle == null) return;
+            _stRecoTitle.Text = "当前策略：" + StCurStrategyName()
+                + "　—　按它在**最新交易日**的信号给出操作建议；范围 / 资金 / 佣金沿用「回测范围」页的设置。";
         }
 
         private void StAddParamEditor(Dictionary<string, object> p)
@@ -373,7 +435,10 @@ namespace StockPool
         private void StBuildResult(TableLayoutPanel stack)
         {
             _stResultHeader = new Label();
-            _stResultHeader.Text = "—";
+            // 第 23 项：初始就带上策略名，而不是「—」等到跑完才显示 —— 这一页
+            // 的操作按钮写的就是「运行回测（选中策略）」，用户在这里按下时最需要
+            // 确认自己选对了没。跑完后会被 StRunBacktest 里的完整区间信息覆盖。
+            _stResultHeader.Text = "策略：" + StCurStrategyName() + " · 尚未回测";
             _stResultHeader.Font = new Font("Microsoft YaHei UI", 11f, FontStyle.Bold);
             _stResultHeader.AutoSize = true;
             _stResultHeader.MaximumSize = new Size(900, 0);
@@ -532,7 +597,12 @@ namespace StockPool
         // 持股（继续持有，含建仓成本与浮盈亏）。
         private void StBuildReco(TableLayoutPanel stack)
         {
-            AddRow(stack, Mute(Lbl("按当前策略在**最新交易日**的信号给出操作建议；范围 / 资金 / 佣金沿用「回测范围」页的设置。")));
+            // 第 23 项：标题行直接写出策略名。这一页的按钮是「生成当前推荐」，
+            // 「当前」指的是列表选中项而不是上回测过的那个；不写出来用户很容易
+            // 切了策略却以为在重跑上一个。下方状态行还会带出「策略：」前缀，双保险。
+            _stRecoTitle = Mute(Lbl(""));
+            AddRow(stack, _stRecoTitle);
+            StRefreshRecoTitle();
             AddRow(stack, Row(MiniBtn("生成当前推荐", delegate { StRunReco(); }, 130),
                 _stRecoStatus = Mute(Lbl("尚未生成"))));
 
@@ -585,31 +655,152 @@ namespace StockPool
 
         private void StRunReco()
         {
+            // ⚠️ 守卫必需：原来这里完全没有，用户等不及再点一次就会叠加多个
+            // 全市场计算（后端并发上限 1，第二个会被拒，但两个都得等）。
+            if (_stRecoBusy) return;
             if (_stStrategies == null || _stList.SelectedIndex < 0)
             {
                 SetErr(_stRecoStatus, "请先在「策略选择与编辑」里选一个策略");
                 return;
             }
+            _stRecoBusy = true;
+            int myRun = ++_stRecoRunId;
             var req = StRequest(0);
-            _stRecoStatus.Text = "计算中…";
-            _stRecoStatus.ForeColor = _cSub;
+            SetErr(_stRecoStatus, "正在提交…（全市场约 7~10 分钟，可随时切走）");
             string body = new JavaScriptSerializer().Serialize(req);
             System.Threading.Tasks.Task.Run(delegate
             {
                 try
                 {
-                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/recommend", body, 600000);
+                    // 只等「启动」这一下（实测0.01s返回），不再等算完
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/recommend", body, 30000);
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    Invoke((Action)(() => StRenderReco(j)));
+                    Invoke((Action)(() =>
+                    {
+                        if (myRun != _stRecoRunId) return;      // 已被新一轮取代
+                        if (J.IsFailed(j))
+                        {
+                            _stRecoBusy = false;
+                            SetErr(_stRecoStatus, "无法启动：" + StErrMsg(j));
+                            return;
+                        }
+                        var st = (Dictionary<string, object>)J.Get(j, "state");
+                        int tot = st == null ? 0 : J.Int(st["total"]);
+                        SetErr(_stRecoStatus, string.Format(
+                            "计算中 0/{0}（0.0%）…", tot <= 0 ? "?" : tot.ToString()));
+                        if (_stRecoTimer == null)
+                        {
+                            _stRecoTimer = new Timer();
+                            _stRecoTimer.Interval = 2000;
+                            _stRecoTimer.Tick += delegate { StRecoPoll(); };
+                        }
+                        _stRecoTimer.Start();
+                    }));
                 }
                 catch (Exception ex)
                 {
                     string msg = ex.Message;
                     Invoke((Action)(() =>
                     {
-                        SetErr(_stRecoStatus, "计算失败：" + msg);
+                        if (myRun != _stRecoRunId) return;
+                        // ⚠️ 失败路径也必须复位，否则按钮点一次之后永久卡死
+                        _stRecoBusy = false;
+                        SetErr(_stRecoStatus, "无法启动：" + msg);
                     }));
                 }
+            });
+        }
+
+        /// <summary>轮询推荐进度；完成后停表并取结果。</summary>
+        private void StRecoPoll()
+        {
+            // ⚠️ 这里**不能**拿 _stRecoBusy 做防重入：它是「整个流程在跑」的标志。
+            // 若在此清掉，下一个 tick 会被 if(!_stRecoBusy) return 挡掉，轮询就自停了
+            //（单次请求一旦超过 Interval 2 秒就必然发生）。
+            // 正确分工：_stRecoPollBusy 管「本次请求在飞」，_stRecoBusy 全程保持 true
+            //——它必须一直为 true，用户才点不动第二次。
+            if (_stRecoPollBusy) return;
+            _stRecoPollBusy = true;
+            int myRun = _stRecoRunId;
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/recommend/progress", null, 15000);
+                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    Invoke((Action)(() =>
+                    {
+                        _stRecoPollBusy = false;
+                        if (myRun != _stRecoRunId) return;      // 已被新一轮取代
+                        var st = (Dictionary<string, object>)J.Get(j, "state");
+                        string state = st == null ? "" : J.StrAt(st, "state");
+                        string phase = st == null ? "" : J.StrAt(st, "phase");
+                        int done = st == null ? 0 : J.Int(st["done"]);
+                        int tot = st == null ? 0 : J.Int(st["total"]);
+                        double sec = st == null ? 0 : J.Num(st["elapsed"]);
+
+                        if (state == "error")
+                        {
+                            if (_stRecoTimer != null) _stRecoTimer.Stop();
+                            _stRecoBusy = false;
+                            SetErr(_stRecoStatus, "计算失败：" + J.StrAt(st, "error"));
+                            return;
+                        }
+                        if (state == "running")
+                        {
+                            if (phase == "running")
+                                // 策略计算阶段外部无法细分（done 已置满），别编百分比
+                                SetErr(_stRecoStatus, string.Format(
+                                    "计算中（{0}/{1}，正在算策略信号，已用 {2:F0} 秒）…",
+                                    done, tot, sec));
+                            else
+                                SetErr(_stRecoStatus, string.Format(
+                                    "读取数据中 {0}/{1}（{2:F1}%），已用 {3:F0} 秒…",
+                                    done, tot, tot > 0 ? done * 100.0 / tot : 0, sec));
+                            return;
+                        }
+
+                        // ready：停表，取结果（_stRecoBusy 保持 true 直到渲染完）
+                        if (_stRecoTimer != null) _stRecoTimer.Stop();
+                        StRecoFetchResult(myRun);
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    string msg = ex.Message;
+                    Invoke((Action)(() =>
+                    {
+                        _stRecoPollBusy = false;
+                        if (myRun != _stRecoRunId) return;
+                        if (_stRecoTimer != null) _stRecoTimer.Stop();
+                        _stRecoBusy = false;
+                        SetErr(_stRecoStatus, "读取进度失败：" + msg);
+                    }));
+                }
+            });
+        }
+
+        private void StRecoFetchResult(int myRun)
+        {
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                string resp = null, emsg = "";
+                Dictionary<string, object> j = null;
+                try
+                {
+                    resp = VRequest("http://127.0.0.1:8000/api/strategies/recommend/result", null, 60000);
+                    j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                }
+                catch (Exception ex) { emsg = ex.Message; }
+                var jj = j;
+                var ee = emsg;
+                Invoke((Action)(() =>
+                {
+                    if (myRun != _stRecoRunId) return;
+                    _stRecoBusy = false;
+                    if (jj == null) { SetErr(_stRecoStatus, "读取结果失败：" + ee); return; }
+                    StRenderReco(jj);
+                }));
             });
         }
 
@@ -635,7 +826,8 @@ namespace StockPool
             StFillRecoGrid(_stSellGrid, j["sell"], false);
             StFillRecoGrid(_stHoldGrid, j["hold"], true);
 
-            _stRecoStatus.Text = "截至 " + J.StrOr(j["date"], "") + " · 每只资金带 " + J.Money(J.Num(j["band"]));
+            _stRecoStatus.Text = "策略：" + StCurStrategyName() + " · 截至 " + J.StrOr(j["date"], "")
+                    + " · 每只资金带 " + J.Money(J.Num(j["band"]));
             _stRecoStatus.ForeColor = C.DownSoft;
         }
 
