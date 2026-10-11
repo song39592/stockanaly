@@ -78,8 +78,13 @@ namespace StockPool
         // 用户等不及再点一次就会叠加多个全市场计算互相拖慢。
         private Timer _stRecoTimer;
         private bool _stRecoBusy;
-        private bool _stRecoPollBusy;      // 有一次轮询请求在飞（防 tick 重叠）
+        private bool _stRecoPollBusy;      // 有一次轮询请求在飞（防tick 重叠）
         private int _stRecoRunId;          // 每次启动 +1：陈旧响应据此丢弃（同回测 _stPollRunId）
+        // 当前选中的策略名（第 23 项）。放在**顶部操作区**而不是「策略选择与编辑」
+        // 子页里 —— 因为所有「运行回测 / 生成推荐」都读列表选中项，跑错策略时用户
+        // 在别的子页看不到自己选了什么。顶部常驻，任何子页都一眼可见。
+        private Label _stCurStrategy;
+        private Label _stRecoTitle;         // 第 23 项：「当前策略推荐」页顶部的策略名说明
 
         private sealed class StParamEditor
         {
@@ -121,6 +126,12 @@ namespace StockPool
             var head = Stack();
             TableLayoutPanel b0;
             var g0 = Group("操作", out b0);
+            // 第 23 项：第一行常驻显示「当前策略」。策略名要显眼（用户在「回测结果」
+            // 或「当前策略推荐」页按下运行时，真正跑的是列表里选中那个 —— 不显示
+            // 名字就很容易以为在跑另一个。空选中时显示提示而不是留白。
+            _stCurStrategy = Lbl("—");
+            _stCurStrategy.Font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold);
+            AddRow(b0, Row(Lbl("当前策略"), _stCurStrategy));
             _stResultStatus = Mute(Lbl("进入本页自动加载策略清单"));
             AddRow(b0, Row(Lbl("策略回测"), MiniBtn("刷新清单", delegate { StLoadStrategies(); }, 90), _stResultStatus));
             AddRow(head, g0);
@@ -189,6 +200,15 @@ namespace StockPool
 
         private void StOnSelectStrategy()
         {
+            StRefreshCurStrategy();          // 第 23 项：顶部「当前策略」随选中即时更新
+            // 第 23 项：回测结果页的标题也跟着换。**只在「尚未回测」时改**——
+            // 一旦跑过，那行标题描述的是上一次回测的范围与参数，换策略后
+            // 若无条件覆盖会把「上一次跑的是哪个策略」这段历史信息抹掉，
+            // 那正是回测后核对结果最需要的。跑完再切回本页会由
+            // StRunBacktest 自己填上新的完整标题。
+            if (_stResultHeader != null && _stResultHeader.Text.Contains("尚未回测"))
+                _stResultHeader.Text = "策略：" + StCurStrategyName() + " ·尚未回测";
+            StRefreshRecoTitle();
             if (_stList.SelectedIndex < 0 || _stStrategies == null) return;
             var meta = _stStrategies[_stList.SelectedIndex];
             _stDesc.Text = J.StrOr(meta["description"], "（无说明）");
@@ -210,6 +230,41 @@ namespace StockPool
             if (_stParamEditors.Count == 0)
                 _stParamPanel.Controls.Add(Mute(Lbl("该策略无可调参数。")));
             Skin(_stParamPanel);
+        }
+
+        /// <summary>当前选中策略的显示名（顶部、回测结果、推荐三处共用一个口径）。</summary>
+private string StCurStrategyName()
+        {
+            if (_stStrategies == null || _stList == null || _stList.SelectedIndex < 0)
+                return "未选择";
+            var meta = _stStrategies[_stList.SelectedIndex];
+            return J.StrOr(meta["name"], J.StrOr(meta["id"], "—"));
+        }
+
+        /// <summary>
+        /// 第 23 项：刷新顶部「当前策略」显示。
+        /// 由 StOnSelectStrategy 调用（切换策略即时生效），并且页面构建时
+        /// 也会先用一次初始值。
+        /// </summary>
+private void StRefreshCurStrategy()
+        {
+            if (_stCurStrategy == null) return;
+            if (_stStrategies == null || _stList == null || _stList.SelectedIndex < 0)
+            {
+                _stCurStrategy.Text = "未选择";
+                _stCurStrategy.ForeColor = _cSub;
+                return;
+            }
+            _stCurStrategy.Text = StCurStrategyName();
+            _stCurStrategy.ForeColor = C.DownSoft;
+        }
+
+        /// <summary>第 23 项：刷新「当前策略推荐」页顶部的说明行。</summary>
+private void StRefreshRecoTitle()
+        {
+            if (_stRecoTitle == null) return;
+            _stRecoTitle.Text = "当前策略：" + StCurStrategyName()
+                + "　—　按它在**最新交易日**的信号给出操作建议；范围 / 资金 / 佣金沿用「回测范围」页的设置。";
         }
 
         private void StAddParamEditor(Dictionary<string, object> p)
@@ -380,7 +435,10 @@ namespace StockPool
         private void StBuildResult(TableLayoutPanel stack)
         {
             _stResultHeader = new Label();
-            _stResultHeader.Text = "—";
+            // 第 23 项：初始就带上策略名，而不是「—」等到跑完才显示 —— 这一页
+            // 的操作按钮写的就是「运行回测（选中策略）」，用户在这里按下时最需要
+            // 确认自己选对了没。跑完后会被 StRunBacktest 里的完整区间信息覆盖。
+            _stResultHeader.Text = "策略：" + StCurStrategyName() + " · 尚未回测";
             _stResultHeader.Font = new Font("Microsoft YaHei UI", 11f, FontStyle.Bold);
             _stResultHeader.AutoSize = true;
             _stResultHeader.MaximumSize = new Size(900, 0);
@@ -539,7 +597,12 @@ namespace StockPool
         // 持股（继续持有，含建仓成本与浮盈亏）。
         private void StBuildReco(TableLayoutPanel stack)
         {
-            AddRow(stack, Mute(Lbl("按当前策略在**最新交易日**的信号给出操作建议；范围 / 资金 / 佣金沿用「回测范围」页的设置。")));
+            // 第 23 项：标题行直接写出策略名。这一页的按钮是「生成当前推荐」，
+            // 「当前」指的是列表选中项而不是上回测过的那个；不写出来用户很容易
+            // 切了策略却以为在重跑上一个。下方状态行还会带出「策略：」前缀，双保险。
+            _stRecoTitle = Mute(Lbl(""));
+            AddRow(stack, _stRecoTitle);
+            StRefreshRecoTitle();
             AddRow(stack, Row(MiniBtn("生成当前推荐", delegate { StRunReco(); }, 130),
                 _stRecoStatus = Mute(Lbl("尚未生成"))));
 
@@ -763,7 +826,8 @@ namespace StockPool
             StFillRecoGrid(_stSellGrid, j["sell"], false);
             StFillRecoGrid(_stHoldGrid, j["hold"], true);
 
-            _stRecoStatus.Text = "截至 " + J.StrOr(j["date"], "") + " · 每只资金带 " + J.Money(J.Num(j["band"]));
+            _stRecoStatus.Text = "策略：" + StCurStrategyName() + " · 截至 " + J.StrOr(j["date"], "")
+                    + " · 每只资金带 " + J.Money(J.Num(j["band"]));
             _stRecoStatus.ForeColor = C.DownSoft;
         }
 

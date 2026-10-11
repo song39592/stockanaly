@@ -483,9 +483,16 @@ def start_reco_task(strategy_id: str, params: dict | None, codes: list[str],
                 _RECO_TASK["done"] = _RECO_TASK["total"]
             else:
                 _RECO_TASK["phase"] = "loading"
-                _RECO_TASK["done"] = int(done)
-                if total:
-                    _RECO_TASK["total"] = int(total)
+                #⚠️ `done` / `total` 是**当前批次**的计数（`run_recommend` 分批
+                # 预检，第 21 项为了压内存峰值引入的），不是整个股票池的。
+                # 这里必须换算成全局进度，否则：
+                #   * 直接写 total 会把「总只数」改成「本批只数」——
+                #     1000 只的池会被显示成 500，进度条永远到不了 100%；
+                #   * 直接写 done 会让进度在批与批之间**倒退**。
+                # 已完成的批数 = 总数 - 本批总数，本批已完成 done。
+                overall = _RECO_TASK["total"]
+                left = max(0, int(total) - int(done))
+                _RECO_TASK["done"] = max(0, min(overall, overall - left))
 
     def _work():
         t0 = time.time()

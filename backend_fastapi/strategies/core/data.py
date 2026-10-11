@@ -69,17 +69,28 @@ def load_bars(codes, start: str | None = None, end: str | None = None,
     # 线程间无共享连接，安全。命中缓存的直接用，不进线程池。
     def _fetch(code: str):
         try:
-            # 统一的 K 线出口（回测固定日线，原因见模块 docstring）
+            # 统一的 K 线出口（回测固定日线，原因见模块 docstring）。
+            # 第 22 项：`fields` 一路下推进去 —— 以前这里恒读全部列再切两次，
+            # 而调用方几乎都只要 close 1 列（实测多读 14 列、pandas 多建十几次
+            # 分配，是 load_bars 比底层 list_bars 慢 4 倍的主因）。
             d = kline_service.get_bars(code, start=start, end=end, adjust=adjust,
-                                       period="day").copy()
-            d = d[[c for c in _BAR_COLUMNS if c in d.columns]]
+                                       period="day", fields=cols or None)
+            if d is None or d.empty:
+                return None
+            keep = [c for c in _BAR_COLUMNS if c in d.columns]
+            if keep and list(d.columns) != keep:
+                d = d[keep]
             d.index = [str(x)[:10] for x in d.index]
             return d if len(d) >= _MIN_ROWS else None
         except Exception:                    # noqa: BLE001 - 单只失败不拖垮整批
             return None
 
-    missing = [(c, (c, start, end, adjust)) for c in codes
-               if (c, start, end, adjust) not in _PER_CACHE]
+    # ⚠️ 缓存键**必须包含 fields**（第 22 项）：`_PER_CACHE` 存的是已按列裁剪的
+    # DataFrame，若键里没有 fields，先取 `["close"]` 再取 `["close","volume"]`
+    # 会直接命中前者、拿到**缺 volume 的表**——而且不报错，是静默的错数据。
+    _fkey = tuple(cols)
+    missing = [(c, (c, start, end, adjust, _fkey)) for c in codes
+               if (c, start, end, adjust, _fkey) not in _PER_CACHE]
     # 进度回调（第 18 项回测进度条）：`ex.map` 是**惰性**的、按提交顺序 yield，
     # 所以每取完一只就报一次「已测/总数」，不用改线程池逻辑。
     # 缓存命中的票瞬间完成（done 一次到位），故基数用 missing 而非全部 codes ——
@@ -107,9 +118,10 @@ def load_bars(codes, start: str | None = None, end: str | None = None,
         _tick()
 
     for code in codes:
-        df = _PER_CACHE.get((code, start, end, adjust))
+        df = _PER_CACHE.get((code, start, end, adjust, _fkey))
         if df is None:
             continue
+        # `_fetch` 已按 cols 裁剪过，这里只需保证调用方拿到的列齐全
         out[code] = df[[c for c in cols if c in df.columns]] if cols else df
     return out
 
@@ -128,6 +140,8 @@ def release_cache(codes: list[str], adjust: str | None = None,
     缓存的收益（同一批内不重复读）完全保留，跨批的占用则被压住。
 
     `adjust` / `start` / `end` 传None 表示该维度不限（只按 code 匹配）。
+    不需要按 `fields` 过滤：同一只票的不同列组合都放掉更安全（宁可重读，
+    也不能留下一个占着内存的条目）。
     ⚠️ 释放后若别处仍需要这些标的，`load_bars` 会**重新读盘**（结果一致，
     只是多花时间）——所以只在"确定后面不再用"的批次边界调用。
     """

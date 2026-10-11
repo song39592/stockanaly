@@ -66,8 +66,9 @@ def resample(bars: list[dict[str, Any]], period: str) -> list[dict[str, Any]]:
 
 @lru_cache(maxsize=128)
 def _frame(code: str, start: str | None, end: str | None, adjust: str,
-           period: str) -> pd.DataFrame | None:
-    rows = price_store.load_bars(code, adjust=adjust, start=start, end=end)
+           period: str, fields: tuple | None = None) -> pd.DataFrame | None:
+    rows = price_store.load_bars(code, adjust=adjust, start=start, end=end,
+                                 fields=list(fields) if fields else None)
     if not rows:
         return None
     if period != "day":
@@ -80,7 +81,8 @@ def _frame(code: str, start: str | None, end: str | None, adjust: str,
 
 def get_bars(code: str, start: str | dt.date | None = None,
              end: str | dt.date | None = None, adjust: str = "qfq",
-             period: str = "day") -> pd.DataFrame:
+             period: str = "day",
+             fields: list[str] | None = None) -> pd.DataFrame:
     """取某只股票的 **K 线序列**（已按周期合样、已复权），索引为日期字符串。
 
     这是「指标 / 筹码」的输入基准——它们不再自己取数、自己合样。
@@ -88,14 +90,23 @@ def get_bars(code: str, start: str | dt.date | None = None,
     参数：
       adjust  qfq（默认，展示）/ hfq（回测）/ raw
       period  day / week / month（周线 / 月线读取时现算）
+      fields  第 22 项：只要这些行情列，下推到 SQL 少读几列、pandas 少建几个
+              数组。给 None（默认）时行为与从前一致。**注意**：`trade_date`
+              始终读取（用作索引），所以调用方不必把它列进 fields。
 
     返回 **只读** DataFrame（缓存共享，调用方如需改动请先 copy）。
     无数据时返回空 DataFrame（由调用方决定是报错还是降级）。
     """
     period = normalize(period)
-    df = _frame(code, _norm(start), _norm(end), price_store._store_adjust(adjust), period)
+    key = tuple(sorted({str(c).strip() for c in fields if c and c.strip()})) \
+        if fields else None
+    df = _frame(code, _norm(start), _norm(end), price_store._store_adjust(adjust),
+                period, key)
     if df is None:
-        return pd.DataFrame(columns=[c for c in _BAR_COLUMNS if c != "trade_date"])
+        cols = [c for c in _BAR_COLUMNS if c != "trade_date"]
+        if key:
+            cols = [c for c in cols if c in key] + [c for c in cols if c not in key]
+        return pd.DataFrame(columns=cols)
     return df
 
 
