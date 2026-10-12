@@ -85,6 +85,9 @@ namespace StockPool
         // 在别的子页看不到自己选了什么。顶部常驻，任何子页都一眼可见。
         private Label _stCurStrategy;
         private Label _stRecoTitle;         // 第 23 项：「当前策略推荐」页顶部的策略名说明
+        // 第 24 项：运行前数据新鲜度守卫。
+        private bool _stFreshBusy;           // 正在检查/等待补齐，挡住重复点击
+        private Timer _stFreshTimer;        // 等待补齐期间的进度轮询
 
         private sealed class StParamEditor
         {
@@ -663,6 +666,12 @@ private void StRefreshRecoTitle()
                 SetErr(_stRecoStatus, "请先在「策略选择与编辑」里选一个策略");
                 return;
             }
+            // 第 24 项：与回测共用同一个数据新鲜度守卫。
+            StEnsureFresh(delegate { StRunRecoInner(); });
+        }
+
+        private void StRunRecoInner()
+        {
             _stRecoBusy = true;
             int myRun = ++_stRecoRunId;
             var req = StRequest(0);
@@ -929,6 +938,120 @@ private void StRefreshRecoTitle()
             return "未知错误";
         }
 
+        /// <summary>
+/// 第 24 项：运行策略前的**数据新鲜度守卫**。
+///
+/// 策略固定跑全市场（筛选发生在策略内部），所以「补数据」必然是补全市场
+/// 5585 只 —— 实测吞吐 1.2~1.4 只/秒，一轮 60~80 分钟。因此这里**不做同步补齐**
+/// （那等于让用户对着界面等一小时），只做：
+///   1. 检查新鲜度（基准是**交易日**，收盘前不期望今天）；
+///   2. 陈旧则弹窗把话说清楚，让用户选「等它补完 / 用现有数据继续 / 取消」；
+///   3. 选「等」就阻塞在此轮询进度，补齐完成后自动继续原本的操作。
+///
+/// 选「等」而不是直接开跑，是因为数据停在几天前时，选股结果本身就不可信；
+/// 但把选择权交给用户，因为补齐可能要一小时。
+/// </summary>
+private void StEnsureFresh(Action then)
+        {
+            if (_stFreshBusy) return;
+            _stFreshBusy = true;
+            string sid = StCurStrategyName();
+            Action proceed = delegate
+            {
+                _stFreshBusy = false;
+                if (_stFreshTimer != null) { _stFreshTimer.Stop(); _stFreshTimer = null; }
+                then();
+            };
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                Dictionary<string, object> f = null;
+                try
+                {
+                    f = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(
+                        VRequest("http://127.0.0.1:8000/api/history/download/freshness", null, 60000));
+                }
+                catch (Exception ex)
+                {
+                    string msg = "无法检查行情数据是否最新：" + ex.Message;
+                    Ui(delegate
+                    {
+                        _stFreshBusy = false;
+                        SetErr(_stResultStatus, msg + "（将按现有数据继续）");
+                        then();
+                    });
+                    return;
+                }
+                bool need = f.ContainsKey("need_refresh") && f["need_refresh"] is bool
+                            && (bool)f["need_refresh"];
+                if (!need) { Ui(proceed); return; }
+
+                string expected = J.StrOr(f["expected"], "?");
+                string latest = J.StrOr(f["latest"], "?");
+                int covered = J.Int(f["covered"]);
+                int checkedCount = J.Int(f["checked"]);
+                DialogResult dr = DialogResult.None;
+                Ui(delegate
+                {
+                    dr = MessageBox.Show(this,
+                        "「" + sid + "」要用全市场 " + checkedCount + " 只股票做筛选，\r\n"
+                        + "但本地行情只更新到 " + latest + "（应有 " + expected + "）。\r\n\r\n"
+                        + "· 现在补齐：预计 60~80 分钟（可随时关窗，断了也能从断点续上）\r\n"
+                        + "· 用现有数据继续：结果基于 " + latest + " 的数据，可能不是最新行情",
+                        AppTitle + " - 行情数据不是最新", MessageBoxButtons.YesNoCancel,
+                        MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+                });
+                if (dr == DialogResult.Cancel) { Ui(delegate { _stFreshBusy = false; }); return; }
+                if (dr != DialogResult.Yes) { Ui(proceed); return; }
+                Ui(delegate { StWaitFresh(proceed, sid); });
+            });
+        }
+
+        /// <summary>第 24 项：轮询等待补齐完成，完成后自动继续 `then`。</summary>
+        private void StWaitFresh(Action then, string sid)
+        {
+            if (_stFreshTimer == null)
+            {
+                _stFreshTimer = new Timer();
+                _stFreshTimer.Interval = 5000;
+                _stFreshTimer.Tick += delegate { StPollFresh(then, sid); };
+            }
+            SetErr(_stResultStatus, "正在等待行情数据补齐…（" + sid + "）");
+            _stFreshTimer.Start();
+            StPollFresh(then, sid);
+        }
+
+        private void StPollFresh(Action then, string sid)
+        {
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                Dictionary<string, object> f = null;
+                try
+                {
+                    f = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(
+                        VRequest("http://127.0.0.1:8000/api/history/download/freshness", null, 60000));
+                }
+                catch (Exception) { return; }        // 单次失败下个周期再试
+                bool need = f.ContainsKey("need_refresh") && f["need_refresh"] is bool
+                            && (bool)f["need_refresh"];
+                int covered = J.Int(f["covered"]);
+                int total = J.Int(f["checked"]);
+                string latest = J.StrOr(f["latest"], "?");
+                Ui(delegate
+                {
+                    if (!need)
+                    {
+                        SetErr(_stResultStatus, "数据已补齐（至" + latest + "），继续运行…");
+                        _stFreshTimer.Stop();
+                        then();
+                        return;
+                    }
+                    SetErr(_stResultStatus, string.Format(
+                        "等待补齐中 {0}/{1}（数据至 {2}）…可切到别的页签，补齐在后台继续",
+                        covered, total, latest));
+                });
+            });
+        }
+
         private void StRunBacktest()
         {
             if (_stStrategies == null || _stList.SelectedIndex < 0)
@@ -936,6 +1059,14 @@ private void StRefreshRecoTitle()
                 SetErr(_stResultStatus, "请先在「策略选择与编辑」里选一个策略");
                 return;
             }
+            // 第 24 项：数据新鲜度守卫在真正发起回测之前（数据陈旧时的弹窗与等待
+            // 都在 `StEnsureFresh` 里）。用守卫包一层而不是就地判断，是为了让
+            // 回测与「生成当前推荐」两条入口共用同一套逻辑与同一个弹窗。
+            StEnsureFresh(delegate { StRunBacktestInner(); });
+        }
+
+        private void StRunBacktestInner()
+        {
             var meta = _stStrategies[_stList.SelectedIndex];
             string sid = J.StrOr(meta["id"], "");
             var codes = _stAll.Checked ? new List<string>() : StParseCodes(_stCodes.Text);
