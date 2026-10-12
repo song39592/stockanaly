@@ -591,6 +591,62 @@ namespace StockPool
             StockRefreshIndicatorList();   // 每次打开同步后端指标清单（后端可能刚启动）
             StockAddHistory(code, null);   // 记录查看历史（名称稍后补全）
             StockLoadName(code);
+            // 第 24 项：**先确认这只票的数据是新的再拉 K 线**。库里陈旧时同步补齐
+            // （实测约 2 秒，页面等得起），补完再走下面那一串加载 —— 否则用户看到的
+            // K 线、筹码、估值可能整体停在几天前，而界面上毫无提示。
+            StockEnsureFresh(code, delegate { StockLoadRest(code); });
+        }
+
+        /// <summary>
+        /// 第 24 项：确保该票的行情数据新到应有交易日，陈旧则**同步补齐**后回调。
+        /// 后端 `sync-code` 实测约 2 秒；失败不阻塞后续加载（宁可显示旧数据，
+        /// 也不要整页打不开），只在状态行提示。
+        /// </summary>
+        private void StockEnsureFresh(string code, Action then)
+        {
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                bool need = false;
+                try
+                {
+                    string url = "http://127.0.0.1:8000/api/history/download/freshness?codes=" + code;
+                    var fj = new JavaScriptSerializer()
+                        .Deserialize<Dictionary<string, object>>(VRequest(url, null, 20000));
+                    need = fj.ContainsKey("need_refresh") && fj["need_refresh"] is bool
+                           && (bool)fj["need_refresh"];
+                }
+                catch (Exception) { need = false; }   // 检查失败就当不需要，不挡路
+                if (!need) { Ui(then); return; }
+
+                Invoke((Action)(() =>
+                {
+                    _stockHint.Text = "数据已过期，正在补齐 " + code + " 的最新行情（约 2~5 秒）…";
+                    _stockHint.Tag = "muted";
+                    _stockHint.ForeColor = _cSub;
+                }));
+                try
+                {
+                    VRequest("http://127.0.0.1:8000/api/history/download/sync-code",
+                             "{\"code\":\"" + code + "\"}", 120000);
+                }
+                catch (Exception ex)
+                {
+                    string m = ex.Message;
+                    Invoke((Action)(() =>
+                    {
+                        _stockHint.Text = "补齐数据失败（仍显示已有数据）：" + m;
+                        _stockHint.Tag = "bad";
+                        _stockHint.ForeColor = C.UpErr;
+                    }));
+                }
+                Ui(then);
+            });
+        }
+
+        /// <summary>第 24 项：个股页「确认数据新鲜之后」要加载的那一串。</summary>
+        private void StockLoadRest(string code)
+        {
+            if (_stockCurrent != code) return;      // 期间又切了别的票就作废
             StockLoadHistory(code, false);
             StockLoadChipFormulas();   // 每次打开同步公式清单（后端可能刚加过公式）
             StockLoadChip(code);

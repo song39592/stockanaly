@@ -16,6 +16,11 @@ from features.download import service as download_service
 router = APIRouter(prefix="/api/history/download", tags=["历史数据下载"])
 
 
+class SyncCodeRequest(BaseModel):
+    """单只股票同步补齐（K 线页进入时用）。"""
+    code: str = Field(pattern=r"^\d{6}$")
+
+
 class StartRequest(BaseModel):
     scope: str = Field(default="all", pattern=r"^(all|pool)$")
     mode: str = Field(default="full", pattern=r"^(full|incremental)$")
@@ -95,6 +100,38 @@ def auto_state(refresh: bool = False):
         return {"ok": True, **download_service.auto_state(force=refresh)}
     except Exception as exc:                      # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"覆盖度检测失败：{exc}")
+
+
+@router.get("/freshness")
+def freshness(codes: str = ""):
+    """**行情数据新鲜度**（第 24 项）：K 线页 / 策略页运行前的前置检查。
+
+    `codes` 为逗号分隔的股票代码；**留空则统计全市场**（策略页的用法 ——
+    它固定跑全市场，筛选发生在策略内部）。
+
+    返回里的 `expected` 是**交易日**而非自然日：收盘前不期望今天的数据，
+    非交易日自动退到上一交易日。`stale_codes` 只回前若干只，够前端提示用。
+    """
+    try:
+        wanted = [c.strip() for c in str(codes or "").split(",") if c.strip()]
+        return {"ok": True, **download_service.freshness(wanted)}
+    except Exception as exc:                      # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"新鲜度检测失败：{exc}")
+
+
+@router.post("/sync-code")
+def sync_code(req: SyncCodeRequest):
+    """**同步补齐单只股票**的日 K（K 线页进入时调用，阻塞至完成）。
+
+    刻意做成同步而不是走任务队列：单只增量只需 1~3 秒，K 线页等得起，
+    而异步任务反而要引入「轮询 + 弹窗 + 重试」一整套。走的是
+    `price_service.sync_bars`（按库里已落盘的最新日期增量补齐），
+    顺带同步复权因子与流通股本 —— 后者是筹码类计算的前置。
+    """
+    try:
+        return {"ok": True, **download_service.sync_one(req.code)}
+    except Exception as exc:                      # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"{req.code} 补齐失败：{exc}")
 
 
 @router.get("/{task_id}")

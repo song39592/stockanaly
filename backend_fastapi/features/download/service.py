@@ -494,6 +494,12 @@ def _run(task_id: str, concurrency: int) -> None:
         left = download_store.remaining(task_id)
         download_store.update_task(task_id, status="completed" if left == 0 else "paused",
                                    finished=(left == 0))
+        # 「每日自动更新已跑过今天」只在**真的跑完时**登记（第 24 项）。
+        # 原先在 `_kick_auto_update` 启动瞬间就写，于是进程一停就等于
+        # 「今天已经跑过」，当天不会再起新任务；叠加任务随时会被停的正常工况，
+        # 就出现了库里 17 个 auto 任务全部 paused 且进度停在半截的现象。
+        if task.get("origin") == ORIGIN_AUTO:
+            download_store.set_setting("auto_last_run", dt.date.today().isoformat())
     with _runtimes_lock:
         _runtimes.pop(task_id, None)
 
@@ -539,17 +545,74 @@ def _has_alive_task() -> bool:
                    for runtime in _runtimes.values())
 
 
-def _downloaded_staleness() -> tuple[int, int, list[str], str | None]:
-    """(已下载只数, 落后超过 FRESHNESS_DAYS 天的只数, 落后示例, 库里最新的日K日期)。
+def _expected_data_day(grace_days: int = 0) -> str | None:
+    """**本地行情数据应有的最新日期**（交易日，不是今天）。
 
-    判定口径：**只看库里已经下过的股票**——没下过的股票不算缺口。
-    因此「该补的历史都已到位、只是还差最近几天」时，stale 为 0。
+    这是「数据新不新鲜」的**唯一基准**，不能只看自然日：
+
+    1. **收盘后才期望今天的数据**。盘中（<15:00）或非交易日都往回退一个交易日 ——
+       否则每天上午都会被判成「全市场 5585 只数据陈旧」，把「今天本来就没数据」
+       误报成缺口。`_market_has_closed_today()` 负责这个判断。
+    2. 再用交易日历（拿不到就退化为「工作日」）往前找最近一个已收盘交易日。
+    3. 兜底：库里已有的最大日期 —— 本地数据本身就是最准的日历。
+    4. 全都拿不到才返回 None，由调用方退回自然日口径。
+    """
+    back = dt.date.today()
+    if not _market_has_closed_today():
+        back -= dt.timedelta(days=1)
+    for _ in range(grace_days + 8):
+        iso = back.isoformat()
+        if _is_trade_day(back):
+            return iso
+        back -= dt.timedelta(days=1)
+    latest = price_store.code_latest_dates()
+    if latest:
+        return max(str(day) for day in latest.values())
+    return None
+
+
+def _market_has_closed_today() -> bool:
+    """今天是否已经收盘（非交易日直接算「已收盘」——今天本就没有新数据）。"""
+    now = dt.datetime.now()
+    try:
+        from features.market.service import _a_share_is_trade_day
+        if not _a_share_is_trade_day(now):
+            return True
+    except Exception:                           # noqa: BLE001 - 日历不可用则按时间判断
+        pass
+    return (now.hour, now.minute) >= (15, 0)
+
+
+def _is_trade_day(day: dt.date) -> bool:
+    """是否交易日：优先交易日历，取不到退化为「工作日」。"""
+    try:
+        from features.market.service import _a_share_trade_days
+        days = _a_share_trade_days()
+    except Exception:                           # noqa: BLE001
+        days = set()
+    if days:
+        return day.isoformat() in days
+    return day.weekday() < 5
+
+
+def _downloaded_staleness() -> tuple[int, int, list[str], str | None]:
+    """(已下载只数, 数据陈旧的只数, 陈旧示例, 库里最新的日K日期)。
+
+    判定口径：**只看库里已经下过的股票** —— 没下过的股票不算缺口。
+
+    ⭐ 「陈旧」的基准是**交易日**，不是自然日（第 24 项）。原先用
+    `今天 - FRESHNESS_DAYS 个自然日` 当阈值，把周末与节假日全算了进去，
+    最多让阈值偏松 4 天（长假后连续几个交易日都被判成「不陈旧」）。
+    现改为按 `_expected_data_day()`给出的应有日期逐票判定。
     """
     latest = price_store.code_latest_dates()
     if not latest:
         return 0, 0, [], None
-    threshold = (dt.date.today() - dt.timedelta(days=FRESHNESS_DAYS)).isoformat()
-    stale = sorted(code for code, day in latest.items() if str(day) < threshold)
+    expected = _expected_data_day()
+    if expected is None:
+        # 交易日历与本地数据都给不出基准时，退回原先的自然日口径
+        expected = (dt.date.today() - dt.timedelta(days=FRESHNESS_DAYS)).isoformat()
+    stale = sorted(code for code, day in latest.items() if str(day) < expected)
     return len(latest), len(stale), stale[:10], max(str(day) for day in latest.values())
 
 
@@ -595,6 +658,93 @@ def _options_for(mode: str, *, source: str = SOURCE_ONLINE, start_date: str | No
     }
 
 
+def freshness(codes: list[str] | None = None) -> dict[str, Any]:
+    """行情数据新鲜度（第 24 项）：K 线页 / 策略页运行前的前置检查。
+
+    `codes` 为空 = 统计全市场（策略页的用法）。**判定基准是交易日**
+    （`_expected_data_day`），不是自然日 —— 否则盘中与长假后都会误报缺口。
+
+    返回 `need_refresh` 给前端决定「是否要先补数据」。刻意**不在这里自动启动
+    下载**：全市场一轮 60~80 分钟（实测吞吐 1.2~1.4 只/秒），同步等待不现实；
+    该由自动更新提前把数据补齐，这里只负责如实报告 + 提供单只补齐入口。
+    """
+    wanted = [str(c).strip() for c in (codes or []) if str(c).strip()]
+    latest = price_store.code_latest_dates()
+    if not latest:
+        return {"expected": None, "total": 0, "covered": 0, "stale": 0,
+                "latest": None, "need_refresh": bool(wanted), "checked": []}
+    expected = _expected_data_day()
+    if wanted:
+        checked = [c for c in wanted if c in latest]
+        # 库里完全没有的票也算缺口（第一次打开的新股）
+        missing = [c for c in wanted if c not in latest]
+    else:
+        checked = list(latest.keys())
+        missing = []
+    covered = sum(1 for c in checked if str(latest[c]) >= expected)
+    stale_codes = sorted(c for c in checked if str(latest[c]) < expected)
+    return {
+        "expected": expected,
+        "total": len(wanted) if wanted else len(latest),
+        "checked": len(checked),
+        "covered": covered,
+        "stale": len(stale_codes),
+        "missing": len(missing),
+        "latest": max(str(d) for d in latest.values()),
+        "need_refresh": bool(stale_codes or missing),
+        "stale_examples": (stale_codes + missing)[:10],
+        "market_closed": _market_has_closed_today(),
+    }
+
+
+def sync_one(code: str) -> dict[str, Any]:
+    """**同步**补齐单只股票的日 K（第 24 项，K 线页用）。
+
+    与遍历下载共用 `price_service`（同一套数据源与降级逻辑），但走单只同步：
+    实测 1~3 秒，页面等得起。顺带把复权因子、流通股本一起同步 ——
+    后者是筹码分布的前置，只补 K 线会让筹码页算出「因子缺失」的空值。
+    """
+    from core import price_service
+    bars = price_service.sync_bars(code)
+    detail: dict[str, Any] = {"bars": bars}
+    for name, fn in (("factors", price_service.sync_factors),
+                     ("share_capital", price_service.sync_share_capital)):
+        try:
+            detail[name] = fn(code)
+        except Exception as exc:                   # noqa: BLE001 - 附加项失败不否决补齐
+            detail[name] = {"ok": False, "error": str(exc)}
+    expected = _expected_data_day()
+    actual = None
+    try:
+        actual = price_store.latest_bar_date(code)
+    except Exception:                             # noqa: BLE001
+        actual = None
+    return {"code": code, "expected": expected, "latest": actual,
+            "fresh": bool(actual and expected and str(actual) >= expected),
+            "detail": detail}
+
+
+def _find_pending_auto_task() -> str | None:
+    """今天还没跑完的「自动更新」任务 id（取最近的一个），没有则 None。
+
+    只认 `origin=auto`：手动任务是用户自己安排的，闲时任务走
+    `_ensure_idle_task`。候选里排除已取消的 —— 取消就该生效。
+    """
+    today = dt.date.today().isoformat()
+    best: tuple[str, str] | None = None
+    for task in download_store.list_tasks(200):
+        if task.get("origin") != ORIGIN_AUTO or task["status"] not in ("paused",):
+            continue
+        if str(task.get("created_at") or "")[:10] != today:
+            continue                      # 昨天没跑完的交给启动时的续传，不在这重复排
+        if download_store.remaining(task["id"]) <= 0:
+            continue
+        stamp = str(task.get("created_at") or "")
+        if best is None or stamp > best[1]:
+            best = (task["id"], stamp)
+    return best[0] if best else None
+
+
 def _kick_auto_update() -> str | None:
     """给「库里已下载的股票」补最新数据（每日自动更新）。"""
     codes = sorted(price_store.code_latest_dates())
@@ -604,7 +754,8 @@ def _kick_auto_update() -> str | None:
     options = _options_for(MODE_INCREMENTAL, concurrency=_idle_concurrency())
     task_id = "dl-" + uuid.uuid4().hex
     download_store.create_task(task_id, "downloaded", options, codes, 1, origin=ORIGIN_AUTO)
-    download_store.set_setting("auto_last_run", dt.date.today().isoformat())
+    # `auto_last_run` **不在这里写**：它由 `_run` 在任务真正跑完时登记。
+    # 启动即写等于「还没补完就先宣布今天跑过了」，进程一停当天就再也不会起新任务。
     _spawn(task_id, options)
     return task_id
 
@@ -690,7 +841,16 @@ def _scheduler_tick() -> None:
     if stored.get("auto_update") == "1":
         today = dt.date.today().isoformat()
         if stored.get("auto_last_run") != today and dt.datetime.now().hour >= AUTO_UPDATE_HOUR:
-            _kick_auto_update()
+            # 今天还没跑完过（`auto_last_run` 现在只在任务真正跑完时登记）。
+            # 若今天已有一个未完成的 auto 任务，**接着它跑**而不是另起一个 ——
+            # 全市场一轮要 60~80 分钟，一个 60 秒一轮的调度器不能每轮都新建。
+            # 这条同时也是断电续传的第二道保险：启动时 `_resume_auto_tasks`
+            # 没接上的（例如任务被暂停过），这里会再试一次。
+            pending = _find_pending_auto_task()
+            if pending:
+                _resume_idle(pending, download_store.get_task(pending))
+            else:
+                _kick_auto_update()
             return
     if stored.get("idle_download") == "1":
         _ensure_idle_task()
@@ -963,11 +1123,40 @@ def retry_failed(task_id: str) -> dict[str, Any]:
     return task_view(task_id)
 
 
+def _resume_auto_tasks() -> None:
+    """启动时把「自动更新」留下的断点自动接上（断电/关机续传）。
+
+    「随时会停」是这个模块的**正常工况**，不是异常：进程被关、机器断电、
+    用户重启，内存里的 worker 全没了，但队列与断点都写在库里
+    （`download_codes.status` / `retries`，`recover_stale` 已把 running 的
+    代码退回 pending）。此前唯一的续跑入口是用户点「继续」，而自动更新
+    没人会点 —— 于是每天 18:00 的任务跑到一半就`paused`，进度永远卡住
+    （实测库里17 个 auto 任务全是paused，进度 2~3966 只不等）。
+
+    这里在启动时自动恢复，且**只恢复 auto 来源**：手动任务是用户自己
+    安排的，不该在他重启后被后台悄悄拉起；`idle` 任务由 `_ensure_idle_task`
+    在调度里自行处理（见其注释「接着上次没下完的继续」），不重复处理。
+    """
+    for task in download_store.list_tasks(200):
+        if task.get("origin") != ORIGIN_AUTO or task["status"] != "paused":
+            continue
+        if download_store.remaining(task["id"]) <= 0:
+            continue                      # 已跑完，只是没落finished，交给调度重开
+        try:
+            resume(task["id"])
+        except Exception:                 # noqa: BLE001 - 一个续不上不影响其它
+            continue
+
+
 def _start_background() -> None:
-    """启动后台：先把上次没跑完的任务标成暂停（等调度或用户续跑），再起调度线程。"""
+    """启动后台：先恢复上次没跑完的任务（断电续传），再起调度线程。"""
     try:
         download_store.recover_stale()
     except Exception:                             # noqa: BLE001 - 表还没建好时静默跳过
+        pass
+    try:
+        _resume_auto_tasks()
+    except Exception:                             # noqa: BLE001 - 同上，绝不让后台起不来
         pass
     threading.Thread(target=_scheduler_loop, daemon=True).start()
 
