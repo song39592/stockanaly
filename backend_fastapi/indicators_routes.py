@@ -61,7 +61,7 @@ def list_indicators():
     前端进入个股页会先拉本清单，等用户勾选 RPS 时面板通常已就绪，避免首帧超时。
     """
     try:
-        indicators.data.warm()
+        indicators.rps_data.warm()
     except Exception:                    # noqa: BLE001 - 预热失败不应影响清单
         pass
     return indicators.list_indicators()

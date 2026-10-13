@@ -163,6 +163,22 @@ def list_universe_codes() -> list[str]:
     return sorted(price_store.code_latest_dates("raw").keys())
 
 
+def load_pool_members(start: str | None = None,
+                      end: str | None = None) -> dict[str, dict[str, dict]]:
+    """股票池成员（按日期），策略包唯一取数入口内转发到 history 存储。
+
+    仅 RPS 等依赖股票池历史的策略使用；空库优雅返回 {}。
+    """
+    from features.history import store as _hist
+    return _hist.load_pool_members(start=start, end=end)
+
+
+def pool_snapshot_range() -> tuple[str | None, str | None]:
+    """股票池快照的 (最早日, 最晚日)，无数据返回 (None, None)。"""
+    from features.history import store as _hist
+    return _hist.pool_snapshot_range()
+
+
 def recent_trading_days(n: int = 5) -> list[str]:
     """本地最新的 N 个交易日日期（升序），用于「近期策略成果」这类短窗口回测。
 

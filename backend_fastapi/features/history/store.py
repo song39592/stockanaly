@@ -168,6 +168,58 @@ def latest_snapshot_codes() -> list[str]:
     return [str(item["code"]) for item in rows]
 
 
+def load_pool_members(start: str | None = None,
+                       end: str | None = None) -> dict[str, dict[str, dict]]:
+    """按日期范围批量取股票池成员，供 RPS 等依赖股票池历史的策略使用。
+
+    返回 {snapshot_date: {code: {"name","industry","region",
+    "import_price","import_change"}}}；空库 / 异常优雅返回 {}（不抛错，
+    让上层策略在「无历史」时安全地返回空信号）。
+    """
+    where, params = [], []
+    if start:
+        where.append("snapshot_date >= ?")
+        params.append(start)
+    if end:
+        where.append("snapshot_date <= ?")
+        params.append(end)
+    sql = ("SELECT snapshot_date, code, name, industry, region, "
+           "import_price, import_change FROM pool_members")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY snapshot_date"
+    try:
+        with connect() as db:
+            rows = db.execute(sql, tuple(params)).fetchall()
+    except Exception:
+        return {}
+    out: dict[str, dict[str, dict]] = {}
+    for r in rows:
+        d = r["snapshot_date"]
+        out.setdefault(d, {})[r["code"]] = {
+            "name": r["name"], "industry": r["industry"], "region": r["region"],
+            "import_price": r["import_price"], "import_change": r["import_change"],
+        }
+    return out
+
+
+def pool_snapshot_range() -> tuple[str | None, str | None]:
+    """返回 (最早快照日, 最晚快照日)；无数据 / 异常返回 (None, None)。
+
+    供策略编排层判断「股票池历史是否覆盖回测区间」。
+    """
+    try:
+        with connect() as db:
+            row = db.execute(
+                "SELECT MIN(snapshot_date) AS mn, MAX(snapshot_date) AS mx "
+                "FROM pool_snapshots").fetchone()
+    except Exception:
+        return (None, None)
+    if not row or row["mn"] is None:
+        return (None, None)
+    return (row["mn"], row["mx"])
+
+
 def create_job(job_id: str, snapshot_date: str, total: int) -> None:
     with connect() as db:
         db.execute("""INSERT OR REPLACE INTO sync_jobs(

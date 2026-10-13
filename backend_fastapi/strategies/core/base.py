@@ -80,12 +80,15 @@ class StrategyMeta:
     outputs: str
     params: list[ParamSpec]
     func: Callable
+    requires_pool: bool = False   # 是否依赖股票池历史（pool_members）；编排层据此做覆盖预检
+    pool_warmup: int = 0          # 回测起点前需有多少天历史养状态（streak 连续性）
 
 
 def strategy(id: str, name: str, category: str, description: str = "",
              inputs: list[str] | None = None,
              outputs: str = "buy/sell 信号 + 仓位系数",
-             params: list[ParamSpec] | None = None):
+             params: list[ParamSpec] | None = None,
+             requires_pool: bool = False, pool_warmup: int = 0):
     """装饰器：把策略登记进 REGISTRY。id 必须唯一，重复会抛 ValueError。"""
     if id in REGISTRY:
         raise ValueError(f"策略 id 重复: {id}")
@@ -95,6 +98,7 @@ def strategy(id: str, name: str, category: str, description: str = "",
             id=id, name=name, category=category, description=description,
             inputs=list(inputs or ["close"]), outputs=outputs,
             params=params or [], func=func,
+            requires_pool=requires_pool, pool_warmup=pool_warmup,
         )
         return func
     return deco
@@ -112,6 +116,8 @@ def list_strategies() -> list[dict]:
             "inputs": meta.inputs,
             "outputs": meta.outputs,
             "params": [dc.asdict(p) for p in meta.params],
+            "requires_pool": meta.requires_pool,
+            "pool_warmup": meta.pool_warmup,
         })
     out.sort(key=lambda x: (x["category"], x["id"]))
     return out
