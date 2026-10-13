@@ -870,6 +870,117 @@ def _sw_first_sectors_hist(date_str, errors, top=10):
     return {"top": rows[:top], "bottom": list(reversed(rows[-top:])), "count": len(rows)}
 
 
+# --------------------------------------------------------------------------- #
+# ③-附：板块总市值（月级别，落盘缓存到 data 文件夹）
+# --------------------------------------------------------------------------- #
+# 板块总市值变化是月级别的，没必要每次请求都重算——东财行业 / 概念板块列表本身每行就带
+# 「总市值」，拉一次即可覆盖全部板块；按月份缓存到磁盘，跨月自动失效重新计算。
+# 首次缺失时后台异步计算，接口立即返回资金流（cap_status=computing），
+# 前端显示「计算中」并稍后自动重试，即可拿到标注用的总市值。
+_SECTOR_CAP_LOCK = threading.Lock()
+_SECTOR_CAP_BUSY = {"busy": False}
+
+
+def _sector_cap_path():
+    """板块总市值缓存文件：backend_fastapi/data/sector_market_cap.json。"""
+    base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    folder = os.path.join(base, "data")
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except OSError:
+        pass
+    return os.path.join(folder, "sector_market_cap.json")
+
+
+def _compute_sector_caps():
+    """拉取东财行业 / 概念板块列表（每行自带总市值，单位元），换算成「亿」后返回。
+    返回 {"industry": {板块名称: 总市值(亿)}, "concept": {...}, "month": "YYYYMM"}。
+    任一来源失败只降级（对应分类为空），不影响另一分类。"""
+    month = dt.date.today().strftime("%Y%m")
+    caps = {"industry": {}, "concept": {}, "month": month}
+    try:
+        ind = _ak(ak.stock_board_industry_name_em)
+        if ind is not None and not getattr(ind, "empty", True):
+            for _, r in ind.iterrows():
+                name = str(r.get("板块名称") or "").strip()
+                cap = _num(r.get("总市值"), 2)
+                if name and cap is not None:
+                    caps["industry"][name] = round(cap / 1e8, 2)   # 元 → 亿
+    except Exception:                                             # noqa: BLE001
+        pass
+    try:
+        con = _ak(ak.stock_board_concept_name_em)
+        if con is not None and not getattr(con, "empty", True):
+            for _, r in con.iterrows():
+                name = str(r.get("板块名称") or "").strip()
+                cap = _num(r.get("总市值"), 2)
+                if name and cap is not None:
+                    caps["concept"][name] = round(cap / 1e8, 2)
+    except Exception:                                             # noqa: BLE001
+        pass
+    return caps
+
+
+def _load_sector_caps(force=False):
+    """返回 (caps_dict_or_None, status)。
+
+    status == 'ready'    ：当月缓存已就绪（磁盘命中），可直接标注；
+    status == 'computing'：当月缓存缺失且后台正在计算，接口此时只返回资金流，
+                          前端显示「计算中」并稍后自动重试即可拿到 cap。
+    月度刷新：缓存以 month(YYYYMM) 为键，跨月自动失效重新计算。
+    """
+    month = dt.date.today().strftime("%Y%m")
+    path = _sector_cap_path()
+
+    def read_disk():
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8-sig") as fh:
+                    data = json.load(fh)
+                if data.get("month") == month:
+                    return data
+        except Exception:                                         # noqa: BLE001
+            pass
+        return None
+
+    disk = read_disk()
+    if disk and not force:
+        return disk, "ready"
+    # 未在计算 → 启动后台线程计算并落盘（先写 .tmp 再原子替换，避免读到半成品）
+    with _SECTOR_CAP_LOCK:
+        if not _SECTOR_CAP_BUSY["busy"]:
+            _SECTOR_CAP_BUSY["busy"] = True
+
+            def worker():
+                try:
+                    caps = _compute_sector_caps()
+                    tmp = path + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as fh:
+                        json.dump(caps, fh, ensure_ascii=False)
+                    os.replace(tmp, path)
+                except Exception:                                 # noqa: BLE001
+                    pass
+                finally:
+                    with _SECTOR_CAP_LOCK:
+                        _SECTOR_CAP_BUSY["busy"] = False
+
+            threading.Thread(target=worker, daemon=True).start()
+    disk = read_disk()
+    if disk:
+        return disk, "ready"
+    return None, "computing"
+
+
+def _attach_sector_cap(block, cap_map):
+    """把板块总市值（亿）按名称挂到资金流 Top 行的 cap 字段；匹配不上则留空（不报错）。"""
+    if not isinstance(block, dict):
+        return
+    rows = list(block.get("top_in") or []) + list(block.get("top_out") or [])
+    for arr in rows:
+        if isinstance(arr, dict):
+            arr["cap"] = cap_map.get(str(arr.get("name") or ""))
+
+
 _SECTOR_WINDOW_SYMBOL = {"今日": "即时", "5日": "5日排行", "10日": "10日排行"}
 
 
@@ -889,7 +1000,8 @@ def sector_beta(date=None, window="今日"):
             errors.append("行业/概念板块资金流为实时/近N日口径，指定历史交易日不显示")
             return {"ok": True, "as_of": _now_str(), "trade_date": date, "historical": True,
                     "industry": empty_flow, "concept": dict(empty_flow),
-                    "sw_first": _sw_first_sectors_hist(date, errors), "errors": errors}
+                    "sw_first": _sw_first_sectors_hist(date, errors),
+                    "cap_status": "n/a", "errors": errors}
         parts: dict = {}
 
         def fetch_industry():
@@ -934,14 +1046,31 @@ def sector_beta(date=None, window="今日"):
         for thread in threads:
             thread.join(max(0.1, deadline - time.time()))
 
+        # 板块总市值：月级别，落盘缓存；首次缺失时后台异步计算（cap_status=computing），
+        # 把总市值按名称挂到资金流 Top 行，供前端在资金数据后括号标注。
+        caps, cap_status = _load_sector_caps()
+        _attach_sector_cap(parts.get("industry"), (caps or {}).get("industry", {}))
+        _attach_sector_cap(parts.get("concept"), (caps or {}).get("concept", {}))
+
         return {"ok": True, "as_of": _now_str(), "historical": False,
                 "industry": parts.get("industry") or empty_industry,
                 "concept": parts.get("concept") or empty_industry,
                 "sw_first": parts.get("sw_first") or empty_sw,
+                "cap_status": cap_status,
+                "cap_month": (caps or {}).get("month"),
                 "errors": errors}
 
     data, cached = _cached(f"sector_beta:{date or 'rt'}:{window}", build,
                            ttl=HIST_CACHE_TTL if date else _ttl(90))
+    # 关键：首次 build 时总市值可能还在后台计算（cap_status=computing），该结果会被进程内缓存
+    # 90s；若直接返回缓存，自动重试会永远拿到「computing」旧值。故在缓存返回后，再按名称
+    # 重新挂载一次总市值——后台算完落盘后即可命中，无需等缓存过期。
+    if not data.get("historical") and data.get("cap_status") != "ready":
+        caps, cap_status = _load_sector_caps()
+        if caps is not None:
+            _attach_sector_cap(data.get("industry"), caps.get("industry", {}))
+            _attach_sector_cap(data.get("concept"), caps.get("concept", {}))
+            data = {**data, "cap_status": cap_status, "cap_month": caps.get("month")}
     return {**data, "cached": cached}
 
 
@@ -1187,7 +1316,7 @@ def _assemble_digest(blocks):
                         "类型": prefix, "名称": r.get("name"), "净额(亿)": r.get("net"),
                         "涨跌幅%": r.get("pct"), "流入(亿)": r.get("inflow"),
                         "流出(亿)": r.get("outflow"), "领涨股": r.get("leader"),
-                        "公司家数": r.get("count"),
+                        "公司家数": r.get("count"), "总市值(亿)": r.get("cap"),
                     })
         return out
 

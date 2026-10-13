@@ -36,6 +36,8 @@ namespace StockPool
         private Button _mktLuFold;                                   // 折叠 / 展开
         private ComboBox _mktLuFilter;                               // 板块筛选
         private ComboBox _mktSectorWindow;                            // ③ 板块β 时间窗口：今日 / 5日 / 10日
+        private bool _mktCapReloadPending;                            // 总市值重拉是否已在排队（避免叠加定时器）
+        private int _mktCapReloadTries;                               // 总市值重拉已尝试次数（限次，防死循环）
         private List<string> _mktLuInds;                             // 下拉里的板块名（与 Items 一一对应，index 0 之后）
         private List<Dictionary<string, object>> _mktBlAll, _mktDtAll;  // 炸板 / 跌停原始数据
         private List<string> _mktBlInds, _mktDtInds;
@@ -196,12 +198,14 @@ namespace StockPool
             _mktSectorWindow.Width = 70;
             AddRow(b3, Row(_mktSectorStatus, _mktSectorWindow));
 
-            AddRow(b3, Row(Mute(Lbl("行业板块资金净额 Top10（单位：亿，红=净流入 / 绿=净流出）"))));
+            AddRow(b3, Row(Mute(Lbl("行业板块资金净额 Top10（单位：亿，红=净流入 / 绿=净流出；括号为板块总市值）"))));
             _mktIndBars = new MktBars { Dock = DockStyle.Top };
+            _mktIndBars.SetValueWidth(132);
             AddRow(b3, _mktIndBars);
 
-            AddRow(b3, Row(Mute(Lbl("概念板块资金净额 Top10（单位：亿）"))));
+            AddRow(b3, Row(Mute(Lbl("概念板块资金净额 Top10（单位：亿；括号为板块总市值）"))));
             _mktConBars = new MktBars { Dock = DockStyle.Top };
+            _mktConBars.SetValueWidth(132);
             AddRow(b3, _mktConBars);
 
             AddRow(b3, Row(Mute(Lbl("申万一级行业 · 领涨 Top10"))));
@@ -619,8 +623,14 @@ namespace StockPool
             var con = J.Map(J.Get(j, "concept"));
             var sw = J.Map(J.Get(j, "sw_first"));
 
-            _mktIndBars.SetItems(MktFlowItems(ind));
-            _mktConBars.SetItems(MktFlowItems(con));
+            // 行业 / 概念资金净额同为「亿」：两张图都把 0 轴钉在中线（上下对齐），
+            // 各图按自身最大绝对值归一 —— 缩放比例互不牵连，最长条都恰好是半个条形区。
+            var indItems = MktFlowItems(ind);
+            var conItems = MktFlowItems(con);
+            _mktIndBars.SetCenterZero(true);
+            _mktConBars.SetCenterZero(true);
+            _mktIndBars.SetItems(indItems);
+            _mktConBars.SetItems(conItems);
             _mktSwTopBars.SetItems(MktPctItems(sw != null ? J.Arr(J.Get(sw, "top")) : null));
             _mktSwBotBars.SetItems(MktPctItems(sw != null ? J.Arr(J.Get(sw, "bottom")) : null));
 
@@ -629,7 +639,57 @@ namespace StockPool
             var errs = J.Arr(J.Get(j, "errors"));
             if (errs != null && errs.Count > 0)
                 st += "（" + J.Str(errs[0]) + "）";     // 说明原因，别让用户只看到「无数据」
+
+            // 板块总市值：月级别落盘缓存，首次缺失时后台计算，接口先返回资金流（cap_status=computing）。
+            // 这里提示「计算中」，并自动延迟重试一次拉取，拿到后自动补上括号标注。
+            string capStatus = J.Str(J.Get(j, "cap_status"));
+            string capMonth = J.Str(J.Get(j, "cap_month"));
+            if (capStatus == "computing")
+            {
+                st += " · 板块总市值计算中…";
+                MktScheduleCapRetry();
+            }
+            else if (!string.IsNullOrEmpty(capMonth))
+            {
+                st += " · 总市值(东财" + capMonth + ")";
+                _mktCapReloadTries = 0;                 // 已就绪，重置重试计数
+            }
             _mktSectorStatus.Text = st;
+        }
+
+        /// <summary>板块总市值仍在计算时，延迟重新拉取一次 /sectors，自动补上括号标注（限次，避免死循环）。</summary>
+        private void MktScheduleCapRetry()
+        {
+            if (_mktCapReloadPending || _mktCapReloadTries >= 6) return;
+            _mktCapReloadPending = true;
+            _mktCapReloadTries++;
+            System.Threading.Tasks.Task.Delay(3500).ContinueWith(delegate
+            {
+                _mktCapReloadPending = false;
+                try { Invoke((Action)delegate { MktReloadSectors(); }); }
+                catch (Exception) { }
+            });
+        }
+
+        /// <summary>仅重新请求「板块β」接口（沿用当前日期窗口），拿到总市值后重渲染。</summary>
+        private void MktReloadSectors()
+        {
+            if (_mktSectorWindow == null) return;
+            string date = _mktDate != null && _mktDate.Checked ? _mktDate.Value.ToString("yyyyMMdd") : "";
+            string w = _mktSectorWindow.SelectedItem != null ? _mktSectorWindow.SelectedItem.ToString() : "今日";
+            string url = "http://127.0.0.1:8000/api/market/sectors"
+                + (date == "" ? "?window=" : "?date=" + date + "&window=") + Uri.EscapeDataString(w);
+            int round = _mktRound;
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    string resp = VRequest(url, null);
+                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    Invoke((Action)delegate { if (round == _mktRound) MktRenderSectors(j); });
+                }
+                catch (Exception) { }
+            });
         }
 
         /// <summary>行业 / 概念资金流：净流入 + 净流出合并后按净额升序（流出在前、流入在后，与网页图表一致）。</summary>
@@ -653,9 +713,21 @@ namespace StockPool
             foreach (Dictionary<string, object> x in rows)
             {
                 double? net = J.NumOrNull(J.Get(x, "net"));
-                items.Add(MktBarItem(J.Str(J.Get(x, "name")), net ?? 0, J.Fmt(net)));
+                string txt = J.Fmt(net);
+                double? cap = J.NumOrNull(J.Get(x, "cap"));   // 板块总市值（亿），匹配不上则为空
+                if (cap != null) txt += "（" + MktFmtCap(cap) + "）";
+                items.Add(MktBarItem(J.Str(J.Get(x, "name")), net ?? 0, txt));
             }
             return items;
+        }
+
+        /// <summary>板块总市值（单位：亿）格式化：>=1万亿 显示为「X.XX万亿」，否则「X亿」。</summary>
+        private static string MktFmtCap(double? yi)
+        {
+            if (yi == null) return "";
+            double v = (double)yi;
+            if (v >= 10000) return (v / 10000.0).ToString("0.00") + "万亿";
+            return v.ToString("0") + "亿";
         }
 
         private static List<MktBars.Item> MktPctItems(System.Collections.ArrayList list)
@@ -1117,16 +1189,35 @@ bool ok = J.IsOk(j);
 
             private const int RowH = 20;
             private const int NameW = 98;
-            private const int ValueW = 72;
+            private int _valueW = 72;               // 右侧数值列宽（行业/概念资金流需容纳「净额(总市值)」）
             private const int BarGapX = 6;          // 名称列与条形之间的间隔
             /// <summary>条形区最多占可用宽度的比例：右侧留出余量，免得最长的条一路顶到数值列。</summary>
             private const double BarMaxRatio = 0.72;
             private readonly List<Item> _items = new List<Item>();
+            // 0 轴钉中线：上下两张图 0 轴对齐；各图按自身最大绝对值归一（最大条 = 半个条形区，缩放比例互不牵连）
+            private bool _centerZero;
 
             public MktBars()
             {
                 // SetStyle 已上移到基类 ChartControl（第 07 项）
                 Height = 40;
+            }
+
+            /// <summary>
+            /// 0 轴固定在条形区正中：上下堆叠的两张图 0 轴对齐；每张图按自己的最大绝对值归一，
+            /// 因此两张图的缩放比例可以不一致（最长条都恰好是半个条形区）。
+            /// </summary>
+            public void SetCenterZero(bool on)
+            {
+                _centerZero = on;
+                Invalidate();
+            }
+
+            /// <summary>设置右侧数值列宽度（单位像素）。行业 / 概念资金流需要更宽以容纳「净额(总市值)」。</summary>
+            public void SetValueWidth(int w)
+            {
+                _valueW = Math.Max(40, w);
+                Invalidate();
             }
 
             public void SetItems(List<Item> items)
@@ -1157,16 +1248,19 @@ bool ok = J.IsOk(j);
                     if (it.Value >= 0) maxPos = Math.Max(maxPos, it.Value);
                     else maxNeg = Math.Max(maxNeg, -it.Value);
                 }
+                double maxAbs = Math.Max(maxPos, maxNeg);
                 int barX = NameW + BarGapX;
                 // 可用宽度再乘 BarMaxRatio：最长的条不铺满整行，右侧留白，条与数值不挤在一起
-                int availW = Math.Max(120, Width - barX - ValueW - 6);
+                int availW = Math.Max(120, Width - barX - _valueW - 6);
                 int barW = Math.Max(40, (int)(availW * BarMaxRatio));
-                double span = maxPos + maxNeg;
-                // 零轴位置：左侧留给负值（maxNeg）、右侧留给正值（maxPos）。
-                // 之前写反成按 maxPos 分，导致最大负值的条越过 NameW、把左侧名称盖住。
-                int zeroX = span > 0 ? barX + (int)(barW * maxNeg / span) : barX;
-                // 正负混合时画一条零轴参考线，左右两侧的条长更好对比
-                if (maxPos > 0 && maxNeg > 0)
+                // 0 轴位置：中线模式则钉在条形区正中（上下两图对齐）；否则按正负极值比例分（旧逻辑）。
+                int zeroX = _centerZero ? barX + barW / 2 : (maxPos + maxNeg > 0 ? barX + (int)(barW * maxNeg / (maxPos + maxNeg)) : barX);
+                // 归一分母与可用条长：中线模式下各图按自身最大绝对值归一（最大条 = 半个条形区，缩放互不牵连）；
+                // 非中线模式按正/负极值之和归一（最大条铺满整条区）。
+                double denom = _centerZero ? (maxAbs > 0 ? maxAbs : 1) : (maxPos + maxNeg);
+                double full = _centerZero ? barW / 2.0 : (double)barW;
+                // 零轴参考线：正负混合时必画；中线模式下即便单边也画出中轴线，强化上下对齐观感
+                if (_centerZero || (maxPos > 0 && maxNeg > 0))
                 {
                     using (var pen = new Pen(Color.FromArgb(80, 127, 127, 127)))
                         g.DrawLine(pen, zeroX, 4, zeroX, Height - 6);
@@ -1178,7 +1272,7 @@ bool ok = J.IsOk(j);
                     using (var nb = new SolidBrush(ForeColor))
                         g.DrawString(it.Name, Font, nb, new RectangleF(0, y, NameW - 6, RowH - 2), FmtLeft);
 
-                    int len = span > 0 ? (int)(Math.Abs(it.Value) / span * barW) : 0;
+                    int len = denom > 0 ? (int)(Math.Abs(it.Value) / denom * full) : 0;
                     int x = it.Value >= 0 ? zeroX : zeroX - len;
                     if (x < barX) { len -= (barX - x); x = barX; }
                     if (x + len > barX + barW) len = barX + barW - x;
@@ -1191,7 +1285,7 @@ bool ok = J.IsOk(j);
                     g.Clip = old;
 
                     using (var br = new SolidBrush(ForeColor))
-                        g.DrawString(it.Text, Font, br, new RectangleF(Width - ValueW, y, ValueW - 4, RowH - 2), FmtRight);
+                        g.DrawString(it.Text, Font, br, new RectangleF(Width - _valueW, y, _valueW - 4, RowH - 2), FmtRight);
                     y += RowH;
                 }
             }
