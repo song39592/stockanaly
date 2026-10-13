@@ -3,7 +3,7 @@
 //
 // 职责：
 //   1) 内嵌拉起 FastAPI 后端（:8000）与 dsh AI 服务（:3080），不再依赖 .bat；
-//   2) 一个窗口装下所有页（RPS 体系 / 分析工具 / 运行日志 / 设置 / 服务控制台），
+//   2) 一个窗口装下所有页（运行日志 / 设置 / 服务控制台 / 各业务页），
 //      业务网页用 Edge/Chrome 应用模式开成独立窗口（没有地址栏、没有标签页），重复点只切到最前；
 //   3) 托盘常驻、状态灯轮询、退出时收尾子进程。
 //
@@ -556,11 +556,14 @@ namespace StockPool
             _tabBody.BackColor = Color.FromArgb(30, 32, 38);
             root.Controls.Add(_tabBody, 0, 2);
 
-            BuildRpsPage();
+            // 第26 项：移除「RPS 体系」说明页与「分析工具」卡片入口页（已无用）。
+            // ⚠️ `BuildRpsPoolPage()` **保留** —— RPS 标注的股票池是独立功能，
+            // 与被删的「RPS 体系」说明页不是一回事（副图的 RPS 指标线也仍要用）。
             BuildRpsPoolPage();           // RPS 标注的股票池（在池 / 入池 / 出池）
             BuildScr90Page();             // SCR90 周榜（本地全市场算集中度，按周更新）
-            BuildToolPage();
             BuildValuationPage();
+            BuildRedBullPage();             // 红色小牛（原生内嵌：问答 + Skill 管理）
+            BuildMentorLabPage();           // 大佬策略实验室（原生内嵌：资料→提炼→审核→Skill→发布）
             BuildMarketPage();
             BuildStockPage();
             BuildDownloadPage();
@@ -710,6 +713,7 @@ namespace StockPool
             if (index == _dlTabIndex) DlOnEnter();     // 进入下载页接着上次的任务刷新进度
             if (index == _scrTabIndex) ScrOnEnter();   // 进入 SCR90 周榜页拉本周结果
             if (index == _rpsPoolTabIndex) RpsPoolOnEnter();   // 进入 RPS 池页拉最新快照
+            if (index == _mlTabIndex) MlOnEnter();         // 进入实验室页自动拉研究对象清单
         }
 
         /// <summary>标签行配色：选中用卡片色 + 蓝色下划线，未选中用窗口底色。</summary>
@@ -765,7 +769,9 @@ namespace StockPool
             AddRow(body3, Row(
                 MiniBtn("接口文档", delegate { WebWindow.Show("接口文档", "http://127.0.0.1:8000/docs"); }, 100),
                 MiniBtn("关闭所有网页窗口", delegate { WebWindow.CloseAll(); }, 140)));
-            var tip = Lbl("说明：RPS 体系、分析工具两个标签页各有一个 / 几个入口按钮，点开是自己的窗口"
+            // 第 26 项：RPS 体系 / 分析工具两个入口页已移除，原文提到的「这两个标签页」
+            // 已不存在，故改为只描述当前真实存在的网页窗口入口。
+            var tip = Lbl("说明：「大佬策略实验室」等入口点开是自己的窗口"
                         + "（没有地址栏、没有标签页）；重复点同一个按钮只会把已开着的窗口切到最前。");
             Mute(tip);
             tip.AutoSize = false;
@@ -963,8 +969,8 @@ namespace StockPool
                 c.BackColor = _cLogBg;
                 c.ForeColor = _cLogText;
                 // 说明框里已插入的文字不会跟着 ForeColor 走，用新配色重写一遍
-                if (tag == "doc-rps") FillRpsDoc((RichTextBox)c);
-                else if (tag == "doc-ai") FillAiDoc((RichTextBox)c, (c == _mktAiBox ? _mktAiMarkdown : _stockAiMarkdown));
+                //（第 26 项移除了 RPS 体系页，原 doc-rps 分支一并删掉）
+                if (tag == "doc-ai") FillAiDoc((RichTextBox)c, (c == _mktAiBox ? _mktAiMarkdown : _stockAiMarkdown));
             }
             else if (c is ProgressBar)
             {
@@ -1054,144 +1060,6 @@ namespace StockPool
         private string UrlWithTheme(string url)
         {
             return url + (url.IndexOf('?') >= 0 ? "&" : "?") + "theme=" + (_light ? "light" : "dark");
-        }
-
-        /// <summary>RPS 体系：整页放使用说明（说明区自己滚动），底部固定一个「进入系统」按钮。</summary>
-        private Panel BuildRpsPage()
-        {
-            var p = NewPage("RPS 体系");
-            p.AutoScroll = false;   // 说明区内部滚动，页面本身不滚，按钮始终可见
-
-            var root = new TableLayoutPanel();
-            root.Dock = DockStyle.Fill;
-            root.Margin = new Padding(0);
-            root.Padding = new Padding(0);
-            root.ColumnCount = 1;
-            root.RowCount = 3;
-            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 顶头一句话
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f)); // 使用说明（自己滚动）
-            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 底部按钮
-            p.Controls.Add(root);
-
-            var head = Lbl("RPS（股价相对强度）体系在网页版「股票池追踪系统」里，下面是这个页面的使用说明。");
-            Mute(head);
-            head.Margin = new Padding(0, 0, 0, 6);
-            root.Controls.Add(head, 0, 0);
-
-            var doc = new RichTextBox();
-            doc.Tag = "doc-rps";
-            doc.ReadOnly = true;
-            doc.BorderStyle = BorderStyle.None;
-            doc.Dock = DockStyle.Fill;
-            doc.ScrollBars = RichTextBoxScrollBars.Vertical;
-            doc.Font = new Font("Microsoft YaHei UI", 9.5f);
-            doc.Margin = new Padding(0, 0, 0, 10);
-            FillRpsDoc(doc);
-            root.Controls.Add(doc, 0, 1);
-
-            var enter = MiniBtn("进入系统", delegate { OpenWeb(); }, 180);
-            enter.Height = 34;
-            enter.Font = new Font("Microsoft YaHei UI", 10.5f);
-            var hint = Lbl("点按钮打开独立窗口（没有地址栏、没有标签页），重复点只会切到已开着的窗口。");
-            Mute(hint);
-            root.Controls.Add(Row(enter, hint), 0, 2);
-
-            return p;
-        }
-
-        /// <summary>把 RPS 体系的使用说明写进只读说明框；换肤时会被再调一次，用新配色重排一遍。</summary>
-        private static void FillRpsDoc(RichTextBox rt)
-        {
-            var heads = new string[] {
-                "1. 导入数据", "2. 查看历史", "3. 连续在榜天数", "4. 表格排序",
-                "5. 数据备份与恢复", "6. 字段识别", "7. 个股研究详情"
-            };
-            var bodies = new string[] {
-                "：点击「导入今日股票池」，选择 .xlsx / .xls 文件（也支持通达信等软件导出的 GBK 文本表格）。"
-                    + "解析后预览确认，即以当天日期保存。",
-                "：顶部日期选择器切换到任意有数据的一天，概览卡片、变动分析、表格和图表都会联动。",
-                "：从选中日期往前数，只要连续出现就累加，中断则重新计算（≥7 天红色、3–6 天橙色、1–2 天灰色）。",
-                "：点击表头切换排序；点击「细分行业」按行业分组，组内按连续天数降序。",
-                "：「导出备份」下载 JSON 文件，「恢复数据」从 JSON 导入，「数据管理」可按天删除或清空。",
-                "：自动识别表头中的「代码 / 名称 / 细分行业 / 地区」列；行业为空归为「未分类」；"
-                    + "股票代码自动补零到 6 位，并自动去重。",
-                "：点击表格 / 排行榜里的股票，查看真实日 K、均线、成交量、进出池标记和公告新闻时间轴；"
-                    + "详情页的「AI 调研」按钮可继续生成主营业务、近期事项和多空观点报告。行情与调研依赖本地后端，本启动器会自动拉起。"
-            };
-            if (_docFont == null) _docFont = new Font("Microsoft YaHei UI", 9.5f);
-            if (_docBold == null) _docBold = new Font(_docFont, FontStyle.Bold);
-            var normal = _docFont;
-
-            rt.Clear();
-            rt.SelectionFont = normal;
-            rt.SelectionColor = rt.ForeColor;
-            rt.AppendText("纯本地工具，数据只保存在浏览器本地，不上传任何服务器。页面顶部的工具栏负责导入、导出与数据管理。"
-                        + Environment.NewLine + Environment.NewLine);
-            for (int i = 0; i < heads.Length; i++)
-            {
-                rt.SelectionFont = _docBold;
-                rt.SelectionColor = rt.ForeColor;
-                rt.AppendText(heads[i]);
-                rt.SelectionFont = normal;
-                rt.SelectionColor = rt.ForeColor;
-                rt.AppendText(bodies[i] + Environment.NewLine + Environment.NewLine);
-            }
-            rt.SelectionStart = 0;
-            rt.SelectionLength = 0;
-        }
-
-        /// <summary>分析工具：三个工具各做成一张卡片（图标 + 标题 + 简介 + 进入按钮）。</summary>
-        private Panel BuildToolPage()
-        {
-            var p = NewPage("分析工具");
-            var stack = Stack();
-
-            var tip = Lbl("盘面及板块分析、大佬策略实验室各开一个自己的窗口（没有地址栏、没有标签页）；"
-                        + "股票估值计算已做成原生页面，就在本窗口的「估值计算」标签页里。都需要后端 / AI 服务在跑。");
-            Mute(tip);
-            tip.AutoSize = false;
-            tip.Width = 720;
-            tip.Height = 40;
-            AddRow(stack, Row(tip));
-
-            AddRow(stack, ToolCard("📊", "盘面及板块分析",
-                "外围市场、大盘资金、行业 / 概念板块强弱与个股联动，一屏看清当日盘面结构。",
-                null, "盘面及板块分析", onEnter: delegate { SelectTab(_mktTabIndex); }));
-            AddRow(stack, ToolCard("🧠", "大佬策略实验室",
-                "把大佬公开资料交给 AI 提炼，人工审核后生成每日观点，沉淀为可回测的候选策略。",
-                "mentor-lab", "大佬策略实验室"));      // 子目录名，不是文件名
-            AddRow(stack, ToolCard("📈", "股票估值计算",
-                "输入标的与假设，按多种估值模型测算内在价值区间，辅助判断高估 / 低估。",
-                null, "股票估值计算", onEnter: delegate { SelectTab(_valTabIndex); }));
-            AddRow(stack, ToolCard("🔍", "个股分析",
-                "前复权日K + 入池出池轨迹 + 消息面时间轴，一图看清个股历史与异动。",
-                null, "个股分析", onEnter: delegate { SelectTab(_stockTabIndex); }));
-
-            var tip2 = Lbl("重复点同一个「进入」按钮，网页版只会把已开着的窗口切到最前；「股票估值计算」则切到本窗口的估值标签页。");
-            Mute(tip2);
-            AddRow(stack, Row(tip2));
-
-            p.Controls.Add(stack);
-            return p;
-        }
-
-
-        /// <summary>一张工具卡片：图标 + 标题（GroupBox 标题）、简介、进入按钮；跟随主题换肤。</summary>
-        private GroupBox ToolCard(string icon, string title, string desc, string file, string pageTitle, Action onEnter = null)
-        {
-            TableLayoutPanel body;
-            var gb = Group(icon + "  " + title, out body);
-            body.BackColor = Color.Transparent;   // 跟随 GroupBox 卡片底色，不露两层底色
-            var d = Lbl(desc);
-            d.AutoSize = true;
-            d.MaximumSize = new Size(780, 0);
-            AddRow(body, Row(d));
-            var enter = onEnter != null
-                ? MiniBtn("进入", delegate { onEnter(); }, 96)
-                : MiniBtn("进入", delegate { OpenWebPage(file, pageTitle); }, 96);
-            AddRow(body, Row(enter));
-            return gb;
         }
 
         private Panel BuildLogPage()
