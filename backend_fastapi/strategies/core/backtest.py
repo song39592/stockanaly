@@ -95,6 +95,33 @@ def _prepare(codes: list[str], start: str | None, end: str | None,
     return usable, errors
 
 
+def _require_pool(strategy_id: str, start: str | None, end: str | None) -> None:
+    """依赖股票池历史的策略：预检「历史是否覆盖回测区间」，否则给出友好提示。
+
+    注册冒烟测试只直接调 meta.func、不经过本函数，故这里抛错不会让策略注册失败
+    （策略本体在无历史时返回空信号，保证注册通过）。
+    """
+    meta = base.REGISTRY.get(strategy_id)
+    if not meta or not getattr(meta, "requires_pool", False):
+        return
+    mn, mx = data.pool_snapshot_range()
+    if mn is None or mx is None:
+        raise RuntimeError("暂无股票池历史数据，请先导入/同步股票池历史数据后再运行本策略")
+    if start and end:
+        warmup = getattr(meta, "pool_warmup", 0) or 0
+        lo = start
+        if warmup:
+            try:
+                lo = (dt.date.fromisoformat(str(start)[:10])
+                      - dt.timedelta(days=warmup)).isoformat()
+            except ValueError:
+                lo = start
+        if mn > lo or mx < end:
+            raise RuntimeError(
+                f"股票池历史数据未覆盖回测区间（历史 {mn}~{mx}，回测 {start}~{end}），"
+                f"请先导入/同步覆盖该区间的数据")
+
+
 def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                  start: str | None, end: str | None,
                  initial_capital: float = 100000.0, commission: float = 0.0003,
@@ -118,6 +145,8 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
         days = data.recent_trading_days(window + _WARMUP_BARS)
         if len(days) >= window + 2:
             start, end = days[0], days[-1]
+
+    _require_pool(strategy_id, start, end)
 
     usable, errors = _prepare(codes, start, end, progress=progress)
     if not usable:
@@ -262,6 +291,8 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
         days = data.recent_trading_days(lookback)
         if len(days) >= 2:
             start, end = days[0], days[-1]
+
+    _require_pool(strategy_id, start, end)
 
     # ---- 第 1 遍：分批预检，**只留日期索引**，不留行情本体----
     # 为什么分批（第 21 项实测）：`_prepare` 一次性把全市场 5585 只 × 250 天
