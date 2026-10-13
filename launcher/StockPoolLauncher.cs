@@ -557,6 +557,7 @@ namespace StockPool
             root.Controls.Add(_tabBody, 0, 2);
 
             BuildRpsPage();
+            BuildRpsPoolPage();           // RPS 标注的股票池（在池 / 入池 / 出池）
             BuildScr90Page();             // SCR90 周榜（本地全市场算集中度，按周更新）
             BuildToolPage();
             BuildValuationPage();
@@ -708,6 +709,7 @@ namespace StockPool
             if (index == _stTabIndex) StOnEnter();
             if (index == _dlTabIndex) DlOnEnter();     // 进入下载页接着上次的任务刷新进度
             if (index == _scrTabIndex) ScrOnEnter();   // 进入 SCR90 周榜页拉本周结果
+            if (index == _rpsPoolTabIndex) RpsPoolOnEnter();   // 进入 RPS 池页拉最新快照
         }
 
         /// <summary>标签行配色：选中用卡片色 + 蓝色下划线，未选中用窗口底色。</summary>

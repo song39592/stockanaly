@@ -62,6 +62,31 @@ def init_db() -> None:
           created_at TEXT NOT NULL,
           finished_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS rps_pool_daily (
+          trade_date TEXT NOT NULL,
+          code TEXT NOT NULL,
+          name TEXT NOT NULL DEFAULT '',
+          industry TEXT NOT NULL DEFAULT '',
+          rps50 REAL,
+          rps120 REAL,
+          rps250 REAL,
+          PRIMARY KEY(trade_date, code)
+        );
+        CREATE INDEX IF NOT EXISTS idx_rps_pool_daily_date ON rps_pool_daily(trade_date);
+        CREATE TABLE IF NOT EXISTS rps_pool_jobs (
+          id TEXT PRIMARY KEY,
+          status TEXT NOT NULL,
+          progress INTEGER NOT NULL DEFAULT 0,
+          total INTEGER NOT NULL DEFAULT 0,
+          note TEXT NOT NULL DEFAULT '',
+          errors_json TEXT NOT NULL DEFAULT '[]',
+          created_at TEXT NOT NULL,
+          finished_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS stock_names (
+          code TEXT PRIMARY KEY,
+          name TEXT NOT NULL DEFAULT ''
+        );
         """)
 
 
@@ -203,6 +228,20 @@ def load_pool_members(start: str | None = None,
     return out
 
 
+def snapshot_dates() -> list[str]:
+    """所有快照日（升序）；无数据 / 异常返回空列表。
+
+    供 RPS 标注池等需要「最新一期 + 上一期」对比的接口取日期序列。
+    """
+    try:
+        with connect() as db:
+            rows = db.execute(
+                "SELECT snapshot_date FROM pool_snapshots ORDER BY snapshot_date").fetchall()
+    except Exception:
+        return []
+    return [str(r["snapshot_date"]) for r in rows]
+
+
 def pool_snapshot_range() -> tuple[str | None, str | None]:
     """返回 (最早快照日, 最晚快照日)；无数据 / 异常返回 (None, None)。
 
@@ -250,6 +289,136 @@ def update_job(job_id: str, *, status: str | None = None, completed: int | None 
 def get_job(job_id: str) -> dict[str, Any] | None:
     with connect() as db:
         row = db.execute("SELECT * FROM sync_jobs WHERE id=?", (job_id,)).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    item["errors"] = json.loads(item.pop("errors_json") or "[]")
+    return item
+
+
+# --------------------------------------------------------------------------- #
+# 每日 RPS 强势池（全市场 RPS≥阈值，按交易日落库；滚动窗口截断）
+# --------------------------------------------------------------------------- #
+def upsert_rps_pool_day(trade_date: str, rows: list[dict[str, Any]]) -> None:
+    """覆盖写入某交易日的 RPS 强势池成员（先删后插，幂等）。
+
+    rows: [{code, name, industry, rps50, rps120, rps250}]；空列表等价于清空该日。
+    """
+    trade_date = str(trade_date)[:10]
+    with connect() as db:
+        db.execute("DELETE FROM rps_pool_daily WHERE trade_date=?", (trade_date,))
+        if rows:
+            db.executemany(
+                """INSERT OR REPLACE INTO rps_pool_daily
+                   (trade_date, code, name, industry, rps50, rps120, rps250)
+                   VALUES(?,?,?,?,?,?,?)""",
+                [(trade_date, str(r["code"]).strip().zfill(6),
+                  str(r.get("name") or ""), str(r.get("industry") or ""),
+                  r.get("rps50"), r.get("rps120"), r.get("rps250"))
+                 for r in rows],
+            )
+
+
+def rps_pool_dates() -> list[str]:
+    """已落库的 RPS 池交易日（降序）；无数据返回 []。"""
+    with connect() as db:
+        rows = db.execute(
+            "SELECT DISTINCT trade_date FROM rps_pool_daily ORDER BY trade_date DESC"
+        ).fetchall()
+    return [str(r["trade_date"]) for r in rows]
+
+
+def load_rps_pool() -> dict[str, list[dict[str, Any]]]:
+    """读全部 RPS 池，按交易日降序、当日按 rps120 降序；{trade_date: [item...]}。"""
+    with connect() as db:
+        rows = db.execute(
+            "SELECT trade_date, code, name, industry, rps50, rps120, rps250 "
+            "FROM rps_pool_daily ORDER BY trade_date DESC, rps120 DESC"
+        ).fetchall()
+    out: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        out.setdefault(r["trade_date"], []).append({
+            "code": r["code"], "name": r["name"], "industry": r["industry"],
+            "rps50": r["rps50"], "rps120": r["rps120"], "rps250": r["rps250"],
+        })
+    return out
+
+
+def truncate_rps_pool(max_days: int) -> int:
+    """只保留最近 max_days 个交易日，删除更早的；返回删除的日期数。"""
+    dates = rps_pool_dates()
+    if len(dates) <= max_days:
+        return 0
+    cutoff = dates[max_days - 1]          # 第 max_days 新的那个日期（含）
+    with connect() as db:
+        cur = db.execute(
+            "DELETE FROM rps_pool_daily WHERE trade_date < ?", (cutoff,))
+        return cur.rowcount
+
+
+def pool_industry_map() -> dict[str, str]:
+    """最新一期股票池快照的行业映射 {code: industry}，用于给强股补行业（没有则空）。"""
+    with connect() as db:
+        row = db.execute(
+            "SELECT snapshot_date FROM pool_snapshots ORDER BY snapshot_date DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return {}
+        rows = db.execute(
+            "SELECT code, industry FROM pool_members WHERE snapshot_date=?",
+            (row["snapshot_date"],)).fetchall()
+    return {r["code"]: r["industry"] for r in rows}
+
+
+def set_names(mapping: dict[str, str]) -> None:
+    if not mapping:
+        return
+    with connect() as db:
+        db.executemany(
+            "INSERT OR REPLACE INTO stock_names(code, name) VALUES(?,?)",
+            [(str(c).zfill(6), str(n)) for c, n in mapping.items()],
+        )
+
+
+def load_names() -> dict[str, str]:
+    with connect() as db:
+        rows = db.execute("SELECT code, name FROM stock_names").fetchall()
+    return {r["code"]: r["name"] for r in rows}
+
+
+def create_rps_pool_job(job_id: str, total: int) -> None:
+    with connect() as db:
+        db.execute(
+            """INSERT OR REPLACE INTO rps_pool_jobs
+               (id, status, progress, total, note, errors_json, created_at, finished_at)
+               VALUES(?,?,?,?,?,?,?,NULL)""",
+            (job_id, "queued", 0, total, "", "[]", now_iso()))
+
+
+def update_rps_pool_job(job_id: str, *, status: str | None = None,
+                        progress: int | None = None, note: str | None = None,
+                        errors: list[str] | None = None, finished: bool = False) -> None:
+    fields, params = [], []
+    for key, value in (("status", status), ("progress", progress), ("note", note)):
+        if value is not None:
+            fields.append(f"{key}=?")
+            params.append(value)
+    if errors is not None:
+        fields.append("errors_json=?")
+        params.append(json.dumps(errors, ensure_ascii=False))
+    if finished:
+        fields.append("finished_at=?")
+        params.append(now_iso())
+    if not fields:
+        return
+    params.append(job_id)
+    with connect() as db:
+        db.execute(f"UPDATE rps_pool_jobs SET {','.join(fields)} WHERE id=?", params)
+
+
+def get_rps_pool_job(job_id: str) -> dict[str, Any] | None:
+    with connect() as db:
+        row = db.execute("SELECT * FROM rps_pool_jobs WHERE id=?", (job_id,)).fetchone()
     if not row:
         return None
     item = dict(row)

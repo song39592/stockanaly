@@ -42,6 +42,7 @@ echo 正在编译原生窗口程序...
   "%~dp0StockPage.cs" ^
   "%~dp0GridKit.cs" ^
   "%~dp0ChipRankPage.cs" ^
+  "%~dp0RpsPoolPage.cs" ^
   "%~dp0DownloadPage.cs" ^
   "%~dp0StrategyPage.cs"
 

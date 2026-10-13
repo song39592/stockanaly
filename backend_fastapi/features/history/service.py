@@ -135,6 +135,94 @@ def enqueue_snapshot_sync(snapshot_date: str, stocks: list[dict[str, Any]]) -> s
     return job_id
 
 
+# --------------------------------------------------------------------------- #
+# 每日 RPS 强势池（全市场 RPS≥阈值，按交易日落库；滚动窗口截断）
+# --------------------------------------------------------------------------- #
+def enqueue_rps_pool_refresh(threshold: int = 90, window: int = 20,
+                            max_days: int = 20) -> str:
+    """启动后台计算：把最近 window 个交易日的全市场 RPS 强势池落库并截断到 max_days。
+
+    返回 job_id；前端据此轮询 `GET /api/history/rps-pool/job/{id}` 拿进度。
+    """
+    job_id = "rps-" + uuid.uuid4().hex
+    history_store.create_rps_pool_job(job_id, max(1, int(window)))
+    threading.Thread(target=_run_rps_pool_job,
+                     args=(job_id, int(threshold), int(window), int(max_days)),
+                     daemon=True).start()
+    return job_id
+
+
+def _run_rps_pool_job(job_id: str, threshold: int, window: int, max_days: int) -> None:
+    import math
+
+    def _num(v):
+        if v is None or (isinstance(v, float) and math.isnan(v)):
+            return None
+        return round(float(v), 1)
+
+    try:
+        history_store.update_rps_pool_job(job_id, status="building_panel", progress=5,
+                                          note="预热全市场日K面板（首次约15秒）")
+        import indicators.rps_data as rps_data
+        panel = rps_data._market_panel("day")
+        if panel is None or panel.empty:
+            history_store.update_rps_pool_job(job_id, status="failed", progress=100,
+                                              note="全市场横截面数据不可用（本地暂无日K）",
+                                              finished=True)
+            return
+
+        panel_dates = sorted(str(x)[:10] for x in panel.index)
+        window_dates = panel_dates[-max(1, int(window)):]
+        history_store.update_rps_pool_job(job_id, status="computing_rps", progress=40,
+                                          note=f"计算最近 {len(window_dates)} 个交易日全市场 RPS")
+
+        rps = rps_data.market_rps(window_dates, [50, 120, 250])
+        r50, r120, r250 = rps[50], rps[120], rps[250]
+
+        history_store.update_rps_pool_job(job_id, status="loading_names", progress=70,
+                                          note="获取股票名称（首次需联网，约数十秒）")
+        try:
+            from strategies.core.backtest import _load_names
+            name_map = _load_names(list(panel.columns))
+        except Exception:                       # noqa: BLE001 - 名称缺失不阻塞
+            name_map = {}
+        if name_map:
+            history_store.set_names(name_map)
+        industry_map = history_store.pool_industry_map()
+
+        import pandas as pd
+        written = 0
+        for d in window_dates:
+            if d not in r50.index:
+                continue
+            a, b, c = r50.loc[d], r120.loc[d], r250.loc[d]
+            mx = pd.concat([a, b, c], axis=1).max(axis=1, skipna=True)
+            sel = mx[mx >= threshold]
+            rows = []
+            for code, _ in sel.items():
+                code = str(code).zfill(6)
+                rows.append({
+                    "code": code,
+                    "name": name_map.get(code) or "",
+                    "industry": industry_map.get(code) or "",
+                    "rps50": _num(a.get(code)),
+                    "rps120": _num(b.get(code)),
+                    "rps250": _num(c.get(code)),
+                })
+            history_store.upsert_rps_pool_day(d, rows)
+            written += 1
+
+        history_store.update_rps_pool_job(job_id, status="truncating", progress=95,
+                                          note="清理超出保留窗口的历史")
+        removed = history_store.truncate_rps_pool(max_days)
+        history_store.update_rps_pool_job(job_id, status="done", progress=100,
+                                          note=f"完成：写入 {written} 天，清理 {removed} 天超出窗口数据",
+                                          finished=True)
+    except Exception as exc:                   # noqa: BLE001
+        history_store.update_rps_pool_job(job_id, status="failed", progress=100,
+                                          note=f"失败：{exc}", finished=True)
+
+
 def _refetch_allowed(code: str, force: bool) -> bool:
     """该股此刻是否允许自动重抓（force 表示用户显式要求，跳过冷却）。"""
     if force:

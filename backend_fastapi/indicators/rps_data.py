@@ -115,6 +115,61 @@ def warm(period: str = "day") -> None:
     threading.Thread(target=_run, name=f"market-panel-{key}", daemon=True).start()
 
 
+def market_rps(dates, periods, period: str = "day") -> dict:
+    """全市场 RPS（相对价格强度，0~100），对齐到 `dates`（每个日期取 ≤ 它的最近交易日）。
+
+    与 `get_rps` 对单只股票逐次做整表 shift / rank 不同，这里**一次算全市场**
+    再按股票池成员挑列，避免对成百上千只成分股重复整表运算（池较大时慢一个量级）。
+
+    返回 {N: pd.DataFrame(index=请求日, columns=代码, 值=RPS 或 NaN)}。
+    某个日期在全市场面板里找不到 ≤ 它的交易日时，其对应行全为 NaN。
+    """
+    panel = _market_panel(period)
+    if panel is None or panel.empty:
+        raise RuntimeError("全市场横截面数据不可用（本地暂无日 K 数据）")
+    periods = [int(n) for n in periods if int(n) > 0]
+
+    # 每个请求日 → 最近的交易日（≤ 它）：面板索引为 ISO 日期字符串，二分查找
+    idx_str = sorted(str(x)[:10] for x in panel.index)
+
+    def map_date(d: str):
+        d = str(d)[:10]
+        lo, hi = 0, len(idx_str)
+        while lo < hi:                       # 最后一个 <= d 的下标
+            mid = (lo + hi) // 2
+            if idx_str[mid] <= d:
+                lo = mid + 1
+            else:
+                hi = mid
+        return idx_str[lo - 1] if lo > 0 else None
+
+    mapped = {str(d)[:10]: map_date(d) for d in dates}
+    present = sorted({v for v in mapped.values() if v})
+
+    rps_by_period: dict[int, "pd.DataFrame"] = {}
+    for n in periods:
+        if not present:
+            rps_by_period[n] = pd.DataFrame(
+                index=[str(d)[:10] for d in dates], columns=panel.columns, dtype="float64")
+            continue
+        shifted = panel.shift(n).loc[present]
+        ret = panel.loc[present] / shifted - 1.0
+        rps_by_period[n] = ret.rank(axis=1, pct=True).mul(100.0)
+
+    out: dict[int, "pd.DataFrame"] = {}
+    for n in periods:
+        df = rps_by_period[n]
+        rows = []
+        for d in dates:
+            td = mapped[str(d)[:10]]
+            if td is None or td not in df.index:
+                rows.append(pd.Series(np.nan, index=panel.columns, dtype="float64"))
+            else:
+                rows.append(df.loc[td])
+        out[n] = pd.DataFrame(rows, index=[str(d)[:10] for d in dates])
+    return out
+
+
 def get_rps(code: str, periods, dates, period: str = "day") -> dict:
     """某只股票在多个周期的 **RPS（相对价格强度，0~100）**，对齐到 `dates`。
 
