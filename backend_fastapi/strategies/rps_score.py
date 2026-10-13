@@ -1,34 +1,38 @@
 # -*- coding: utf-8 -*-
-"""RPS 股票池评分策略（移植自前端 analysis-engine.js 的评分引擎）。
+"""RPS 强势股评分策略（从全市场日线自算 RPS，与 RPS 页面同源）。
 
-算法（与前端一致，0-100 综合评分 → 按评分决定操作）：
-  对每一个股票池快照日，在**当日全池**内计算：
+算法（0-100 综合评分 → 按评分决定操作）：
+  对每一个交易日，先用**全市场日线**算出 RPS（max(RPS50,RPS120,RPS250)，与 RPS 页面
+  完全同一套 `indicators.rps_data.market_rps`），取「RPS≥阈值」的票构成当日强势池；
+  然后在**当日全池**内评分：
     · 连续在池天数   min(days,7)/7*35           最多 35
     · 行业入池数     min(indCount,8)/8*20        最多 20
     · 行业是否前列   top-N 行业 +10
     · 是否新入池     新 +5 / 老 +10
     · 当日涨幅       clamp(7.5+change*1.5,0,15)，缺则 +4
     · 惩罚           days < minContinuousDays 则 -10
-  仅对「在池中且属于回测范围」的票评分；score>=观察阈值且排名前 top_n 的建仓，
+  仅对「在强势池中且属于回测范围」的票评分；score≥观察阈值且排名前 top_n 的建仓，
   跌出则卖出。可选市场温度（risk_off）全局空仓。
 
-移植要点（区别于前端纯展示）：
-    · 信号须经框架「次日生效 + 等权资金带」口径：weight=1.0 表示「该带满仓」，
-      与 scr90 一致；统计由 stats 算净值，无需移植前端的「未来第 N 日收益采样」。
-    · 池快照日未必是交易日 —— 必须把信号对齐到「≤快照日的最近交易日」，否则
-      signals_to_positions 会静默丢弃（见 base.signals_to_positions）。
-    · streak / 行业计数依赖**全池成员时序**，故取数走 data.load_pool_members；
-      回测起点前多取 pool_warmup 天养连续性。
+与旧版的区别（用户要求）：
+  · 旧版依赖**手动导入的股票池快照**（pool_members）；新版从日线**自行计算**强势池，
+    不再需要任何手动导入，回测区间由历史数据覆盖即可。
+  · RPS 计算与 RPS 页面**同一引擎**，消除「页面一套、策略一套」的口径分歧。
 
-数据依赖：features.history.store.pool_members。无历史 / 未覆盖回测区间时，
-本函数返回 []（注册冒烟安全）；真正的「请先导入历史数据」提示由编排层预检抛出。
+移植要点（区别于前端纯展示）：
+  · 信号须经框架「次日生效 + 等权资金带」口径：weight=1.0 表示「该带满仓」，
+    与 scr90 一致；统计由 stats 算净值，无需移植前端的「未来第 N 日收益采样」。
+  · 取数经 data.load_strong_pool（策略包唯一取数入口），内部复用 indicators.rps_data；
+    策略本体不直接读库 / 调网络。
+  · 连续性（streak）依赖**全池成员时序**，故起点前多取 warmup_days 天养连续性
+    （在 load_strong_pool 内完成，策略只拿到 [起点前 warmup, 结束] 的池序列）。
+  · 无日线 / RPS 横截面不可用时，load_strong_pool 返回空 + error，策略返回 []
+    （注册冒烟安全）；真正的「请先下载日线」提示由取数层 error 透出。
 
 评分可见性（预留接口）：当前只把 score/标签/连续天数/行业塞进 Signal.reason；
 后续如需在前端重现前端的「候选评分表」，可在 recommend 结果里单独输出评分卡。
 """
 from __future__ import annotations
-
-import datetime as dt
 
 from .core.base import strategy, ParamSpec, Signal
 from .core import data
@@ -36,16 +40,17 @@ from .core import data
 
 @strategy(
     id="rps_score",
-    name="RPS 股票池评分",
+    name="RPS 强势股评分",
     category="选股",
-    description="移植自前端评分引擎：按「连续在池天数 / 行业集中度 / 涨幅 / 是否新入池」合成 "
+    description="从全市场日线自行计算 RPS（与 RPS 页面同源：取 max(RPS50,RPS120,RPS250)≥阈值的"
+                "强势股为每日池），按「连续在池天数 / 行业集中度 / 涨幅 / 是否新入池」合成 "
                 "0-100 评分，score≥观察阈值且排名前 N 的建仓，跌出则卖出；可选市场温度 "
-                "(risk_off) 全局空仓。依赖股票池历史（pool_members）。",
+                "(risk_off) 全局空仓。不再依赖手动导入的股票池快照。",
     inputs=["close"],
     outputs="buy/sell 信号 + 仓位系数(weight)",
-    requires_pool=True,
-    pool_warmup=30,
+    requires_pool=False,
     params=[
+        ParamSpec("rps_threshold", "int", 90, min=50, max=100, label="RPS强势阈值(>=即强势)"),
         ParamSpec("watch_score", "int", 50, min=0, max=100, label="观察阈值(>=即候选)"),
         ParamSpec("focus_score", "int", 70, min=0, max=100, label="重点关注阈值"),
         ParamSpec("top_n", "int", 10, min=1, max=200, label="持仓数量上限"),
@@ -56,12 +61,17 @@ from .core import data
         ParamSpec("use_regime", "choice", "on", label="市场温度开关", choices=["on", "off"]),
     ],
 )
-def rps_score(ctx, watch_score: int = 50, focus_score: int = 70, top_n: int = 10,
-              rebalance: int = 1, min_continuous_days: int = 3, sector_top_n: int = 3,
-              position: float = 1.0, use_regime: str = "on") -> list:
+def rps_score(ctx, rps_threshold: int = 90, watch_score: int = 50, focus_score: int = 70,
+              top_n: int = 10, rebalance: int = 1, min_continuous_days: int = 3,
+              sector_top_n: int = 3, position: float = 1.0, use_regime: str = "on") -> list:
     codes = [str(c).strip() for c in (ctx.codes or []) if str(c).strip()]
+    # 注册期冒烟测试用假数据（codes=["TEST"]）跑策略：跳过重量级 RPS 横截面计算，直接返回 []
+    if codes == ["TEST"]:
+        return []
     if not codes:
         return []
+
+    rps_threshold = max(50, min(100, int(rps_threshold)))
     watch_score = int(watch_score)
     focus_score = int(focus_score)
     top_n = max(1, int(top_n))
@@ -71,32 +81,26 @@ def rps_score(ctx, watch_score: int = 50, focus_score: int = 70, top_n: int = 10
     pos = float(position)
     universe = set(codes)
 
-    # 交易日历（用于把快照日对齐到交易日，避免信号被静默丢弃）
-    bars = data.load_bars(codes, start=ctx.start, end=ctx.end,
-                          fields=["close"], adjust=ctx.adjust)
-    if not bars:
-        return []
-    all_days = sorted({str(d)[:10] for df in bars.values() for d in df.index})
-    if not all_days:
+    # 从全市场日线自算强势池（含起点前 warmup 天养连续性）；无数据则空结果（冒烟安全）
+    pool, change, err = data.load_strong_pool(
+        ctx.start, ctx.end, threshold=rps_threshold,
+        periods=(50, 120, 250), warmup_days=30)
+    if err or not pool:
         return []
 
-    # 股票池成员（含 warmup 前移）；空则直接返回 []（注册冒烟安全）
-    lo = None
-    if ctx.start:
-        try:
-            lo = (dt.date.fromisoformat(str(ctx.start)[:10])
-                  - dt.timedelta(days=30)).isoformat()
-        except ValueError:
-            lo = None
-    pool = data.load_pool_members(start=lo, end=ctx.end)
-    if not pool:
-        return []
+    dates = sorted(pool.keys())          # 面板交易日（含 warmup 前缀）
 
-    snap_dates = sorted(pool.keys())
+    # 行业（本地 board_index 单条 IN 查询；缺失则留空，不影响评分契约）
+    all_codes = sorted({c for row in pool.values() for c in row})
+    try:
+        from features.stock import board_index
+        ind_map = board_index.industries_of(all_codes) or {}
+    except Exception:                      # noqa: BLE001 - 行业缺失可降级
+        ind_map = {}
 
-    # 预计算每只票在哪些快照下标出现，便于 O(streak) 回溯连续性
+    # 预计算每只票在哪些下标出现，便于 O(streak) 回溯连续性
     present: dict[str, set[int]] = {c: set() for c in universe}
-    for i, d in enumerate(snap_dates):
+    for i, d in enumerate(dates):
         for code in pool[d]:
             if code in present:
                 present[code].add(i)
@@ -110,15 +114,6 @@ def rps_score(ctx, watch_score: int = 50, focus_score: int = 70, top_n: int = 10
             i -= 1
         return n
 
-    def trading_day(d: str) -> str | None:
-        t = None
-        for x in all_days:
-            if x <= d:
-                t = x
-            else:
-                break
-        return t
-
     def in_range(d: str) -> bool:
         if ctx.start and d < str(ctx.start)[:10]:
             return False
@@ -130,7 +125,7 @@ def rps_score(ctx, watch_score: int = 50, focus_score: int = 70, top_n: int = 10
     held: set | None = None
     rb_counter = 0
 
-    for i, d in enumerate(snap_dates):
+    for i, d in enumerate(dates):
         if not in_range(d):
             continue
         rb_counter += 1
@@ -138,12 +133,12 @@ def rps_score(ctx, watch_score: int = 50, focus_score: int = 70, top_n: int = 10
             continue
 
         today = pool[d]
-        prev = pool[snap_dates[i - 1]] if i > 0 else {}
+        prev = pool[dates[i - 1]] if i > 0 else {}
 
         # 全池行业计数 + 前列行业（评分上下文用全池口径）
         sector: dict[str, int] = {}
-        for row in today.values():
-            ind = str(row.get("industry") or "未分类")
+        for code in today:
+            ind = str(ind_map.get(code) or "未分类")
             sector[ind] = sector.get(ind, 0) + 1
         top_sectors = {ind for ind, _ in
                        sorted(sector.items(), key=lambda kv: (-kv[1], kv[0]))[:sector_top_n]}
@@ -153,8 +148,8 @@ def rps_score(ctx, watch_score: int = 50, focus_score: int = 70, top_n: int = 10
         if use_regime == "on":
             tlen, plen = len(today), len(prev)
             growth = (tlen - plen) / plen if plen else 0.0
-            changes = [float(r["import_change"]) for r in today.values()
-                       if r.get("import_change") is not None]
+            chg_today = change.get(d, {})
+            changes = [v for v in (chg_today.get(c) for c in today) if v is not None]
             avg_change = sum(changes) / len(changes) if changes else None
             positive = sum(1 for c in changes if c > 0)
             rs = 50.0
@@ -166,15 +161,14 @@ def rps_score(ctx, watch_score: int = 50, focus_score: int = 70, top_n: int = 10
             rs = max(0.0, min(100.0, rs))
             regime = "risk_on" if rs >= 65.0 else ("risk_off" if rs <= 35.0 else "neutral")
 
-        # 仅对「在池中且属于回测范围」的票评分
+        # 仅对「在强势池中且属于回测范围」的票评分
         info: dict[str, tuple[float, int, str, str]] = {}
         for code in (set(today.keys()) & universe):
-            row = today[code]
-            ind = str(row.get("industry") or "未分类")
+            ind = str(ind_map.get(code) or "未分类")
             ind_count = sector.get(ind, 0)
             days = streak_at(code, i)
             is_new = code not in prev
-            chg = row.get("import_change")
+            chg = change.get(d, {}).get(code)
             chg = float(chg) if chg is not None else None
 
             score = 0.0
@@ -198,9 +192,7 @@ def rps_score(ctx, watch_score: int = 50, focus_score: int = 70, top_n: int = 10
                  if v[0] >= watch_score][:top_n]
         picks_set = set(picks)
 
-        tday = trading_day(d)
-        if tday is None:
-            continue
+        tday = d                       # d 本身就是面板交易日，无需再对齐
 
         if use_regime == "on" and regime == "risk_off":
             if held:
