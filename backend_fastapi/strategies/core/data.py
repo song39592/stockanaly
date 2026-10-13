@@ -22,6 +22,7 @@ load_bars 支持批量取数并按 fields 切片，且按 (code, start, end, adj
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import datetime as dt
 
 import pandas as pd
 
@@ -177,6 +178,93 @@ def pool_snapshot_range() -> tuple[str | None, str | None]:
     """股票池快照的 (最早日, 最晚日)，无数据返回 (None, None)。"""
     from features.history import store as _hist
     return _hist.pool_snapshot_range()
+
+
+def _rps_num(x):
+    """RPS 值清洗：None / NaN → None，否则 float。"""
+    if x is None:
+        return None
+    try:
+        if pd.isna(x):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return float(x)
+
+
+def load_strong_pool(start: str, end: str, threshold: int = 90,
+                     periods=(50, 120, 250), warmup_days: int = 30):
+    """从全市场日线**自行计算** RPS 强势池 —— 与「RPS 页面」同源（indicators.rps_data.market_rps）。
+
+    返回 (pool_by_date, change_by_date, error)：
+      pool_by_date   {date: {code: {"rps50","rps120","rps250"}}}  当日强势股
+      change_by_date {date: {code: 当日涨幅(百分比)}}             后复权收盘价环比 ×100
+      error          str | None  取数/计算失败原因（无则 None）
+
+    强势股口径与 RPS 页面**完全一致**：取 max(RPS50, RPS120, RPS250) >= 阈值 的票；
+    这样「页面一套、策略一套」的 RPS 口径分歧不再存在。RPS 策略不再依赖手动导入的
+    股票池快照（pool_members），而是从日线现算，回测区间由历史数据覆盖即可。
+
+    设计点（呼应策略包冒烟测试）：本函数不抛异常，失败统一以 error 返回空结果，
+    由调用方决定是否降级 —— 因此 LOAD 期冒烟（无横截面数据）也能安全返回 []。
+    """
+    try:
+        import indicators.rps_data as rps_data
+    except Exception as exc:                       # noqa: BLE001 - 引擎不可用降级
+        return {}, {}, f"RPS 引擎不可用：{exc}"
+    try:
+        lo = (dt.date.fromisoformat(str(start)[:10])
+              - dt.timedelta(days=warmup_days)).isoformat()
+        panel = rps_data._market_panel("day")
+        if panel is None or panel.empty:
+            return {}, {}, "全市场横截面数据不可用（请先下载日线历史）"
+        panel_dates = sorted(str(x)[:10] for x in panel.index)
+        sel = [d for d in panel_dates if lo <= d <= str(end)[:10]]
+        if not sel:
+            return {}, {}, "回测区间无交易日"
+
+        rps = rps_data.market_rps(sel, list(periods))
+        r50, r120, r250 = rps[50], rps[120], rps[250]
+
+        # 与 RPS 页面完全一致：取三期 RPS 的最大值，>= 阈值即强势股
+        m12 = r50.where(r50 >= r120, r120)
+        combo = m12.where(m12 >= r250, r250)
+
+        pool: dict[str, dict[str, dict]] = {}
+        for d in sel:
+            hi = combo.loc[d]
+            hi = hi[hi >= threshold]
+            row: dict[str, dict] = {}
+            for code in hi.index:
+                c = str(code)
+                row[c] = {
+                    "rps50": _rps_num(r50.at[d, code]),
+                    "rps120": _rps_num(r120.at[d, code]),
+                    "rps250": _rps_num(r250.at[d, code]),
+                }
+            pool[d] = row
+
+        # 当日涨幅：后复权收盘价环比（×100 转百分比，与旧 import_change 口径一致）
+        strong_set = {c for row in pool.values() for c in row}
+        col_str = {str(c): c for c in panel.columns}
+        strong_codes = [col_str[s] for s in strong_set if s in col_str]
+        change: dict[str, dict[str, float | None]] = {}
+        if strong_codes:
+            chg_panel = panel.loc[:, strong_codes].pct_change()
+            str_of = {c: str(c) for c in strong_codes}
+            for d in sel:
+                try:
+                    s = chg_panel.loc[d]
+                except KeyError:
+                    change[d] = {}
+                    continue
+                change[d] = {
+                    str_of[c]: (None if pd.isna(v) else float(v) * 100.0)
+                    for c, v in s.items()
+                }
+        return pool, change, None
+    except Exception as exc:                       # noqa: BLE001 - 计算失败降级
+        return {}, {}, f"RPS 强势池计算失败：{exc}"
 
 
 def recent_trading_days(n: int = 5) -> list[str]:

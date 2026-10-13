@@ -108,18 +108,23 @@ def _require_pool(strategy_id: str, start: str | None, end: str | None) -> None:
     if mn is None or mx is None:
         raise RuntimeError("暂无股票池历史数据，请先导入/同步股票池历史数据后再运行本策略")
     if start and end:
-        warmup = getattr(meta, "pool_warmup", 0) or 0
-        lo = start
-        if warmup:
-            try:
-                lo = (dt.date.fromisoformat(str(start)[:10])
-                      - dt.timedelta(days=warmup)).isoformat()
-            except ValueError:
-                lo = start
-        if mn > lo or mx < end:
+        # ① 池历史必须与回测区间**相交**：完全在区间之前或之后都取不到任何池成员。
+        if mx < start or mn > end:
             raise RuntimeError(
-                f"股票池历史数据未覆盖回测区间（历史 {mn}~{mx}，回测 {start}~{end}），"
-                f"请先导入/同步覆盖该区间的数据")
+                f"股票池历史数据与回测区间没有交集（历史 {mn}~{mx}，回测 {start}~{end}），"
+                f"请先在「股票池」页把覆盖该区间的池数据同步到后端")
+        # ② 池历史没覆盖到回测结束日：区间后段没有任何池成员，净值会退化成
+        #    「只持有、不换手」的假结果，必须挡住，并直接说清该改哪一头。
+        if mx < end:
+            raise RuntimeError(
+                f"股票池历史数据只到 {mx}，覆盖不到回测结束日 {end}"
+                f"（{mx} 之后没有任何池成员），请把回测结束日改到 {mx} 之前，"
+                f"或先同步 {mx}~{end} 的股票池数据")
+        # ③ pool_warmup 只是「起点前尽量多取几天养连续性」的**尽力而为**项：
+        #    历史够不到 lo 时，连续在池天数从历史首日开始算（策略内部按现有数据兜底），
+        #    不能因为预热不足就把整个回测拦下 —— 否则池历史短于 warmup 时
+        #    该策略在任何区间都会失败（例如池历史 11 天、warmup 30 天，连
+        #    「池历史覆盖的最后一天」当结束日都跑不了）。
 
 
 def run_backtest(strategy_id: str, params: dict | None, codes: list[str],

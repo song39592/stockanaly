@@ -212,8 +212,8 @@ namespace StockPool
             if (_stResultHeader != null && _stResultHeader.Text.Contains("尚未回测"))
                 _stResultHeader.Text = "策略：" + StCurStrategyName() + " ·尚未回测";
             StRefreshRecoTitle();
-            if (_stList.SelectedIndex < 0 || _stStrategies == null) return;
-            var meta = _stStrategies[_stList.SelectedIndex];
+            var meta = StSelectedMeta();
+            if (meta == null) return;
             _stDesc.Text = J.StrOr(meta["description"], "（无说明）");
             _stParamPanel.Controls.Clear();
             _stParamEditors.Clear();
@@ -235,12 +235,28 @@ namespace StockPool
             Skin(_stParamPanel);
         }
 
+        /// <summary>
+        /// 当前选中的策略元数据（列表选中项）；无选中 / 越界返回 null。
+        ///
+        /// ⚠️ 这是「当前策略」的**唯一**来源，而列表选中项会被清单加载改写
+        /// （见 StLoadStrategies），所以**真正发起请求前必须先取一次快照**再把
+        /// 这份 meta 一路传下去：否则「弹窗里写的策略」与「实际提交的策略」
+        /// 可能取到不同时刻的选中项，用户看到的就是「选了 RPS，跑的是筹码」。
+        /// 越界也在这里挡掉 —— `_stStrategies` 被新清单替换后，旧的 SelectedIndex
+        /// 可能已经超出新列表长度。
+        /// </summary>
+        private Dictionary<string, object> StSelectedMeta()
+        {
+            if (_stStrategies == null || _stList == null) return null;
+            int i = _stList.SelectedIndex;
+            return (i >= 0 && i < _stStrategies.Count) ? _stStrategies[i] : null;
+        }
+
         /// <summary>当前选中策略的显示名（顶部、回测结果、推荐三处共用一个口径）。</summary>
 private string StCurStrategyName()
         {
-            if (_stStrategies == null || _stList == null || _stList.SelectedIndex < 0)
-                return "未选择";
-            var meta = _stStrategies[_stList.SelectedIndex];
+            var meta = StSelectedMeta();
+            if (meta == null) return "未选择";
             return J.StrOr(meta["name"], J.StrOr(meta["id"], "—"));
         }
 
@@ -532,12 +548,13 @@ private void StRefreshRecoTitle()
 
         private void StRunRecent()
         {
-            if (_stStrategies == null || _stList.SelectedIndex < 0)
+            var meta = StSelectedMeta();
+            if (meta == null)
             {
                 SetErr(_stRecentStatus, "请先在「策略选择与编辑」里选一个策略");
                 return;
             }
-            var req = StRequest((int)_stRecentDays.Value);
+            var req = StRequest(meta, (int)_stRecentDays.Value);
             _stRecentStatus.Text = "回测中…";
             _stRecentStatus.ForeColor = _cSub;
             string body = new JavaScriptSerializer().Serialize(req);
@@ -661,20 +678,21 @@ private void StRefreshRecoTitle()
             // ⚠️ 守卫必需：原来这里完全没有，用户等不及再点一次就会叠加多个
             // 全市场计算（后端并发上限 1，第二个会被拒，但两个都得等）。
             if (_stRecoBusy) return;
-            if (_stStrategies == null || _stList.SelectedIndex < 0)
+            var meta = StSelectedMeta();
+            if (meta == null)
             {
                 SetErr(_stRecoStatus, "请先在「策略选择与编辑」里选一个策略");
                 return;
             }
-            // 第 24 项：与回测共用同一个数据新鲜度守卫。
-            StEnsureFresh(delegate { StRunRecoInner(); });
+            // 第 24 项：与回测共用同一个数据新鲜度守卫；策略用点击时的快照。
+            StEnsureFresh(meta, delegate { StRunRecoInner(meta); });
         }
 
-        private void StRunRecoInner()
+        private void StRunRecoInner(Dictionary<string, object> meta)
         {
             _stRecoBusy = true;
             int myRun = ++_stRecoRunId;
-            var req = StRequest(0);
+            var req = StRequest(meta, 0);
             SetErr(_stRecoStatus, "正在提交…（全市场约 7~10 分钟，可随时切走）");
             string body = new JavaScriptSerializer().Serialize(req);
             System.Threading.Tasks.Task.Run(delegate
@@ -877,9 +895,9 @@ private void StRefreshRecoTitle()
         // ---------------- 通用小工具 ----------------
         // 回测 / 推荐共用请求体：策略、范围、资金、佣金都取「回测范围」页的设置。
         // window>0 时后端直接把区间定位到最近 N 个交易日（近期成果用）。
-        private Dictionary<string, object> StRequest(int window)
+        // meta 由调用方传入（点击时取的快照），不在函数内部读列表选中项 —— 理由见 StSelectedMeta。
+        private Dictionary<string, object> StRequest(Dictionary<string, object> meta, int window)
         {
-            var meta = _stStrategies[_stList.SelectedIndex];
             var codes = _stAll.Checked ? new List<string>() : StParseCodes(_stCodes.Text);
             return new Dictionary<string, object>
             {
@@ -951,11 +969,19 @@ private void StRefreshRecoTitle()
 /// 选「等」而不是直接开跑，是因为数据停在几天前时，选股结果本身就不可信；
 /// 但把选择权交给用户，因为补齐可能要一小时。
 /// </summary>
-private void StEnsureFresh(Action then)
+private void StEnsureFresh(Dictionary<string, object> meta, Action then)
         {
-            if (_stFreshBusy) return;
+            if (_stFreshBusy)
+            {
+                // ⚠️ 不能静默 return：上一次点击的检查还在飞时用户又选了个策略再点，
+                // 这一下被吞掉，用户会以为「已按新选的策略重跑」，其实后台跑的还是上一次那个。
+                SetErr(_stResultStatus, "正在检查行情数据是否最新，请稍候再点「运行回测」…");
+                return;
+            }
             _stFreshBusy = true;
-            string sid = StCurStrategyName();
+            // 策略名取**点击时**的快照（而不是稍后 proceed 时再读列表选中项），
+            // 保证「弹窗里写的策略」==「实际提交的策略」。
+            string sid = J.StrOr(meta["name"], J.StrOr(meta["id"], "—"));
             Action proceed = delegate
             {
                 _stFreshBusy = false;
@@ -986,7 +1012,6 @@ private void StEnsureFresh(Action then)
                 if (!need) { Ui(proceed); return; }
 
                 string expected = J.StrOr(f["expected"], "?");
-                string latest = J.StrOr(f["latest"], "?");
                 int covered = J.Int(f["covered"]);
                 int checkedCount = J.Int(f["checked"]);
                 DialogResult dr = DialogResult.None;
@@ -994,9 +1019,15 @@ private void StEnsureFresh(Action then)
                 {
                     dr = MessageBox.Show(this,
                         "「" + sid + "」要用全市场 " + checkedCount + " 只股票做筛选，\r\n"
-                        + "但本地行情只更新到 " + latest + "（应有 " + expected + "）。\r\n\r\n"
+                        // ⚠️ 新鲜度是**逐票**判定的：covered = 已更新到 expected 的只数，
+                        // latest = 全市场里最新那一只的日期（通常就是 expected）。
+                        // 原来写「本地行情只更新到 <latest>（应有 <expected>）」在
+                        // latest==expected 时会自相矛盾（"只更新到 10-13，应有 10-13"），
+                        // 完全看不出「其实 5573 只还停在更早」。这里改成按只数说。
+                        + "但其中只有 " + covered + " 只的行情更新到 " + expected
+                        + "（其余 " + Math.Max(0, checkedCount - covered) + " 只还停在更早的交易日）。\r\n\r\n"
                         + "· 现在补齐：预计 60~80 分钟（可随时关窗，断了也能从断点续上）\r\n"
-                        + "· 用现有数据继续：结果基于 " + latest + " 的数据，可能不是最新行情",
+                        + "· 用现有数据继续：结果基于各票现有数据（未补齐），可能不是最新行情",
                         AppTitle + " - 行情数据不是最新", MessageBoxButtons.YesNoCancel,
                         MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
                 });
@@ -1054,7 +1085,11 @@ private void StEnsureFresh(Action then)
 
         private void StRunBacktest()
         {
-            if (_stStrategies == null || _stList.SelectedIndex < 0)
+            // 点击时取一次快照：后面弹窗、等待补齐、真正提交统一用这一份。
+            // 不能各步各读一次列表选中项 —— 中途清单被刷新 / 用户改了选中，
+            // 就会出现「弹窗说筹码、实际跑 RPS」这类对不上的情况。
+            var meta = StSelectedMeta();
+            if (meta == null)
             {
                 SetErr(_stResultStatus, "请先在「策略选择与编辑」里选一个策略");
                 return;
@@ -1062,12 +1097,11 @@ private void StEnsureFresh(Action then)
             // 第 24 项：数据新鲜度守卫在真正发起回测之前（数据陈旧时的弹窗与等待
             // 都在 `StEnsureFresh` 里）。用守卫包一层而不是就地判断，是为了让
             // 回测与「生成当前推荐」两条入口共用同一套逻辑与同一个弹窗。
-            StEnsureFresh(delegate { StRunBacktestInner(); });
+            StEnsureFresh(meta, delegate { StRunBacktestInner(meta); });
         }
 
-        private void StRunBacktestInner()
+        private void StRunBacktestInner(Dictionary<string, object> meta)
         {
-            var meta = _stStrategies[_stList.SelectedIndex];
             string sid = J.StrOr(meta["id"], "");
             var codes = _stAll.Checked ? new List<string>() : StParseCodes(_stCodes.Text);
             var req = new Dictionary<string, object>
@@ -1592,6 +1626,14 @@ private void StEnsureFresh(Action then)
                     }
                     Invoke((Action)(() =>
                     {
+                        // 刷新清单时**保住用户已选的策略**：先记下旧选中项的 id，重新填充后按
+                        // id 找回同一项。否则「刷新清单」会把选中悄悄换成列表第 1 项 —— 用户在
+                        // 别的子页看不到列表（选中项看不见），只会在按下「运行回测」时发现跑的
+                        // 不是自己选的策略。后端清单第 1 项恰好是筹码，于是表现为
+                        // 「明明选了 RPS，跑的却是筹码集中度90」。
+                        string keepId = "";
+                        var oldMeta = StSelectedMeta();
+                        if (oldMeta != null) keepId = J.StrOr(oldMeta["id"], "");
                         _stStrategies = list;
                         _stLocalCodeCount = cnt;
                         _stList.Items.Clear();
@@ -1604,7 +1646,12 @@ private void StEnsureFresh(Action then)
                         _stResultStatus.Text = "已加载 " + list.Count
                             + " 个策略供选择 · 一次只运行选中的 1 个 · 本地股票 " + cnt + " 只";
                         _stResultStatus.ForeColor = _cSub;
-                        if (_stList.Items.Count > 0) _stList.SelectedIndex = 0;
+                        // 按 id 找回原选中项；该策略已从后端删除（id 找不到）才退回第 1 项。
+                        int keepIdx = 0;
+                        if (keepId.Length > 0)
+                            for (int i = 0; i < list.Count; i++)
+                                if (J.StrOr(list[i]["id"], "") == keepId) { keepIdx = i; break; }
+                        if (_stList.Items.Count > 0) _stList.SelectedIndex = keepIdx;
                         _stLoaded = true;
                     }));
                 }
