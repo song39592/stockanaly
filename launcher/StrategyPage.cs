@@ -88,6 +88,9 @@ namespace StockPool
         // 第 24 项：运行前数据新鲜度守卫。
         private bool _stFreshBusy;           // 正在检查/等待补齐，挡住重复点击
         private Timer _stFreshTimer;        // 等待补齐期间的进度轮询
+        // 暂停 / 继续 / 停止。三个按钮互斥可见：运行中显「暂停」「停止」，
+        // 暂停后换成「继续」「停止」，空闲时三个全隐（避免用户点一个必然失败的操作）。
+        private Button _stBtnPause, _stBtnResume, _stBtnStop;
 
         private sealed class StParamEditor
         {
@@ -464,7 +467,16 @@ private void StRefreshRecoTitle()
             _stResultHeader.Margin = new Padding(0, 0, 0, 8);
             AddRow(stack, _stResultHeader);
 
-            AddRow(stack, Row(MiniBtn("运行回测（选中策略）", delegate { StRunBacktest(); }, 160), _stResultStatus = Mute(Lbl("尚未回测"))));
+            AddRow(stack, Row(
+                MiniBtn("运行回测（选中策略）", delegate { StRunBacktest(); }, 160),
+                // 暂停 / 继续 / 停止：全市场一次实测约 13 分钟（5578 只 × 3 年），
+                // 而并发上限是 1 —— 没有这三个按钮，用户改完策略想重跑就只能干等。
+                // 原来后端提示「请先点『停止』」而界面上根本没有这个按钮，属于死路。
+                _stBtnPause = MiniBtn("暂停", delegate { StControlTask("pause"); }, 64),
+                _stBtnResume = MiniBtn("继续", delegate { StControlTask("resume"); }, 64),
+                _stBtnStop = MiniBtn("停止", delegate { StControlTask("cancel"); }, 64),
+                _stResultStatus = Mute(Lbl("尚未回测"))));
+            StSetControlButtons(false, false);
 
             // 进度条：默认隐藏，跑起来才显示（_stProgress.Visible 控制）
             _stProgress = new ProgressBar();
@@ -571,6 +583,18 @@ private void StRefreshRecoTitle()
                     string msg = ex.Message;
                     Invoke((Action)(() =>
                     {
+                        // ⚠️ 同步接口固定 600s 超时，而**全市场 3 年实测约 761s**
+                        //（2026-10-14 实测 5578 只 × 2023-10-14~2026-10-14）。
+                        // 超时后这里只会抛一句无信息量的 WebException，
+                        // 用户完全看不出「其实是跑太慢、换个池子或用异步按钮就好」。
+                        // 故把这类超时翻译成可操作的提示，而不是原样透出原始报文。
+                        if (msg.Contains("超时") || msg.Contains("timed out")
+                            || msg.Contains("Timeout") || msg.Contains("已超时"))
+                        {
+                            msg = "同步回测超过 600 秒仍未返回（通常是「全部本地」范围太大）。"
+                                + "请改用「运行回测」按钮走后台任务（有进度条、不受此限制），"
+                                + "或缩小回测范围后重试。";
+                        }
                         SetErr(_stRecentStatus, "回测失败：" + msg);
                     }));
                 }
@@ -588,9 +612,14 @@ private void StRefreshRecoTitle()
             _stRecentCards.Controls.Clear();
             _stRecentCards.Controls.Add(StKpiCard("区间收益", J.Pct100Plain(J.Num(metrics["total_return"]))));
             _stRecentCards.Controls.Add(StKpiCard("最大回撤", J.Pct100Plain(J.Num(metrics["max_drawdown"]))));
-            _stRecentCards.Controls.Add(StKpiCard("胜率", J.Pct100Plain(J.Num(metrics["win_rate"]))));
-            _stRecentCards.Controls.Add(StKpiCard("交易次数", J.Int(metrics["num_trades"]).ToString()));
-            _stRecentCards.Controls.Add(StKpiCard("参与标的", J.Int(metrics["num_stocks"]).ToString()));
+            // ⚠️ 「胜率」原来只有一个字段，而它的值其实是**日胜率**，被当交易胜率读了很久。
+            //   现在后端拆成两个，这里两个都显示，避免继续误读。
+            _stRecentCards.Controls.Add(StKpiCard("日胜率", StMPct(metrics, "win_rate_daily")));
+            _stRecentCards.Controls.Add(StKpiCard("交易胜率", StMPct(metrics, "win_rate_trade")));
+            _stRecentCards.Controls.Add(StKpiCard("盈亏比", StMText(metrics, "profit_factor")));
+            _stRecentCards.Controls.Add(StKpiCard("平均持仓", StMText(metrics, "avg_positions", "F1")));
+            // 资金利用率应接近 position；远低于 1 说明配置有问题，是排查的第一眼
+            _stRecentCards.Controls.Add(StKpiCard("资金利用率", StMPct(metrics, "capital_utilization")));
             Skin(_stRecentCards);
 
             _stRecentGrid.Rows.Clear();
@@ -854,7 +883,7 @@ private void StRefreshRecoTitle()
             StFillRecoGrid(_stHoldGrid, j["hold"], true);
 
             _stRecoStatus.Text = "策略：" + StCurStrategyName() + " · 截至 " + J.StrOr(j["date"], "")
-                    + " · 每只资金带 " + J.Money(J.Num(j["band"]));
+                    + " · 目标资金 " + J.Money(StM(j as Dictionary<string, object>, "target_capital"));
             _stRecoStatus.ForeColor = C.DownSoft;
         }
 
@@ -1249,6 +1278,14 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
 
             if (state == "running")
             {
+                // 暂停标志从控制句柄读（后端 state 里带 paused 字段）。
+                // 暂停时进度条**不动**，所以只靠 done 看不出来 ——
+                // 用户看到进度卡住会以为死了，必须显式说明「已暂停」。
+                // ⚠️ 本项目用 .NET Framework 的 csc（C# 5），**不支持** `is bool b` 模式匹配
+                //   与内联 `out object v` 声明 —— 写了就是编译错误。故用最朴素写法。
+                object pv = J.Get(st, "paused");
+                bool paused = pv is bool && (bool)pv;
+                StSetControlButtons(true, paused);
                 string text;
                 if (phase == "loading")
                     text = "加载数据 " + done + " / " + total + "只（已用 "
@@ -1256,12 +1293,22 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
                 else
                     text = "计算信号中…" + done + " / " + total + "只（已用 "
                            + ((int)elapsed) + " 秒）";
+                if (paused) text = "⏸ 已暂停 · " + text + " · 可点「继续」或「停止」";
                 StShowProgress(total > 0 ? done : 0, total, text);
                 return;
             }
 
-            // ready / error：停表，取结果
+            // ready / error / cancelled：停表，取结果
             StStopProgress();
+            StSetControlButtons(false, false);
+            if (state == "cancelled")
+            {
+                // 用户主动停止：**中性提示**，不用错误态的红色。
+                // 中途的结果不保留（后端已清空），所以不能接着去取结果。
+                _stResultStatus.Text = "已停止（已完成的回测结果不保留，可改参数后重跑）";
+                _stResultStatus.ForeColor = _cSub;
+                return;
+            }
             if (state == "error")
             {
                 SetErr(_stResultStatus, "回测失败：" + (string.IsNullOrEmpty(err) ? "未知错误" : err));
@@ -1313,8 +1360,17 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
             _stMetricCards.Controls.Add(StKpiCard("年化收益", J.Pct100Plain(J.Num(metrics["annual_return"]))));
             _stMetricCards.Controls.Add(StKpiCard("最大回撤", J.Pct100Plain(J.Num(metrics["max_drawdown"]))));
             _stMetricCards.Controls.Add(StKpiCard("夏普比率", J.Num(metrics["sharpe"]).ToString("F2")));
-            _stMetricCards.Controls.Add(StKpiCard("胜率", J.Pct100Plain(J.Num(metrics["win_rate"]))));
-            _stMetricCards.Controls.Add(StKpiCard("交易次数", J.Int(metrics["num_trades"]).ToString()));
+            _stMetricCards.Controls.Add(StKpiCard("日胜率", StMPct(metrics, "win_rate_daily")));
+            _stMetricCards.Controls.Add(StKpiCard("交易胜率", StMPct(metrics, "win_rate_trade")));
+            // 笔数盈亏比与金额盈亏比会背离，**盈亏比才是必看的那一个**
+            _stMetricCards.Controls.Add(StKpiCard("盈亏比", StMText(metrics, "profit_factor")));
+            _stMetricCards.Controls.Add(StKpiCard("单笔期望", StMPct(metrics, "expectancy_pct")));
+            _stMetricCards.Controls.Add(StKpiCard("交易次数", J.Int(StM(metrics, "num_trades_eff")).ToString()));
+            _stMetricCards.Controls.Add(StKpiCard("平均持仓", StMText(metrics, "avg_positions", "F1")));
+            _stMetricCards.Controls.Add(StKpiCard("年化换手", StMText(metrics, "turnover_annual", "F1")));
+            // 横向比策略时该看的是「每单位动用资金收益」，不是总收益率（后者混着仓位高低）
+            _stMetricCards.Controls.Add(StKpiCard("资金利用率", StMPct(metrics, "capital_utilization")));
+            _stMetricCards.Controls.Add(StKpiCard("每单位动用资金", StMPct(metrics, "return_per_utilized_capital")));
             object bret;
             if (metrics.TryGetValue("benchmark_return", out bret) && bret != null)
                 _stMetricCards.Controls.Add(StKpiCard("基准收益", J.Pct100Plain(J.Num(bret))));
@@ -1342,8 +1398,10 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
             _stDetailCache.Clear();       // 明细跟着旧 result_id，一并作废
             StFillPerStockRows();
 
-            object nstk;
-            int doneCount = (metrics.TryGetValue("num_stocks", out nstk)) ? J.Int(nstk) : 0;
+            // 参与只数改从 scope.codes_count 取（metrics.num_stocks 已废止 —— 它其实是
+            // 回测池大小，不是持仓数，显示出来会被当成「持仓了这么多只」）
+            var scope = j["scope"] as Dictionary<string, object>;
+            int doneCount = scope != null ? J.Int(scope["codes_count"]) : 0;
             _stResultStatus.Text = "回测完成（参与统计 " + doneCount + " 只）";
             _stResultStatus.ForeColor = C.DownSoft;
             object errs;
@@ -1665,7 +1723,87 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
             });
         }
 
+        /// <summary>暂停/继续/停止按钮的可见性。</summary>
+        /// <param name="running">任务在跑（决定「暂停」还是「继续」可见）。</param>
+        /// <param name="paused">当前处于暂停态。</param>
+        private void StSetControlButtons(bool running, bool paused)
+        {
+            if (_stBtnPause != null) { _stBtnPause.Visible = running && !paused; _stBtnPause.Enabled = running && !paused; }
+            if (_stBtnResume != null) { _stBtnResume.Visible = running && paused; _stBtnResume.Enabled = running && paused; }
+            if (_stBtnStop != null) { _stBtnStop.Visible = running; _stBtnStop.Enabled = running; }
+        }
+
+        /// <summary>
+        /// 调后端的暂停/继续/停止。三者都是**幂等**的：重复点不会出错，
+        /// 也不需要在前端额外上锁 —— 真状态在后端的 RunControl 里。
+        /// </summary>
+        private void StControlTask(string action)
+        {
+            RunUi<Dictionary<string, object>>(
+                delegate
+                {
+                    string resp = VRequest(
+                        "http://127.0.0.1:8000/api/strategies/backtest/" + action, "{}", 15000);
+                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                },
+                delegate(Dictionary<string, object> j)
+                {
+                    if (J.IsFailed(j)) { SetErr(_stResultStatus, "操作失败：" + J.ErrMsg(j)); return; }
+                    object pv;
+                    bool paused = j.TryGetValue("paused", out pv) && pv is bool && (bool)pv;
+                    // 非错误态：用普通子色写，别用 SetErr（那是红色错误态）。
+                    // 暂停/继续是**正常操作**，标红会让人以为出错了。
+                    _stResultStatus.Text = J.StrOr(J.Get(j, "message"), "已处理");
+                    _stResultStatus.ForeColor = _cSub;
+                    StSetControlButtons(true, paused);
+                },
+                delegate(Exception ex)
+                {
+                    // 后端没起来是最常见的原因，给一句能照做的提示
+                    SetErr(_stResultStatus, "操作失败（确认后端已启动）：" + ex.Message);
+                    StSetControlButtons(true, false);
+                },
+                null);
+        }
+
         // ---------------- 小工具 ----------------
+
+        /// <summary>
+        /// 安全读取 metrics 里的数值键：缺失或 null 返回 def。
+        ///
+        /// ⚠️ **不能**直接写 metrics["win_rate"]：组合权重口径下该字段已拆成
+        /// win_rate_daily / win_rate_trade，Dictionary 缺键会抛 KeyNotFoundException，
+        /// 把整个结果面板搞崩（旧代码正是直接索引，所以这次必须全部换掉）。
+        /// </summary>
+        private static double StM(Dictionary<string, object> d, string key, double def = 0)
+        {
+            object v;
+            if (d == null || !d.TryGetValue(key, out v) || v == null) return def;
+            return J.Num(v);
+        }
+
+        /// <summary>
+        /// 指标缺失 / 不可计算时显示「—」而不是 0。
+        ///
+        /// 后端约定：样本为空、或全胜导致 profit_factor 分母为 0 时一律返回 null
+        /// （**绝不返回 0 或 inf** —— json.dumps(inf) 产出的 Infinity 不是合法 JSON）。
+        /// 这里若把 null 显示成 0.00，读者会以为「盈亏比真的是 0」。
+        /// </summary>
+        private static string StMText(Dictionary<string, object> d, string key, string fmt = "F2")
+        {
+            object v;
+            if (d == null || !d.TryGetValue(key, out v) || v == null) return "—";
+            return J.Num(v).ToString(fmt);
+        }
+
+        /// <summary>可空百分比：null → 「—」。</summary>
+        private static string StMPct(Dictionary<string, object> d, string key)
+        {
+            object v;
+            if (d == null || !d.TryGetValue(key, out v) || v == null) return "—";
+            return J.Pct100Plain(J.Num(v));
+        }
+
         private static Panel StKpiCard(string title, string value)
         {
             var card = new Panel();

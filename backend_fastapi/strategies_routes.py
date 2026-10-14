@@ -63,8 +63,15 @@ class BacktestRequest(BaseModel):
     end: Optional[str] = None
     window: Optional[int] = None   # 最近 N 个交易日（给了则覆盖 start/end，用于「近期成果」）
     initial_capital: float = 100000.0
-    commission: float = 0.0003   # 单边佣金比例（如 0.0003 = 万三）
-    benchmark: Optional[str] = None
+    # ---- 成本模型（全部进净值；口径见 stats 模块 docstring）----
+    commission: float = 0.0003        # 双边佣金比例（万三）
+    stamp_duty: float = 0.001         # 印花税，**卖出单边**
+    slippage: float = 0.0005          # 滑点，双边
+    min_commission: float = 5.0       # 最低佣金，元/笔（max(成交额×费率, 此值)）
+    lot_size: int = 100               # 整手股数，0 = 不约束；**只影响明细可行性，不影响净值**
+    # ---- 样本口径 ----
+    universe_mode: str = "interval_data"   # interval_data / pool_snapshot / index_constituent
+    benchmark: Optional[str] = None        # 指数代码；不给则用「等权全池买入持有」作默认基准
 
 
 _CODE_ERR = {
@@ -85,7 +92,11 @@ def do_backtest(req: BacktestRequest):
     # window 交给编排层处理（取数会额外向前预热，只统计最近 N 日）
     result = backtest.run_backtest(
         req.strategy_id, req.params, codes, req.start, req.end,
-        req.initial_capital, req.commission, req.benchmark, req.window,
+        initial_capital=req.initial_capital, commission=req.commission,
+        stamp_duty=req.stamp_duty, slippage=req.slippage,
+        min_commission=req.min_commission, lot_size=req.lot_size,
+        benchmark=req.benchmark, window=req.window,
+        universe_mode=req.universe_mode,
     )
     # 回测跑完**自动落盘一份报告**（策略 + 覆盖范围 + 指标 + 逐票汇总），
     # 便于事后对比不同策略 / 不同区间 —— 原来结果只在一次响应里，关掉就没了。
@@ -117,7 +128,11 @@ def do_backtest_start(req: BacktestRequest):
         raise ValueError("股票池为空，请先选择回测范围")
     out = backtest.start_task(
         req.strategy_id, req.params, codes, req.start, req.end,
-        req.initial_capital, req.commission, req.benchmark, req.window,
+        initial_capital=req.initial_capital, commission=req.commission,
+        stamp_duty=req.stamp_duty, slippage=req.slippage,
+        min_commission=req.min_commission, lot_size=req.lot_size,
+        benchmark=req.benchmark, window=req.window,
+        universe_mode=req.universe_mode,
     )
     if not out.get("ok"):
         return JSONResponse(status_code=409,
@@ -146,6 +161,33 @@ def do_backtest_result():
         return {"ok": False, "state": backtest.task_state(),
                 "error": {"code": "NOT_READY", "message": "还没有已完成的回测结果"}}
     return out
+
+
+@router.post("/backtest/cancel")
+def do_backtest_cancel():
+    """停止当前回测 / 推荐任务。
+
+    存在的理由：并发上限是 1，而全市场一次实测约 13 分钟（5578 只 × 3 年）。
+    没有停止能力时，用户改完策略想重跑就只能干等 —— 而原来的报错文案
+    让人「先点『停止』」，那个按钮压根不存在。
+
+    ⚠️ 刻意**不挂** `_guard`：暂停/继续/停止都是正常操作，不是业务异常。
+    `_guard` 会把异常转成 400，而这里的语义是「尽量完成」，
+    没在跑时也应返回 200 + ok（幂等）。
+    """
+    return backtest.cancel_task()
+
+
+@router.post("/backtest/pause")
+def do_backtest_pause():
+    """暂停当前回测 / 推荐（可重复调用）。"""
+    return backtest.pause_task()
+
+
+@router.post("/backtest/resume")
+def do_backtest_resume():
+    """继续被暂停的回测 / 推荐。"""
+    return backtest.resume_task()
 
 
 @router.get("/backtest/reports")
