@@ -32,9 +32,12 @@
 - env：Python 版本 + 数据目录，便于日后复现
 
 **逐笔交易明细**（trades）：每笔含 code / name / 买卖日期 / 买卖价 / 收益率 /
-股数 / 盈亏（字段口径逐条写在报告里，见 stats.trade_detail）。超过 MAX_TRADES
-（2 万笔）会截断并用 `trades_truncated` 如实标注 —— 全市场高频策略能到十几万笔，
-全量落盘会让报告膨胀到不可读。
+股数 / 盈亏 / 归因（reason + meta）/ 可行性（feasible + blocked_by）。
+字段口径见 `stats` 模块 docstring。超过 MAX_TRADES（2 万笔）会截断并用
+`trades_truncated` 如实标注 —— 全市场高频策略能到十几万笔，全量落盘会让报告膨胀到不可读。
+
+**warnings**（schema 2 新增）：幸存者偏差声明、成本/基准降级原因。
+**必须落盘** —— 报告常被单独翻出来看，脱离页面后没人记得当时跑在什么样本上。
 
 ## 写盘失败绝不影响回测结果
 
@@ -54,9 +57,9 @@ import logutil
 
 logger = logutil.logger
 
-SCHEMA = "backtest-report/1"
+SCHEMA = "backtest-report/2"        # 2：组合权重口径 + 成本分层 + 新指标组
 INDEX_NAME = "index.json"
-MAX_PER_STOCK = 500          # 逐票汇总最多记多少行（超出只留统计口径）
+MAX_PER_STOCK = 500          # 逐票汇总：降序头部 N + 尾部 N 各取 N 条（**双向**）
 MAX_TRADES = 20000           # 逐笔明细最多记多少笔（超出截断并标注 trades_truncated）
 INDEX_MAX_ENTRIES = 500      # 索引最多留多少条（超出丢弃最旧的摘要行）
 
@@ -109,13 +112,31 @@ def _summarize(report: dict) -> dict:
         "requested": scope.get("requested"),
         "initial_capital": scope.get("initial_capital"),
         "commission": scope.get("commission"),
+        "stamp_duty": scope.get("stamp_duty"),
+        "slippage": scope.get("slippage"),
+        "min_commission": scope.get("min_commission"),
         "benchmark": scope.get("benchmark"),
+        "universe_mode": scope.get("universe_mode"),
+        "equity_model": scope.get("equity_model"),
+        # ---- 横向对比指标（schema_version=2）----
         "total_return": _num(metrics.get("total_return")),
         "annual_return": _num(metrics.get("annual_return")),
         "max_drawdown": _num(metrics.get("max_drawdown")),
         "sharpe": _num(metrics.get("sharpe")),
-        "win_rate": _num(metrics.get("win_rate")),
-        "num_trades": _num(report.get("trades_total")),
+        # ⚠️ 旧版这个字段叫 win_rate，值其实是**日胜率**，被当成交易胜率读了很久。
+        #    现在拆成两个，索引里只放「该看的那几个」。
+        "win_rate_daily": _num(metrics.get("win_rate_daily")),
+        "win_rate_trade": _num(metrics.get("win_rate_trade")),
+        "profit_factor": _num(metrics.get("profit_factor")),
+        "expectancy_pct": _num(metrics.get("expectancy_pct")),
+        # 资金利用率与「每单位动用资金收益」：**横向比策略用后者**
+        # （不同策略的总仓位不同，只比 total_return 等于在比谁更满仓）
+        "capital_utilization": _num(metrics.get("capital_utilization")),
+        "return_per_utilized_capital": _num(metrics.get("return_per_utilized_capital")),
+        "turnover_annual": _num(metrics.get("turnover_annual")),
+        "avg_positions": _num(metrics.get("avg_positions")),
+        "num_trades": _num(metrics.get("num_trades_eff")),
+        "schema_version": metrics.get("schema_version"),
     }
 
 
@@ -170,7 +191,11 @@ def build_report(payload: dict) -> dict:
     )
 
     per_stock = list(payload.get("per_stock") or [])
-    truncated = max(0, len(per_stock) - MAX_PER_STOCK)
+    # ⚠️ **不要再按 MAX_PER_STOCK 单向切一刀**：`run_backtest` 已经做过**双向**截断
+    # （收益降序头部 N + 尾部 N），这里若再截前 500 条，正好把「尾部亏损端」切掉，
+    # 白改。截断元信息由 backtest 写在 scope.per_stock_truncated 里，直接沿用。
+    trunc_meta = dict(scope.get("per_stock_truncated") or {})
+    per_stock_total = int(trunc_meta.get("total") or len(per_stock))
 
     # 逐笔交易明细：全市场一次回测动辄数千~上万笔，全量写进去报告可达数十 MB。
     # 与 per_stock 同策略：**超量就截断并如实标注**，让分析者知道「还有 N 笔没落盘」
@@ -202,14 +227,18 @@ def build_report(payload: dict) -> dict:
         "dates": dates,
         "equity": payload.get("equity"),
         "equity_benchmark": payload.get("equity_benchmark"),
-        "per_stock": per_stock[:MAX_PER_STOCK],
-        "per_stock_total": len(per_stock),
-        "per_stock_truncated": truncated,
-        # 逐笔「一买一卖」明细。字段口径见 stats.trade_detail 的 docstring：
+        "per_stock": per_stock,
+        "per_stock_total": per_stock_total,
+        "per_stock_truncated": trunc_meta or {"truncated": False,
+                                              "total": len(per_stock)},
+        # 幸存者偏差声明与降级原因（来自 scope.warnings）——**必须落盘**：
+        # 报告会被单独翻出来看，脱离页面后没人会记得当时跑在什么样本上。
+        "warnings": list(scope.get("warnings") or []),
+        # 逐笔「一买一卖」明细。字段口径（stats 模块 docstring 有完整版）：
         #   buy_price/sell_price 原始收盘（未复权，便于核对）
-        #   ret                   后复权收益率（消除除权跳空的假盈亏）
-        #   shares                按等权资金带折算的股数（**非模拟成交**）
-        #   pnl                   shares × 原始买价 × 后复权收益率（见 stats）
+        #   ret / pnl             权重口径（Δw × 组合净值），**与 equity 同一套成本公式**
+        #   shares                按整手约束折算的股数，仅供可行性参考，**不影响净值**
+        #   feasible/blocked_by   整手/涨跌停/停牌的可行性判定（**不改净值**）
         "trades": trades_kept,
         "trades_total": len(all_trades),
         "trades_truncated": trades_dropped,

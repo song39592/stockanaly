@@ -23,11 +23,15 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import datetime as dt
+import sys
 
 import pandas as pd
 
 import kline_service
 import price_store
+
+# 只取异常类型（运行控制住在独立模块，避免数据层反向依赖契约层 base）
+from .runcontrol import Cancelled
 
 # 对外只暴露 OHLCV：保持与原先（经 indicators.data.get_ohlcv）一致的列集合，
 # 避免 amount / turnover 等列混进策略的 DataFrame 改变既有行为。
@@ -81,7 +85,12 @@ def load_bars(codes, start: str | None = None, end: str | None = None,
             keep = [c for c in _BAR_COLUMNS if c in d.columns]
             if keep and list(d.columns) != keep:
                 d = d[keep]
-            d.index = [str(x)[:10] for x in d.index]
+            # ⚠️ **必须 intern**：全市场 5578 只 × 730 天，每个 Series 的索引里
+            #    都是各自独立的 str 对象 —— 不共享就是 400 万个重复字符串（约 240MB），
+            #    在可用内存只有 1.2GB 的机器上这是决定性的。intern 后全进程只保留
+            #    ~2000 个交易日对象，全市场回测省下约 240MB。
+            #    字符串不可变，intern 不改变任何行为（`str(d)[:10]` 的结果一样）。
+            d.index = pd.Index([sys.intern(str(x)[:10]) for x in d.index])
             return d if len(d) >= _MIN_ROWS else None
         except Exception:                    # noqa: BLE001 - 单只失败不拖垮整批
             return None
@@ -105,6 +114,12 @@ def load_bars(codes, start: str | None = None, end: str | None = None,
         if progress is not None:
             try:
                 progress(done, total)
+            except Cancelled:
+                # ⚠️ **必须放行**：下面那个 `except Exception: pass` 本身是对的
+                #   （进度回调不该让取数失败），但它会连「用户点了停止」一起吃掉 ——
+                #   实测就踩过：勾了停止，进度照样跑到底，状态永远停在 running。
+                #   Cancelled 不是「进度回调出错」，是「整个运行要结束了」。
+                raise
             except Exception:            # 进度回调不该影响取数
                 pass
 
@@ -159,9 +174,69 @@ def release_cache(codes: list[str], adjust: str | None = None,
     return len(drop)
 
 
-def list_universe_codes() -> list[str]:
-    """列出本地已下载（有日 K）的全部股票代码，供「回测范围」选股票池。"""
+UNIVERSE_MODES = ("interval_data", "pool_snapshot", "index_constituent")
+
+
+def list_universe_codes(universe_mode: str = "interval_data",
+                        start: str | None = None, end: str | None = None) -> list[str]:
+    """列出回测候选股票代码，按 universe_mode 决定口径。
+
+    三档（见 ARCHITECTURE.md「幸存者偏差」）：
+      interval_data（默认）
+          本地已下载、且**在 [start,end] 内有足够行情**的全部代码。
+          实现上先取「本地全部代码」，再由编排层的 _prepare 按区间内根数过滤，
+          所以**已退市但历史行情仍在库的票会被纳入**（旧口径把它们按当前代码表
+          排除在「当前还活着」之外，正是幸存者偏差的主要来源）。
+          ⚠️ 仍**不包含**「从未下载过行情」的票——本地无数据就是无法回测，
+          偏差存在是事实，只能显式声明（见 survivorship_note），藏起来才是问题。
+      pool_snapshot
+          `pool_members` 的**时点**成分，最严格；requires_pool=True 的策略用这档。
+      index_constituent
+          历史指数成分股（中证全指等）—— **尚未接入**，回退到 interval_data 并
+          在 flags 里标注，绝不假装自己用了历史成分股。
+    """
+    mode = str(universe_mode or "interval_data")
+    if mode == "pool_snapshot":
+        try:
+            members = load_pool_members(start=start, end=end)
+            codes = {c for row in members.values() for c in row}
+            return sorted(codes)
+        except Exception:                    # noqa: BLE001 - 无池历史则退回默认口径
+            return sorted(price_store.code_latest_dates("raw").keys())
+    # interval_data / index_constituent（后者待接入，暂同前者）
     return sorted(price_store.code_latest_dates("raw").keys())
+
+
+def survivorship_note(universe_mode: str, n_codes: int) -> str:
+    """幸存者偏差声明 —— **非 pool_snapshot 模式下必须写进报告 scope.warnings**。
+
+    不允许静默：偏差无法消除（本地没有「从未下载过」的票的历史），
+    但读者必须知道结果是建立在什么样的样本上，否则指标会被误当成无偏估计。
+    """
+    mode = str(universe_mode or "interval_data")
+    if mode == "pool_snapshot":
+        return (f"股票池口径：成员取自 pool_members 的时点成分（{n_codes} 只），"
+                f"幸存者偏差最小。")
+    if mode == "index_constituent":
+        return (f"⚠️ 幸存者偏差：index_constituent 尚未接入，实际按 interval_data "
+                f"执行（{n_codes} 只）——本地未下载过行情的历史成分股不在样本内。")
+    return (f"⚠️ 幸存者偏差：样本为「本地已下载且区间内有行情」的 {n_codes} 只，"
+            f"含已退市但行情仍在库的票，但**不含从未下载过行情的历史成分股**。"
+            f"绝对收益不可当作无偏估计，跨策略横向比较仍然有效。")
+
+
+def load_bars_raw_for(codes, start: str | None = None,
+                      end: str | None = None) -> dict[str, pd.DataFrame]:
+    """取**未复权** OHLCV，供统计层做「整手 / 涨跌停 / 停牌」可行性判定。
+
+    ⚠️ 必须用 raw：涨跌停是真实市场规则，作用于原始价；hfq 会平滑除权跳空，
+    把真实的涨跌停抹平。净值侧仍用 hfq（消除除权假盈亏），两者分工不同、不可混用。
+
+    **只对权重变动过的 code 调**（见 backtest.run_backtest）：全市场日频换手下
+    变动过的票通常只有百量级，全取会把内存重新推向 2GB 的老问题。
+    """
+    return load_bars(codes, start, end,
+                     fields=["high", "low", "close", "volume"], adjust="raw")
 
 
 def load_pool_members(start: str | None = None,

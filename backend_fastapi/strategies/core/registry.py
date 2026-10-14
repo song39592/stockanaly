@@ -11,10 +11,11 @@
   3. 元数据完整（name / category / outputs 非空，inputs 为 str 列表，
      params 为 ParamSpec 列表且 type ∈ {int,float,choice}）；
   4. 函数签名：首参必须为 ctx，其余参数名与 ParamSpec 一一对应；
-  5. 冒烟测试：用假数据替换 data.load_bars，跑一次策略，
-     经严格 base._as_signals 确认其返回「list[Signal]」（带 code、合法 action、
-     weight ∈ [0,1]）——验证输入/输出契约成立；不通过者 LOAD 即剔除，
-     运行期不再做冗余兜底。
+  5. 冒烟测试：用假数据替换 data.load_bars（及 load_strong_pool 等重取数口），
+     跑一次策略，经严格 base._as_signals 确认其返回「list[Signal]」
+     （带 code、weight ≥ 0、同日 Σweight ≤ 1）——验证输入/输出契约成立；
+     不通过者 LOAD 即剔除，运行期不再做冗余兜底。
+     假 codes 是**多只**（见 _SMOKE_CODES）：单只时 Σweight 恒 ≤ 1，超额校验形同虚设。
 
 通过校验的策略写入 _validated.json 缓存，记录「文件名 + 最后修改时间 +
 状态 + 元数据/错误」，作为审计与前端展示依据；文件 mtime 变化则下次扫描
@@ -39,7 +40,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))          # core 框架目录
 _STRATEGY_DIR = os.path.dirname(_HERE)                       # 上一层：具体策略所在目录
 _STRATEGY_PACKAGE = "strategies"                             # 具体策略模块名空间
 _CACHE_FILE = os.path.join(_STRATEGY_DIR, "_validated.json")
-_EXCLUDE = {"__init__", "core"}                              # 排除包入口与框架子目录
+_EXCLUDE = {"__init__", "core", "report"}   # 排除包入口、框架子目录与报告落盘模块
 _FAKE_COLS = ["open", "high", "low", "close", "volume"]
 
 
@@ -75,6 +76,23 @@ def _stub_load_bars(codes, start=None, end=None, fields=None, adjust="hfq"):
         df = pd.DataFrame({c: list(range(n)) for c in cols}, index=idx)
         out[code] = df[[c for c in (fields or cols) if c in df.columns]] if fields else df
     return out
+
+
+def _stub_strong_pool(start, end, threshold=90, periods=(50, 120, 250), warmup_days=30):
+    """冒烟测试用假强势池：空结果 + error，让重取数策略安全早退。
+
+    RPS 这类策略的取数口是 `load_strong_pool`（内部读全市场横截面），
+    它**不经** `load_bars`，所以只 stub 后者不够 —— 不 stub 就会在包加载时
+    触发一次真实的全市场 RPS 计算（分钟级），把「打开策略页」拖成慢操作。
+    返回 (空池, 空涨幅, error) 而非抛异常：与真实实现的失败语义一致。
+    """
+    return {}, {}, "冒烟测试：强势池不可用"
+
+
+# 冒烟用的假代码集：**必须是多只**。单只时任一事件日 Σweight 恒 ≤ 1，
+# 「权重合法性」这项校验永远通过，等于形同虚设；而恰恰「每只票各自发信号、
+# 权重都是 1.0」正是组合权重口径下最典型的 Σw 超额写法。
+_SMOKE_CODES = ["TEST", "TEST2", "TEST3", "TEST4", "TEST5"]
 
 
 def _force_import(mod_name: str):
@@ -134,6 +152,8 @@ def _validate_module(mod_name: str, filename: str) -> dict:
             raise ValueError("inputs 必须是 str 列表")
         if not isinstance(meta.params, list):
             raise ValueError("params 必须是列表")
+        if not isinstance(meta.requires_pool, bool):
+            raise ValueError("requires_pool 必须是 bool")
         param_names: set[str] = set()
         for p in meta.params:
             if not isinstance(p, base.ParamSpec):
@@ -164,22 +184,32 @@ def _validate_module(mod_name: str, filename: str) -> dict:
 
     # 5) 冒烟测试：用假数据替换 data.load_bars，确认返回 list[Signal] 契约成立。
     #    此处依赖严格版 base._as_signals——它对「非 list[Signal] / 缺 code /
-    #    非法 action / weight 越界」直接抛错；未通过者 LOAD 即拒之门外，
+    #    负权重 / 同日 Σweight > 1」直接抛错；未通过者 LOAD 即拒之门外，
     #    运行期不再静默兜底。空列表（窗口内无信号）属合法，不拦截。
+    #
+    #    ⚠️ 局限（明说不装懂）：冒烟只验 I/O 契约，**不验策略逻辑**。若策略在假数据下
+    #    走的是「无信号早退」分支（如 rps_score 拿到空强势池），本轮 Σw 检查等于没跑。
+    #    真正兜住 Σw 的还有运行期 base._as_signals 的硬校验——那里会带完整的
+    #    超额明细抛错，不依赖冒烟。
     defaults = {p.name: p.default for p in meta.params}
-    ctx = base.StrategyContext(codes=["TEST"], start="2024-01-01", end="2024-02-09", adjust="hfq")
-    real = data.load_bars
+    ctx = base.StrategyContext(codes=list(_SMOKE_CODES), start="2024-01-01",
+                               end="2024-02-09", adjust="hfq")
+    real_bars = data.load_bars
+    real_pool = getattr(data, "load_strong_pool", None)
     data.load_bars = _stub_load_bars
+    if real_pool is not None:
+        data.load_strong_pool = _stub_strong_pool
     try:
         raw = meta.func(ctx, **defaults)
-        base._as_signals(raw)        # 严格校验：类型 / code / action / weight
+        base._as_signals(raw)        # 严格校验：类型 / code / 负权重 / Σweight ≤ 1
     except Exception as exc:
-        data.load_bars = real
         base.REGISTRY.pop(sid, None)
         rec["error"] = f"冒烟测试失败：{exc}\n{traceback.format_exc()}"
         return rec
     finally:
-        data.load_bars = real
+        data.load_bars = real_bars
+        if real_pool is not None:
+            data.load_strong_pool = real_pool
 
     rec["status"] = "ok"
     rec["strategy_id"] = sid

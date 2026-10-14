@@ -9,22 +9,32 @@
     4. 经 base.signals_to_positions 把扁平信号（含 code）转成「目标仓位序列」；
     5. 把收盘价交给 stats.compute 做净值与指标统计。
 
-返回结构（前后端契约）：
+返回结构（前后端契约，metrics.schema_version = 2）：
   {
     "ok": True,
     "strategy": {"id","name","params"},
     "result_id": str,                          # 逐笔明细按需查询的句柄（见 trades_for）
     "scope": {"codes_count","requested","start","end",
-              "initial_capital","commission","benchmark"},
+              "initial_capital","commission","stamp_duty","slippage",
+              "min_commission","lot_size","benchmark","universe_mode",
+              "equity_model","per_stock_truncated","feasibility","warnings"},
     "dates": [YYYY-MM-DD, ...],
     "equity": [float|null, ...],               # 组合净值（初始资金起）
-    "equity_benchmark": [float|null,...]|None, # 基准净值（若有）
-    "metrics": {total_return, annual_return, max_drawdown, sharpe, win_rate,
-                num_trades, num_stocks, trading_days, benchmark_return},
-    "per_stock": [{"code","name","total_return","trades"}, ...],
-                   # 按收益降序，全量不截断；逐笔明细经 /backtest/trades 按需取
-    "data_errors": [str, ...]                              # 跳过/失败的标的说明
+    "equity_benchmark": [float|null,...]|None, # 基准净值（默认等权全池买入持有）
+    "metrics": {total_return, annual_return, max_drawdown, sharpe,
+                win_rate_daily, win_rate_trade, profit_factor, expectancy_pct,
+                num_trades_eff, weight_change_count, avg_positions, max_positions,
+                turnover_annual, avg_holding_days, capital_utilization,
+                return_per_utilized_capital, benchmark_return,
+                alpha, beta, ir, tracking_error},
+    "per_stock": [{"code","name","pnl","total_return","trades","closed"}, ...],
+                   # 降序**双向**截断（头部+尾部），元信息见 scope.per_stock_truncated；
+                   # 逐笔明细经 /backtest/trades 按需取
+    "data_errors": [str, ...]                  # 跳过/失败的标的说明
   }
+
+⚠️ `scope.warnings` **必须非空且含幸存者偏差声明**（见 data.survivorship_note）：
+   偏差消不掉，但必须让读报告的人看见结果是跑在什么样本上的。
 """
 from __future__ import annotations
 
@@ -130,12 +140,18 @@ def _require_pool(strategy_id: str, start: str | None, end: str | None) -> None:
 def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                  start: str | None, end: str | None,
                  initial_capital: float = 100000.0, commission: float = 0.0003,
+                 stamp_duty: float = 0.001, slippage: float = 0.0005,
+                 min_commission: float = 5.0, lot_size: int = 100,
                  benchmark: str | None = None, window: int | None = None,
+                 universe_mode: str = "interval_data",
                  progress=None) -> dict:
     """执行回测，返回标准化结果字典。异常由路由层转成错误响应。
 
     不设标的上限：「全部本地」（5000+ 只）全量跑——数据层 load_bars
     已并行读库，冷缓存全量也在可等待的量级。
+
+    成本参数全部**进净值**（佣金/印花税/滑点/最低佣金），`lot_size` 只影响
+    逐笔明细的可行性判定、不影响净值——见 stats 模块 docstring 的成本分层。
 
     `window=N` 时只统计**最近 N 个交易日**：取数窗口会额外向前多取 warmup 根
     （策略指标如 MACD 需要历史预热，只给 5 根根本算不出信号），但净值与指标
@@ -144,6 +160,19 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
     codes = [str(c).strip() for c in (codes or []) if str(c).strip()]
     if not codes:
         raise ValueError("股票池为空，请先选择回测范围")
+
+    # 暂停/停止的检查点之一：数据加载阶段每批都会回调进度，
+    # 这是唯一既「调用频繁」又「已在调用栈上」的插入点 —— 在这里响应能让
+    # load_bars / _prepare 正常 unwind，而不是留一堆半开的读取任务。
+    # 第二个检查点在策略内部（base.checkpoint），由策略逐标的调用。
+    _raw_progress = progress
+
+    def _tick(done, total):
+        base.checkpoint()
+        if _raw_progress is not None:
+            _raw_progress(done, total)
+
+    progress = _tick
 
     requested = len(codes)
     if window and window > 0:
@@ -170,6 +199,7 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
 
     close_by_code = {c: usable[c]["close"] for c in usable}
     positions = base.signals_to_positions(signals, close_by_code)
+    sig_index = base.signal_meta_index(signals)
 
     bench_close = None
     if benchmark:
@@ -180,35 +210,42 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
         except Exception as exc:
             errors.append(f"基准 {benchmark}: {exc}")
 
+    # raw OHLCV **只取权重变动过的票**：整手/涨跌停/停牌的可行性判定要未复权价，
+    # 但全市场 5559 只全取会把内存重新推向 2GB 的老问题（见 data.load_bars_raw_for）。
+    # 先用 diff_trades 定位变动集合（一次向量化扫描），再按需取价。
+    try:
+        changed = list(base.diff_trades(positions, sig_index).keys())
+    except Exception:                          # noqa: BLE001 - 定位失败不该拖垮回测
+        changed = list(positions.keys())
+    raw_by_code: dict = {}
+    if changed:
+        try:
+            raw_by_code = data.load_bars_raw_for(changed, start, end)
+            data.release_cache(changed, adjust="raw")   # 取完即还，别挂在内存里
+        except Exception as exc:               # noqa: BLE001 - 明细不该拖垮回测
+            errors.append(f"可行性判定取原始价失败：{type(exc).__name__}: {exc}")
+
     core = stats.compute(positions, close_by_code, initial_capital=initial_capital,
-                         commission=commission, benchmark_close=bench_close, tail=window)
+                         commission=commission, stamp_duty=stamp_duty,
+                         slippage=slippage, min_commission=min_commission,
+                         lot_size=lot_size, benchmark_close=bench_close,
+                         raw_by_code=raw_by_code, signal_meta=sig_index, tail=window)
+
+    trades: list[dict] = core.pop("trades", []) or []
+    flags: list[str] = core.pop("flags", []) or []
 
     # 名称补齐（只做展示口径，不影响统计）。逐笔明细**不**随结果下发：
     # 全量 5000+ 只的明细 JSON 会到 10MB 级，改为前端点击展开时按
     # result_id 调 /backtest/trades 现算（上下文缓存在 _BT_CTX，见 trades_for）。
-    per_stock = core["per_stock"]
+    per_stock, trunc_info = stats.truncate_per_stock(core["per_stock"], 500)
     names = _load_names([x["code"] for x in per_stock])
     for item in per_stock:
         item["name"] = names.get(item["code"]) or None
+    for t in trades:
+        t["name"] = names.get(t["code"]) or None
 
-    # 全市场逐笔「一买一卖」明细：给**回测报告**落盘用。
-    # 价格要「原始收盘」（未复权，用户看得懂、股数能对上行情软件），需再取一次
-    # raw 口径 —— 与上面 hfq 那次同构、且 data.load_bars 有缓存，额外开销主要是
-    # 一次批量变换。band 用等权资金带，与 run_recommend 的金额口径一致。
-    trades: list[dict] = []
-    try:
-        raw_bars = data.load_bars(list(usable.keys()), start, end,
-                                  fields=["close"], adjust="raw",
-                                  progress=progress)
-        raw_close = {c: df["close"] for c, df in raw_bars.items()
-                     if df is not None and "close" in df}
-        band = initial_capital / max(1, len(usable))
-        trades = stats.all_trades_detail(positions, close_by_code, raw_close, band=band)
-        for t in trades:
-            t["name"] = names.get(t["code"]) or None
-    except Exception as exc:                   # noqa: BLE001 - 明细不该拖垮回测
-        errors.append(f"逐笔明细生成失败：{type(exc).__name__}: {exc}")
-        trades = []
+    # 可行性汇总（整手/涨跌停/停牌 —— 只影响明细、不影响净值，单列成一组指标）
+    feas = _feasibility_summary(trades, len(changed))
 
     global _BT_CTX, _BT_TRADES
     rid = uuid.uuid4().hex[:12]
@@ -216,6 +253,13 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                "start": start, "end": end, "names": names}
     # 逐笔明细**只**给报告落盘用，**不进 HTTP 响应**（见返回字典处注释）
     _BT_TRADES = trades
+
+    warnings = list(flags)
+    # 幸存者偏差：任何模式都必须显式声明，**不允许静默**（偏差消不掉，但必须让人看见）
+    warnings.append(data.survivorship_note(universe_mode, len(usable)))
+    if window:
+        warnings.append(f"short_window: 只统计最近 {window} 个交易日（区间被裁剪）")
+    warnings.extend(errors[:20])
 
     return {
         "ok": True,
@@ -232,17 +276,52 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
             "end": end,
             "initial_capital": initial_capital,
             "commission": commission,
+            "stamp_duty": stamp_duty,
+            "slippage": slippage,
+            "min_commission": min_commission,
+            "lot_size": lot_size,
             "benchmark": benchmark,
+            "universe_mode": universe_mode,
+            "equity_model": "weight_idealized",
+            "per_stock_truncated": trunc_info,
+            "feasibility": feas,
+            "warnings": warnings,
         },
         "dates": core["dates"],
         "equity": core["equity"],
         "equity_benchmark": core["equity_benchmark"],
         "metrics": core["metrics"],
         "per_stock": per_stock,
-        # ⚠️ **逐笔明细刻意不在这里**（第 18 项实测后才补上的约定）：全市场一次回测
-        # 15 万+ 笔，随响应下发是 24 MB JSON、取结果要 10 秒；前端展开某只票时
-        # 走 /backtest/trades 按需现算即可。报告要用的话从 `last_trades()` 取。
+        # ⚠️ **逐笔明细刻意不在这里**：全市场一次回测 15 万+ 笔，随响应下发是
+        # 24 MB JSON、取结果要 10 秒；前端展开某只票时走 /backtest/trades 按需取。
+        # 报告要用的话从 `last_trades()` 取。
         "data_errors": errors[:20],
+    }
+
+
+def _feasibility_summary(trades: list[dict], n_checked: int) -> dict:
+    """整手 / 涨跌停 / 停牌的可行性汇总（**独立于净值的一组指标**）。
+
+    口径提醒：`equity` 是权重口径的理想曲线，不含这些约束；这里给出的是
+    「这笔在真实市场里能不能成交」，两者必须分区展示，不能混读成「实际赚到的钱」。
+    """
+    n = len(trades)
+    blocked = {"suspended": 0, "limit_up": 0, "limit_down": 0,
+               "lot_size": 0, "no_price": 0}
+    ok_n = 0
+    for t in trades:
+        if t.get("feasible", True):
+            ok_n += 1
+            continue
+        b = t.get("blocked_by")
+        if b in blocked:
+            blocked[b] += 1
+    return {
+        "checked_codes": n_checked,
+        "trades": n,
+        "tradable_ratio": round(ok_n / n, 4) if n else None,
+        "blocked_counts": blocked,
+        "note": "可行性口径独立于 equity（净值不含整手/涨跌停/停牌）",
     }
 
 
@@ -280,8 +359,8 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
     未指定区间时自动回看最近 `lookback` 个交易日——MACD 这类长周期策略
     只看最近几天是算不出有效信号的。
 
-    金额口径：等权资金带 `band = initial_capital / 有效标的数`，与回测的
-    组合口径一致；盈亏用**后复权**序列算（消除除权的假盈亏），
+    金额口径：组合权重 × 目标资金（`amount = initial_capital × weight`），
+    与回测的净值口径一致；盈亏用**后复权**序列算（消除除权的假盈亏），
     价格展示用原始收盘（不复权，用户看得懂）。
 
     `progress(done, total)` 与 `run_backtest` 同义（哨兵 done=-1 表示进入
@@ -291,6 +370,15 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
     codes = [str(c).strip() for c in (codes or []) if str(c).strip()]
     if not codes:
         raise ValueError("股票池为空，请先选择回测范围")
+
+    _raw_reco = progress
+
+    def _rtick(done, total):
+        base.checkpoint()
+        if _raw_reco is not None:
+            _raw_reco(done, total)
+
+    progress = _rtick
 
     if not start or not end:
         days = data.recent_trading_days(lookback)
@@ -356,7 +444,10 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
     data.release_cache(need)      # 两种口径都取完即还回去，别把内存挂在 107 只上
 
     names = _load_names(list(priced.keys()))
-    band = initial_capital / len(usable)
+    # 组合权重口径：金额 = 目标资金 × 权重。**没有「资金带」**——
+    # 旧口径的 initial_capital/N 会让同一策略在 500 只池与 5559 只池给出差 11 倍的
+    # 建议金额（池子越大每票分到越少），推荐结果因此不可横向对比、也不可跨池复用。
+    target_capital = float(initial_capital)
 
     buy: list[dict] = []
     sell: list[dict] = []
@@ -374,10 +465,10 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
 
         if cur > 0.0 and prev <= 0.0:                       # 建仓
             buy.append({"code": code, "name": nm, "weight": round(cur, 4),
-                        "price": round(px, 2), "amount": round(band * cur, 2)})
+                        "price": round(px, 2), "amount": round(target_capital * cur, 2)})
         elif cur <= 0.0 and prev > 0.0:                     # 清仓
             sell.append({"code": code, "name": nm, "weight": round(prev, 4),
-                         "price": round(px, 2), "amount": round(band * prev, 2)})
+                         "price": round(px, 2), "amount": round(target_capital * prev, 2)})
         elif cur > 0.0 and prev > 0.0:                      # 继续持仓（可能加/减仓）
             open_i = len(w) - 1                             # 回溯到本次持仓的建仓日
             for i in range(len(w) - 1, -1, -1):
@@ -387,7 +478,7 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
             hfq_buy = float(hfq["close"].iloc[open_i])
             hfq_now = float(hfq["close"].iloc[-1])
             pnl_pct = (hfq_now / hfq_buy - 1.0) if hfq_buy else 0.0
-            amount = band * cur
+            amount = target_capital * cur
             cost = float(raw["close"].iloc[open_i]) if (raw is not None and len(raw) > open_i) else hfq_buy
             hold.append({
                 "code": code, "name": nm, "weight": round(cur, 4), "price": round(px, 2),
@@ -417,7 +508,7 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
             "params": params or {},
         },
         "date": date or end,
-        "band": round(band, 2),
+        "target_capital": round(target_capital, 2),
         "buy": buy,
         "sell": sell,
         "hold": hold,
@@ -451,6 +542,7 @@ _RECO_TASK: dict = {
 }
 _RECO_LOCK = threading.Lock()
 _RECO_RESULT: dict | None = None
+_RECO_CANCEL = threading.Event()      # 与 _BT_CANCEL 同理，见 cancel_task
 
 
 def _reco_state_locked() -> dict:
@@ -474,7 +566,10 @@ def _reco_state_locked() -> dict:
 def reco_task_state() -> dict:
     """当前推荐任务状态（供轮询）：语义与 `task_state` 一致，深拷贝。"""
     with _RECO_LOCK:
-        return _reco_state_locked()
+        snap = _reco_state_locked()
+    ctrl = _RECO_CTRL
+    snap["paused"] = bool(ctrl.paused) if ctrl is not None else False
+    return snap
 
 
 def reco_result() -> dict | None:
@@ -497,7 +592,7 @@ def start_reco_task(strategy_id: str, params: dict | None, codes: list[str],
         if _RECO_TASK["state"] == "running":
             # ⚠️ 必须用 `_reco_state_locked()`，不能用 reco_task_state()——
             # 后者会再去加同一把不可重入的锁，当前线程会永久死锁。
-            return {"ok": False, "error": "已有推荐在运行，请等它结束",
+            return {"ok": False, "error": "已有推荐在运行。可点「停止」中断它，或等它结束",
                     "state": _reco_state_locked()}
         _RECO_RESULT = None
         try:
@@ -531,11 +626,23 @@ def start_reco_task(strategy_id: str, params: dict | None, codes: list[str],
                 _RECO_TASK["done"] = max(0, min(overall, overall - left))
 
     def _work():
+        global _RECO_CTRL
         t0 = time.time()
+        _RECO_CTRL = base.RunControl()
+        base.install_control(_RECO_CTRL)
         try:
-            out = run_recommend(strategy_id, params, codes, start, end,
-                               initial_capital, commission,
-                               progress=_on_progress)
+            try:
+                out = run_recommend(strategy_id, params, codes, start, end,
+                                   initial_capital, commission,
+                                   progress=_on_progress)
+            except base.Cancelled:
+                with _RECO_LOCK:
+                    _RECO_TASK.update(
+                        state="cancelled", phase="done",
+                        finished_at=dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        elapsed=round(time.time() - t0, 1),
+                        error="已被用户停止")
+                return
             global _RECO_RESULT
             _RECO_RESULT = out
             with _RECO_LOCK:
@@ -550,6 +657,9 @@ def start_reco_task(strategy_id: str, params: dict | None, codes: list[str],
                     finished_at=dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     elapsed=round(time.time() - t0, 1),
                     error=f"{type(exc).__name__}: {exc}")
+        finally:
+            base.install_control(None)
+            _RECO_CTRL = None
 
     threading.Thread(target=_work, name="recommend-task", daemon=True).start()
     return {"ok": True, "state": reco_task_state()}
@@ -580,6 +690,63 @@ def last_trades() -> list:
     return _BT_TRADES
 
 
+# ---- 暂停 / 继续 / 停止 ----
+# 控制句柄本身在 base.RunControl（协作式，语义与生效边界见那里的 docstring）。
+# 这里只持有「本次任务用的那一个」，供 HTTP 层跨请求地置标志。
+_BT_CTRL: "base.RunControl | None" = None
+_RECO_CTRL: "base.RunControl | None" = None
+
+
+def _control_state(ctrl, running: bool, extra: dict | None = None) -> dict:
+    out = {"ok": True, "running": running, "paused": bool(ctrl.paused) if ctrl else False}
+    if extra:
+        out.update(extra)
+    return out
+
+
+def pause_task() -> dict:
+    """暂停当前回测 / 推荐。可重复调用（已暂停时返回 ok）。"""
+    if _BT_CTRL is not None:
+        _BT_CTRL.request_pause()
+    if _RECO_CTRL is not None:
+        _RECO_CTRL.request_pause()
+    return _control_state(_BT_CTRL or _RECO_CTRL,
+                          (_BT_CTRL is not None) or (_RECO_CTRL is not None),
+                          {"message": "已请求暂停：任务会在下一个检查点停下"})
+
+
+def resume_task() -> dict:
+    """继续被暂停的任务。"""
+    if _BT_CTRL is not None:
+        _BT_CTRL.resume()
+    if _RECO_CTRL is not None:
+        _RECO_CTRL.resume()
+    return _control_state(_BT_CTRL or _RECO_CTRL,
+                          (_BT_CTRL is not None) or (_RECO_CTRL is not None),
+                          {"message": "已继续"})
+
+
+def cancel_task() -> dict:
+    """停止当前回测 / 推荐。**幂等**，没在跑也返回 ok。
+
+    为什么不做成「后端直接杀线程」：Python 没法安全杀线程，硬杀会让 SQLite
+    连接与 `_PER_CACHE` 停在半途。这里只置标志，由回测自己在检查点抛
+    `Cancelled` 正常 unwind —— 数据层与缓存都能干净收尾。
+
+    ⚠️ **生效边界**：检查点只有两处 —— 数据加载阶段的每批进度回调，
+    以及策略自己循环里的 `base.checkpoint()`。没写 checkpoint 的策略，
+    在它自己的计算循环里停不住（详见 base.RunControl 的 docstring）。
+    """
+    if _BT_CTRL is not None:
+        _BT_CTRL.request_cancel()
+    if _RECO_CTRL is not None:
+        _RECO_CTRL.request_cancel()
+    running = (_BT_CTRL is not None) or (_RECO_CTRL is not None)
+    return {"ok": True, "requested": running,
+            "message": "已请求停止：任务会在下一个检查点退出" if running
+                       else "当前没有正在运行的任务"}
+
+
 def _bt_state_locked() -> dict:
     """`_BT_TASK` 的深拷贝快照。**调用方必须已持有 `_BT_LOCK`。**
 
@@ -602,9 +769,15 @@ def task_state() -> dict:
 
     `elapsed` 在**运行中也要有值** —— 只在结束时写的话，进度条旁边的时间会一直
     显示 0s，用户以为卡住了。这里按 `started_at` 实时算。
+
+    `paused` 从控制器读（而不是存进 _BT_TASK）：暂停是**控制句柄的状态**，
+    存在两处就会出现「任务说没暂停但实际卡住」的不一致。
     """
     with _BT_LOCK:
-        return _bt_state_locked()
+        snap = _bt_state_locked()
+    ctrl = _BT_CTRL
+    snap["paused"] = bool(ctrl.paused) if ctrl is not None else False
+    return snap
 
 
 def task_result() -> dict | None:
@@ -615,7 +788,10 @@ def task_result() -> dict | None:
 def start_task(strategy_id: str, params: dict | None, codes: list[str],
                start: str | None, end: str | None,
                initial_capital: float = 100000.0, commission: float = 0.0003,
-               benchmark: str | None = None, window: int | None = None) -> dict:
+               stamp_duty: float = 0.001, slippage: float = 0.0005,
+               min_commission: float = 5.0, lot_size: int = 100,
+               benchmark: str | None = None, window: int | None = None,
+               universe_mode: str = "interval_data") -> dict:
     """启动一次后台回测并**立即返回**；已有任务在跑时返回 ok=false（不排队）。
 
     并发上限为 1：两个全市场回测并行会把 CPU 与 SQLite 读盘打满，反而比串行更慢，
@@ -626,7 +802,11 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
         if _BT_TASK["state"] == "running":
             # ⚠️ 必须用 `_bt_state_locked()`，不能用 task_state()——后者会再去加
             # 同一把不可重入的锁，导致本线程（连带所有轮询）永久死锁。
-            return {"ok": False, "error": "已有回测在运行，请等它结束或先点「停止」",
+            # 并发上限是 1（两个全市场并行会把 CPU 与读盘打满，反而更慢）。
+            # 这里**必须**给出出路：全市场一次实测约 13 分钟，只让用户干等没有意义。
+            # 「停止」是真存在的（POST /backtest/cancel），不再指向一个不存在的按钮。
+            return {"ok": False, "error": "已有回测在运行。可点「停止」中断它后重跑，"
+                                          "或等它跑完（回测期间只能同时跑一个）",
                     "state": _bt_state_locked()}
         _BT_RESULT = None
         try:
@@ -652,11 +832,28 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
                     _BT_TASK["total"] = int(total)
 
     def _work():
+        global _BT_CTRL
         t0 = time.time()
+        # 装控制器：装上之后 base.checkpoint() 才不是 no-op，
+        # 暂停/停止标志也需要一个跨请求可见的落脚点。
+        _BT_CTRL = base.RunControl()
+        base.install_control(_BT_CTRL)
         try:
-            out = run_backtest(strategy_id, params, codes, start, end,
-                               initial_capital, commission, benchmark, window,
-                               progress=_on_progress)
+            try:
+                out = run_backtest(strategy_id, params, codes, start, end,
+                                   initial_capital, commission, stamp_duty,
+                                   slippage, min_commission, lot_size,
+                                   benchmark, window, universe_mode,
+                                   progress=_on_progress)
+            except base.Cancelled:
+                # 用户主动停止：**不是错误**。用 paused/cancelled 状态，
+                # 界面上按中性提示显示，绝不弹红色报错或堆栈。
+                with _BT_LOCK:
+                    _BT_TASK.update(state="cancelled", phase="done",
+                                    finished_at=dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    elapsed=round(time.time() - t0, 1),
+                                    error="已被用户停止（已完成部分不保留结果）")
+                return
             global _BT_RESULT
             _BT_RESULT = out
             try:
@@ -677,6 +874,11 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
                                 finished_at=dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 elapsed=round(time.time() - t0, 1),
                                 error=f"{type(exc).__name__}: {exc}")
+        finally:
+            # 必须卸掉：否则这次任务的控制器会留给下一次无关的调用去用，
+            # 而 base.RUN_CONTROL 是**模块级**的（见 base 的说明）。
+            base.install_control(None)
+            _BT_CTRL = None
 
     threading.Thread(target=_work, name="backtest-task", daemon=True).start()
     return {"ok": True, "state": task_state()}
@@ -685,16 +887,13 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
 def trades_for(rid: str, code: str) -> list[dict]:
     """按 result_id 取某只的逐笔交易明细（前端展开时按需调用）。
 
-    上下文是**单槽缓存**（只留最近一次回测，约几十 MB）；过期/不匹配直接报错，
-    让前端提示重跑。价格用原始收盘（未复权），收益按后复权口径。
+    上下文是**单槽缓存**（只留最近一次回测）；过期/不匹配直接报错，让前端提示重跑。
+
+    ⚠️ 直接从已算好的全市场明细里过滤，**不再单票重算**：
+    旧实现有独立的 `stats.trade_detail()`，自己扫权重序列并用硬编码的 100000
+    折算股数，于是同一笔交易在「全市场明细」与「单票明细」里口径不一致，
+    报告无法交叉核对。组合权重口径下逐笔 pnl 就是全市场口径。
     """
     if not _BT_CTX or _BT_CTX["rid"] != rid:
         raise ValueError("回测结果已过期，请重新运行回测")
-    pos = _BT_CTX["positions"].get(code)
-    close = _BT_CTX["close"].get(code)
-    if pos is None or close is None:
-        return []
-    raw = data.load_bars([code], _BT_CTX["start"], _BT_CTX["end"],
-                         fields=["close"], adjust="raw")
-    r = raw.get(code)
-    return stats.trade_detail(pos, close, r["close"] if r is not None else None)
+    return stats.trades_for_code(_BT_TRADES, code)
