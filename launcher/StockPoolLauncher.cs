@@ -602,6 +602,19 @@ namespace StockPool
                 return base.ProcessCmdKey(ref msg, keyData);
             }
 
+            // ---- F8：个股页循环切换 K 线周期（日 → 周 → 月 → 日）----
+            // 搜索框展开时不劫持（那里正在输入指标 / 代码）；仅在个股页且有已打开个股时生效。
+            if (keyData == Keys.F8)
+            {
+                if (_quickSearch != null && _quickSearch.Visible)
+                    return base.ProcessCmdKey(ref msg, keyData);
+                if (_tabIndex == _stockTabIndex && _stockCurrent != null)
+                {
+                    StockCyclePeriod();
+                    return true;
+                }
+            }
+
             // 仅当搜索框未显示、且当前焦点不在文本类控件（避免劫持已有输入框）时，用数字或字母键唤出。
             // 数字 → 快速开个股；字母 → 直接键入指标英文 id（如敲 m 再补 acd = macd）切换副图。
             // 具体唤起逻辑见 QuickSearch.cs 的 QuickSearchSummonOnKey。
@@ -866,6 +879,11 @@ namespace StockPool
             else if (tag == "stock-adjust")
             {
                 // 复权按钮（前复权 / 不复权）的配色由 StockSetAdjustActive 控制，跳过默认按钮上色
+            }
+            else if (tag == "stock-period")
+            {
+                // 周期按钮（日 / 周 / 月）的配色由 StockSetPeriodActive 控制当前周期高亮，
+                // 跳过默认按钮上色 —— 否则每次 Skin（切页/换肤）会把三个按钮全刷成 Accent，多按钮同时"高亮"。
             }
             else if (c is Button)
             {

@@ -2322,6 +2322,13 @@ bool ok = J.IsOk(j);
             if (_stockKline != null) _stockKline.FocusForKeys();
         }
 
+        /// <summary>F8 循环切换 K 线周期：日 → 周 → 月 → 日（K线、指标、筹码随周期一起重算）。</summary>
+        private void StockCyclePeriod()
+        {
+            string next = _stockPeriod == "day" ? "week" : (_stockPeriod == "week" ? "month" : "day");
+            StockSetPeriod(next);
+        }
+
         // ---- 历史查看记录（左侧可折叠导航，持久化到 stockanaly-data）----
         private TableLayoutPanel BuildStockHistoryPanel()
         {
