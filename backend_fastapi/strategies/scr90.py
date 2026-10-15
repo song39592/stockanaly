@@ -31,7 +31,7 @@ import datetime as dt
 
 import pandas as pd
 
-import chip_formulas
+from features.chip import formulas as chip_formulas
 from features.chip.formulas.core import scr
 from .core.base import strategy, ParamSpec, Signal, checkpoint
 

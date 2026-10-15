@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from .base import REGISTRY, ParamSpec
+from .base import REGISTRY
 
 
 def _chip_formula_ids() -> list[str]:
@@ -15,7 +15,7 @@ def _chip_formula_ids() -> list[str]:
     取不到时返回空列表——指标本身照常可用（会用默认公式），只是下拉没选项。
     """
     try:
-        import chip_formulas
+        from features.chip import formulas as chip_formulas
         return sorted(chip_formulas.FORMULAS)
     except Exception:                       # noqa: BLE001 - 公式包不可用不影响指标清单
         return []

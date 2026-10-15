@@ -10,8 +10,20 @@
 面板位置（panel）：每个指标声明自己画在哪里，前端据此分配渲染层：
   - "main"   主图叠加（共用主图价格坐标轴），如 MA / EMA / BOLL
   - "lower"  主图下方副图（共享时间轴、独立 y 轴，可多个堆叠），如 MACD / RSI / KDJ
-  - "right"  主图右侧副图（与主图等高并列、独立 y 轴），如需要独立纵轴的指标
   - "none"   不显示：仅注册、可计算（用于导出 / 内部辅助 / 暂不开放），前端不把它放入任何渲染面板
+
+**为什么没有 "right"（右侧面板）—— 这是刻意收回，不是遗漏。**
+它曾作为枚举值预留，但承诺了一个本层给不出的东西。右侧窗口（筹码峰）是
+「按价位分布的直方图」：x 轴是价格分箱、y 轴是占比；而指标体系产出的是
+「按日期对齐的序列」：x 轴是交易日、y 轴是数值。两者连**维度都不同**，塞进同一套
+panel 只会为了统一而扭曲其中一个（前端要为 right 单独写一套与 K 线不对齐的缩放）。
+筹码峰因此走自己的渲染单元（`launcher/StockPage.cs` 的 `ChipPanel`）与自己的接口
+`/api/chip/dist`，但**算法与筹码类指标共用同一份筹码矩阵**
+（`chip_formulas.compute_matrix` 缓存，两条路径共享）。
+
+把 "right" 从 `VALID_PANELS` 删掉，是让「本层没有右侧面板」成为**被 LOAD 校验的事实**，
+而不是一个没人用的占位值 —— 否则每个加指标的人都会先问一遍「能不能放 right」。
+若将来真有需要独立纵轴的**序列**指标，请复用 "lower"（它本就支持多序列堆叠）。
 
 指标函数约定：
   def my_indicator(df: pd.DataFrame, **params) -> dict:
@@ -38,7 +50,7 @@ from . import data
 
 REGISTRY: dict[str, "IndicatorMeta"] = {}
 
-VALID_PANELS = ("main", "lower", "right", "none")
+VALID_PANELS = ("main", "lower", "none")      # 无 "right"，理由见模块 docstring
 VALID_KINDS = ("line", "bar")
 
 
@@ -47,7 +59,7 @@ class IndicatorMeta:
     id: str
     name: str
     category: str             # "trend" | "oscillator" | "volatility" ...
-    panel: str                # "main" | "lower" | "right" 放置面板
+    panel: str                # "main" | "lower" | "none"（none = 仅计算不渲染）；无 "right"
     params: list[ParamSpec]
     func: Callable
     file: str = ""            # 定义该指标的源文件绝对路径（由装饰器经 inspect 取得）
@@ -63,11 +75,16 @@ def series_bar(name: str, data) -> dict:
     return {"name": name, "kind": "bar", "data": data}
 
 
-def indicator(id: str, name: str, category: str, panel: str, params: list[ParamSpec]):
+def indicator(id: str, name: str, category: str, panel: str,
+              params: list[ParamSpec]):
     """装饰器：把指标函数登记进 REGISTRY。
 
-    panel 必须是 "main" / "lower" / "right" / "none" 之一，否则在模块导入时即报错，
-    便于尽早发现错误的面板声明。
+    panel 必须是 "main" / "lower" / "none" 之一，否则在模块导入时即报错，
+    便于尽早发现错误的面板声明（"right" 已刻意收回，理由见模块 docstring）。
+
+    启动时还会经 `scan.scan()` 做元数据 + 签名 + 合成数据自检，不过关的会被移出
+    `REGISTRY`（详见 scan.py）。**不需要**在这里声明"要不要参与自检"—— 依赖
+    行情/全市场数据的指标会自动判为跳过。
     """
     if panel not in VALID_PANELS:
         raise ValueError(f"panel 必须是 {VALID_PANELS}，收到: {panel}")
@@ -84,6 +101,35 @@ def indicator(id: str, name: str, category: str, panel: str, params: list[ParamS
         )
         return func
     return deco
+
+
+def signature_problems(meta: "IndicatorMeta") -> list[str]:
+    """签名检查（LOAD 时）：首参必须是 df，其余参数都要有默认值且与 ParamSpec 对齐。
+
+    与筹码公式的同名函数同义（都是「声明与实现对不上就拦下」），只是首参名从
+    `ctx` 换成 `df`。
+    """
+    problems: list[str] = []
+    try:
+        sig = inspect.signature(meta.func)
+    except (TypeError, ValueError) as exc:
+        return [f"无法解析签名：{exc}"]
+    names = [p.name for p in sig.parameters.values()
+             if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)]
+    if not names or names[0] != "df":
+        problems.append(
+            f"首参必须是 df（pandas.DataFrame），实际是 {names[0] if names else '无参数'}")
+    declared = {p.name for p in meta.params}
+    for name in names[1:]:
+        param = sig.parameters[name]
+        if param.default is inspect.Parameter.empty:
+            problems.append(f"参数 {name} 缺少默认值")
+        if name not in declared:
+            problems.append(f"参数 {name} 未在 ParamSpec 中声明")
+    for spec in meta.params:
+        if spec.name not in names:
+            problems.append(f"ParamSpec 声明的 {spec.name} 不是函数参数")
+    return problems
 
 
 def _normalize_series(result: dict, df: pd.DataFrame) -> list[dict]:

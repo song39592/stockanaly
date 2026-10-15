@@ -19,6 +19,8 @@ from __future__ import annotations
 import dataclasses as dc
 import datetime as dt
 import inspect
+import json
+from functools import lru_cache
 from typing import Any, Callable
 
 import numpy as np
@@ -184,22 +186,45 @@ class ChipResult:
     lockup_factor: float = 1.0
 
 
-def compute_matrix(code: str, formula_id: str | None = None, params: dict | None = None,
-                   start: str | None = None, end: str | None = None,
-                   adjust: str = "qfq", days: int | None = None,
-                   bins: int = DEFAULT_BINS, period: str = "day",
-                   offline: bool = False) -> ChipResult:
-    """按指定公式算出**筹码矩阵**（不含 HTTP 响应包装）。
+def _params_key(params: dict | None):
+    """`params` → **可哈希**的缓存键（`lru_cache` 不能直接吃 dict）。
 
-    指标侧的延伸量（获利比例 / 平均成本 / 集中度）复用这一份结果，
-    避免同一只票被重复计算多遍。
-
-    `offline=True`：透传给 `data.load_input`，批量场景不联网（见那里的说明）。
-
-    异常：
-      KeyError      公式 id 不存在（调用方应转成 400）
-      RuntimeError  行情不足 / 缺流通股本
+    优先用 `tuple(sorted(items))`：原生标量（float/int/str/bool）可哈希且
+    **类型不丢失**。只有出现 list / dict / numpy 标量时才回退到 JSON 字符串
+    （`default=str` 兜底）—— 注意回退分支会把值转成字符串，而筹码公式的参数
+    全是标量（`ParamSpec` 只允许 float / int / bool / choice），故正常路径不走回退。
     """
+    if not params:
+        return ""
+    try:
+        return tuple(sorted(params.items()))
+    except TypeError:
+        return json.dumps(params, sort_keys=True, default=str)
+
+
+def _params_from_key(key):
+    """`_params_key` 的逆运算。"""
+    if not key:
+        return None
+    if isinstance(key, str):
+        return json.loads(key)
+    return dict(key)
+
+
+@lru_cache(maxsize=24)
+def _compute_matrix_cached(code: str, formula_id: str | None, params_key,
+                           start: str | None, end: str | None, adjust: str,
+                           days: int | None, bins: int, period: str,
+                           offline: bool) -> ChipResult:
+    """`compute_matrix` 的**缓存实现**；签名只含可哈希项，故 `params` 走键。
+
+    ⚠️ `offline` 是**缓存键的一部分**，这是业务口径要求、不是可优化项：
+    `offline=True`（SCR90 周榜 / scr90 策略）与 `offline=False`（指标 / 右侧窗口）
+    的差别在于**要不要做锁仓修正**。`core/scr.py` 顶部已明确「有无锁仓修正是
+    业务口径差异，合并调用参数会让周榜与策略的数值整体偏移」，把它们混进同一条
+    缓存会让其中一个悄悄拿到另一个的数。
+    """
+    params = _params_from_key(params_key)
     fid = formula_id or DEFAULT_FORMULA_ID
     meta = FORMULAS.get(fid)
     if meta is None:
@@ -228,6 +253,49 @@ def compute_matrix(code: str, formula_id: str | None = None, params: dict | None
         formula_id=meta.id, formula_name=meta.name, params=kwargs,
         lockup_ratio=ctx.lockup_ratio, lockup_factor=ctx.lockup_factor,
     )
+
+
+def compute_matrix(code: str, formula_id: str | None = None, params: dict | None = None,
+                   start: str | None = None, end: str | None = None,
+                   adjust: str = "qfq", days: int | None = None,
+                   bins: int = DEFAULT_BINS, period: str = "day",
+                   offline: bool = False) -> ChipResult:
+    """按指定公式算出**筹码矩阵**（不含 HTTP 响应包装）。
+
+    **本层是筹码矩阵的唯一缓存入口。** 之前缓存只挂在指标侧的
+    `indicators/data._chip_frames`，于是「右侧筹码峰窗口」（走 `compute` → 本函数）
+    完全绕过它：同一只票，开着 COST/SCR/WIN 三个指标再看右侧筹码峰，
+    矩阵会被**独立算两遍**。缓存下沉到 `_compute_matrix_cached` 后，
+    两条路径共用一份，重复计算消失、两侧口径也不再依赖「两处代码写得一致」。
+
+    指标侧的延伸量（获利比例 / 平均成本 / 集中度）同样复用这一份结果。
+
+    `offline=True`：透传给 `data.load_input`，批量场景不联网（见那里的说明）。
+
+    ⚠️ **返回对象是缓存中的共享实例，只读。** `ChipResult` 内含 numpy 数组，
+    调用方不得就地修改；需要改就先 `.copy()`。现有四个调用方
+    （`compute` / `indicators.data` / `rank_service` / `strategies.scr90`）
+    均已核对为只读。
+
+    异常：
+      KeyError      公式 id 不存在（调用方应转成 400）
+      RuntimeError  行情不足 / 缺流通股本
+    """
+    return _compute_matrix_cached(
+        code, formula_id, _params_key(params), start, end, adjust,
+        int(days) if days else None,
+        int(bins) if bins and int(bins) > 1 else DEFAULT_BINS,
+        period, bool(offline),
+    )
+
+
+def clear_matrix_cache() -> None:
+    """清空筹码矩阵缓存（测试 / 切换数据源后调用）。
+
+    指标侧的 `indicators.data.clear_cache` 会转调这里，两侧共用一份缓存后
+    只需清一次。
+    """
+    _compute_matrix_cached.cache_clear()
 
 
 def compute(code: str, formula_id: str | None = None, params: dict | None = None,
