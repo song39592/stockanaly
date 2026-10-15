@@ -22,14 +22,13 @@ from __future__ import annotations
 
 import dataclasses as dc
 import datetime as dt
-import threading
 from functools import lru_cache
 
 import kline_service
 import numpy as np
 import pandas as pd
 import price_store          # 仅用于读股本（share_capital），K 线本身走 kline_service
-from periods import bucket_last_indices, normalize
+from periods import normalize
 
 _MIN_ROWS = 2  # 少于此行数视为数据不足，技术指标无法计算
 _OHLCV = ("open", "high", "low", "close", "volume")
@@ -181,12 +180,17 @@ def code_of(df: pd.DataFrame) -> str:
     return code
 
 
-@lru_cache(maxsize=8)
 def _chip_frames(code: str, formula_id: str | None, days: int | None,
                  bins: int, adjust: str) -> ChipFrames:
-    # 延迟导入：chip_formulas.core.data 反过来要 import 本模块（取行情 / 换手率），
-    # 模块级互导会形成环；放在函数里，双方模块都已加载完毕，环自然断开。
-    import chip_formulas
+    # 延迟导入：features.chip.formulas.core.data 反过来要 import 本模块（取行情 /
+    # 换手率），模块级互导会形成环；放在函数里，双方模块都已加载完毕，环自然断开。
+    #
+    # ⚠️ 本函数**不再自带缓存**（原来挂着 lru_cache(maxsize=8)）：筹码矩阵的缓存
+    # 已下沉到 `compute_matrix` —— 它是矩阵的唯一入口，右侧筹码峰窗口也走它。
+    # 缓存只挂在指标侧时，「开着 COST/SCR/WIN 三个指标 + 看右侧筹码峰」会把同一只
+    # 票的矩阵**独立算两遍**（实测 tri_decay 250 天 × 80 箱的循环不便宜）。
+    # 两层缓存还会让同一份矩阵在内存里存两份。
+    from features.chip import formulas as chip_formulas
     res = chip_formulas.compute_matrix(code, formula_id=formula_id, days=days,
                                        bins=bins, adjust=adjust)
     return ChipFrames(dates=list(res.dates), close=res.close,
@@ -198,8 +202,10 @@ def get_chip_frames(code: str, formula_id: str | None = None,
                     adjust: str = "qfq") -> ChipFrames:
     """取筹码分布矩阵（带缓存）。**只读**：调用方不得修改返回的数组。
 
-    缓存按 (code, formula_id, days, bins, adjust) 计；同一只票上叠加多个筹码类指标
-    （获利比例 / 平均成本 / 集中度）只会真正算一次。
+    缓存键是 (code, formula_id, days, bins, adjust)，但**缓存本体在
+    `chip_formulas.compute_matrix` 里**（筹码矩阵的唯一入口），本函数只做
+    参数规范化与 `ChipFrames` 包装。故同一只票上叠加多个筹码类指标
+    （获利比例 / 平均成本 / 集中度）只会真正算一次，右侧筹码峰窗口也共用这一份。
     """
     return _chip_frames(code, formula_id, days, int(bins), adjust)
 
@@ -238,6 +244,9 @@ def chip_rows_of(df: pd.DataFrame, formula_id: str | None = None,
 def clear_cache() -> None:
     """测试或切换数据源后清空取数缓存。"""
     _load.cache_clear()
-    _chip_frames.cache_clear()
+    # 筹码矩阵缓存已下沉到 chip_formulas.compute_matrix（唯一入口），这里转调；
+    # 本模块不再单独持有缓存，故没有 _chip_frames.cache_clear() 可调。
+    from features.chip import formulas as chip_formulas
+    chip_formulas.clear_matrix_cache()
     from .rps_data import clear_market_panel
     clear_market_panel()

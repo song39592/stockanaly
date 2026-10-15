@@ -8,7 +8,6 @@ from __future__ import annotations
 import pandas as pd
 
 from .base import indicator, ParamSpec, series_line
-from .data import get_ohlcv
 
 
 @indicator(

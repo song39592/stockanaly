@@ -11,14 +11,14 @@ import `price_store` / `akshare` / 任何外部源**，只能 `from .data import
 """
 from .base import compute, REGISTRY, indicator, ParamSpec, IndicatorMeta
 from .registry import list_indicators
-from . import data, base, registry
+from . import data, base, registry, scan
 
 # 自动发现并注册所有指标模块：新增一个 <id>.py 指标文件即被自动枚举，
 # 无需在本文件手动 import（每个指标文件用 @indicator 在导入时登记）。
 import importlib
 import pkgutil
 
-_EXCLUDE = {"__init__", "base", "registry", "data"}
+_EXCLUDE = {"__init__", "base", "registry", "data", "scan"}
 for _finder, _name, _ispkg in pkgutil.iter_modules(__path__):
     if _ispkg or _name in _EXCLUDE:
         continue
@@ -28,8 +28,14 @@ for _finder, _name, _ispkg in pkgutil.iter_modules(__path__):
         import sys
         print(f"[indicators] 跳过无法导入的指标模块 {_name}: {_exc}", file=sys.stderr)
 
+# LOAD 校验（元数据 + 函数签名；冒烟需指标显式声明 smoke=True）：
+# 不过关的指标会被移出 REGISTRY —— 既不进 /api/indicators 的清单，也无法被 compute。
+# 与筹码公式层（features/chip/formulas/core/registry.py 的 scan）同一套思路，
+# 详见 scan.py 顶部的「为什么形态不同 / 为什么冒烟默认关闭」。
+SCAN_REPORT = scan.scan()
+
 __all__ = [
     "compute", "list_indicators", "REGISTRY",
     "indicator", "ParamSpec", "IndicatorMeta",
-    "data", "base", "registry",
+    "data", "base", "registry", "scan",
 ]

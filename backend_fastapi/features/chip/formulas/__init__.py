@@ -16,7 +16,7 @@ from .core import base, data, registry
 
 from .core.base import (
     FORMULAS, ChipContext, ChipFormulaMeta, ChipResult, ParamSpec,
-    chip_formula, compute, compute_matrix, list_formulas,
+    chip_formula, clear_matrix_cache, compute, compute_matrix, list_formulas,
 )
 from .core.data import get_float_shares, float_shares_info
 from .core.registry import scan, validation_report
@@ -26,6 +26,7 @@ scan()      # 包加载即校验：坏公式在这里就被拦下，不会流到
 __all__ = [
     "base", "data", "registry",
     "FORMULAS", "ChipContext", "ChipFormulaMeta", "ChipResult", "ParamSpec",
-    "chip_formula", "compute", "compute_matrix", "list_formulas",
+    "chip_formula", "clear_matrix_cache", "compute", "compute_matrix",
+    "list_formulas",
     "get_float_shares", "float_shares_info", "scan", "validation_report",
 ]

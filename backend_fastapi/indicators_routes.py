@@ -17,7 +17,6 @@ import ast
 import importlib
 from typing import Optional
 
-import pandas as pd
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -91,7 +90,9 @@ def diagnose_indicators():
     """
     # 扫描 indicators 子包目录（本路由文件在 backend_fastapi/ 顶层，故拼一级 "indicators"）
     here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "indicators")
-    _EXCLUDE = {"__init__", "base", "registry", "data"}
+    # 与 indicators/__init__.py 的 _EXCLUDE 保持一致：base/registry/data/scan 是
+    # 框架模块而非指标，漏掉 scan 会让自检模块自己被当成「有 @indicator 却没 id」的坏指标。
+    _EXCLUDE = {"__init__", "base", "registry", "data", "scan"}
     files = []
     for fn in sorted(os.listdir(here)):
         if not fn.endswith(".py"):
@@ -150,6 +151,11 @@ def diagnose_indicators():
         if id_dup:
             messages.append(f"索引名称重复：'{pid}' 在多个文件中出现")
 
+        # ⚠️ **辅助模块（`helper=True`，如 `rps_data.py`）的 `ok` 恒为 False，这是刻意的**：
+        # 它没有指标输出、无数据可校验，`data_ok` 无从谈起（保持初始的 False）。
+        # 前端 `IndicatorIndexPage.IndFill` 是**先判 `helper`、再判 `ok`**，所以界面上
+        # 显示为灰字「— 辅助模块」并单独计入「辅助 N」，**不会被算成失败**。
+        # 看到辅助模块的 `ok=false` 时不要当成缺陷去"修" —— 先看 `helper`。
         ok = bool(pid) and registered and (not id_dup) and data_ok
         items.append({
             "file": fn,
@@ -206,55 +212,16 @@ def _parse_indicator(path: str) -> dict:
     return {"id": None, "name": None, "has_indicator": False}
 
 
-# 需要全市场 / 行情数据的指标，本机未下载行情时跑不通属正常，不判失败
-_DATA_DEP_MARKERS = ("行情数据不足", "缺少流通股本", "取不到股票代码", "无行情数据",
-                     "price_store", "get_ohlcv", "akshare", "全市场", "NoData", "market")
-
-
 def _check_indicator_io(indicator_id: str):
-    """用合成 OHLCV 跑一遍指标，校验输入输出是否合法。返回 (ok, note)。"""
-    meta = indicators.REGISTRY.get(indicator_id)
-    if meta is None:
-        return False, "未注册"
-    n = 60
-    idx = pd.date_range("2024-01-01", periods=n, freq="D")
-    close = [100.0 + i * 0.3 for i in range(n)]
-    df = pd.DataFrame({
-        "open": [c + 0.5 for c in close],
-        "high": [c + 1.2 for c in close],
-        "low": [c - 1.2 for c in close],
-        "close": close,
-        "volume": [1_000_000.0 + i * 1000.0 for i in range(n)],
-    }, index=idx)
-    params = {p.name: p.default for p in meta.params}
-    try:
-        res = meta.func(df, **params)
-    except Exception as exc:
-        msg = str(exc)
-        if any(m in msg for m in _DATA_DEP_MARKERS):
-            return True, "需行情/全市场数据，本机未下载，跳过校验"
-        return False, f"{type(exc).__name__}: {msg}"
-    if not isinstance(res, dict):
-        return False, "返回值不是 dict"
-    series = res.get("series")
-    if series is None:                       # 兼容旧 {"lines": {name: Series}}
-        lines = res.get("lines")
-        if not lines:
-            return False, "缺少 series / lines"
-        series = [{"name": k, "data": v} for k, v in lines.items()]
-    if not isinstance(series, list) or len(series) == 0:
-        return False, "series 为空"
-    for s in series:
-        data = s.get("data")
-        if data is None:
-            return False, f"序列 {s.get('name')} 缺少 data"
-        if not hasattr(data, "__len__") or len(data) != n:
-            return False, f"序列 {s.get('name')} 长度与 K 线不一致"
-        bad = sum(1 for v in data
-                  if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float))))
-        if bad:
-            return False, f"序列 {s.get('name')} 含 {bad} 个非数值"
-    return True, "OK"
+    """合成数据自检 —— **转调 `indicators.scan.check_io`**，判据只保留一份。
+
+    合成行情怎么造、序列长度/类型怎么查、依赖行情数据的失败怎么算"跳过"，
+    这些原都写在本路由文件里；而 `indicators/scan.py` 又独立实现了一遍同样的事。
+    两份实现会漂移（改一处忘另一处 → 同一指标在两个端点结论相反），故收敛到包内。
+
+    本函数保留是为`/diagnose` 的调用点与返回结构不变。
+    """
+    return indicators.scan.check_io(indicators.REGISTRY.get(indicator_id))
 
 
 @router.get("/compute")
