@@ -3403,6 +3403,11 @@ bool ok = J.IsOk(j);
                 for (int p = 0; p < indCount; p++)
                 {
                     Rectangle rect = indRects[p];
+                    // 顶部预留一条图例带：标题 + 各序列「名称 当前值」画在这里，
+                    // 曲线 / 柱子只在图例带下方绘制 → 字与线不再重叠。
+                    const int LegendH = 14;
+                    Rectangle plot = new Rectangle(rect.X, rect.Y + LegendH,
+                        rect.Width, Math.Max(10, rect.Height - LegendH));
                     LowerPanel panel = _indicators[p];
                     double ipmin = double.MaxValue, ipmax = double.MinValue;
                     foreach (ChartSeries s in panel.Series)
@@ -3418,7 +3423,7 @@ bool ok = J.IsOk(j);
                     if (ipmax <= ipmin) ipmax = ipmin + 1;
                     double ppad = (ipmax - ipmin) * 0.12; ipmin -= ppad; ipmax += ppad;
                     double ispan = ipmax - ipmin;
-                    Func<double, double> yInd = val => rect.Bottom - (val - ipmin) / ispan * rect.Height;
+                    Func<double, double> yInd = val => plot.Bottom - (val - ipmin) / ispan * plot.Height;
                     using (var pen = new Pen(grid))
                     {
                         int gN = 2;
@@ -3429,7 +3434,7 @@ bool ok = J.IsOk(j);
                             g.DrawLine(pen, LeftPad, y, LeftPad + plotW, y);
                             using (var b2 = new SolidBrush(text)) g.DrawString(v.ToString("F2"), Font, b2, 2, y - 7);
                         }
-                        g.DrawLine(pen, LeftPad, rect.Bottom, LeftPad + plotW, rect.Bottom);
+                        g.DrawLine(pen, LeftPad, plot.Bottom, LeftPad + plotW, plot.Bottom);
                     }
                     foreach (ChartSeries s in panel.Series)
                     {
@@ -3479,19 +3484,41 @@ bool ok = J.IsOk(j);
                             }
                         }
                     }
+                    // 悬停：在副图上标注光标处各序列数值（跟随光标，对应竖线交点画一个圆点）
+                    if (_hoverIndex >= 0 && _hoverIndex < n)
+                    {
+                        int gi = wstart + _hoverIndex;
+                        int hx = (int)xOf(_hoverIndex);
+                        foreach (ChartSeries s in panel.Series)
+                        {
+                            if (s.Data == null || gi >= s.Data.Count) continue;
+                            double v = s.Data[gi];
+                            if (double.IsNaN(v)) continue;
+                            int yv = (int)yInd(v);
+                            using (var dot = new SolidBrush(s.Color))
+                                g.FillEllipse(dot, hx - 3, yv - 3, 6, 6);
+                        }
+                    }
                     int lx = LeftPad + 4; int ly = rect.Top + 2;
+                    g.SetClip(rect);                 // 图例过长时裁剪在本面板内，不溢出到右侧筹码窗口
                     using (var b = new SolidBrush(text))
                     {
-                        g.DrawString(panel.Title, Font, b, lx, ly); lx += 44;
+                        g.DrawString(panel.Title, Font, b, lx, ly);
+                        lx += (int)(g.MeasureString(panel.Title, Font).Width) + 16;
+                        // 图例实时显示光标所在交易日的指标值（移出图表则只显示名称）
+                        int gi = _hoverIndex >= 0 ? wstart + _hoverIndex : -1;
                         foreach (ChartSeries s in panel.Series)
                         {
                             using (var pen = new Pen(s.Color, Math.Max(2f, s.Width))) g.DrawLine(pen, lx, ly + 7, lx + 14, ly + 7);
-                            g.DrawString(s.Name, Font, b, lx + 18, ly); lx += 58;
+                            string label = s.Name;
+                            if (gi >= 0 && s.Data != null && gi < s.Data.Count && !double.IsNaN(s.Data[gi]))
+                                label += " " + s.Data[gi].ToString("F2");
+                            g.DrawString(label, Font, b, lx + 18, ly);
+                            lx += (int)(g.MeasureString(label, Font).Width) + 18;
                         }
                     }
+                    g.ResetClip();
                 }
-
-                // 标记（入池/出池/事件）
                 var idxMap = new Dictionary<string, int>();
                 for (int i = 0; i < vis.Count; i++) idxMap[vis[i].Date] = i;
                 foreach (KMark m in _marks)
