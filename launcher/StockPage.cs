@@ -23,8 +23,9 @@ namespace StockPool
     {
         // ---- 个股分析页 ----
         private int _stockTabIndex = -1;
-        private TextBox _stockCode;
-        private Button _stockOpen, _stockRefresh;
+        // ⚠️ 「代码 / 指标」输入入口已统一收敛到右下角隐藏输入框（见 QuickSearch.cs），
+        // 个股页不再保留顶部输入框；以下只保留展示用字段。
+        private Button _stockRefresh;
         private Label _stockName, _stockHint, _stockStatus, _stockValStatus, _stockIndStatus;
         private KLineChart _stockKline;
         private ChipPanel _stockChip;                      // K 线右侧的筹码分布窗口
@@ -56,8 +57,14 @@ namespace StockPool
         private Label _stockSaoleiStatus;                   // 扫雷状态行
         private TableLayoutPanel _stockSaoleiList;          // 扫雷 · 风险清单 + 个股亮点
         private string _stockCurrent = null;
-        private readonly HashSet<string> _stockIndicators = new HashSet<string>();   // 已勾选的指标 id（跨面板）
-        private FlowLayoutPanel _stockIndFlow;                                       // 指标勾选区（动态生成）
+        private readonly HashSet<string> _stockIndicators = new HashSet<string>();   // 已勾选的主图指标 id（可多选）
+        private FlowLayoutPanel _stockIndFlow;                                       // 主图指标勾选区（动态生成）
+        // 副图指标：**固定只显示 1 个**。复用顶部「代码」输入框键入指标名（带输入联想）即可替换，
+        // 不再用勾选框堆叠多个副图面板（多面板会把 K 线主图挤得太矮）。
+        private string _stockSubIndicator = null;                                    // 当前副图指标 id（null = 无）
+        private readonly List<IndOpt> _stockSubOpts = new List<IndOpt>();            // 副图候选（名称 ↔ id）
+        private sealed class IndOpt { public string Id; public string Name; }
+        // 副图指标的联想下拉逻辑见 QuickSearch.cs（与右下角输入框共用）。
         // AI 分析（调 /api/stock/research）
         private Label _stockAiStatus;                 // AI 分析状态
         private RichTextBox _stockAiBox;              // AI 分析 markdown 渲染框
@@ -138,17 +145,15 @@ namespace StockPool
             mainCol.Controls.Add(head, 0, 0);
 
             // ---- 查询工具区（始终可见，不随二级页滚动）----
+            // 「代码 / 指标」输入入口已统一收敛到右下角隐藏输入框（见 QuickSearch.cs）：
+            // 敲数字 → 打开个股；敲字母 → 输指标英文 id（macd/rsi/rps…）切换副图。本区只展示状态。
             TableLayoutPanel b0;
             var g0 = Group("查询", out b0);
-            _stockCode = new TextBox();
-            _stockCode.Width = 130;
-            _stockCode.MaxLength = 6;
-            _stockCode.Margin = new Padding(0);
-            _stockOpen = MiniBtn("打开", delegate { StockOpen(); }, 80);
             _stockName = Mute(Lbl(""));
-            AddRow(b0, Row(Lbl("代码"), _stockCode, _stockOpen, _stockName));
+            AddRow(b0, Row(Lbl("当前个股"), _stockName));
 
-            _stockHint = Mute(Lbl("输入 6 位代码后点「打开」；数据来自本机后端 /api/history/stock/{code}"));
+            _stockHint = Mute(Lbl("敲任意数字 / 字母 → 右下角输入框：6 位代码打开个股；或输指标英文代码（macd / rsi / rps）回车切换副图"));
+
             _stockHint.AutoSize = true;
             _stockHint.MaximumSize = new Size(740, 0);
             AddRow(b0, Row(_stockHint));
@@ -290,7 +295,7 @@ namespace StockPool
             kTop.ColumnStyles.Clear();
             kTop.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 300f));
 
-            // 指标勾选：从后端 /api/indicators 自动枚举，按 panel 分组（主图 / 副图），none 类型不显示
+            // 主图指标勾选：从后端 /api/indicators 自动枚举，只取 panel=main（主图叠加），none 类型不显示
             _stockIndFlow = new FlowLayoutPanel();
             _stockIndFlow.WrapContents = true;
             _stockIndFlow.AutoSize = true;
@@ -298,10 +303,13 @@ namespace StockPool
             _stockIndFlow.Margin = new Padding(0, 0, 0, 6);
             _stockIndFlow.Padding = new Padding(0);
             AddRow(kTop, _stockIndFlow);
-            StockRefreshIndicatorList();   // 异步拉取指标清单并动态生成勾选项
 
-            // 「更新至 …」与「个股概况（在榜统计 KPI）」已按需求移除，kTop 只留指标勾选；
-            // 省下的高度全部归 K 线——row1 是 Percent 100，会自动吃满剩余空间。
+            // 副图指标：**固定 1 个**。不再用勾选框堆叠多个副图面板（会把 K 线主图挤矮），
+            // 改由右下角隐藏输入框（见 QuickSearch.cs）键入指标名 / id 切换。
+            StockRefreshIndicatorList();   // 异步拉取指标清单：填主图勾选 + 副图联想（灌进右下角输入框的下拉）
+
+            // 「更新至 …」与「个股概况（在榜统计 KPI）」已按需求移除，kTop 只留主图指标勾选这一块
+            // （副图改用顶部代码框输入）；省下的高度全部归 K 线——row1 是 Percent 100，会自动吃满。
 
             _stockKline = new KLineChart();
             _stockKline.Dock = DockStyle.Fill;
@@ -543,21 +551,6 @@ namespace StockPool
 
             _stockStrip.Select(0);
 
-            _stockCode.KeyDown += delegate(object s, KeyEventArgs e)
-            {
-                if (e.KeyCode == Keys.Enter) StockOpen();
-            };
-            _stockCode.TextChanged += delegate
-            {
-                string digits = Regex.Replace(_stockCode.Text, "[^0-9]", "");
-                if (digits.Length > 6) digits = digits.Substring(0, 6);
-                if (_stockCode.Text != digits)
-                {
-                    int sel = _stockCode.SelectionStart;
-                    _stockCode.Text = digits;
-                    _stockCode.SelectionStart = Math.Min(sel, digits.Length);
-                }
-            };
 
             StockApplyRange();
             StockSetAdjustActive();
@@ -569,16 +562,29 @@ namespace StockPool
             return p;
         }
 
-        // ---- 打开 ----
+        // ---- 打开（输入来自右下角隐藏输入框；见 QuickSearch.cs）----
         private void StockOpen()
         {
-            string code = _stockCode.Text.Trim();
+            string code = _quickSearch.Text.Trim();
+            _quickActiveCode = code;                    // 记入激活字段，供异步守卫使用（与输入框文本解耦）
             if (!Regex.IsMatch(code, "^[0-9]{6}$"))
             {
-                _stockHint.Text = "股票代码必须是 6 位数字（如 600519）";
+                // 非 6 位代码：当作「指标名称 / id」尝试替换副图
+                string id = StockResolveSubId(code);
+                if (id != null)
+                {
+                    _stockSubIndicator = id;
+                    string nm = StockSubNameOf(id) ?? id;
+                    _stockHint.Tag = "muted";
+                    _stockHint.ForeColor = C.Flat;
+                    _stockHint.Text = "副图指标已切换为：" + nm + "（输入 6 位代码则打开个股）";
+                    if (_stockCurrent != null) StockLoadIndicators(_stockCurrent);
+                    return;
+                }
+                _stockHint.Text = "股票代码须是 6 位数字（如 600519）；或输入已注册指标名以切换副图";
                 _stockHint.Tag = "bad";
                 _stockHint.ForeColor = C.UpErr;
-                _stockCode.Focus();
+                _quickSearch.Focus();
                 return;
             }
             if ((_stockHint.Tag as string) != "bad")
@@ -662,13 +668,13 @@ namespace StockPool
             FetchStockName(code,
                 delegate(string name, string display)
                 {
-                    if (_stockCode.Text.Trim() != code) return;   // 竞态守卫：输入框已换成别的代码
+                    if (_quickActiveCode != code) return;          // 竞态守卫：已换别的代码 / 输入框已清空
                     _stockName.Text = display;
                     StockAddHistory(code, name);                  // 补全历史记录中的名称
                 },
                 delegate(string err)
                 {
-                    if (_stockCode.Text.Trim() != code) return;
+                    if (_quickActiveCode != code) return;
                     _stockName.Text = err;
                 });
         }
@@ -706,14 +712,41 @@ namespace StockPool
             if (_stockChip != null) _stockChip.SetStatus("筹码未加载", false);
         }
 
-        // ---- 副图指标（lower 面板）：勾选 → 后端计算 → 按日期对齐 → 叠加到 K 线下方 ----
+        // ---- 指标：主图勾选（可多选）+ 副图固定单指标（键盘输入替换）→ 后端计算 → 按日期对齐 → 叠加到 K 线 ----
         private void StockSetIndicator(string id, bool on)
         {
             if (on) _stockIndicators.Add(id); else _stockIndicators.Remove(id);
             if (_stockCurrent != null) StockLoadIndicators(_stockCurrent);
         }
 
-        // 从后端自动枚举指标清单，按 panel 分组动态生成勾选框（none 类型不显示）
+        // ---- 副图单指标：在顶部「代码」框键入指标名（带输入联想）→ 替换当前副图指标 ----
+        // 解析与替换的实际逻辑在 StockOpen() 内（复用同一输入框，无需独立方法）。
+
+        /// <summary>名称 / id → 副图指标 id：先精确（名称、id），再前缀，最后包含（联想兜底）。</summary>
+        private string StockResolveSubId(string typed)
+        {
+            if (_stockSubOpts.Count == 0) return null;    // 清单未就绪：不接受非代码输入
+            foreach (var o in _stockSubOpts) if (o.Name == typed || o.Id == typed) return o.Id;
+            foreach (var o in _stockSubOpts)
+                if (o.Name.StartsWith(typed, StringComparison.OrdinalIgnoreCase)) return o.Id;
+            foreach (var o in _stockSubOpts)
+                if (o.Id.StartsWith(typed, StringComparison.OrdinalIgnoreCase)) return o.Id;
+            foreach (var o in _stockSubOpts)
+                if (o.Name.IndexOf(typed, StringComparison.OrdinalIgnoreCase) >= 0) return o.Id;
+            return null;
+        }
+
+        /// <summary>副图指标 id → 规范名称（找不到返回 null）。</summary>
+        private string StockSubNameOf(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return null;
+            foreach (var o in _stockSubOpts) if (o.Id == id) return o.Name;
+            return null;
+        }
+
+        // 副图指标的联想下拉逻辑见 QuickSearch.cs（与右下角输入框共用 StockSug* 方法）。
+
+        // 从后端自动枚举指标清单：panel=main → 主图勾选框；panel≠main/none → 副图输入框的联想列表。
         private void StockRefreshIndicatorList()
         {
             if (_stockIndFlow == null) return;
@@ -725,40 +758,44 @@ namespace StockPool
                     if (!GetText("http://127.0.0.1:8000/api/indicators", 15000, out body) || string.IsNullOrEmpty(body))
                         return;
                     var list = new JavaScriptSerializer().Deserialize<System.Collections.ArrayList>(body);
-                    var groups = new System.Collections.Generic.SortedList<string, List<Dictionary<string, object>>>();
+                    var mains = new List<Dictionary<string, object>>();
+                    var subs = new List<Dictionary<string, object>>();
                     if (list != null)
                     {
                         foreach (Dictionary<string, object> it in list)
                         {
                             string panel = J.Str(J.Get(it, "panel"));
-                            if (panel == "none") continue;                   // 不显示类型：不进勾选列表
-                            string grp = (panel == "main") ? "主图" : "副图";
-                            if (!groups.ContainsKey(grp)) groups[grp] = new List<Dictionary<string, object>>();
-                            groups[grp].Add(it);
+                            if (panel == "none") continue;                   // 不显示类型：不进任何列表
+                            if (panel == "main") mains.Add(it); else subs.Add(it);   // lower / right → 副图候选
                         }
                     }
-                    Invoke((Action)delegate { BuildIndicatorToggles(groups); });
+                    Invoke((Action)delegate { BuildIndicatorToggles(mains, subs); });
                 }
                 catch { }
             });
         }
 
-        private void BuildIndicatorToggles(System.Collections.Generic.SortedList<string, List<Dictionary<string, object>>> groups)
+        private void BuildIndicatorToggles(List<Dictionary<string, object>> mains,
+                                           List<Dictionary<string, object>> subs)
         {
             if (_stockIndFlow == null) return;
+
+            // 主图：勾选框（可多选，叠加在价格轴上，不额外占高度）
             _stockIndFlow.Controls.Clear();
-            foreach (var kv in groups)
+            _stockIndFlow.Controls.Add(Lbl("主图："));
+            foreach (var it in mains)
             {
-                _stockIndFlow.Controls.Add(Lbl(kv.Key + "："));
-                foreach (var it in kv.Value)
-                {
-                    string id = J.Str(J.Get(it, "id"));
-                    string name = J.Str(J.Get(it, "name"));
-                    var cb = Check(name, _stockIndicators.Contains(id));
-                    cb.CheckedChanged += delegate { StockSetIndicator(id, cb.Checked); };
-                    _stockIndFlow.Controls.Add(cb);
-                }
+                string id = J.Str(J.Get(it, "id"));
+                string name = J.Str(J.Get(it, "name"));
+                var cb = Check(name, _stockIndicators.Contains(id));
+                cb.CheckedChanged += delegate { StockSetIndicator(id, cb.Checked); };
+                _stockIndFlow.Controls.Add(cb);
             }
+
+            // 副图：把 panel≠main 的指标灌进联想候选（_stockSubOpts）；输入联想浮层据此过滤显示
+            _stockSubOpts.Clear();
+            foreach (var it in subs)
+                _stockSubOpts.Add(new IndOpt { Id = J.Str(J.Get(it, "id")), Name = J.Str(J.Get(it, "name")) });
             // ⭐ 补染（bug 修复）：本方法在**每次点「分析」**后都会被异步调到
             // （StockOpen -> StockRefreshIndicatorList -> Invoke），Clear + 重建出的
             // 勾选框是默认配色 —— `Check()` 不设 BackColor（默认 SystemColors.Window 白底）、
@@ -769,7 +806,12 @@ namespace StockPool
 
         private void StockLoadIndicators(string code)
         {
-            if (_stockIndicators.Count == 0)
+            // 主图（可多选）+ 副图（固定 1 个）合并成一次批量请求
+            var ids = new List<string>(_stockIndicators);
+            if (!string.IsNullOrEmpty(_stockSubIndicator) && !ids.Contains(_stockSubIndicator))
+                ids.Add(_stockSubIndicator);
+
+            if (ids.Count == 0)
             {
                 if (_stockIndStatus != null) _stockIndStatus.Text = "";
                 if (_stockKline != null)
@@ -783,7 +825,7 @@ namespace StockPool
             // 没有这行的话，勾选后界面毫无动静，用户会以为指标没出来。
             if (_stockIndStatus != null)
             {
-                bool slow = _stockIndicators.Contains("rps");
+                bool slow = ids.Contains("rps");
                 _stockIndStatus.Text = slow
                     ? "指标计算中…（RPS 首次约 15 秒预热全市场）"
                     : "指标计算中…";
@@ -794,7 +836,7 @@ namespace StockPool
                 try
                 {
                     var items = new System.Collections.ArrayList();
-                    foreach (var id in _stockIndicators)
+                    foreach (var id in ids)
                     {
                         var it = new Dictionary<string, object>();
                         it["id"] = id;
@@ -2360,7 +2402,7 @@ bool ok = J.IsOk(j);
                 btn.ForeColor = cur ? Color.White : _cText;
                 string name = string.IsNullOrEmpty(h.Name) ? "" : ("  " + h.Name);
                 btn.Text = h.Code + name;
-                btn.Click += delegate { _stockCode.Text = h.Code; StockOpen(); _stockStrip.Select(0); };
+                btn.Click += delegate { _quickSearch.Text = h.Code; StockOpen(); _stockStrip.Select(0); };
                 btn.MouseUp += delegate(object s, MouseEventArgs e)
                 {
                     if (e.Button == MouseButtons.Right) StockRemoveHistory(h.Code);

@@ -46,7 +46,8 @@ echo 正在编译原生窗口程序...
   "%~dp0ChipRankPage.cs" ^
   "%~dp0RpsPoolPage.cs" ^
   "%~dp0DownloadPage.cs" ^
-  "%~dp0StrategyPage.cs"
+  "%~dp0StrategyPage.cs" ^
+  "%~dp0QuickSearch.cs"
 
 if errorlevel 1 (
   echo.

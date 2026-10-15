@@ -14,7 +14,7 @@ namespace StockPool
     ///
     /// 本项目有三类互不相同的守卫，硬凑成一种必然出交叉刷新：
     ///   1. round 比对（`if (round != _stockRound) return;`）—— 切个股时作废旧请求
-    ///   2. 代码比对（`if (_stockCode.Text.Trim() != code) return;`）—— 名称查询
+    ///   2. 代码比对（`if (_quickSearch.Text.Trim() != code) return;`）—— 名称查询
     ///   3. busy 标志（`if (_scrBusy) return; _scrBusy = true;`）—— 防重复点击
     ///
     /// 抽成「无守卫的通用方法」后，快速切换股票时旧请求后返回，会把
@@ -24,7 +24,7 @@ namespace StockPool
     /// ## stillValid 固定在 UI 线程求值
     ///
     /// 守卫 1 读的是闭包捕获的局部变量（后台读安全），但守卫 2 要读
-    /// `_stockCode.Text` —— WinForms 控件**只能**在 UI 线程访问，
+    /// `_quickSearch.Text` —— WinForms 控件**只能**在 UI 线程访问，
     /// 后台读会抛跨线程异常。故判定点放在 `Invoke` **内部**，与改动前一致。
     ///
     /// ## 不在本骨架范围内的
