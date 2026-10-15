@@ -57,9 +57,11 @@ namespace StockPool
         private Label _stockSaoleiStatus;                   // 扫雷状态行
         private TableLayoutPanel _stockSaoleiList;          // 扫雷 · 风险清单 + 个股亮点
         private string _stockCurrent = null;
-        private readonly HashSet<string> _stockIndicators = new HashSet<string>();   // 已勾选的主图指标 id（可多选）
-        private FlowLayoutPanel _stockIndFlow;                                       // 主图指标勾选区（动态生成）
-        // 副图指标：**固定只显示 1 个**。复用顶部「代码」输入框键入指标名（带输入联想）即可替换，
+        // 主图指标：与副图一致，**固定只显示 1 个**，由右下角输入框键入指标名 / id 切换（再输一次同一指标 = 关闭）。
+        // 主图指标（含 "ma" 均线）统一走后端指标通道，与副图同一套规则；null = 不显示任何主图指标。
+        private string _stockMainIndicator = "ma";
+        private readonly List<IndOpt> _stockMainOpts = new List<IndOpt>();           // 主图候选（名称 ↔ id，含 ma）
+        // 副图指标：**固定只显示 1 个**。复用右下角输入框键入指标名（带输入联想）即可替换，
         // 不再用勾选框堆叠多个副图面板（多面板会把 K 线主图挤得太矮）。
         private string _stockSubIndicator = null;                                    // 当前副图指标 id（null = 无）
         private readonly List<IndOpt> _stockSubOpts = new List<IndOpt>();            // 副图候选（名称 ↔ id）
@@ -152,7 +154,7 @@ namespace StockPool
             _stockName = Mute(Lbl(""));
             AddRow(b0, Row(Lbl("当前个股"), _stockName));
 
-            _stockHint = Mute(Lbl("敲任意数字 / 字母 → 右下角输入框：6 位代码打开个股；或输指标英文代码（macd / rsi / rps）回车切换副图"));
+            _stockHint = Mute(Lbl("敲任意数字 / 字母 → 右下角输入框：6 位代码打开个股；输指标英文代码（ma / cyc / macd / rsi / rps）回车切换主图 / 副图指标"));
 
             _stockHint.AutoSize = true;
             _stockHint.MaximumSize = new Size(740, 0);
@@ -295,20 +297,10 @@ namespace StockPool
             kTop.ColumnStyles.Clear();
             kTop.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 300f));
 
-            // 主图指标勾选：从后端 /api/indicators 自动枚举，只取 panel=main（主图叠加），none 类型不显示
-            _stockIndFlow = new FlowLayoutPanel();
-            _stockIndFlow.WrapContents = true;
-            _stockIndFlow.AutoSize = true;
-            _stockIndFlow.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            _stockIndFlow.Margin = new Padding(0, 0, 0, 6);
-            _stockIndFlow.Padding = new Padding(0);
-            AddRow(kTop, _stockIndFlow);
+            // 主图指标勾选行已移除：主图指标与副图一样由右下角输入框键入指标名 / id 切换。
+            StockRefreshIndicatorList();   // 异步拉取指标清单：主图 / 副图候选灌进右下角输入框的联想下拉
 
-            // 副图指标：**固定 1 个**。不再用勾选框堆叠多个副图面板（会把 K 线主图挤矮），
-            // 改由右下角隐藏输入框（见 QuickSearch.cs）键入指标名 / id 切换。
-            StockRefreshIndicatorList();   // 异步拉取指标清单：填主图勾选 + 副图联想（灌进右下角输入框的下拉）
-
-            // 「更新至 …」与「个股概况（在榜统计 KPI）」已按需求移除，kTop 只留主图指标勾选这一块
+            // 「更新至 …」与「个股概况（在榜统计 KPI）」已按需求移除
             // （副图改用顶部代码框输入）；省下的高度全部归 K 线——row1 是 Percent 100，会自动吃满。
 
             _stockKline = new KLineChart();
@@ -569,19 +561,36 @@ namespace StockPool
             _quickActiveCode = code;                    // 记入激活字段，供异步守卫使用（与输入框文本解耦）
             if (!Regex.IsMatch(code, "^[0-9]{6}$"))
             {
-                // 非 6 位代码：当作「指标名称 / id」尝试替换副图
-                string id = StockResolveSubId(code);
+                // 非 6 位代码：当作「指标名称 / id」尝试切换主图 / 副图指标
+                bool isMain;
+                string id = StockResolveAnyId(code, out isMain);
                 if (id != null)
                 {
-                    _stockSubIndicator = id;
-                    string nm = StockSubNameOf(id) ?? id;
+                    string nm = StockIndicatorNameOf(id) ?? id;
                     _stockHint.Tag = "muted";
                     _stockHint.ForeColor = C.Flat;
-                    _stockHint.Text = "副图指标已切换为：" + nm + "（输入 6 位代码则打开个股）";
+                    if (isMain)
+                    {
+                        if (_stockMainIndicator == id)
+                        {   // 再输一次同一主图指标 → 关闭
+                            _stockMainIndicator = null;
+                            _stockHint.Text = "主图指标已关闭（曾用：" + nm + "）";
+                        }
+                        else
+                        {
+                            _stockMainIndicator = id;
+                            _stockHint.Text = "主图指标已切换为：" + nm + "（再输一次可关闭；输入 6 位代码则打开个股）";
+                        }
+                    }
+                    else
+                    {
+                        _stockSubIndicator = id;
+                        _stockHint.Text = "副图指标已切换为：" + nm + "（输入 6 位代码则打开个股）";
+                    }
                     if (_stockCurrent != null) StockLoadIndicators(_stockCurrent);
                     return;
                 }
-                _stockHint.Text = "股票代码须是 6 位数字（如 600519）；或输入已注册指标名以切换副图";
+                _stockHint.Text = "股票代码须是 6 位数字（如 600519）；或输入已注册指标名以切换主图 / 副图指标";
                 _stockHint.Tag = "bad";
                 _stockHint.ForeColor = C.UpErr;
                 _quickSearch.Focus();
@@ -712,44 +721,46 @@ namespace StockPool
             if (_stockChip != null) _stockChip.SetStatus("筹码未加载", false);
         }
 
-        // ---- 指标：主图勾选（可多选）+ 副图固定单指标（键盘输入替换）→ 后端计算 → 按日期对齐 → 叠加到 K 线 ----
-        private void StockSetIndicator(string id, bool on)
-        {
-            if (on) _stockIndicators.Add(id); else _stockIndicators.Remove(id);
-            if (_stockCurrent != null) StockLoadIndicators(_stockCurrent);
-        }
-
-        // ---- 副图单指标：在顶部「代码」框键入指标名（带输入联想）→ 替换当前副图指标 ----
+        // ---- 指标：主图 / 副图均固定单指标，由右下角输入框键入指标名 / id 替换 → 后端计算 → 按日期对齐 → 叠加到 K 线 ----
         // 解析与替换的实际逻辑在 StockOpen() 内（复用同一输入框，无需独立方法）。
 
-        /// <summary>名称 / id → 副图指标 id：先精确（名称、id），再前缀，最后包含（联想兜底）。</summary>
-        private string StockResolveSubId(string typed)
+        /// <summary>输入 → 指标 id（主图或副图）。先精确（名称、id），再前缀，最后包含；
+        /// 同层副图优先（macd / rsi 等长 id 不被主图短 id 截胡）。isMain 区分主图 / 副图。</summary>
+        private string StockResolveAnyId(string typed, out bool isMain)
         {
-            if (_stockSubOpts.Count == 0) return null;    // 清单未就绪：不接受非代码输入
+            isMain = false;
+            if (_stockMainOpts.Count == 0 && _stockSubOpts.Count == 0) return null;   // 清单未就绪：不接受非代码输入
             foreach (var o in _stockSubOpts) if (o.Name == typed || o.Id == typed) return o.Id;
+            foreach (var o in _stockMainOpts) if (o.Name == typed || o.Id == typed) { isMain = true; return o.Id; }
             foreach (var o in _stockSubOpts)
                 if (o.Name.StartsWith(typed, StringComparison.OrdinalIgnoreCase)) return o.Id;
             foreach (var o in _stockSubOpts)
                 if (o.Id.StartsWith(typed, StringComparison.OrdinalIgnoreCase)) return o.Id;
+            foreach (var o in _stockMainOpts)
+                if (o.Name.StartsWith(typed, StringComparison.OrdinalIgnoreCase) || o.Id.StartsWith(typed, StringComparison.OrdinalIgnoreCase))
+                { isMain = true; return o.Id; }
             foreach (var o in _stockSubOpts)
                 if (o.Name.IndexOf(typed, StringComparison.OrdinalIgnoreCase) >= 0) return o.Id;
+            foreach (var o in _stockMainOpts)
+                if (o.Name.IndexOf(typed, StringComparison.OrdinalIgnoreCase) >= 0)
+                { isMain = true; return o.Id; }
             return null;
         }
 
-        /// <summary>副图指标 id → 规范名称（找不到返回 null）。</summary>
-        private string StockSubNameOf(string id)
+        /// <summary>指标 id → 规范名称（主图 + 副图一起查，找不到返回 null）。</summary>
+        private string StockIndicatorNameOf(string id)
         {
             if (string.IsNullOrEmpty(id)) return null;
+            foreach (var o in _stockMainOpts) if (o.Id == id) return o.Name;
             foreach (var o in _stockSubOpts) if (o.Id == id) return o.Name;
             return null;
         }
 
-        // 副图指标的联想下拉逻辑见 QuickSearch.cs（与右下角输入框共用 StockSug* 方法）。
+        // 指标联想下拉逻辑见 QuickSearch.cs（与右下角输入框共用 StockSug* 方法）。
 
-        // 从后端自动枚举指标清单：panel=main → 主图勾选框；panel≠main/none → 副图输入框的联想列表。
+        // 从后端自动枚举指标清单：panel=main → 主图候选；panel≠main/none → 副图候选（灌进输入框联想下拉）。
         private void StockRefreshIndicatorList()
         {
-            if (_stockIndFlow == null) return;
             System.Threading.Tasks.Task.Run(delegate
             {
                 try
@@ -775,39 +786,28 @@ namespace StockPool
             });
         }
 
+        /// <summary>后端指标清单 → 主图 / 副图候选（供右下角输入框解析与联想下拉，不再生成勾选框）。</summary>
         private void BuildIndicatorToggles(List<Dictionary<string, object>> mains,
                                            List<Dictionary<string, object>> subs)
         {
-            if (_stockIndFlow == null) return;
-
-            // 主图：勾选框（可多选，叠加在价格轴上，不额外占高度）
-            _stockIndFlow.Controls.Clear();
-            _stockIndFlow.Controls.Add(Lbl("主图："));
+            _stockMainOpts.Clear();
             foreach (var it in mains)
-            {
-                string id = J.Str(J.Get(it, "id"));
-                string name = J.Str(J.Get(it, "name"));
-                var cb = Check(name, _stockIndicators.Contains(id));
-                cb.CheckedChanged += delegate { StockSetIndicator(id, cb.Checked); };
-                _stockIndFlow.Controls.Add(cb);
-            }
-
-            // 副图：把 panel≠main 的指标灌进联想候选（_stockSubOpts）；输入联想浮层据此过滤显示
+                _stockMainOpts.Add(new IndOpt { Id = J.Str(J.Get(it, "id")), Name = J.Str(J.Get(it, "name")) });
+            // 后端清单里若恰好没有 "ma"，这里补一个，保证输入 ma / 均线 也能作为主图指标解析
+            bool hasMa = false;
+            foreach (var o in _stockMainOpts) if (o.Id == "ma") { hasMa = true; break; }
+            if (!hasMa) _stockMainOpts.Add(new IndOpt { Id = "ma", Name = "均线 MA" });
             _stockSubOpts.Clear();
             foreach (var it in subs)
                 _stockSubOpts.Add(new IndOpt { Id = J.Str(J.Get(it, "id")), Name = J.Str(J.Get(it, "name")) });
-            // ⭐ 补染（bug 修复）：本方法在**每次点「分析」**后都会被异步调到
-            // （StockOpen -> StockRefreshIndicatorList -> Invoke），Clear + 重建出的
-            // 勾选框是默认配色 —— `Check()` 不设 BackColor（默认 SystemColors.Window 白底）、
-            // `Lbl()` 甚至硬编码黑字，深色主题下分组标签直接看不见。
-            // 重建发生在页面挂载之后，之前的 Skin 不会再扫到这里，必须自己补一次。
-            Skin(_stockIndFlow);
         }
 
         private void StockLoadIndicators(string code)
         {
-            // 主图（可多选）+ 副图（固定 1 个）合并成一次批量请求
-            var ids = new List<string>(_stockIndicators);
+            // 主图（单选）+ 副图（固定 1 个）合并成一次批量请求；「ma」与主图其它指标走同一通道
+            var ids = new List<string>();
+            if (!string.IsNullOrEmpty(_stockMainIndicator))
+                ids.Add(_stockMainIndicator);
             if (!string.IsNullOrEmpty(_stockSubIndicator) && !ids.Contains(_stockSubIndicator))
                 ids.Add(_stockSubIndicator);
 
@@ -871,6 +871,7 @@ namespace StockPool
                             if (panel == "main")
                             {
                                 // 主图叠加：序列直接叠加到价格轴
+                                int maIdx = 0;
                                 foreach (Dictionary<string, object> s in sArr)
                                 {
                                     string sname = J.Str(J.Get(s, "name"));
@@ -879,6 +880,13 @@ namespace StockPool
                                     var data = AlignSeries(dates, J.Get(s, "dates"), dArr);
                                     var cs = new ChartSeries { Name = sname, Kind = kind, Data = data };
                                     ApplySeriesStyle(cs);
+                                    // MA5/10/20/60 等多条均线按出现顺序依次取色，避免按周期取模撞色（如 20 与 60 同色）
+                                    if (sname != null && sname.StartsWith("MA"))
+                                    {
+                                        Color[] mac = { C.LineDif, C.LineDea, C.LinePink, C.LineViolet };
+                                        cs.Color = mac[maIdx % mac.Length];
+                                        maIdx++;
+                                    }
                                     mainSeries.Add(cs);
                                 }
                             }
@@ -2847,7 +2855,6 @@ bool ok = J.IsOk(j);
             private readonly List<KBar> _raw = new List<KBar>();
             private string _adjust = "qfq";                    // qfq 前复权 / raw 不复权
             private readonly List<KMark> _marks = new List<KMark>();
-            private List<List<double>> _ma = new List<List<double>>();
             private List<LowerPanel> _indicators = new List<LowerPanel>();   // 指标副图（lower）
             private List<ChartSeries> _mainIndicators = new List<ChartSeries>();   // 主图叠加指标（main 面板）
             private int _range = 250;                          // 可见 K 线根数，0 = 全部
@@ -2857,6 +2864,7 @@ bool ok = J.IsOk(j);
             private int _dragStartOffset = 0;
             private readonly ToolTip _tip = new ToolTip();
             private int _hoverIndex = -1;
+            private int _wstart;                          // 当前可见窗口的全局起始索引（图例取光标数值用）
             public string Period = "day";                      // K 线周期（图例显示 日K / 周K / 月K）
             public Action<int> OnRangeChanged;                 // 缩放改变范围时通知外部刷新高亮
             /// <summary>光标所在 K 线的日期（移出时保留最后一次）——右侧筹码窗口据此切换到那一天。</summary>
@@ -2896,11 +2904,6 @@ bool ok = J.IsOk(j);
                 if (changed && PriceAxisChanged != null) PriceAxisChanged();
             }
 
-            private static readonly int[] MaPeriods = new int[] { 5, 10, 20, 60 };
-            private static readonly Color[] MaColors = new Color[] {
-                C.LineDif, C.LineDea,
-                C.LinePink, C.LineViolet };
-
             public KLineChart()
             {
                 // SetStyle 已上移到基类 ChartControl（第 07 项）
@@ -2937,7 +2940,6 @@ bool ok = J.IsOk(j);
             private void ApplyAdjust()
             {
                 _bars = (_adjust == "raw" && _raw.Count > 0) ? _raw : _qfq;
-                _ma = ComputeMA(_bars);
                 Invalidate();
             }
 
@@ -2955,7 +2957,8 @@ bool ok = J.IsOk(j);
                 Invalidate();
             }
 
-            /// <summary>设置主图叠加指标（main 面板）。传空列表即清除。</summary>
+            /// <summary>设置主图叠加指标（main 面板）。传空列表即清除。
+            /// MA 等主图指标都走这一条通道（与副图同一套规则），不再单独处理。</summary>
             public void SetMainIndicators(List<ChartSeries> series)
             {
                 _mainIndicators = series ?? new List<ChartSeries>();
@@ -2971,24 +2974,6 @@ bool ok = J.IsOk(j);
             }
 
             // GetPreferredSize 已上移到基类 ChartControl（第 07 项）
-
-            private static List<List<double>> ComputeMA(List<KBar> bars)
-            {
-                var res = new List<List<double>>();
-                foreach (int p in MaPeriods)
-                {
-                    var s = new List<double>();
-                    for (int i = 0; i < bars.Count; i++)
-                    {
-                        if (i < p - 1) { s.Add(double.NaN); continue; }
-                        double sum = 0;
-                        for (int j = 0; j < p; j++) sum += bars[i - j].C;
-                        s.Add(sum / p);
-                    }
-                    res.Add(s);
-                }
-                return res;
-            }
 
             protected override void OnMouseDown(MouseEventArgs e)
             {
@@ -3155,10 +3140,6 @@ bool ok = J.IsOk(j);
                 sb.Append("  高 ").Append(b.H.ToString("F2"));
                 sb.Append("  低 ").Append(b.L.ToString("F2"));
                 sb.Append("  量 ").Append(VolumeText(b.V));
-                foreach (KMark mk in _marks)
-                {
-                    if (mk.Date == b.Date) sb.Append("  [").Append(mk.Text).Append("]");
-                }
                 int n = VisibleCount();
                 int plotW = Math.Max(20, Width - LeftPad - RightPad);
                 int x = mouseX >= 0 ? mouseX
@@ -3267,18 +3248,23 @@ bool ok = J.IsOk(j);
                 }
                 int bottomMost = (indCount > 0) ? indBottom : volBottom;
 
-                // 价格区间（含 MA）
+                // 价格区间（先按 K 线）
                 double pmin = double.MaxValue, pmax = double.MinValue;
                 foreach (KBar b in vis) { if (b.L < pmin) pmin = b.L; if (b.H > pmax) pmax = b.H; }
                 int wstart, wcount;
                 VisibleWindow(out wstart, out wcount);
-                var maTail = new List<List<double>>();
-                foreach (List<double> s in _ma)
-                {
-                    List<double> tail = (s.Count >= wstart + wcount) ? s.GetRange(wstart, wcount) : new List<double>();
-                    maTail.Add(tail);
-                    foreach (double v in tail) if (!double.IsNaN(v)) { if (v < pmin) pmin = v; if (v > pmax) pmax = v; }
-                }
+                _wstart = wstart;
+                // 主图叠加指标（MA / CYC 等）一并纳入价格区间，避免线画到图外（与副图同一规则）
+                foreach (ChartSeries s in _mainIndicators)
+                    if (s.Data != null)
+                        for (int i = 0; i < n; i++)
+                        {
+                            int gi = wstart + i;
+                            if (gi >= s.Data.Count) continue;
+                            double v = s.Data[gi];
+                            if (double.IsNaN(v)) continue;
+                            if (v < pmin) pmin = v; if (v > pmax) pmax = v;
+                        }
                 if (pmax <= pmin) pmax = pmin + 1;
                 double pad = (pmax - pmin) * 0.04;
                 pmin -= pad; pmax += pad;
@@ -3309,24 +3295,6 @@ bool ok = J.IsOk(j);
                     g.DrawLine(pen, LeftPad, volBottom, LeftPad + plotW, volBottom);
                 }
 
-                // MA 线
-                for (int k = 0; k < maTail.Count; k++)
-                {
-                    List<double> series = maTail[k];
-                    using (var pen = new Pen(MaColors[k % MaColors.Length], 1.4f))
-                    {
-                        bool penUp = false;
-                        for (int i = 0; i < series.Count; i++)
-                        {
-                            if (double.IsNaN(series[i])) { penUp = false; continue; }
-                            int x = (int)xOf(i);
-                            int y = (int)yOf(series[i]);
-                            if (penUp) g.DrawLine(pen, (int)xOf(i - 1), (int)yOf(series[i - 1]), x, y);
-                            penUp = true;
-                        }
-                    }
-                }
-
                 // 蜡烛
                 for (int i = 0; i < vis.Count; i++)
                 {
@@ -3354,9 +3322,11 @@ bool ok = J.IsOk(j);
                     {
                         using (var br = new SolidBrush(s.Color))
                         {
-                            for (int i = 0; i < s.Data.Count && i < n; i++)
+                            for (int i = 0; i < n; i++)
                             {
-                                double v = s.Data[i];
+                                int gi = wstart + i;
+                                if (gi >= s.Data.Count) continue;
+                                double v = s.Data[gi];
                                 if (double.IsNaN(v)) continue;
                                 int x = (int)xOf(i);
                                 int y = (int)yOf(v);
@@ -3371,13 +3341,19 @@ bool ok = J.IsOk(j);
                         using (var pen = new Pen(s.Color, 1.4f))
                         {
                             bool penUp = false;
-                            for (int i = 0; i < s.Data.Count && i < n; i++)
+                            for (int i = 0; i < n; i++)
                             {
-                                double v = s.Data[i];
+                                int gi = wstart + i;
+                                if (gi >= s.Data.Count) { penUp = false; continue; }
+                                double v = s.Data[gi];
                                 if (double.IsNaN(v)) { penUp = false; continue; }
                                 int x = (int)xOf(i);
                                 int y = (int)yOf(v);
-                                if (penUp) g.DrawLine(pen, (int)xOf(i - 1), (int)yOf(s.Data[i - 1]), x, y);
+                                if (penUp)
+                                {
+                                    double pv = s.Data[wstart + i - 1];
+                                    g.DrawLine(pen, (int)xOf(i - 1), (int)yOf(pv), x, y);
+                                }
                                 penUp = true;
                             }
                         }
@@ -3519,27 +3495,7 @@ bool ok = J.IsOk(j);
                     }
                     g.ResetClip();
                 }
-                var idxMap = new Dictionary<string, int>();
-                for (int i = 0; i < vis.Count; i++) idxMap[vis[i].Date] = i;
-                foreach (KMark m in _marks)
-                {
-                    if (!idxMap.ContainsKey(m.Date)) continue;
-                    int x = (int)xOf(idxMap[m.Date]);
-                    using (var br = new SolidBrush(m.Color))
-                    {
-                        int s = 6;
-                        if (m.Kind == "event")
-                        {
-                            Point[] pts = new Point[] { new Point(x, plotTop - 2 - s), new Point(x + s, plotTop - 2), new Point(x, plotTop - 2 + s), new Point(x - s, plotTop - 2) };
-                            g.FillPolygon(br, pts);
-                        }
-                        else
-                        {
-                            Point[] pts = new Point[] { new Point(x, plotTop - 2 - s), new Point(x + s, plotTop - 2), new Point(x - s, plotTop - 2) };
-                            g.FillPolygon(br, pts);
-                        }
-                    }
-                }
+                // 主图标记（入池/出池/事件的菱形、三角标注）已按需求移除
 
                 // 悬停竖线
                 if (_hoverIndex >= 0 && _hoverIndex < vis.Count)
@@ -3568,12 +3524,14 @@ bool ok = J.IsOk(j);
                     }
                 }
 
-                DrawLegend(g, text, 0);
+                DrawLegend(g, text, _hoverIndex);
                 // 右下角的「滚轮缩放 · 拖动平移 · 前复权」提示已按需求移除；
                 // 周期 / 复权状态看工具栏按钮的高亮即可（图例里也标了 日K / 周K / 月K）。
             }
 
-            private void DrawLegend(Graphics g, Color text, int dummy)
+            /// <summary>顶部图例：周期 + 主图叠加指标（MA / CYC 等，统一走 _mainIndicators）。
+            /// hoverIdx &gt;= 0 时，在名称后实时显示光标所在交易日的数值（跟随光标）。</summary>
+            private void DrawLegend(Graphics g, Color text, int hoverIdx)
             {
                 int x = LeftPad + 4;
                 int y = 4;
@@ -3582,13 +3540,17 @@ bool ok = J.IsOk(j);
                     // 周期写进图例：周线下这里就是「周K」，MA5 也是 5 周均线，别让人误读
                     string label = (Period == "week") ? "周K" : (Period == "month") ? "月K" : "日K";
                     g.DrawString(label, Font, b, x, y); x += 34;
-                    string[] names = new string[] { "MA5", "MA10", "MA20", "MA60" };
-                    for (int i = 0; i < names.Length; i++)
+                    // 主图叠加指标（MA / CYC 等）：名称 + 光标处数值 —— 全部走同一套规则
+                    foreach (ChartSeries s in _mainIndicators)
                     {
-                        using (var pen = new Pen(MaColors[i], 2f))
-                            g.DrawLine(pen, x, y + 7, x + 14, y + 7);
-                        g.DrawString(names[i], Font, b, x + 18, y);
-                        x += 56;
+                        double v = double.NaN;
+                        if (hoverIdx >= 0 && s.Data != null && _wstart + hoverIdx < s.Data.Count)
+                            v = s.Data[_wstart + hoverIdx];
+                        using (var pen = new Pen(s.Color, 2f)) g.DrawLine(pen, x, y + 7, x + 14, y + 7);
+                        string lbl = s.Name;
+                        if (!double.IsNaN(v)) lbl += " " + v.ToString("F2");
+                        g.DrawString(lbl, Font, b, x + 18, y);
+                        x += (int)(g.MeasureString(lbl, Font).Width) + 14;
                     }
                 }
             }

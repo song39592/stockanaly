@@ -147,14 +147,14 @@ namespace StockPool
             if (_stockSugList != null) _stockSugList.Visible = false;
         }
 
-        /// <summary>随输入内容筛选副图指标名，刷新下拉；无匹配则隐藏。仅在本框可见时生效。</summary>
+        /// <summary>随输入内容筛选主图 / 副图指标名，刷新下拉；无匹配则隐藏。仅在本框可见时生效。</summary>
         private void StockSugUpdate()
         {
             if (_stockSugList == null) return;
             if (_quickSearch == null || !_quickSearch.Visible) { StockSugHide(); return; }
             string t = _quickSearch.Text.Trim();
             _stockSugMatches.Clear();
-            if (_stockSubOpts.Count == 0 || t.Length == 0)
+            if ((_stockSubOpts.Count == 0 && _stockMainOpts.Count == 0) || t.Length == 0)
             {
                 StockSugHide();
                 return;
@@ -162,10 +162,18 @@ namespace StockPool
             foreach (var o in _stockSubOpts)
                 if (o.Name.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0
                  || o.Id.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0) _stockSugMatches.Add(o);
+            foreach (var o in _stockMainOpts)
+                if (o.Name.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0
+                 || o.Id.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0) _stockSugMatches.Add(o);
             if (_stockSugMatches.Count == 0) { StockSugHide(); return; }
 
             _stockSugList.Items.Clear();
-            foreach (var o in _stockSugMatches) _stockSugList.Items.Add(o.Name);
+            foreach (var o in _stockSugMatches)
+            {
+                bool isMain = false;
+                foreach (var m in _stockMainOpts) if (m.Id == o.Id) { isMain = true; break; }
+                _stockSugList.Items.Add(isMain ? o.Name + "（主图）" : o.Name);
+            }
             _stockSugList.SelectedIndex = 0;
             // 框在右下角：下拉显示在输入框「上方」，避免超出屏幕底边。
             int h = Math.Min(_stockSugList.ItemHeight * _stockSugMatches.Count + 4, 220);
