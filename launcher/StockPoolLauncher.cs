@@ -428,8 +428,6 @@ namespace StockPool
         private CheckBox _ckRunOnBoot;
         private Label _lbEnvState;
         private Button _btnTheme;
-        private TextBox _quickSearch;       // 右下角隐藏搜索框（键盘输入即唤出）
-        private Control _quickPrevFocus;    // 唤出前拥有焦点的控件，取消时还原
         private bool _light;   // true = 浅色主题（网页 + 本窗口都跟着这个按钮走）
         private bool _envChecked;   // 本次运行是否已做过环境检查（自动只做一次，装失败也不重试）
         private static Font _docFont;   // RPS 页说明框的正文 / 加粗字体（缓存，换肤时复用）
@@ -572,54 +570,8 @@ namespace StockPool
             BuildSettingsPage();
             BuildServicePage();   // 服务控制台放最后一个标签
 
-            // ---- 右下角隐藏搜索框：键盘输入即唤出，回车/ESC/切换界面隐藏 ----
-            _quickSearch = new TextBox();
-            _quickSearch.Width = 150;
-            _quickSearch.MaxLength = 6;
-            _quickSearch.Visible = false;
-            _quickSearch.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
-            _quickSearch.Location = new Point(ClientSize.Width - _quickSearch.Width - 18,
-                                              ClientSize.Height - _quickSearch.Height - 18);
-            _quickSearch.TextChanged += delegate
-            {
-                string digits = Regex.Replace(_quickSearch.Text, "[^0-9]", "");
-                if (digits.Length > 6) digits = digits.Substring(0, 6);
-                if (_quickSearch.Text != digits)
-                {
-                    int sel = _quickSearch.SelectionStart;
-                    _quickSearch.Text = digits;
-                    _quickSearch.SelectionStart = Math.Min(sel, digits.Length);
-                }
-            };
-            _quickSearch.KeyDown += delegate(object s, KeyEventArgs e)
-            {
-                if (e.KeyCode == Keys.Enter)
-                {
-                    e.Handled = true;
-                    string code = _quickSearch.Text.Trim();
-                    if (Regex.IsMatch(code, "^[0-9]{6}$"))
-                    {
-                        SelectTab(_stockTabIndex);
-                        _stockCode.Text = code;
-                        StockOpen();
-                        _stockStrip.Select(0);
-                        HideQuickSearch();
-                    }
-                    else
-                    {
-                        MessageBox.Show("请输入 6 位数字股票代码（如 600519）", "提示",
-                            MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    }
-                }
-                else if (e.KeyCode == Keys.Escape)
-                {
-                    e.Handled = true;
-                    HideQuickSearch();
-                }
-            };
-            _quickSearch.Leave += delegate { if (_quickSearch.Text.Length == 0) HideQuickSearch(); };
-            Controls.Add(_quickSearch);
-            _quickSearch.BringToFront();
+            // ---- 右下角隐藏输入框（代码 / 指标统一入口，逻辑见 QuickSearch.cs）----
+            BuildQuickSearch();
 
             _timer = new System.Windows.Forms.Timer();
             _timer.Interval = 3000;
@@ -650,40 +602,24 @@ namespace StockPool
                 return base.ProcessCmdKey(ref msg, keyData);
             }
 
-            // 仅当搜索框未显示、且当前焦点不在文本类控件（避免劫持已有输入框）时，用数字键唤出。
-            if (_quickSearch != null && !_quickSearch.Visible
-                && !(ActiveControl is TextBox) && !(ActiveControl is ComboBox) && !(ActiveControl is RichTextBox))
+            // ---- F8：个股页循环切换 K 线周期（日 → 周 → 月 → 日）----
+            // 搜索框展开时不劫持（那里正在输入指标 / 代码）；仅在个股页且有已打开个股时生效。
+            if (keyData == Keys.F8)
             {
-                Keys k = key;
-                if (((k >= Keys.D0 && k <= Keys.D9) || (k >= Keys.NumPad0 && k <= Keys.NumPad9))
-                    && (keyData & (Keys.Control | Keys.Alt)) == 0)
+                if (_quickSearch != null && _quickSearch.Visible)
+                    return base.ProcessCmdKey(ref msg, keyData);
+                if (_tabIndex == _stockTabIndex && _stockCurrent != null)
                 {
-                    int off = (k >= Keys.D0) ? ((int)k - (int)Keys.D0) : ((int)k - (int)Keys.NumPad0);
-                    ShowQuickSearch();
-                    _quickSearch.AppendText(((char)('0' + off)).ToString());
-                    return true;   // 已消费该按键，不再向下传递
+                    StockCyclePeriod();
+                    return true;
                 }
             }
+
+            // 仅当搜索框未显示、且当前焦点不在文本类控件（避免劫持已有输入框）时，用数字或字母键唤出。
+            // 数字 → 快速开个股；字母 → 直接键入指标英文 id（如敲 m 再补 acd = macd）切换副图。
+            // 具体唤起逻辑见 QuickSearch.cs 的 QuickSearchSummonOnKey。
+            if (QuickSearchSummonOnKey(key, keyData)) return true;
             return base.ProcessCmdKey(ref msg, keyData);
-        }
-
-        private void ShowQuickSearch()
-        {
-            if (_quickSearch == null) return;
-            _quickPrevFocus = ActiveControl;
-            _quickSearch.Visible = true;
-            _quickSearch.BringToFront();
-            _quickSearch.Focus();
-        }
-
-        private void HideQuickSearch()
-        {
-            if (_quickSearch == null || !_quickSearch.Visible) return;
-            _quickSearch.Visible = false;
-            _quickSearch.Text = "";
-            Control prev = _quickPrevFocus;
-            _quickPrevFocus = null;
-            if (prev != null && !prev.IsDisposed && prev.Visible) prev.Focus();
         }
 
         #region 页面构建
@@ -943,6 +879,11 @@ namespace StockPool
             else if (tag == "stock-adjust")
             {
                 // 复权按钮（前复权 / 不复权）的配色由 StockSetAdjustActive 控制，跳过默认按钮上色
+            }
+            else if (tag == "stock-period")
+            {
+                // 周期按钮（日 / 周 / 月）的配色由 StockSetPeriodActive 控制当前周期高亮，
+                // 跳过默认按钮上色 —— 否则每次 Skin（切页/换肤）会把三个按钮全刷成 Accent，多按钮同时"高亮"。
             }
             else if (c is Button)
             {

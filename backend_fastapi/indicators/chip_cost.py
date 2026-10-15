@@ -17,7 +17,7 @@ from .data import chip_rows_of
 
 
 @indicator(
-    id="chip_cost",
+    id="COST",
     name="筹码成本线",
     category="chip",
     panel="main",                    # 与价格同量纲 → 叠加在主图

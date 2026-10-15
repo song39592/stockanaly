@@ -35,6 +35,7 @@ def list_indicators() -> list[dict]:
             "name": meta.name,
             "category": meta.category,
             "panel": meta.panel,
+            "file": meta.file,            # 定义该指标的源文件绝对路径（指标索引页点击跳转用）
             "params": [asdict(p) for p in meta.params],
         })
     # `formula` 参数（筹码类指标）的选项来自筹码公式包的注册表，运行时填充

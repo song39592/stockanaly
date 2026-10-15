@@ -398,7 +398,7 @@ namespace StockPool
             code = code.Trim();
             if (!Regex.IsMatch(code, "^[0-9]{6}$")) return;   // 非 6 位数字（如名称列）不跳
             if (_tabIndex != _stockTabIndex) _returnTabIndex = _tabIndex;
-            _stockCode.Text = code;
+            _quickSearch.Text = code;
             SelectTab(_stockTabIndex);
             StockOpen();
         }

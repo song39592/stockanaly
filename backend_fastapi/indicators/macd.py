@@ -11,7 +11,7 @@ from .base import indicator, ParamSpec, series_line, series_bar
 
 
 @indicator(
-    id="macd",
+    id="MACD",
     name="MACD",
     category="trend",
     panel="lower",
