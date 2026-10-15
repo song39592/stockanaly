@@ -269,6 +269,8 @@ namespace StockPool
             {
                 // 切到 K线 页就把焦点交给图表，↑↓ 缩放 / ←→ 移光标立刻可用
                 if (index == 0 && _stockKline != null) _stockKline.FocusForKeys();
+                // 切到指标索引页：首次自动拉取目录自检
+                if (index == _stockIndSubIndex) StockIndOnEnter();
             };
 
             // 主内容列挂到根布局的右列
@@ -541,6 +543,10 @@ namespace StockPool
             prefPage.Controls.Add(prefStack);
             _stockStrip.Add("偏好设置", prefPage);
 
+            // ---- 二级页 ⑥ 指标索引（目录自检：索引是否重复 + 输入输出数据是否正确）----
+            _stockStrip.Add("指标索引", BuildStockIndicatorIndexPage());
+            _stockIndSubIndex = _stockStrip.Count - 1;
+
             _stockStrip.Select(0);
 
 
@@ -730,8 +736,8 @@ namespace StockPool
         {
             isMain = false;
             if (_stockMainOpts.Count == 0 && _stockSubOpts.Count == 0) return null;   // 清单未就绪：不接受非代码输入
-            foreach (var o in _stockSubOpts) if (o.Name == typed || o.Id == typed) return o.Id;
-            foreach (var o in _stockMainOpts) if (o.Name == typed || o.Id == typed) { isMain = true; return o.Id; }
+            foreach (var o in _stockSubOpts) if (string.Equals(o.Name, typed, StringComparison.OrdinalIgnoreCase) || string.Equals(o.Id, typed, StringComparison.OrdinalIgnoreCase)) return o.Id;
+            foreach (var o in _stockMainOpts) if (string.Equals(o.Name, typed, StringComparison.OrdinalIgnoreCase) || string.Equals(o.Id, typed, StringComparison.OrdinalIgnoreCase)) { isMain = true; return o.Id; }
             foreach (var o in _stockSubOpts)
                 if (o.Name.StartsWith(typed, StringComparison.OrdinalIgnoreCase)) return o.Id;
             foreach (var o in _stockSubOpts)
@@ -795,8 +801,8 @@ namespace StockPool
                 _stockMainOpts.Add(new IndOpt { Id = J.Str(J.Get(it, "id")), Name = J.Str(J.Get(it, "name")) });
             // 后端清单里若恰好没有 "ma"，这里补一个，保证输入 ma / 均线 也能作为主图指标解析
             bool hasMa = false;
-            foreach (var o in _stockMainOpts) if (o.Id == "ma") { hasMa = true; break; }
-            if (!hasMa) _stockMainOpts.Add(new IndOpt { Id = "ma", Name = "均线 MA" });
+            foreach (var o in _stockMainOpts) if (o.Id == "MA") { hasMa = true; break; }
+            if (!hasMa) _stockMainOpts.Add(new IndOpt { Id = "MA", Name = "均线 MA" });
             _stockSubOpts.Clear();
             foreach (var it in subs)
                 _stockSubOpts.Add(new IndOpt { Id = J.Str(J.Get(it, "id")), Name = J.Str(J.Get(it, "name")) });
@@ -825,7 +831,7 @@ namespace StockPool
             // 没有这行的话，勾选后界面毫无动静，用户会以为指标没出来。
             if (_stockIndStatus != null)
             {
-                bool slow = ids.Contains("rps");
+                bool slow = ids.Contains("RPS");
                 _stockIndStatus.Text = slow
                     ? "指标计算中…（RPS 首次约 15 秒预热全市场）"
                     : "指标计算中…";

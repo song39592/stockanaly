@@ -11,7 +11,7 @@ from .base import indicator, ParamSpec, series_line
 
 
 @indicator(
-    id="ma",
+    id="MA",
     name="均线 MA",
     category="trend",
     panel="main",

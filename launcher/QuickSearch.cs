@@ -101,7 +101,7 @@ namespace StockPool
                 char ch;
                 if (k >= Keys.D0 && k <= Keys.D9) ch = (char)('0' + ((int)k - (int)Keys.D0));
                 else if (k >= Keys.NumPad0 && k <= Keys.NumPad9) ch = (char)('0' + ((int)k - (int)Keys.NumPad0));
-                else ch = (char)('a' + ((int)k - (int)Keys.A));   // 字母 → 小写，匹配指标 id（macd/rsi…）
+                else ch = (char)('a' + ((int)k - (int)Keys.A));   // 字母原样上屏；匹配指标 id 时大小写不敏感（MA/MACD/VOL…）
                 if (_quickSearch.Visible) _quickSearch.Focus();   // 兜底：框还挂着但焦点跑了 → 拉回来继续输
                 else ShowQuickSearch();
                 _quickSearch.AppendText(ch.ToString());

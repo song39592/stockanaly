@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import dataclasses as dc
+import inspect
 from typing import Callable
 
 import pandas as pd
@@ -49,6 +50,7 @@ class IndicatorMeta:
     panel: str                # "main" | "lower" | "right" 放置面板
     params: list[ParamSpec]
     func: Callable
+    file: str = ""            # 定义该指标的源文件绝对路径（由装饰器经 inspect 取得）
 
 
 def series_line(name: str, data) -> dict:
@@ -72,9 +74,13 @@ def indicator(id: str, name: str, category: str, panel: str, params: list[ParamS
     def deco(func: Callable) -> Callable:
         if id in REGISTRY:
             raise ValueError(f"指标 id 重复: {id}")
+        try:
+            src = inspect.getsourcefile(func) or ""
+        except Exception:                       # 极端情况下取不到文件也不影响注册
+            src = ""
         REGISTRY[id] = IndicatorMeta(
             id=id, name=name, category=category,
-            panel=panel, params=params, func=func,
+            panel=panel, params=params, func=func, file=src,
         )
         return func
     return deco

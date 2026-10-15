@@ -16,7 +16,7 @@ from .data import chip_rows_of
 
 
 @indicator(
-    id="chip_profit",
+    id="WIN",
     name="筹码获利比例",
     category="chip",
     panel="lower",                   # 0~100，独立纵轴

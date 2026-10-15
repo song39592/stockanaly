@@ -18,7 +18,7 @@ from .data import get_turnover
 
 
 @indicator(
-    id="turnover",
+    id="VOL",
     name="换手率",
     category="volume",
     panel="none",                    # 能枚举、能算、不显示（供导出 / 内部复用）

@@ -26,7 +26,7 @@ _DEFAULT_PERIODS = [120, 250, 50, 20, 10]
 
 
 @indicator(
-    id="rps",
+    id="RPS",
     name="RPS 相对强度",
     category="momentum",
     panel="lower",

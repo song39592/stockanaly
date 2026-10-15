@@ -18,7 +18,7 @@ from features.chip.formulas.core import scr
 
 
 @indicator(
-    id="chip_scr",
+    id="SCR",
     name="筹码集中度",
     category="chip",
     panel="lower",
