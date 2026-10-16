@@ -31,7 +31,7 @@ from . import base
 
 _HERE = os.path.dirname(os.path.abspath(__file__))       # core 框架目录
 _FORMULA_DIR = os.path.dirname(_HERE)                     # 上一层：具体公式所在目录
-# 本包现住在 `features/chip/formulas/`（第 34 项）。原来这里硬编码 chip_formulas，
+# 本包现住在 `chipformulas/`（顶层包，与 indicators 同级）。原来这里硬编码 chip_formulas，
 # 搬家后会让 `importlib.import_module` 去 import 一个已不存在的顶层命名空间。
 # 改为**按 __package__ 推导**：本文件位于 <包>.core，去掉最后一段即包名。
 # 以后再搬一次也自动正确，不需要手工同步这里。

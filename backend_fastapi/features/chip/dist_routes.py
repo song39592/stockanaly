@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """筹码分布（筹码峰）的 HTTP 接口（独立模块，不放在 main.py 里）。
 
-本模块只负责 HTTP 层：参数校验与响应封装；算法在 `chip_formulas/` 包里
+本模块只负责 HTTP 层：参数校验与响应封装；算法在 `chipformulas/` 包里
 （一个文件一个公式、文件名即 id、LOAD 时校验，详见该包 ARCHITECTURE.md）。
 main.py 只需 import 本模块并 include_router。
 
@@ -18,7 +18,7 @@ import json
 from fastapi import APIRouter, Query
 
 import apiutil
-from features.chip import formulas as chip_formulas
+import chipformulas as chip_formulas
 from core.periods import normalize
 
 router = APIRouter(prefix="/api/chip/dist", tags=["筹码体系 · 筹码分布"])

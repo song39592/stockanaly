@@ -14,7 +14,7 @@ import pandas as pd
 
 from .base import ParamSpec, indicator, series_line
 from .data import chip_rows_of
-from features.chip.formulas.core import scr
+from chipformulas.core import scr
 
 
 @indicator(
