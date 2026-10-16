@@ -142,6 +142,8 @@ def _validate_module(mod_name: str, filename: str) -> dict:
     defaults = {p.name: p.default for p in meta.params}
     try:
         raw = meta.func(_stub_context(), **defaults)
+        if isinstance(raw, tuple) and len(raw) == 2 and isinstance(raw[1], dict):
+            raw = raw[0]          # 公式可返回 (矩阵, 附加字典)，冒烟只校验矩阵
         matrix = base._as_matrix(raw, _SMOKE_DAYS, _SMOKE_BINS)
         if float(matrix.sum()) <= 0:
             raise ValueError("冒烟结果全为 0，公式没有产生任何筹码")

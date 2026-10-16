@@ -44,6 +44,8 @@ class EmaLockResult:
     red: np.ndarray             # (days, bins) 强换手分布，行和=100
     gray: np.ndarray            # (days, bins) 锁仓分布，行和=100
     lock_ratio: np.ndarray      # (days, bins) 锁仓浓度 = gray/(red+gray)，范围 0~1
+    red_rel: np.ndarray         # (days, bins) 相对量（未归一；供 @chip_formula 返回总分布+灰叠层）
+    gray_rel: np.ndarray        # (days, bins) 相对量（未归一）
     close: np.ndarray
 
 
@@ -52,15 +54,23 @@ def _turnover_to_n(turnover: np.ndarray) -> np.ndarray:
 
     令 pref[i+1] = Σ_{0..i} turnover；对第 t 日，找最大的 j≤t 使
     Σ_{j..t} turnover ≥ 1.0（即 pref[t+1] − pref[j] ≥ 1.0 → pref[j] ≤ pref[t+1]−1），
-    则 N[t] = t − j + 1。若整段累计换手都 <1（早期/低换手），N[t] = t+1（全部可用天数）。
+    则 N[t] = t − j + 1。
+
+    早段 / 短窗口退化处理：当累计换手仍 <1.0 时，原本 N[t]=t+1（随 t 增长），
+    会把 B=1/N 压到虚高 → 没有一天达到 M_high×B 阈值 → 整幅空白（实测 days=60/120
+    时全 0）。改用「全窗口日均换手率」外推的 N：N_est = n / pref[n]，即把整段历史
+    的换手率均值当作该票稳定的 100% 换手周期。这样 N 只取决于该票的换手属性、
+    不再随**输出窗口长短**退化——短可见周期也能正常出红（且长窗口下早段帧的取值也更合理）。
     """
     n = len(turnover)
     pref = np.concatenate(([0.0], np.cumsum(turnover)))   # pref[k] = Σ turnover[0..k-1]
+    # 全窗口均值外推的 100% 换手周期（换手率均值 = pref[n]/n → N = 1/均值 = n/pref[n]）
+    N_est = (n / pref[n]) if pref[n] > 1e-12 else float(n)
     N = np.empty(n, dtype=float)
     for t in range(n):
         total = pref[t + 1]
         if total < 1.0:
-            N[t] = t + 1
+            N[t] = N_est                       # 累计不足 100%：用均值外推，避免 B 虚高
             continue
         target = total - 1.0
         j = int(np.searchsorted(pref, target, side="right")) - 1   # 最大 j 使 pref[j] ≤ target
@@ -137,13 +147,16 @@ def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float) 
 
     return EmaLockResult(
         dates=list(ctx.dates), centers=np.asarray(ctx.centers, dtype=float),
-        red=red_norm, gray=gray_norm, lock_ratio=lock_ratio, close=np.asarray(ctx.close, dtype=float),
+        red=red_norm, gray=gray_norm, lock_ratio=lock_ratio,
+        red_rel=red_rel, gray_rel=gray_rel,
+        close=np.asarray(ctx.close, dtype=float),
     )
 
 
 @chip_formula(
     id="ema_lock",
     name="EMA换手峰·锁仓染色",
+    index="EMLK",
     category="chip",
     description="方案③：EMA 递归堆积强换手分布（红），锁仓日将红按比例染灰（灰）；"
                 "衰减全靠 EMA 时间权重，B 与记忆长度随换手周期自适应。",
@@ -158,12 +171,20 @@ def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float) 
     ],
 )
 def ema_lock(ctx: ChipContext, M_low: float = 0.7, M_high: float = 2.0,
-             R: float = 0.5, k: float = 0.5) -> np.ndarray:
-    """@chip_formula 入口：返回**红**单矩阵（相对量，core 按行归一化到 100）。
+             R: float = 0.5, k: float = 0.5):
+    """@chip_formula 入口：返回 **(总分布, {"gray": 锁仓占比})** 元组。
 
-    供现有筹码窗口直接选用（formula_id=ema_lock）；灰与锁仓浓度走 compute_ema_lock。
+    总分布 = 红(强换手) + 灰(锁仓)，core 按行归一化到 100（即筹码窗口整幅分布）；
+    gray 是「锁仓占该箱总量」的占比（与 pct 同一归一尺度，单箱 ≤ pct），供前端在红底上叠灰。
+    灰与红来自同一次 _compute，周期/口径天然一致；纯红/纯灰的按行归一分布仍走
+    compute_ema_lock_frames（供 path-B 双分布热力图）。
     """
-    return _compute(ctx, M_low, M_high, R, k).red
+    res = _compute(ctx, M_low, M_high, R, k)
+    total = res.red_rel + res.gray_rel
+    rowsum = total.sum(axis=1)
+    safe = np.where(rowsum > 0, rowsum, 1.0)
+    gray_overlay = res.gray_rel / safe[:, None] * 100.0   # 与 pct 同尺度：每行合计≤100，单箱≤pct
+    return (total, {"gray": gray_overlay})
 
 
 def compute_ema_lock(ctx: ChipContext, M_low: float = 0.7, M_high: float = 2.0,

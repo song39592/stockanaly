@@ -172,6 +172,34 @@ def diagnose_indicators():
             "messages": messages,
         })
 
+    # 筹码分布公式（features/chip/formulas）也并入本页：它输出「按价位的分布矩阵」，
+    # 与「按日期的序列」不同构，走不了 @indicator 通道（panel 无「右侧 / 分布」取值），
+    # 由 K 线右侧的 ChipPanel 单独渲染；但它同样能被右下角输入框按**纯字母索引 id** 切换，
+    # 所以在此一并列出，方便在本页查到可用的 key。校验状态取自公式包自身的
+    # validation_report（公式文件独立于 indicators/ 目录，不参与上面的文件扫描）。
+    try:
+        from features.chip import formulas as _chip
+        for fname, rec in sorted(_chip.validation_report().get("files", {}).items()):
+            fid = rec.get("formula_id") or fname[:-3]
+            cok = (rec.get("status") == "ok")
+            items.append({
+                "file": fname,
+                "path": "",
+                "id": _chip.base.index_id(fid),
+                "name": rec.get("name") or fid,
+                "registered": cok,
+                "id_dup": False,
+                "data_ok": cok,
+                "helper": False,
+                "import_error": None if cok else rec.get("error"),
+                "note": "筹码分布 · 由 K 线右侧筹码窗口渲染",
+                "ok": cok,
+                "messages": [] if cok else ["公式校验未通过（见公式包 validation_report）"],
+                "source": "chip",
+            })
+    except Exception:                     # noqa: BLE001 - 筹码公式包不可用不影响指标索引
+        pass
+
     # 用统一响应封装（{"ok": True, "dir":…, "dup_ids":…, "items":…}）：
     # 前端 J.IsOk() 要求顶层有 ok=true，否则会被误判为「读取失败」（曾踩此坑）。
     return apiutil.ok({"dir": here, "dup_ids": dup_ids, "items": items})

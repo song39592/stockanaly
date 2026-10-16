@@ -29,9 +29,10 @@ namespace StockPool
         private Label _stockName, _stockHint, _stockStatus, _stockValStatus, _stockIndStatus;
         private KLineChart _stockKline;
         private ChipPanel _stockChip;                      // K 线右侧的筹码分布窗口
-        private ComboBox _stockChipFormula;                // 筹码公式下拉（后端 /api/chip/dist/formulas 枚举）
-        private string _stockChipFormulaId = null;         // 当前选中的公式 id（null = 后端默认）
-        private bool _chipFormulaInit = false;             // 填充下拉时抑制 SelectedIndexChanged
+        // 筹码模型不再用下拉框：与主图 / 副图指标一致，由右下角输入框键入**索引名**切换
+        // （候选来自 /api/chip/dist/formulas，见 StockLoadChipFormulas）。
+        private string _stockChipFormulaId = null;         // 当前筹码公式 id（null = 用后端默认 tri_decay）
+        private readonly List<IndOpt> _stockChipOpts = new List<IndOpt>();   // 筹码公式候选（Id=纯字母索引名，Raw=公式 id）
         private System.Windows.Forms.Timer _chipTimer;     // 滚轮缩放的防抖重算
         private int _stockRange = 250;                     // 0 = 全部
         private string _stockAdjust = "qfq";               // qfq 前复权 / raw 不复权
@@ -65,7 +66,8 @@ namespace StockPool
         // 不再用勾选框堆叠多个副图面板（多面板会把 K 线主图挤得太矮）。
         private string _stockSubIndicator = null;                                    // 当前副图指标 id（null = 无）
         private readonly List<IndOpt> _stockSubOpts = new List<IndOpt>();            // 副图候选（名称 ↔ id）
-        private sealed class IndOpt { public string Id; public string Name; }
+        // Raw：筹码公式的后端 id（仅筹码候选使用，其余为 null）
+        private sealed class IndOpt { public string Id; public string Name; public string Raw; }
         // 副图指标的联想下拉逻辑见 QuickSearch.cs（与右下角输入框共用）。
         // AI 分析（调 /api/stock/research）
         private Label _stockAiStatus;                 // AI 分析状态
@@ -301,6 +303,7 @@ namespace StockPool
 
             // 主图指标勾选行已移除：主图指标与副图一样由右下角输入框键入指标名 / id 切换。
             StockRefreshIndicatorList();   // 异步拉取指标清单：主图 / 副图候选灌进右下角输入框的联想下拉
+            StockLoadChipFormulas();       // 同步筹码公式清单：索引名 → 切换右侧筹码窗口（与指标同一入口）
 
             // 「更新至 …」与「个股概况（在榜统计 KPI）」已按需求移除
             // （副图改用顶部代码框输入）；省下的高度全部归 K 线——row1 是 Percent 100，会自动吃满。
@@ -327,26 +330,9 @@ namespace StockPool
             _stockKline.PriceAxisChanged += delegate { if (_stockChip != null) _stockChip.Invalidate(); };
             _stockChip.BackColorChanged += delegate { _stockChip.Invalidate(); };
 
-            // 公式下拉放在右侧列的**第 0 行**（不能压在筹码窗口上——筹码窗口必须与
-            // K 线同顶同高，价格轴才对得齐）。直接放控件、不套 Panel：
-            // 普通 Panel 默认高 100px，会把 AutoSize 行撑出一大块空白。
-            _stockChipFormula = new ComboBox();
-            _stockChipFormula.DropDownStyle = ComboBoxStyle.DropDownList;
-            _stockChipFormula.Width = 170;
-            _stockChipFormula.Margin = new Padding(0, 3, 0, 0);
-            _stockChipFormula.TabStop = false;
-            _stockChipFormula.Visible = false;             // 只有 ≥2 个公式才值得选
-            _stockChipFormula.SelectedIndexChanged += delegate
-            {
-                if (_chipFormulaInit) return;
-                var it = _stockChipFormula.SelectedItem as ChipFormulaItem;
-                if (it == null) return;
-                _stockChipFormulaId = it.Id;
-                if (_stockCurrent != null) StockLoadChip(_stockCurrent);
-            };
-
+            // （原「筹码公式下拉框」已移除：筹码模型改由右下角输入框键入索引名切换，
+            //   与主图 / 副图指标同一入口，见 QuickSearch.cs 与 StockOpen。）
             kLayout.Controls.Add(kTop, 0, 0);                  // 指标勾选
-            kLayout.Controls.Add(_stockChipFormula, 1, 0);     // 筹码公式下拉
             kLayout.Controls.Add(_stockKline, 0, 1);       // 图表占满剩余高度
             kLayout.Controls.Add(_stockChip, 1, 1);        // 右侧筹码分布窗口
             _stockStrip.Add("K线", klinePage);
@@ -596,6 +582,18 @@ namespace StockPool
                     if (_stockCurrent != null) StockLoadIndicators(_stockCurrent);
                     return;
                 }
+                // 筹码模型（独立通道）：索引名 → 切换 K 线右侧筹码窗口的公式
+                string chipId = StockResolveChipId(code);
+                if (chipId != null)
+                {
+                    _stockChipFormulaId = chipId;
+                    _stockHint.Tag = "muted";
+                    _stockHint.ForeColor = C.Flat;
+                    _stockHint.Text = "筹码模型已切换为：" + (StockChipNameOf(chipId) ?? chipId)
+                                    + "（输入 6 位代码则打开个股）";
+                    if (_stockCurrent != null) StockLoadChip(_stockCurrent);
+                    return;
+                }
                 _stockHint.Text = "股票代码须是 6 位数字（如 600519）；或输入已注册指标名以切换主图 / 副图指标";
                 _stockHint.Tag = "bad";
                 _stockHint.ForeColor = C.UpErr;
@@ -732,6 +730,35 @@ namespace StockPool
             return null;
         }
 
+        /// <summary>输入 → 筹码公式 id（独立于指标通道）。匹配顺序同指标：先精确（索引名 / 名称 / 公式 id），
+        /// 再前缀，最后按名称包含；命中返回**后端公式 id**（拼 &amp;formula= 用），未命中返回 null。</summary>
+        private string StockResolveChipId(string typed)
+        {
+            if (_stockChipOpts.Count == 0) return null;
+            foreach (var o in _stockChipOpts)
+                if (string.Equals(o.Id, typed, StringComparison.OrdinalIgnoreCase)
+                 || string.Equals(o.Name, typed, StringComparison.OrdinalIgnoreCase)
+                 || string.Equals(o.Raw, typed, StringComparison.OrdinalIgnoreCase))
+                    return o.Raw ?? o.Id;
+            foreach (var o in _stockChipOpts)
+                if (o.Id.StartsWith(typed, StringComparison.OrdinalIgnoreCase)
+                 || (o.Raw != null && o.Raw.StartsWith(typed, StringComparison.OrdinalIgnoreCase)))
+                    return o.Raw ?? o.Id;
+            foreach (var o in _stockChipOpts)
+                if (o.Name.IndexOf(typed, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return o.Raw ?? o.Id;
+            return null;
+        }
+
+        /// <summary>筹码公式 id → 显示名（找不到返回 null）。</summary>
+        private string StockChipNameOf(string rawId)
+        {
+            if (string.IsNullOrEmpty(rawId)) return null;
+            foreach (var o in _stockChipOpts)
+                if (o.Raw == rawId || o.Id == rawId) return o.Name;
+            return null;
+        }
+
         /// <summary>指标 id → 规范名称（主图 + 副图一起查，找不到返回 null）。</summary>
 
         // 指标联想下拉逻辑见 QuickSearch.cs（与右下角输入框共用 StockSug* 方法）。
@@ -767,8 +794,9 @@ namespace StockPool
 
         // ---- 基本信息（/api/stock/profile）：行业 / 市值 / 前十大股东 / 涨停与连板 ----
 
-        // ---- 筹码公式下拉：后端 /api/chip/dist/formulas 枚举 ----
-        // 公式是「一个文件一个公式、文件名即 id」，新增公式无需改前端，这里自动列出。
+        // ---- 筹码模型：后端 /api/chip/dist/formulas 枚举 ----
+        // 公式是「一个文件一个公式、文件名即 id」，新增公式无需改前端，这里自动同步成
+        // 右下角输入框的候选（键入索引名即切换，原下拉框已移除）。
 
         /// <summary>滚轮缩放会连续改变可见根数，防抖后再重算筹码，避免每滚一格就发一次请求。</summary>
 
@@ -1163,14 +1191,6 @@ namespace StockPool
             public double Pct;          // 占比（%，全部合计 100）
         }
 
-        /// <summary>筹码公式下拉项：显示名 + 后端 id。</summary>
-        private sealed class ChipFormulaItem
-        {
-            public string Id;
-            public string Name;
-            public override string ToString() { return Name ?? Id; }
-        }
-
         /// <summary>筹码分布统计（后端 stats）。字段可空：后端算不出时为 null。</summary>
         private sealed class ChipStats
         {
@@ -1197,6 +1217,7 @@ namespace StockPool
             private List<ChipBin> _bins = new List<ChipBin>();          // 价格轴（各分箱的价格区间）
             private List<string> _dates = new List<string>();           // 逐日快照的日期
             private List<double[]> _frames = new List<double[]>();      // 逐日快照的占比（与 _bins 同序）
+            private List<double[]> _grayFrames = null;                  // EMA 锁仓：逐日锁仓占比（与 _frames 同序；null=非锁仓模型）
             private List<ChipStats> _frameStats = new List<ChipStats>();
             private Dictionary<string, int> _dateIdx = new Dictionary<string, int>();
             private int _frame = -1;                // 当前显示的帧（默认最新）
@@ -1213,11 +1234,13 @@ namespace StockPool
 
             /// <summary>装入计算结果。dates / frames / frameStats 三者一一对应（逐日快照）。</summary>
             public void SetData(List<ChipBin> bins, List<string> dates,
-                                List<double[]> frames, List<ChipStats> frameStats, string note)
+                                List<double[]> frames, List<ChipStats> frameStats, string note,
+                                List<double[]> grayFrames = null)
             {
                 _bins = bins ?? new List<ChipBin>();
                 _dates = dates ?? new List<string>();
                 _frames = frames ?? new List<double[]>();
+                _grayFrames = (grayFrames != null && grayFrames.Count == frames.Count) ? grayFrames : null;
                 _frameStats = frameStats ?? new List<ChipStats>();
                 _dateIdx = new Dictionary<string, int>();
                 for (int i = 0; i < _dates.Count; i++)
@@ -1322,46 +1345,91 @@ namespace StockPool
                     // 画面形状画成**三角形分布**：每个分箱取其占比换算的宽度与中心价，
                     // 相邻分箱的顶点**直线相连**成峰形轮廓（不再是一格格的方块阶梯）。
                     // 占比为 0 的分箱也参与连线（宽度 0），这样峰与峰之间的谷能真正归零。
+                    // EMA 锁仓模型分支：有 gray 帧则画「红底 + 灰叠层」，否则走原盈亏两色逻辑
+                    bool emaMode = (_grayFrames != null && _frame >= 0 && _frame < _grayFrames.Count);
+                    double[] gray = emaMode ? _grayFrames[_frame] : null;
+
+                    // 横轴满宽 = 最高峰占比（两种模式共用；下方刻度标签也要用）
                     double maxPct = 0;
                     for (int i = 0; i < pct.Length; i++) if (pct[i] > maxPct) maxPct = pct[i];
                     if (maxPct <= 0) maxPct = 1;
-                    Color profit = dark ? C.ProfitDark : C.ProfitLight;
-                    Color locked = dark ? C.LockedDark : C.LockedLight;
 
-                    // 先收集价格轴内各分箱的「顶点」：(左侧轴 + 占比宽度, 该箱中心价)
-                    var idxs = new List<int>();
-                    var ws = new List<int>();
-                    var ys = new List<int>();
-                    var profs = new List<bool>();
-                    for (int i = 0; i < pct.Length && i < _bins.Count; i++)
+                    if (emaMode)
                     {
-                        ChipBin b = _bins[i];
-                        if (b.Hi < lo || b.Lo > hi) continue;       // 价格轴之外的分箱不画（会盖住统计区）
-                        int w = (int)Math.Round(pct[i] / maxPct * plotW);
-                        if (w < 0) w = 0;
-                        if (w > plotW) w = plotW;
-                        int yc = (int)yOf(b.Price);
-                        if (yc < top) yc = top;
-                        if (yc > bottom) yc = bottom;
-                        idxs.Add(i); ws.Add(w); ys.Add(yc); profs.Add(b.Price <= refClose);
+                        // 先画红底（= 全量分布：强换手+锁仓），再在红底上叠灰（锁仓）。
+                        // gray 与 pct 同一归一尺度、单箱 ≤ pct，故灰宽永不超过红宽。
+                        Color active = C.Up;                          // 红：活跃/强换手
+                        Color lockedC = Color.FromArgb(150, 156, 168); // 灰：锁仓（中性灰）
+                        var gIdx = new List<int>(); var gWs = new List<int>(); var gYs = new List<int>();
+                        for (int i = 0; i < pct.Length && i < _bins.Count; i++)
+                        {
+                            ChipBin b = _bins[i];
+                            if (b.Hi < lo || b.Lo > hi) continue;
+                            int w = (int)Math.Round(pct[i] / maxPct * plotW);
+                            if (w < 0) w = 0; if (w > plotW) w = plotW;
+                            int yc = (int)yOf(b.Price);
+                            if (yc < top) yc = top; if (yc > bottom) yc = bottom;
+                            gIdx.Add(i); gWs.Add(w); gYs.Add(yc);
+                        }
+                        if (gIdx.Count > 0)
+                        {
+                            var poly = new List<Point>();
+                            poly.Add(new Point(LeftPad, gYs[0]));
+                            for (int t = 0; t < gIdx.Count; t++) poly.Add(new Point(LeftPad + gWs[t], gYs[t]));
+                            poly.Add(new Point(LeftPad, gYs[gIdx.Count - 1]));
+                            using (var br = new SolidBrush(active)) g.FillPolygon(br, poly.ToArray());
+                            var gp = new List<Point>();
+                            gp.Add(new Point(LeftPad, gYs[0]));
+                            for (int t = 0; t < gIdx.Count; t++)
+                            {
+                                int w = (int)Math.Round(gray[gIdx[t]] / maxPct * plotW);
+                                if (w < 0) w = 0; if (w > plotW) w = plotW;
+                                gp.Add(new Point(LeftPad + w, gYs[t]));
+                            }
+                            gp.Add(new Point(LeftPad, gYs[gIdx.Count - 1]));
+                            using (var br = new SolidBrush(lockedC)) g.FillPolygon(br, gp.ToArray());
+                        }
                     }
-                    // 逐段成面：连续且同色的一段连成一个多边形，避免逐个填充产生接缝。
-                    // 配色按价格相对收盘价单调划分，故实际最多两段（获利段 / 套牢段）。
-                    int k2 = 0;
-                    while (k2 < idxs.Count)
+                    else
                     {
-                        bool isProfit = profs[k2];
-                        int j = k2;
-                        while (j + 1 < idxs.Count && profs[j + 1] == isProfit
-                               && idxs[j + 1] == idxs[j] + 1) j++;
-                        var poly = new List<Point>();
-                        poly.Add(new Point(LeftPad, ys[k2]));            // 左轴上端点
-                        for (int t = k2; t <= j; t++)                    // 峰形外轮廓
-                            poly.Add(new Point(LeftPad + ws[t], ys[t]));
-                        poly.Add(new Point(LeftPad, ys[j]));             // 左轴下端点，闭合
-                        using (var br = new SolidBrush(isProfit ? profit : locked))
-                            g.FillPolygon(br, poly.ToArray());
-                        k2 = j + 1;
+                        Color profit = dark ? C.ProfitDark : C.ProfitLight;
+                        Color locked = dark ? C.LockedDark : C.LockedLight;
+
+                        // 先收集价格轴内各分箱的「顶点」：(左侧轴 + 占比宽度, 该箱中心价)
+                        var idxs = new List<int>();
+                        var ws = new List<int>();
+                        var ys = new List<int>();
+                        var profs = new List<bool>();
+                        for (int i = 0; i < pct.Length && i < _bins.Count; i++)
+                        {
+                            ChipBin b = _bins[i];
+                            if (b.Hi < lo || b.Lo > hi) continue;       // 价格轴之外的分箱不画（会盖住统计区）
+                            int w = (int)Math.Round(pct[i] / maxPct * plotW);
+                            if (w < 0) w = 0;
+                            if (w > plotW) w = plotW;
+                            int yc = (int)yOf(b.Price);
+                            if (yc < top) yc = top;
+                            if (yc > bottom) yc = bottom;
+                            idxs.Add(i); ws.Add(w); ys.Add(yc); profs.Add(b.Price <= refClose);
+                        }
+                        // 逐段成面：连续且同色的一段连成一个多边形，避免逐个填充产生接缝。
+                        // 配色按价格相对收盘价单调划分，故实际最多两段（获利段 / 套牢段）。
+                        int k2 = 0;
+                        while (k2 < idxs.Count)
+                        {
+                            bool isProfit = profs[k2];
+                            int j = k2;
+                            while (j + 1 < idxs.Count && profs[j + 1] == isProfit
+                                   && idxs[j + 1] == idxs[j] + 1) j++;
+                            var poly = new List<Point>();
+                            poly.Add(new Point(LeftPad, ys[k2]));            // 左轴上端点
+                            for (int t = k2; t <= j; t++)                    // 峰形外轮廓
+                                poly.Add(new Point(LeftPad + ws[t], ys[t]));
+                            poly.Add(new Point(LeftPad, ys[j]));             // 左轴下端点，闭合
+                            using (var br = new SolidBrush(isProfit ? profit : locked))
+                                g.FillPolygon(br, poly.ToArray());
+                            k2 = j + 1;
+                        }
                     }
 
                     // 当日收盘 / 平均成本参考线

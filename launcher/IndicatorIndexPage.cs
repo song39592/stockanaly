@@ -186,7 +186,7 @@ namespace StockPool
                     IndFill(arr);
                     int ndup = J.Arr(J.Get(j, "dup_ids")) == null ? 0 : J.Arr(J.Get(j, "dup_ids")).Count;
                     var sp = new List<string>();
-                    sp.Add(string.Format("共 {0} 个文件", _indMsgs.Count));
+                    sp.Add(string.Format("共 {0} 项", _indMsgs.Count));
                     sp.Add("通过 " + _indPass);
                     if (_indHelper > 0) sp.Add("辅助 " + _indHelper);
                     if (_indFail > 0) sp.Add("失败 " + _indFail);

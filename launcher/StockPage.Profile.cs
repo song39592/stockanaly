@@ -246,9 +246,11 @@ bool ok = J.IsOk(j);
             _stockBasicStatus.ForeColor = hasErr ? C.Warn : C.Flat;
         }
 
+        /// <summary>同步筹码公式清单 → `_stockChipOpts`，供右下角输入框按**索引名**切换筹码模型
+        /// （原独立下拉框已移除；与主图 / 副图指标共用同一个输入入口）。
+        /// Id = 纯字母索引名（EMALOCK / TRIDECAY，键入用），Raw = 后端公式 id（拼 &amp;formula= 用）。</summary>
         private void StockLoadChipFormulas()
         {
-            if (_stockChipFormula == null) return;
             System.Threading.Tasks.Task.Run(delegate
             {
                 try
@@ -259,42 +261,33 @@ bool ok = J.IsOk(j);
                         return;
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body);
                     var items = J.Arr(J.Get(j, "items"));
-                    var list = new List<ChipFormulaItem>();
+                    var list = new List<IndOpt>();
                     if (items != null)
                     {
                         foreach (Dictionary<string, object> it in items)
                         {
                             string fid = J.Str(J.Get(it, "id"));
                             if (string.IsNullOrEmpty(fid)) continue;
-                            list.Add(new ChipFormulaItem
+                            string idx = J.Str(J.Get(it, "index"));
+                            list.Add(new IndOpt
                             {
-                                Id = fid,
+                                Id = string.IsNullOrEmpty(idx) ? fid : idx,   // 纯字母索引名（键入用）
                                 Name = J.Str(J.Get(it, "name")) ?? fid,
+                                Raw = fid,                                    // 后端公式 id
                             });
                         }
                     }
-                    string def = J.Str(J.Get(j, "default"));
-                    Invoke((Action)delegate { StockRenderChipFormulas(list, def); });
+                    Invoke((Action)delegate { StockApplyChipFormulas(list); });
                 }
                 catch { }
             });
         }
 
 
-        private void StockRenderChipFormulas(List<ChipFormulaItem> list, string def)
+        private void StockApplyChipFormulas(List<IndOpt> list)
         {
-            if (_stockChipFormula == null || list == null || list.Count == 0) return;
-            _stockChipFormula.Visible = list.Count > 1;     // 单公式时保持界面干净
-            int sel = 0;
-            for (int i = 0; i < list.Count; i++)
-            {
-                if (!string.IsNullOrEmpty(def) && list[i].Id == def) { sel = i; break; }
-            }
-            _chipFormulaInit = true;
-            _stockChipFormula.Items.Clear();
-            foreach (ChipFormulaItem it in list) _stockChipFormula.Items.Add(it);
-            if (_stockChipFormula.Items.Count > 0) _stockChipFormula.SelectedIndex = sel;
-            _chipFormulaInit = false;
+            _stockChipOpts.Clear();
+            if (list != null) _stockChipOpts.AddRange(list);
         }
 
         private void ScheduleChipReload()
@@ -349,8 +342,9 @@ bool ok = J.IsOk(j);
                     var bins = StockParseChipBins(j);
                     var dates = new List<string>();
                     var frames = new List<double[]>();
+                    var grayFrames = new List<double[]>();
                     var fstats = new List<ChipStats>();
-                    StockParseChipFrames(j, bins, dates, frames, fstats);
+                    StockParseChipFrames(j, bins, dates, frames, fstats, grayFrames);
                     // 口径提示：锁仓修正 = 前十大流通股东「占流通股比例 > 5%」合计 r，
                     // 换手率按 1/(1-r) 放大（对齐通达信 / 东财口径，见 chip_formulas/tri_decay.py）。
                     object lockObj;
@@ -365,7 +359,7 @@ bool ok = J.IsOk(j);
                     Invoke((Action)delegate
                     {
                         if (round != _stockRound) return;
-                        _stockChip.SetData(bins, dates, frames, fstats, note);
+                        _stockChip.SetData(bins, dates, frames, fstats, note, grayFrames);
                         // 重算后若光标仍停在 K 线上，立刻回到光标那一天
                         if (_stockKline != null) _stockChip.SetCursorDate(_stockKline.CursorDate);
                     });
@@ -403,7 +397,7 @@ bool ok = J.IsOk(j);
         }
 
         private static void StockParseChipFrames(Dictionary<string, object> j, List<ChipBin> bins,
-            List<string> dates, List<double[]> frames, List<ChipStats> fstats)
+            List<string> dates, List<double[]> frames, List<ChipStats> fstats, List<double[]> grayFrames)
         {
             var frObj = J.Get(j, "frames") as Dictionary<string, object>;
             if (frObj != null)
@@ -422,6 +416,19 @@ bool ok = J.IsOk(j);
                         var vals = new double[rl.Count];
                         for (int k = 0; k < rl.Count; k++) vals[k] = J.NumOrNull(rl[k]) ?? 0;
                         frames.Add(vals);
+                    }
+                }
+
+                var gArr = J.Arr(J.Get(frObj, "gray"));
+                if (gArr != null)
+                {
+                    foreach (object row in gArr)
+                    {
+                        var rl = row as System.Collections.ArrayList;
+                        if (rl == null) continue;
+                        var vals = new double[rl.Count];
+                        for (int k = 0; k < rl.Count; k++) vals[k] = J.NumOrNull(rl[k]) ?? 0;
+                        grayFrames.Add(vals);
                     }
                 }
 
