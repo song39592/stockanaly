@@ -55,11 +55,15 @@ def _stub_context() -> base.ChipContext:
     p_lo = float(low.min()) - 0.1
     p_hi = float(high.max()) + 0.1
     edges = np.linspace(p_lo, p_hi, _SMOKE_BINS + 1)
+    # 换手率做成**可变**：基础 0.015 + 每 7 天一次 0.09 的放量尖峰。
+    # 常量换手率下 B = 换手率，阈值类公式（如 ema_lock：仅 > M_high×B 的日才堆积红）
+    # 永远触发不了、冒烟全 0 被剔出；可变序列才能覆盖活跃/锁仓/滤除三种区间。
+    turnover = np.where(np.arange(n) % 7 == 0, 0.09, 0.015)
     return base.ChipContext(
         dates=[f"2024-01-{i + 1:02d}" if i < 31 else f"2024-02-{i - 30:02d}" for i in range(n)],
         open=open_, high=high, low=low, close=close,
         volume=np.full(n, 12345.0),
-        turnover=np.full(n, 0.012),
+        turnover=turnover,
         vwap=close.copy(),
         float_shares=1.0e9,
         edges=edges,
