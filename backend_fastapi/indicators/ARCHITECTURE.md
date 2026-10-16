@@ -8,7 +8,7 @@
 
 - **范围**：技术面指标（基于行情序列 OHLCV 派生）。基本面指标（PE/PB/ROE/分红/估值）本期**不做**，后续再扩。
 - **计算方式**：实时计算、不落库。每次请求现算现返，无状态，不写 `indicators_store`。
-- **呈现方式**：指标接口返回与 K 线同 `date` 序列的**标准化输出**，并声明自己放在哪个**面板**（主图叠加 / 下方副图 / 右侧副图），前端按面板分配渲染层。
+- **呈现方式**：指标接口返回与 K 线同 `date` 序列的**标准化输出**，并声明自己放在哪个**面板**（主图叠加 / 下方副图；分布类 `dist` 复用主图价格轴，见 §6）。前端按面板分配渲染层。
 
 ---
 
@@ -81,14 +81,18 @@ backend_fastapi/indicators/
 ## 5. 指标注册机制 `base.py`
 
 每个指标是一个**普通函数**，用 `@indicator(...)` 装饰即完成登记。装饰时声明
-**面板位置 `panel`**，取值只能是 `"main"` / `"lower"` / `"right"` / `"none"`（非法值在模块导入时即报错）：
+**面板位置 `panel`**，取值只能是 `"main"` / `"lower"` / `"none"`（非法值在模块导入时即报错）：
 
 - `"none"`（**不显示类型**）：指标照常注册、可经 `compute` 计算（例如导出 / 内部辅助 / 暂不开放给界面），
   但 `panel="none"` 时前端不把它放入任何渲染面板，即「能枚举到、能算、但不显示」。
 
-- `"main"`   主图叠加（共用主图价格坐标轴），如 MA / EMA / BOLL
+- `"main"`   主图叠加（共用主图价格坐标轴），如 MA / EMA / BOLL；
+  分发布局（`kind="dist"`，如筹码双分布）也用 `"main"` 表示「共用价格轴」，由专用热力图渲染器绘制
 - `"lower"`  主图下方副图（与主图共享时间轴、独立 y 轴，可多个堆叠），如 MACD / RSI / KDJ
-- `"right"`  主图右侧副图（与主图等高并列、独立 y 轴），如需要独立纵轴的指标
+
+> 历史上曾有 `"right"`（主图右侧独立纵轴副图），但分布的 x 轴是价格、与指标的 x 轴（时间）维度不同，
+> 强行统一会扭曲其中一方，故已从 `VALID_PANELS` 删除（见 `base.py` 模块 docstring）。分布类改用
+> `panel="main"` + `kind="dist"`，复用 K 线价格轴，不再有独立纵轴面板。
 
 ```python
 import pandas as pd
@@ -173,12 +177,15 @@ def ma(df: pd.DataFrame, periods=None) -> dict:
 |---|---|---|
 | `id` | string | 指标 id |
 | `name` | string | 指标中文名 |
-| `panel` | "main"\|"lower"\|"right" | 渲染面板 |
+| `panel` | "main"\|"lower"\|"none" | 渲染面板（无 "right"；分布类用 `main` 共用价格轴） |
 | `dates` | string[] | 交易日，与 K 线完全同序 |
 | `series` | array | 该指标的 1..N 条序列 |
 | `series[].name` | string | 序列名（如图例 MA5） |
-| `series[].kind` | "line"\|"bar" | 线 / 柱（前端据此选渲染方式） |
-| `series[].data` | number[]\|null | 与 `dates` 等长，NaN→null |
+| `series[].kind` | "line"\|"bar"\|"dist" | 线 / 柱 / 分发布局（前端据此选渲染方式） |
+| `series[].data` | number[]\|null | `line`/`bar`：与 `dates` 等长，NaN→null |
+| `series[].axis` | number[] | **仅 `dist`**：价格分箱中心（长度=bins），与日期无关 |
+| `series[].side` | "left"\|"right" | **仅 `dist`**：镜像方向（固定筹码负侧 / 强换手正侧） |
+| `series[].data`(dist) | number[][] | **仅 `dist`**：(days, bins)，每行=当日价格直方图，不按行归一 |
 
 ### 6.2 三个 panel 的常用数据需求
 
@@ -190,7 +197,7 @@ def ma(df: pd.DataFrame, periods=None) -> dict:
 | **lower** 下方副图 | MACD | DIF `line`、DEA `line`、MACD柱 `bar` |
 | | RSI | RSI(14) `line`（0–100） |
 | | KDJ | K/D/J 三条 `line` |
-| **right** 右侧副图 | （预留） | 需要独立纵轴、与主图等高并列的指标；具体由前端定布局 |
+| **main** 分发布局 | 筹码双分布(`dist`) | `panel="main"` 仅表示「共用 K 线价格轴」；`kind="dist"` 的 series 由**专用热力图渲染器**绘制（时间×价格色温），永不进通用 line/bar 面板，替代原被删的 `right` 独立纵轴面板 |
 
 > 设计要点：MACD 同时含 `line`（DIF/DEA）与 `bar`（柱），靠 `kind` 区分，前端无需特判指标算法。
 > 一条指标可输出多条 series，且分属不同 kind，全部由 §6.1(e) 统一承载。
@@ -200,9 +207,8 @@ def ma(df: pd.DataFrame, periods=None) -> dict:
 前端**不写死任何指标算法**，只把后端标准化响应映射为三个面板数据集容器，供图表组件消费：
 
 ```
-mainPanel:   Series[]            // 叠加在主图，共用价格轴
+mainPanel:   Series[]            // 叠加在主图，共用价格轴（含 line/bar 与 dist 分发布局）
 lowerPanels: Series[][]          // 每个 lower 指标一组，纵向堆叠成多个副图
-rightPanel:  Series[]            // 右侧并列面板
 ```
 其中每个 `Series`（= 一个指标实例）结构为：
 ```
@@ -210,10 +216,12 @@ rightPanel:  Series[]            // 右侧并列面板
 ```
 
 **路由与渲染规则**：
-1. 按响应的 `panel` 字段分发：`main`→`mainPanel`；`lower`→`lowerPanels` 追加一组；`right`→`rightPanel`。
-2. 按 `series[].kind` 选渲染图元：`line` 画折线，`bar` 画柱（如 MACD 柱）。
+1. 按响应的 `panel` 字段分发：`main`→`mainPanel`；`lower`→`lowerPanels` 追加一组。
+2. 按 `series[].kind` 选渲染图元：`line` 画折线，`bar` 画柱（如 MACD 柱）；
+   `dist` 走**专用价格轴共享热力图渲染器**（y=价格复用 K 线 `priceToY`、x=时间、色温表强度），不进 line/bar 分支。
 3. `data` 按 `dates` 与主图 K 线对齐（同序等长，null 留空）。
-4. 新增指标**无需改前端渲染代码**，只要后端注册并标好 `panel`、输出符合 §6.1(e) 的结构。
+4. 新增指标**无需改前端渲染代码**，只要后端注册并标好 `panel`、输出符合 §6.1(e) 的结构
+   （dist 类另需按 §6.1(e) 带 `axis`/`side`，并由前端新增的 dist 渲染器消费）。
 
 ---
 

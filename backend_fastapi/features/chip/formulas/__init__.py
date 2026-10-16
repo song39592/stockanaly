@@ -20,6 +20,7 @@ from .core.base import (
 )
 from .core.data import get_float_shares, float_shares_info
 from .core.registry import scan, validation_report
+from .ema_lock import compute_ema_lock_frames
 
 scan()      # 包加载即校验：坏公式在这里就被拦下，不会流到运行期
 
@@ -27,6 +28,6 @@ __all__ = [
     "base", "data", "registry",
     "FORMULAS", "ChipContext", "ChipFormulaMeta", "ChipResult", "ParamSpec",
     "chip_formula", "clear_matrix_cache", "compute", "compute_matrix",
-    "list_formulas",
+    "list_formulas", "compute_ema_lock_frames",
     "get_float_shares", "float_shares_info", "scan", "validation_report",
 ]

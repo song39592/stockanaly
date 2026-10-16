@@ -11,6 +11,9 @@
   - "main"   主图叠加（共用主图价格坐标轴），如 MA / EMA / BOLL
   - "lower"  主图下方副图（共享时间轴、独立 y 轴，可多个堆叠），如 MACD / RSI / KDJ
   - "none"   不显示：仅注册、可计算（用于导出 / 内部辅助 / 暂不开放），前端不把它放入任何渲染面板
+  - 分发布局（`kind="dist"`）也声明 `panel="main"`：仅表示「共用主图价格轴」，但由
+    专用热力图渲染器绘制（时间×价格色温），永不进通用 line/bar 面板——这是对被删
+    `right` 的替代：分布不再有独立纵轴面板，而是复用 K 线价格轴。
 
 **为什么没有 "right"（右侧面板）—— 这是刻意收回，不是遗漏。**
 它曾作为枚举值预留，但承诺了一个本层给不出的东西。右侧窗口（筹码峰）是
@@ -51,7 +54,7 @@ from . import data
 REGISTRY: dict[str, "IndicatorMeta"] = {}
 
 VALID_PANELS = ("main", "lower", "none")      # 无 "right"，理由见模块 docstring
-VALID_KINDS = ("line", "bar")
+VALID_KINDS = ("line", "bar", "dist")         # dist = 价格轴共享的分发布局（热力图），见 series_dist
 
 
 @dc.dataclass
@@ -73,6 +76,17 @@ def series_line(name: str, data) -> dict:
 def series_bar(name: str, data) -> dict:
     """构造一条「柱」型序列（标准化输出单元），如 MACD 柱、成交量。"""
     return {"name": name, "kind": "bar", "data": data}
+
+
+def series_dist(name: str, axis, data, side: str = "right") -> dict:
+    """构造一条「分发布局」序列（标准化输出单元）。
+
+    用于筹码双分布等「每日一个价格直方图」型指标：数据不是按日期对齐的标量，
+    而是 (days, bins) 的二维矩阵，且必须带价格轴（axis = 价格分箱中心）。
+    `side` 表达镜像方向（"left"=固定筹码负侧 / "right"=强换手正侧），由前端
+    价格轴共享热力图渲染器消费。该 kind 永不进通用 line/bar 面板（详见 ARCHITECTURE.md §6）。
+    """
+    return {"name": name, "kind": "dist", "axis": axis, "data": data, "side": side}
 
 
 def indicator(id: str, name: str, category: str, panel: str,
@@ -140,14 +154,34 @@ def _normalize_series(result: dict, df: pd.DataFrame) -> list[dict]:
                for n, s in result.get("lines", {}).items()]
     out: list[dict] = []
     for item in raw:
+        name = item.get("name") or ""
         kind = item.get("kind", "line")
         if kind not in VALID_KINDS:
             kind = "line"
+        if kind == "dist":
+            # 分发布局：二维 (days, bins)，带价格轴 axis；不拍平、不按行归一
+            # （筹码% 已在来源归一）。axis 是价格分箱中心，长度=bins，与日期无关。
+            axis = item.get("axis")
+            axis_list = [json_safe(v) for v in axis] if axis is not None else []
+            d2 = item.get("data")
+            if isinstance(d2, pd.DataFrame):
+                d2 = d2.values
+            if getattr(d2, "ndim", 0) == 2:           # numpy 二维
+                d2 = d2.tolist()
+            data_list = [[json_safe(v) for v in row] for row in d2]
+            out.append({
+                "name": name,
+                "kind": "dist",
+                "axis": axis_list,
+                "side": item.get("side", "right"),
+                "data": data_list,
+            })
+            continue
         data = item.get("data")
         if not isinstance(data, pd.Series):
             data = pd.Series(data, index=df.index)
         out.append({
-            "name": item["name"],
+            "name": name,
             "kind": kind,
             # 走公共清洗（第 09 项）：指标值本就是浮点，语义与原先
             # 「NaN→None，否则 float()」一致，另多挡住 ±Inf。
@@ -167,12 +201,15 @@ def compute(code: str, indicator_id: str, params: dict | None = None,
       {
         "id": <指标id>,
         "name": <名称>,
-        "panel": "main"|"lower"|"right",
+        "panel": "main"|"lower"|"none",
         "dates": ["2024-01-02", ...],                 # 与 K 线完全同序
         "series": [                                  # 该指标的一条/多条序列
           {"name": "MA5", "kind": "line", "data": [..]},
           {"name": "MACD", "kind": "bar",  "data": [..]}
         ]                                            # data 中 NaN -> null
+        # 分发布局（kind="dist"）示例（筹码双分布，共用价格轴的热力图）：
+        #   {"name":"固定筹码","kind":"dist","axis":[价格中心...],"side":"left","data":[[...]...]}
+        #   {"name":"强换手","kind":"dist","axis":[价格中心...],"side":"right","data":[[...]...]}
       }
     """
     meta = REGISTRY.get(indicator_id)

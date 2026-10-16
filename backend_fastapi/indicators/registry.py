@@ -25,8 +25,9 @@ def list_indicators() -> list[dict]:
     """返回全部已注册指标的元数据（不含计算函数）。
 
     每项含：id / name / category / panel / params（参数规格列表）。
-    panel 取值 "main"|"lower"|"right"|"none"：前三者前端据此分配到对应渲染面板，
+    panel 取值 "main"|"lower"|"none"（无 "right"）：前两者前端据此分配到对应渲染面板，
     "none" 表示不显示（仅注册、可计算，前端不放入任何渲染面板，如内部辅助指标）。
+    分发布局（kind="dist"）用 "main" 表示「共用价格轴」，由专用热力图渲染器绘制。
     """
     out: list[dict] = []
     for meta in REGISTRY.values():

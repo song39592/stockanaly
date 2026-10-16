@@ -72,18 +72,24 @@ class ChipFormulaMeta:
     description: str
     params: list[ParamSpec]
     func: Callable
+    # 索引 id：指标索引页展示 + 右下角输入框切换筹码模型用的**纯字母短名**（如 EMLK / TRI）。
+    # 留空则自动由 id 去掉非字母后大写推导（ema_lock → EMALOCK）。
+    index: str | None = None
 
 
 def chip_formula(id: str, name: str, category: str = "chip", description: str = "",
-                 params: list[ParamSpec] | None = None):
-    """装饰器：把筹码公式登记进 FORMULAS。id 必须唯一，重复会抛 ValueError。"""
+                 params: list[ParamSpec] | None = None, index: str | None = None):
+    """装饰器：把筹码公式登记进 FORMULAS。id 必须唯一，重复会抛 ValueError。
+
+    `index`：指标索引页展示 / 输入框切换用的**纯字母短名**（如 EMLK / TRI），留空则自动推导。
+    """
     if id in FORMULAS:
         raise ValueError(f"筹码公式 id 重复: {id}")
 
     def deco(func: Callable) -> Callable:
         FORMULAS[id] = ChipFormulaMeta(
             id=id, name=name, category=category, description=description,
-            params=params or [], func=func,
+            params=params or [], func=func, index=index,
         )
         return func
     return deco
@@ -184,6 +190,7 @@ class ChipResult:
     params: dict
     lockup_ratio: float = 0.0
     lockup_factor: float = 1.0
+    gray: np.ndarray | None = None     # EMA 锁仓模型：锁仓占比（与 pct 同归一尺度，单箱≤pct）；其余公式为 None
 
 
 def _params_key(params: dict | None):
@@ -242,9 +249,24 @@ def _compute_matrix_cached(code: str, formula_id: str | None, params_key,
         lockup_ratio=float(getattr(inp, "lockup_ratio", 0.0)),
         lockup_factor=float(getattr(inp, "lockup_factor", 1.0)),
     )
-    matrix = _normalize_rows(_as_matrix(meta.func(ctx, **kwargs), ctx.days, ctx.bins))
+    raw = meta.func(ctx, **kwargs)
+    # 公式可返回 (矩阵, 附加字典) 元组：附加字典携带第二分布（如 EMA 锁仓的 gray），
+    # 与矩阵来自同一次计算，周期/口径天然一致；普通公式仍返回单矩阵（附加=None）。
+    extra = None
+    if isinstance(raw, tuple) and len(raw) == 2 and isinstance(raw[1], dict):
+        raw, extra = raw
+    matrix = _normalize_rows(_as_matrix(raw, ctx.days, ctx.bins))
 
     win = inp.win                                   # 只输出窗口内的帧（预热段不输出）
+    # 附加分布（如 EMA 锁仓的 gray）与 matrix 同为「含预热」的全序列，必须一起切到窗口：
+    # 否则 gray 行数 = ctx.days（含预热）> pct 行数 = win，前端按帧对齐会错位（被判为非本模型）。
+    extra_gray = extra.get("gray") if extra else None
+    if extra_gray is not None:
+        extra_gray = np.asarray(extra_gray, dtype=float)
+        if extra_gray.shape != matrix.shape:
+            raise ValueError(
+                f"附加 gray 形状必须与矩阵一致 {matrix.shape}（含预热），实际 {extra_gray.shape}")
+        extra_gray = extra_gray[-win:]
     return ChipResult(
         dates=inp.dates[-win:], close=ctx.close[-win:], centers=ctx.centers,
         edges=ctx.edges, pct=matrix[-win:], turnover=ctx.turnover[-win:],
@@ -252,6 +274,7 @@ def _compute_matrix_cached(code: str, formula_id: str | None, params_key,
         period=inp.period,
         formula_id=meta.id, formula_name=meta.name, params=kwargs,
         lockup_ratio=ctx.lockup_ratio, lockup_factor=ctx.lockup_factor,
+        gray=extra_gray,
     )
 
 
@@ -296,6 +319,19 @@ def clear_matrix_cache() -> None:
     只需清一次。
     """
     _compute_matrix_cached.cache_clear()
+
+
+def _chip_frames_payload(res: ChipResult, frame_stats: list) -> dict:
+    """构造响应里的逐日快照 frames（含可选 gray，与 pct 同归一尺度）。"""
+    payload = {
+        "dates": res.dates,
+        "bins": int(len(res.centers)),
+        "pct": np.round(res.pct, 2).tolist(),
+        "stats": frame_stats,
+    }
+    if res.gray is not None:
+        payload["gray"] = np.round(res.gray, 2).tolist()
+    return payload
 
 
 def compute(code: str, formula_id: str | None = None, params: dict | None = None,
@@ -343,21 +379,30 @@ def compute(code: str, formula_id: str | None = None, params: dict | None = None
         "stats": frame_stats[-1] if frame_stats else {},
         # 逐日快照（光标左右移动时前端按日期本地切片，不再回服务端）：
         #   dates[i] / pct[i] / stats[i] 一一对应，pct[i] 与 bins 共用同一价格轴。
-        "frames": {
-            "dates": res.dates,
-            "bins": int(len(res.centers)),
-            "pct": np.round(res.pct, 2).tolist(),
-            "stats": frame_stats,
-        },
+        "frames": _chip_frames_payload(res, frame_stats),
         "computed_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
+def index_id(fid: str) -> str:
+    """公式的「纯字母索引 id」：指标索引页展示 + 右下角输入框切换用的 key。
+
+    优先取公式声明的 `index`（如 EMLK / TRI，短名便于记忆与键入）；
+    未声明时退化为「id 去掉非字母后大写」：ema_lock → EMALOCK。
+    """
+    meta = FORMULAS.get(fid)
+    declared = getattr(meta, "index", None) if meta is not None else None
+    if declared:
+        return str(declared)
+    return "".join(ch for ch in fid.upper() if ch.isalpha())
+
+
 def list_formulas() -> list[dict]:
-    """公式清单（供前端下拉选择）。"""
+    """公式清单（供前端展示 / 指标索引页列出可切换的筹码模型）。"""
     return [
         {
             "id": m.id,
+            "index": index_id(m.id),   # 纯字母索引 id（输入框切换、指标索引页展示用）
             "name": m.name,
             "category": m.category,
             "description": m.description,

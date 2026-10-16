@@ -37,6 +37,7 @@ from .core.spread import triangle_cdf
 @chip_formula(
     id="tri_decay",
     name="三角形分布 · 换手率衰减",
+    index="TRI",
     category="chip",
     description="当日成交按三角形分布（峰值=当日均价）摊到 [low, high]，"
                 "存量筹码按换手率 × 衰减系数衰减。",

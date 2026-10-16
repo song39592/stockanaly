@@ -165,6 +165,10 @@ namespace StockPool
             foreach (var o in _stockMainOpts)
                 if (o.Name.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0
                  || o.Id.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0) _stockSugMatches.Add(o);
+            // 筹码模型（独立通道，见 StockResolveChipId）也进联想：键入索引名即可切换 K 线右侧筹码窗口
+            foreach (var o in _stockChipOpts)
+                if (o.Name.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0
+                 || o.Id.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0) _stockSugMatches.Add(o);
             if (_stockSugMatches.Count == 0) { StockSugHide(); return; }
 
             _stockSugList.Items.Clear();
@@ -172,7 +176,8 @@ namespace StockPool
             {
                 bool isMain = false;
                 foreach (var m in _stockMainOpts) if (m.Id == o.Id) { isMain = true; break; }
-                _stockSugList.Items.Add(isMain ? o.Name + "（主图）" : o.Name);
+                string tag = (o.Raw != null) ? "（筹码）" : (isMain ? "（主图）" : "");
+                _stockSugList.Items.Add(o.Name + tag);
             }
             _stockSugList.SelectedIndex = 0;
             // 框在右下角：下拉显示在输入框「上方」，避免超出屏幕底边。
