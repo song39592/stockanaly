@@ -11,7 +11,7 @@
 ## 1. 目录结构
 
 ```
-backend_fastapi/chip_formulas/
+backend_fastapi/chipformulas/
     __init__.py        包入口：暴露 compute / compute_matrix / list_formulas / FORMULAS
     ARCHITECTURE.md    本文件（新增公式前必读）
     core/base.py       注册机制（@chip_formula）+ ChipContext + 统一入口 compute()
@@ -136,7 +136,7 @@ def tri_decay(ctx: ChipContext, decay: float = 1.0) -> np.ndarray:
 | 换手率 | 按日期的序列 | `indicators/turnover.py`（panel="none"，内部/导出复用） |
 
 指标侧经 `indicators/data.py` 的 `get_chip_frames()` 拿矩阵，**函数内延迟 import 本包**
-以打断 `indicators.data ↔ chip_formulas.core.data` 的循环依赖；指标实现文件本身
+以打断 `indicators.data ↔ chipformulas.core.data` 的循环依赖；指标实现文件本身
 不得 import 本包（保持 §2 的单向依赖）。
 
 ---
@@ -149,10 +149,10 @@ def tri_decay(ctx: ChipContext, decay: float = 1.0) -> np.ndarray:
 4. **无需手动登记**：包加载时自动扫描校验。
 5. 本地验证：
    ```python
-   import chip_formulas
-   print(chip_formulas.list_formulas())
-   print(chip_formulas.validation_report())          # 看是否被剔出、为什么
-   r = chip_formulas.compute("600000", "tri_decay", {"decay": 1.5}, days=250)
+   import chipformulas
+   print(chipformulas.list_formulas())
+   print(chipformulas.validation_report())          # 看是否被剔出、为什么
+   r = chipformulas.compute("600000", "tri_decay", {"decay": 1.5}, days=250)
    print(r["formula"], r["bars"], len(r["frames"]["dates"]))
    ```
 6. 想让延伸指标（获利比例等）跟着新公式走：给指标传 `formula` 参数即可。

@@ -198,7 +198,7 @@ def compute_ema_lock_frames(code: str, params: dict | None = None,
                             adjust: str = "qfq", period: str = "day") -> EmaLockResult:
     """按 code 取数并算 EMA 锁仓模型（code 级入口，复用包内唯一数据入口 data.load_input）。
 
-    返回含预热段的完整结果；调用方按窗口切片即可（与 chip_formulas.compute_matrix 对齐）。
+    返回含预热段的完整结果；调用方按窗口切片即可（与 chipformulas.compute_matrix 对齐）。
     若只想在现有筹码窗口使用，直接用 formula_id=ema_lock 走 compute() 即可，不必调本函数。
     """
     from .core import data as _data

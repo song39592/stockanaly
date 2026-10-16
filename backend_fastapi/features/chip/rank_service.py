@@ -48,8 +48,8 @@ import numpy as np
 import pandas as pd
 
 import apiutil
-from features.chip import formulas as chip_formulas
-from features.chip.formulas.core import scr
+import chipformulas as chip_formulas
+from chipformulas.core import scr
 from features.chip import scr_service as chip_service
 from strategies.core.data import list_universe_codes
 
