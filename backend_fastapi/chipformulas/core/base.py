@@ -190,7 +190,8 @@ class ChipResult:
     params: dict
     lockup_ratio: float = 0.0
     lockup_factor: float = 1.0
-    gray: np.ndarray | None = None     # EMA 锁仓模型：锁仓占比（与 pct 同归一尺度，单箱≤pct）；其余公式为 None
+    gray: np.ndarray | None = None     # 锁仓/折旧浓度（与 pct 同归一尺度）；其余公式为 None
+    red: np.ndarray | None = None      # 强换手叠层分布（与 pct 同归一尺度）；其余公式为 None
 
 
 def _params_key(params: dict | None):
@@ -267,6 +268,14 @@ def _compute_matrix_cached(code: str, formula_id: str | None, params_key,
             raise ValueError(
                 f"附加 gray 形状必须与矩阵一致 {matrix.shape}（含预热），实际 {extra_gray.shape}")
         extra_gray = extra_gray[-win:]
+    # 附加 red 通道：与 gray 对称，承载强换手叠层分布（如 chip_brg）。
+    extra_red = extra.get("red") if extra else None
+    if extra_red is not None:
+        extra_red = np.asarray(extra_red, dtype=float)
+        if extra_red.shape != matrix.shape:
+            raise ValueError(
+                f"附加 red 形状必须与矩阵一致 {matrix.shape}（含预热），实际 {extra_red.shape}")
+        extra_red = extra_red[-win:]
     return ChipResult(
         dates=inp.dates[-win:], close=ctx.close[-win:], centers=ctx.centers,
         edges=ctx.edges, pct=matrix[-win:], turnover=ctx.turnover[-win:],
@@ -274,7 +283,7 @@ def _compute_matrix_cached(code: str, formula_id: str | None, params_key,
         period=inp.period,
         formula_id=meta.id, formula_name=meta.name, params=kwargs,
         lockup_ratio=ctx.lockup_ratio, lockup_factor=ctx.lockup_factor,
-        gray=extra_gray,
+        gray=extra_gray, red=extra_red,
     )
 
 
@@ -331,6 +340,8 @@ def _chip_frames_payload(res: ChipResult, frame_stats: list) -> dict:
     }
     if res.gray is not None:
         payload["gray"] = np.round(res.gray, 2).tolist()
+    if res.red is not None:
+        payload["red"] = np.round(res.red, 2).tolist()
     return payload
 
 

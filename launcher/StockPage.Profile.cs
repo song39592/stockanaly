@@ -343,8 +343,9 @@ bool ok = J.IsOk(j);
                     var dates = new List<string>();
                     var frames = new List<double[]>();
                     var grayFrames = new List<double[]>();
+                    var redFrames = new List<double[]>();
                     var fstats = new List<ChipStats>();
-                    StockParseChipFrames(j, bins, dates, frames, fstats, grayFrames);
+                    StockParseChipFrames(j, bins, dates, frames, fstats, grayFrames, redFrames);
                     // 口径提示：锁仓修正 = 前十大流通股东「占流通股比例 > 5%」合计 r，
                     // 换手率按 1/(1-r) 放大（对齐通达信 / 东财口径，见 chip_formulas/tri_decay.py）。
                     object lockObj;
@@ -359,7 +360,7 @@ bool ok = J.IsOk(j);
                     Invoke((Action)delegate
                     {
                         if (round != _stockRound) return;
-                        _stockChip.SetData(bins, dates, frames, fstats, note, grayFrames);
+                        _stockChip.SetData(bins, dates, frames, fstats, note, grayFrames, redFrames);
                         // 重算后若光标仍停在 K 线上，立刻回到光标那一天
                         if (_stockKline != null) _stockChip.SetCursorDate(_stockKline.CursorDate);
                     });
@@ -397,7 +398,8 @@ bool ok = J.IsOk(j);
         }
 
         private static void StockParseChipFrames(Dictionary<string, object> j, List<ChipBin> bins,
-            List<string> dates, List<double[]> frames, List<ChipStats> fstats, List<double[]> grayFrames)
+            List<string> dates, List<double[]> frames, List<ChipStats> fstats, List<double[]> grayFrames,
+            List<double[]> redFrames)
         {
             var frObj = J.Get(j, "frames") as Dictionary<string, object>;
             if (frObj != null)
@@ -429,6 +431,20 @@ bool ok = J.IsOk(j);
                         var vals = new double[rl.Count];
                         for (int k = 0; k < rl.Count; k++) vals[k] = J.NumOrNull(rl[k]) ?? 0;
                         grayFrames.Add(vals);
+                    }
+                }
+
+                // 红叠层通道（chip_brg）：与 gray 同尺度，前端在其上叠红。
+                var rArr = J.Arr(J.Get(frObj, "red"));
+                if (rArr != null)
+                {
+                    foreach (object row in rArr)
+                    {
+                        var rl = row as System.Collections.ArrayList;
+                        if (rl == null) continue;
+                        var vals = new double[rl.Count];
+                        for (int k = 0; k < rl.Count; k++) vals[k] = J.NumOrNull(rl[k]) ?? 0;
+                        redFrames.Add(vals);
                     }
                 }
 
@@ -514,6 +530,7 @@ bool ok = J.IsOk(j);
                 case "RPS50": s.Color = C.RpsYellow;  break;    // COLORYELLOW
                 case "RPS20": s.Color = C.Flat; break;    // COLORGRAY
                 case "RPS10": s.Color = C.RpsCyan; break;    // COLORLICYAN
+                case "锁仓": s.Color = C.Up; break;           // 锁仓箭头（图例红三角）
                 default: s.Color = LineColor(s.Name); return;
             }
             s.Width = 2f;                       // LINETHICK2

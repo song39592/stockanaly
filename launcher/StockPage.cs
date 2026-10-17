@@ -1218,6 +1218,7 @@ namespace StockPool
             private List<string> _dates = new List<string>();           // 逐日快照的日期
             private List<double[]> _frames = new List<double[]>();      // 逐日快照的占比（与 _bins 同序）
             private List<double[]> _grayFrames = null;                  // EMA 锁仓：逐日锁仓占比（与 _frames 同序；null=非锁仓模型）
+            private List<double[]> _redFrames = null;                   // 红叠层：逐日强换手占比（与 _frames 同序；null=非红叠模型）
             private List<ChipStats> _frameStats = new List<ChipStats>();
             private Dictionary<string, int> _dateIdx = new Dictionary<string, int>();
             private int _frame = -1;                // 当前显示的帧（默认最新）
@@ -1235,12 +1236,13 @@ namespace StockPool
             /// <summary>装入计算结果。dates / frames / frameStats 三者一一对应（逐日快照）。</summary>
             public void SetData(List<ChipBin> bins, List<string> dates,
                                 List<double[]> frames, List<ChipStats> frameStats, string note,
-                                List<double[]> grayFrames = null)
+                                List<double[]> grayFrames = null, List<double[]> redFrames = null)
             {
                 _bins = bins ?? new List<ChipBin>();
                 _dates = dates ?? new List<string>();
                 _frames = frames ?? new List<double[]>();
-                _grayFrames = (grayFrames != null && grayFrames.Count == frames.Count) ? grayFrames : null;
+                _grayFrames = (grayFrames != null && grayFrames.Count == _frames.Count) ? grayFrames : null;
+                _redFrames = (redFrames != null && redFrames.Count == _frames.Count) ? redFrames : null;
                 _frameStats = frameStats ?? new List<ChipStats>();
                 _dateIdx = new Dictionary<string, int>();
                 for (int i = 0; i < _dates.Count; i++)
@@ -1274,6 +1276,8 @@ namespace StockPool
                 _bins = new List<ChipBin>();
                 _dates = new List<string>();
                 _frames = new List<double[]>();
+                _grayFrames = null;
+                _redFrames = null;
                 _frameStats = new List<ChipStats>();
                 _dateIdx = new Dictionary<string, int>();
                 _frame = -1;
@@ -1345,16 +1349,72 @@ namespace StockPool
                     // 画面形状画成**三角形分布**：每个分箱取其占比换算的宽度与中心价，
                     // 相邻分箱的顶点**直线相连**成峰形轮廓（不再是一格格的方块阶梯）。
                     // 占比为 0 的分箱也参与连线（宽度 0），这样峰与峰之间的谷能真正归零。
+                    // 蓝/红/灰模型（chip_brg）：有 red 帧则以「蓝底 + 灰折旧段 + 红外沿叠层」渲染
+                    bool brgMode = (_redFrames != null && _grayFrames != null
+                                    && _frame >= 0 && _frame < _redFrames.Count);
                     // EMA 锁仓模型分支：有 gray 帧则画「红底 + 灰叠层」，否则走原盈亏两色逻辑
-                    bool emaMode = (_grayFrames != null && _frame >= 0 && _frame < _grayFrames.Count);
-                    double[] gray = emaMode ? _grayFrames[_frame] : null;
+                    bool emaMode = (!brgMode && _grayFrames != null && _frame >= 0 && _frame < _grayFrames.Count);
+                    double[] gray = (brgMode || emaMode) ? _grayFrames[_frame] : null;
+                    double[] red = brgMode ? _redFrames[_frame] : null;
 
                     // 横轴满宽 = 最高峰占比（两种模式共用；下方刻度标签也要用）
                     double maxPct = 0;
                     for (int i = 0; i < pct.Length; i++) if (pct[i] > maxPct) maxPct = pct[i];
                     if (maxPct <= 0) maxPct = 1;
 
-                    if (emaMode)
+                    if (brgMode)
+                    {
+                        // 红/灰都从左侧（底部）起画，不溢出面板；maxPct 仍用 pct 峰值即可
+                        Color blueC = C.LockedDark;                     // 蓝：base 原始筹码
+                        Color grayC = Color.FromArgb(150, 156, 168);    // 灰：沉淀折旧
+                        Color redC = C.Up;                              // 红：强换手叠层（外沿）
+                        var idxs = new List<int>();
+                        var baseWs = new List<int>();
+                        var grayWs = new List<int>();
+                        var redWs = new List<int>();
+                        var ys = new List<int>();
+                        for (int i = 0; i < pct.Length && i < _bins.Count; i++)
+                        {
+                            ChipBin b = _bins[i];
+                            if (b.Hi < lo || b.Lo > hi) continue;
+                            int w = (int)Math.Round(pct[i] / maxPct * plotW);
+                            if (w < 0) w = 0; if (w > plotW) w = plotW;
+                            int yc = (int)yOf(b.Price);
+                            if (yc < top) yc = top; if (yc > bottom) yc = bottom;
+                            idxs.Add(i); baseWs.Add(w); ys.Add(yc);
+                            int gw = (int)Math.Round((i < gray.Length ? gray[i] : 0) / maxPct * plotW);
+                            if (gw < 0) gw = 0; if (gw > w) gw = w;
+                            grayWs.Add(gw);
+                            int rw = (int)Math.Round((i < red.Length ? red[i] : 0) / maxPct * plotW);
+                            if (rw < 0) rw = 0; if (rw > plotW) rw = plotW;
+                            redWs.Add(rw);
+                        }
+                        if (idxs.Count > 0)
+                        {
+                            // 蓝底（base 全量堆积）
+                            var poly = new List<Point>();
+                            poly.Add(new Point(LeftPad, ys[0]));
+                            for (int t = 0; t < idxs.Count; t++) poly.Add(new Point(LeftPad + baseWs[t], ys[t]));
+                            poly.Add(new Point(LeftPad, ys[idxs.Count - 1]));
+                            using (var br = new SolidBrush(blueC)) g.FillPolygon(br, poly.ToArray());
+
+                            // 灰折旧段：base 内左段 [0, grayW]，表示这部分蓝已沉淀
+                            var gp = new List<Point>();
+                            gp.Add(new Point(LeftPad, ys[0]));
+                            for (int t = 0; t < idxs.Count; t++) gp.Add(new Point(LeftPad + grayWs[t], ys[t]));
+                            gp.Add(new Point(LeftPad, ys[idxs.Count - 1]));
+                            using (var br = new SolidBrush(grayC)) g.FillPolygon(br, gp.ToArray());
+
+                            // 红叠层：从左侧（底部）起覆盖蓝底左段 [0, redW]，与灰段同侧起点；
+                            // 强换手档位显示红、沉淀档位显示灰、其余为蓝
+                            var rp = new List<Point>();
+                            rp.Add(new Point(LeftPad, ys[0]));
+                            for (int t = 0; t < idxs.Count; t++) rp.Add(new Point(LeftPad + redWs[t], ys[t]));
+                            rp.Add(new Point(LeftPad, ys[idxs.Count - 1]));
+                            using (var br = new SolidBrush(redC)) g.FillPolygon(br, rp.ToArray());
+                        }
+                    }
+                    else if (emaMode)
                     {
                         // 先画红底（= 全量分布：强换手+锁仓），再在红底上叠灰（锁仓）。
                         // gray 与 pct 同一归一尺度、单箱 ≤ pct，故灰宽永不超过红宽。
@@ -1906,16 +1966,19 @@ namespace StockPool
                 VisibleWindow(out wstart, out wcount);
                 _wstart = wstart;
                 // 主图叠加指标（MA / CYC 等）一并纳入价格区间，避免线画到图外（与副图同一规则）
+                // marker 是信号值（+1/-1/0），不是价格，必须排除，否则价格轴会被撑到 -1
                 foreach (ChartSeries s in _mainIndicators)
-                    if (s.Data != null)
-                        for (int i = 0; i < n; i++)
-                        {
-                            int gi = wstart + i;
-                            if (gi >= s.Data.Count) continue;
-                            double v = s.Data[gi];
-                            if (double.IsNaN(v)) continue;
-                            if (v < pmin) pmin = v; if (v > pmax) pmax = v;
-                        }
+                {
+                    if (s.Data == null || s.Kind == "marker") continue;
+                    for (int i = 0; i < n; i++)
+                    {
+                        int gi = wstart + i;
+                        if (gi >= s.Data.Count) continue;
+                        double v = s.Data[gi];
+                        if (double.IsNaN(v)) continue;
+                        if (v < pmin) pmin = v; if (v > pmax) pmax = v;
+                    }
+                }
                 if (pmax <= pmin) pmax = pmin + 1;
                 double pad = (pmax - pmin) * 0.04;
                 pmin -= pad; pmax += pad;
@@ -1965,11 +2028,44 @@ namespace StockPool
                     }
                 }
 
-                // 主图叠加指标（main 面板）：在价格轴范围内绘制线 / 柱
+                // 主图叠加指标（main 面板）：在价格轴范围内绘制线 / 柱 / 箭头
                 foreach (ChartSeries s in _mainIndicators)
                 {
                     if (s.Data == null) continue;
-                    if (s.Kind == "bar")
+                    if (s.Kind == "marker")
+                    {
+                        // 锁仓箭头：+1 红上三角画在 K 线下方；-1 绿下三角画在 K 线上方
+                        for (int i = 0; i < n; i++)
+                        {
+                            int gi = wstart + i;
+                            if (gi >= s.Data.Count) continue;
+                            double v = s.Data[gi];
+                            if (double.IsNaN(v) || Math.Abs(v) < 1e-9) continue;
+                            int x = (int)xOf(i);
+                            KBar kb = vis[i];
+                            if (v > 0)
+                            {
+                                int yb = (int)yOf(kb.L) + 6;               // 底边（低点下方）
+                                if (yb - 10 < plotTop) yb = plotTop + 10;
+                                using (var br = new SolidBrush(C.Up))
+                                    g.FillPolygon(br, new Point[] {
+                                        new Point(x, yb - 10),
+                                        new Point(x - 5, yb),
+                                        new Point(x + 5, yb) });
+                            }
+                            else
+                            {
+                                int yt = (int)yOf(kb.H) - 6;               // 顶边（高点上方）
+                                if (yt + 10 > plotBottom) yt = plotBottom - 10;
+                                using (var br = new SolidBrush(C.Down))
+                                    g.FillPolygon(br, new Point[] {
+                                        new Point(x, yt + 10),
+                                        new Point(x - 5, yt),
+                                        new Point(x + 5, yt) });
+                            }
+                        }
+                    }
+                    else if (s.Kind == "bar")
                     {
                         using (var br = new SolidBrush(s.Color))
                         {
@@ -2194,6 +2290,16 @@ namespace StockPool
                     // 主图叠加指标（MA / CYC 等）：名称 + 光标处数值 —— 全部走同一套规则
                     foreach (ChartSeries s in _mainIndicators)
                     {
+                        if (s.Kind == "marker")
+                        {
+                            // 箭头型指标：图例画一个小三角，不画线
+                            using (var br = new SolidBrush(s.Color))
+                                g.FillPolygon(br, new Point[] {
+                                    new Point(x + 7, y + 1), new Point(x + 1, y + 10), new Point(x + 13, y + 10) });
+                            g.DrawString(s.Name, Font, b, x + 18, y);
+                            x += (int)(g.MeasureString(s.Name, Font).Width) + 14;
+                            continue;
+                        }
                         double v = double.NaN;
                         if (hoverIdx >= 0 && s.Data != null && _wstart + hoverIdx < s.Data.Count)
                             v = s.Data[_wstart + hoverIdx];
