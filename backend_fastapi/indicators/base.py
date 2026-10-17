@@ -81,8 +81,11 @@ def series_bar(name: str, data) -> dict:
 def series_marker(name: str, data) -> dict:
     """构造一条「标记」型序列（标准化输出单元）。
 
-    用于主图箭头信号：值 > 0 画上箭头、< 0 画下箭头、0 / NaN 不画。
-    与 line/bar 一样按日期对齐，只是前端不走折线渲染。
+    用于主图图标信号：data 中每个值是一个【图标序号】（0 = 不画），由前端预设图标库渲染。
+    序号约定（前后端必须同步）：
+        0 = 无   1 = 上箭头(红)   2 = 下箭头(绿)   3 = 钱袋(金)
+        4 = 菱形(黄)   5 = 叉(警示红)   6 = 圆点(灰)
+    与 line/bar 一样按日期对齐，前端按序号调 DrawIcon 渲染，不画折线。
     """
     return {"name": name, "kind": "marker", "data": data}
 

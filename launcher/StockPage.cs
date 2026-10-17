@@ -1902,6 +1902,71 @@ namespace StockPool
                 return v.ToString("F0");
             }
 
+            // ---- 主图标记图标（marker）：前端预设常用图标，后端只传【图标序号】 ----
+            // 序号约定（前后端共享，务必同步）：
+            //   0 = 无   1 = 上箭头(红)   2 = 下箭头(绿)   3 = 钱袋(金)   4 = 菱形(黄)
+            //   5 = 叉(警示红)            6 = 圆点(灰)
+            private static readonly Color[] _iconColors = new Color[]
+            {
+                Color.Transparent,                      // 0 无
+                Color.FromArgb(255, 152, 0),            // 1 上箭头（橙，区别于涨跌红绿）
+                Color.FromArgb(38, 198, 218),           // 2 下箭头（青，区别于涨跌红绿）
+                Color.FromArgb(212, 175, 55),           // 3 钱袋（金）
+                C.RpsYellow,                            // 4 菱形（黄）
+                C.UpErr,                                // 5 叉（警示红）
+                C.FlatWarm,                             // 6 圆点（灰）
+            };
+
+            private static void DrawIcon(Graphics g, int iconId, int x, int y, int size)
+            {
+                if (iconId <= 0 || iconId >= _iconColors.Length) return;
+                Color c = _iconColors[iconId];
+                switch (iconId)
+                {
+                    case 1: // 上箭头
+                        using (var br = new SolidBrush(c))
+                            g.FillPolygon(br, new Point[] {
+                                new Point(x, y - size * 2), new Point(x - size, y), new Point(x + size, y) });
+                        break;
+                    case 2: // 下箭头
+                        using (var br = new SolidBrush(c))
+                            g.FillPolygon(br, new Point[] {
+                                new Point(x, y + size * 2), new Point(x - size, y), new Point(x + size, y) });
+                        break;
+                    case 3: // 钱袋
+                        DrawMoneyBag(g, x, y, size, c);
+                        break;
+                    case 4: // 菱形
+                        using (var br = new SolidBrush(c))
+                            g.FillPolygon(br, new Point[] {
+                                new Point(x, y - size * 2), new Point(x + size, y),
+                                new Point(x, y + size * 2), new Point(x - size, y) });
+                        break;
+                    case 5: // 叉
+                        using (var pen = new Pen(c, 2f))
+                        {
+                            g.DrawLine(pen, x - size, y - size, x + size, y + size);
+                            g.DrawLine(pen, x + size, y - size, x - size, y + size);
+                        }
+                        break;
+                    case 6: // 圆点
+                        using (var br = new SolidBrush(c))
+                            g.FillEllipse(br, x - size, y - size, size * 2, size * 2);
+                        break;
+                }
+            }
+
+            private static void DrawMoneyBag(Graphics g, int x, int y, int size, Color c)
+            {
+                using (var br = new SolidBrush(c))
+                using (var pen = new Pen(c, 2f))
+                {
+                    int w = size * 2, h = size * 2;
+                    g.FillEllipse(br, x - w / 2, y - h / 2 + 2, w, h - 2);          // 袋身
+                    g.DrawLine(pen, x - size / 2, y - h / 2 + 2, x + size / 2, y - h / 2 + 2);  // 束口
+                }
+            }
+
             protected override void OnPaint(PaintEventArgs e)
             {
                 base.OnPaint(e);
@@ -2034,36 +2099,35 @@ namespace StockPool
                     if (s.Data == null) continue;
                     if (s.Kind == "marker")
                     {
-                        // 锁仓箭头：+1 红上三角画在 K 线下方；-1 绿下三角画在 K 线上方
+                        // 后端传图标序号（0=无），前端按 _iconColors 预设渲染。
+                        // 锚点约定：上箭头(1)的 y 是【底边】，下箭头(2)的 y 是【顶边】；
+                        // 箭头整体落在 K 线外侧并留 4px 间隙，避免与影线重合。
+                        int size = 4;
                         for (int i = 0; i < n; i++)
                         {
                             int gi = wstart + i;
                             if (gi >= s.Data.Count) continue;
                             double v = s.Data[gi];
-                            if (double.IsNaN(v) || Math.Abs(v) < 1e-9) continue;
+                            if (double.IsNaN(v) || v == 0) continue;
+                            int iconId = (int)Math.Round(v);
                             int x = (int)xOf(i);
                             KBar kb = vis[i];
-                            if (v > 0)
+                            int y;
+                            if (iconId == 2)
                             {
-                                int yb = (int)yOf(kb.L) + 6;               // 底边（低点下方）
-                                if (yb - 10 < plotTop) yb = plotTop + 10;
-                                using (var br = new SolidBrush(C.Up))
-                                    g.FillPolygon(br, new Point[] {
-                                        new Point(x, yb - 10),
-                                        new Point(x - 5, yb),
-                                        new Point(x + 5, yb) });
+                                // 下箭头：顶边在最高价上方 4 + 2*size，整体在高点上方
+                                y = (int)yOf(kb.H) - 4 - size * 2;
+                                if (y < plotTop) y = plotTop;
                             }
                             else
                             {
-                                int yt = (int)yOf(kb.H) - 6;               // 顶边（高点上方）
-                                if (yt + 10 > plotBottom) yt = plotBottom - 10;
-                                using (var br = new SolidBrush(C.Down))
-                                    g.FillPolygon(br, new Point[] {
-                                        new Point(x, yt + 10),
-                                        new Point(x - 5, yt),
-                                        new Point(x + 5, yt) });
+                                // 上箭头：底边在最低价下方 4 + 2*size，整体在低点下方
+                                y = (int)yOf(kb.L) + 4 + size * 2;
+                                if (y > plotBottom) y = plotBottom;
                             }
+                            DrawIcon(g, iconId, x, y, size);
                         }
+                        continue;
                     }
                     else if (s.Kind == "bar")
                     {
@@ -2292,10 +2356,14 @@ namespace StockPool
                     {
                         if (s.Kind == "marker")
                         {
-                            // 箭头型指标：图例画一个小三角，不画线
-                            using (var br = new SolidBrush(s.Color))
-                                g.FillPolygon(br, new Point[] {
-                                    new Point(x + 7, y + 1), new Point(x + 1, y + 10), new Point(x + 13, y + 10) });
+                            // 图例：画一个代表性图标（hover 时取当日图标序号，否则用 1=上箭头）
+                            int iconId = 1;
+                            if (hoverIdx >= 0 && s.Data != null && _wstart + hoverIdx < s.Data.Count)
+                            {
+                                double hv = s.Data[_wstart + hoverIdx];
+                                if (!double.IsNaN(hv) && hv != 0) iconId = (int)Math.Round(hv);
+                            }
+                            DrawIcon(g, iconId, x + 7, y + 5, 5);
                             g.DrawString(s.Name, Font, b, x + 18, y);
                             x += (int)(g.MeasureString(s.Name, Font).Width) + 14;
                             continue;

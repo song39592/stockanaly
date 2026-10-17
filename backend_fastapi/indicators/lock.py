@@ -63,9 +63,9 @@ def lock(df: pd.DataFrame, M_low: float = 0.5, M_high: float = 2.0) -> dict:
         if not np.isfinite(to[t]):
             continue
         if state == 0 and to[t] < M_low * b[t]:
-            sig[t] = 1.0            # 锁仓成立（红上箭头）
+            sig[t] = 1.0            # 图标序号 1：上箭头（锁仓成立）
             state = 1
         elif state == 1 and to[t] > M_high * b[t]:
-            sig[t] = -1.0           # 锁仓解除（绿下箭头）
+            sig[t] = 2.0            # 图标序号 2：下箭头（锁仓解除）
             state = 0
     return {"series": [series_marker("锁仓", pd.Series(sig, index=df.index))]}
