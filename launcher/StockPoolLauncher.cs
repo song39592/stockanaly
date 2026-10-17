@@ -1218,7 +1218,9 @@ namespace StockPool
         {
             var cands = new List<string>();
             cands.Add(Path.Combine(root, "backend_fastapi", ".venv", "Scripts", "python.exe"));
+            cands.Add(Path.Combine(root, "backend_fastapi", ".venv", "python.exe"));   // 免安装 embeddable 自动装配
             cands.Add(Path.Combine(root, "backend_fastapi", "venv", "Scripts", "python.exe"));
+            cands.Add(Path.Combine(root, "backend_fastapi", "venv", "python.exe"));
             var codex = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                 ".cache", "codex-runtimes", "codex-primary-runtime", "dependencies", "python", "python.exe");
             cands.Add(codex);
@@ -1239,7 +1241,11 @@ namespace StockPool
                 catch { }
             }
             foreach (var c in cands) if (File.Exists(c)) return c;
-            return FindOnPath("python.exe");
+            var onPath = FindOnPath("python.exe");
+            // Windows 应用商店的 python.exe 是占位 stub（执行时报 "Python was not found"），
+            // 必须跳过，否则会误判成「已有 Python」而阻止自动安装。
+            if (onPath != null && onPath.ToLowerInvariant().IndexOf("windowsapps") >= 0) return null;
+            return onPath;
         }
 
         private static string FindNode()
@@ -1691,10 +1697,13 @@ namespace StockPool
         /// <summary>跑一次环境安装脚本，输出实时进日志框，同时收集全文（失败时落盘 + 弹窗展示）。</summary>
         private string RunInstaller(string bat, out int exitCode)
         {
+            // bat 可能因拷贝 / 压缩 / 网盘传输变成 LF-only 行尾，导致 cmd 解析错位、报「不是内部或外部命令」。
+            // 执行前先把行尾规范化为 CRLF（写到临时副本），彻底免疫传输导致的行尾问题（.gitattributes 只保 Git 通道）。
+            string runnable = NormalizeBatLineEndings(bat);
             var sb = new StringBuilder();
             var psi = new ProcessStartInfo();
             psi.FileName = "cmd.exe";
-            psi.Arguments = "/c chcp 65001 >nul && \"" + bat + "\" \"" + _root + "\" silent";
+            psi.Arguments = "/c chcp 65001 >nul && \"" + runnable + "\" \"" + _root + "\" silent";
             psi.WorkingDirectory = _root;
             psi.UseShellExecute = false;
             psi.CreateNoWindow = true;
@@ -1709,6 +1718,38 @@ namespace StockPool
             exitCode = RunAndCollect(psi, 20 * 60 * 1000, sb,
                 delegate(string line) { Ui(delegate { Log("环境", line); }); });
             return sb.ToString();
+        }
+
+        /// <summary>把 bat 文件行尾规范化为 CRLF（补 CR），写到临时文件返回路径；失败则原样返回。</summary>
+        /// <remarks>cmd.exe 无法可靠解析 LF-only 的 .bat（会错位、乱码、报「不是内部或外部命令」）。
+        /// 拷贝 / 压缩包 / 网盘传输不会帮我们转 CRLF（只有 Git 检出会，见 .gitattributes），所以这里兜底。</remarks>
+        private static string NormalizeBatLineEndings(string batPath)
+        {
+            try
+            {
+                byte[] bytes = File.ReadAllBytes(batPath);
+                var outBuf = new System.Collections.Generic.List<byte>(bytes.Length + 256);
+                for (int i = 0; i < bytes.Length; i++)
+                {
+                    byte b = bytes[i];
+                    if (b == 0x0A)                       // LF
+                    {
+                        if (i == 0 || bytes[i - 1] != 0x0D) outBuf.Add(0x0D);  // 不是 CRLF 的一部分才补 CR
+                        outBuf.Add(0x0A);
+                    }
+                    else
+                    {
+                        outBuf.Add(b);
+                    }
+                }
+                string tmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "StockPool_" + System.IO.Path.GetFileName(batPath));
+                File.WriteAllBytes(tmp, outBuf.ToArray());
+                return tmp;
+            }
+            catch
+            {
+                return batPath;
+            }
         }
 
         /// <summary>跑一条命令并拿到输出（用于探测 Python 版本、依赖是否齐全）。</summary>
