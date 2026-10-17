@@ -32,12 +32,21 @@ if not exist "%BACKEND_DIR%\requirements.txt" (
   exit /b 1
 )
 
-rem ---- 1. 找 Python：已有虚拟环境就直接复用，没有才用系统 Python 建一个 ----
-set "VENV_PY=%BACKEND_DIR%\.venv\Scripts\python.exe"
-if not exist "%VENV_PY%" if exist "%BACKEND_DIR%\venv\Scripts\python.exe" set "VENV_PY=%BACKEND_DIR%\venv\Scripts\python.exe"
-if exist "%VENV_PY%" (
-  echo [1/4] 复用已有虚拟环境：%VENV_PY%
-  goto pip
+rem ---- 1. 找 Python：已有虚拟环境就直接复用，否则按 系统python / py / codex 顺序找；都没有则自动装免安装版 ----
+set "VENV_PY="
+if exist "%BACKEND_DIR%\.venv\Scripts\python.exe" set "VENV_PY=%BACKEND_DIR%\.venv\Scripts\python.exe"
+if not defined VENV_PY if exist "%BACKEND_DIR%\.venv\python.exe" set "VENV_PY=%BACKEND_DIR%\.venv\python.exe"
+if not defined VENV_PY if exist "%BACKEND_DIR%\venv\Scripts\python.exe" set "VENV_PY=%BACKEND_DIR%\venv\Scripts\python.exe"
+if defined VENV_PY (
+  "%VENV_PY%" -m pip --version >nul 2>&1
+  if not errorlevel 1 (
+    echo [1/4] 复用已有虚拟环境：%VENV_PY%
+    goto pip
+  )
+  echo [WARN] 已有虚拟环境不可用（没有 pip，可能是旧版/损坏），删除后重建：%VENV_PY%
+  rmdir /s /q "%BACKEND_DIR%\.venv" >nul 2>&1
+  rmdir /s /q "%BACKEND_DIR%\venv" >nul 2>&1
+  set "VENV_PY="
 )
 
 set "BOOTSTRAP_PY="
@@ -57,10 +66,21 @@ if not defined BOOTSTRAP_PY if exist "%CODEX_PY%" (
   "%CODEX_PY%" -c "import sys" >nul 2>&1
   if not errorlevel 1 set "BOOTSTRAP_PY=%CODEX_PY%"
 )
+
+rem ---- 1.5 本机没有任何 Python：自动下载免安装版（embeddable），装到 backend_fastapi\.venv\，不写 PATH、免管理员权限 ----
 if not defined BOOTSTRAP_PY (
-  echo [FATAL] 没有找到可用的 Python 3，装不下去。
-  echo         请先安装 Python 3.9 及以上版本（安装时勾选 Add python.exe to PATH），
-  echo         装完重新打开启动器：https://www.python.org/downloads/
+  call :auto_embeddable
+  set "VENV_PY=%BACKEND_DIR%\.venv\python.exe"
+  if exist "%VENV_PY%" (
+    set "BOOTSTRAP_PY=%VENV_PY%"
+    goto pip
+  )
+)
+if not defined BOOTSTRAP_PY (
+  echo [FATAL] 没有找到可用的 Python 3，且自动下载免安装版失败，装不下去。
+  echo         请先手动安装 Python 3.9 及以上版本（安装时勾选 Add python.exe to PATH）：
+  echo         https://www.python.org/downloads/
+  echo         或检查网络 / 代理后重试（自动下载需要联网）。
   if /i not "%SILENT%"=="silent" pause
   exit /b 2
 )
@@ -129,4 +149,55 @@ popd
 :done
 echo ENV_OK 环境安装完成。
 if /i not "%SILENT%"=="silent" pause
+exit /b 0
+
+rem ============================================================
+rem  自动下载免安装版 Python（embeddable），仅当本机没有任何 Python 时由 :1.5 调用
+rem  产物：backend_fastapi\.venv\python.exe（带 pip），与「复用已有虚拟环境」分支无缝衔接
+rem ============================================================
+:auto_embeddable
+echo [1/4] 本机没有 Python，自动下载免安装版（embeddable，约 10MB，无需权限）...
+set "PYVER=3.11.9"
+set "TARGET=%BACKEND_DIR%\.venv"
+set "ZIP=%TEMP%\stockpool_python_%PYVER%.zip"
+set "URL=https://www.python.org/ftp/python/%PYVER%/python-%PYVER%-embed-amd64.zip"
+if not exist "%TARGET%" mkdir "%TARGET%"
+
+echo        下载 %URL%
+powershell -NoProfile -Command "try { (New-Object System.Net.WebClient).DownloadFile('%URL%','%ZIP%') } catch { Write-Host 'download-failed'; exit 1 }"
+if not exist "%ZIP%" (
+  echo        默认源失败，换清华镜像...
+  set "URL=https://mirrors.tuna.tsinghua.edu.cn/python/%PYVER%/python-%PYVER%-embed-amd64.zip"
+  powershell -NoProfile -Command "try { (New-Object System.Net.WebClient).DownloadFile('%URL%','%ZIP%') } catch { Write-Host 'download-failed'; exit 1 }"
+)
+if not exist "%ZIP%" (
+  echo [WARN] 自动下载 Python 失败（可能没联网 / 被代理或杀毒拦）。
+  exit /b 1
+)
+
+echo        解压到 %TARGET%
+powershell -NoProfile -Command "if (Test-Path '%TARGET%\python.exe') { exit 0 }; Expand-Archive -Force '%ZIP%' '%TARGET%'"
+
+rem embeddable 默认把 site 注释掉，启用它才能 import 第三方包
+if exist "%TARGET%\python311._pth" (
+  powershell -NoProfile -Command "(Get-Content '%TARGET%\python311._pth') -replace '#import site','import site' | Set-Content '%TARGET%\python311._pth'"
+)
+
+echo        下载并安装 pip（get-pip.py）...
+powershell -NoProfile -Command "try { (New-Object System.Net.WebClient).DownloadFile('https://bootstrap.pypa.io/get-pip.py','%TARGET%\get-pip.py') } catch { Write-Host 'getpip-failed'; exit 1 }"
+if not exist "%TARGET%\get-pip.py" (
+  echo [WARN] 下载 get-pip.py 失败。
+  exit /b 1
+)
+"%TARGET%\python.exe" "%TARGET%\get-pip.py" --no-warn-script-location >nul 2>&1
+if errorlevel 1 (
+  echo [WARN] 安装 pip 失败。
+  exit /b 1
+)
+
+if not exist "%TARGET%\python.exe" (
+  echo [WARN] embeddable Python 装配后仍未找到 %TARGET%\python.exe。
+  exit /b 1
+)
+echo        embeddable Python 就绪：%TARGET%\python.exe
 exit /b 0
