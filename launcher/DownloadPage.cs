@@ -12,7 +12,7 @@ namespace StockPool
     /// <summary>
     /// 历史数据下载（原生内嵌标签页）：驱动后端 /api/history/download/*。
     /// 遍历编排（worker 池 / 限速 / 断点续传 / 失败重试）都在后端，
-    /// 这里只负责下发参数、轮询进度、做暂停 / 继续 / 取消 / 重试失败项的控制，
+    /// 这里只负责下发参数、轮询进度、做暂停 / 继续 / 重试失败项的控制，
     /// 因此关掉窗口甚至重启后端都不会让任务丢——重新打开点「继续」即可。
     /// </summary>
     internal sealed partial class MainForm
@@ -26,8 +26,8 @@ namespace StockPool
         private ProgressBar _dlBar;
         private Label _dlStatus;
         private Label _dlCount;
-        private TextBox _dlErrors;
-        private Button _dlBtnStart, _dlBtnPause, _dlBtnResume, _dlBtnCancel, _dlBtnRetry;
+        private Label _dlRange;         // 本次请求下载的时间段
+        private Button _dlBtnStart, _dlBtnToggle, _dlBtnRetry;
         private CheckBox _dlAuto, _dlIdle;
         private Label _dlAutoNote;
         private bool _dlSettingsLoading;          // 程序回填控件值时抑制保存事件
@@ -55,7 +55,7 @@ namespace StockPool
             AddRow(stack, Row(title));
 
             var sub = Mute(Lbl("按代码逐只遍历下载完整历史日K（可带复权因子 / 除权明细）。"
-                + "后端 worker 池并发 + 限速，支持暂停 / 继续 / 取消 / 重试失败项；任务存在库里，重启后端后可继续。"));
+                + "后端 worker 池并发 + 限速，支持暂停 / 继续 / 重试失败项；任务存在库里，重启后端后可继续。"));
             sub.AutoSize = false;
             sub.Width = 760;
             sub.Height = 36;
@@ -88,12 +88,11 @@ namespace StockPool
             var g2 = Group("任务控制与进度", out b2);
 
             _dlBtnStart = MiniBtn("开始下载", delegate { DlStart("online"); }, 100);
-            _dlBtnPause = MiniBtn("暂停", delegate { DlControl("pause"); }, 80);
-            _dlBtnResume = MiniBtn("继续", delegate { DlControl("resume"); }, 80);
-            _dlBtnCancel = MiniBtn("取消", delegate { DlControl("cancel"); }, 80);
+            // 暂停 / 继续互斥，合成一个按钮：运行时显示「暂停」，暂停后显示「继续」。
+            // 原先两个按钮并排会让用户同时看到两个互斥动作，得先想清楚该点哪个。
+            _dlBtnToggle = MiniBtn("暂停", delegate { DlControl(DlToggleAction()); }, 80);
             _dlBtnRetry = MiniBtn("重试失败项", delegate { DlControl("retry-failed"); }, 110);
-            var refresh = MiniBtn("刷新", delegate { DlRefresh(); }, 80);
-            AddRow(b2, Row(_dlBtnStart, _dlBtnPause, _dlBtnResume, _dlBtnCancel, _dlBtnRetry, refresh));
+            AddRow(b2, Row(_dlBtnStart, _dlBtnToggle, _dlBtnRetry));
 
             _dlBar = new ProgressBar();
             _dlBar.Width = 430;
@@ -107,14 +106,9 @@ namespace StockPool
             AddRow(b2, Row(_dlStatus));
             _dlCount = Mute(Lbl(""));
             AddRow(b2, Row(_dlCount));
-            _dlErrors = new TextBox();
-            _dlErrors.ReadOnly = true;
-            _dlErrors.Multiline = true;
-            _dlErrors.ScrollBars = ScrollBars.Vertical;
-            _dlErrors.Width = 740;
-            _dlErrors.Height = 78;
-            _dlErrors.Text = "失败原因将在这里显示。";
-            AddRow(b2, Row(_dlErrors));
+            // 请求区间：让用户随时看到「这次到底要下哪段」，不必回头翻起始年份
+            _dlRange = Mute(Lbl(""));
+            AddRow(b2, Row(_dlRange));
 
             // ---- 后台自动化：每日自动更新 / 闲时补历史 ----
             _dlAuto = Check("每天自动更新数据", false);
@@ -225,7 +219,7 @@ namespace StockPool
             if (_dlCommandBusy) return;
             if (_dlLastStatus == "running" || _dlLastStatus == "queued")
             {
-                Msg("已有任务正在下载，请先暂停或取消");
+                Msg("已有任务正在下载，请先暂停");
                 return;
             }
             // 范围 / 模式 / 并发 / 限速都不再暴露给界面：范围固定全市场，
@@ -263,6 +257,12 @@ namespace StockPool
         }
 
         // ---------------------------------------------------------------- 控制
+
+        /// <summary>合并按钮按下时该发什么动作：已暂停就继续，否则就暂停。</summary>
+        private string DlToggleAction()
+        {
+            return _dlLastStatus == "paused" ? "resume" : "pause";
+        }
 
         private void DlControl(string action)
         {
@@ -379,10 +379,13 @@ namespace StockPool
             }
             finally { _dlSettingsLoading = false; }
 
-            // 只报「数据更新到哪天」：还差多少只由「自动更新」开关能否点开体现，不再堆提示文字
-            string latest = Convert.ToString(J.GetFrom(root, "latest_date") ?? "");
+            // 只报「当前覆盖的周期」：两端都是多数股票的中位位置，
+            // 不会被某一只 2005 年上市的老票把起点拉到 2005 而误报「覆盖 20 年」。
+            string coverBegin = Convert.ToString(J.GetFrom(root, "cover_begin") ?? "");
+            string coverEnd = Convert.ToString(J.GetFrom(root, "cover_end") ?? "");
             if (downloaded == 0) _dlAutoNote.Text = "库里还没有日K数据：先「开始下载」一次。";
-            else if (!string.IsNullOrEmpty(latest)) _dlAutoNote.Text = "数据已更新到 " + latest;
+            else if (coverBegin.Length > 0 && coverEnd.Length > 0)
+                _dlAutoNote.Text = string.Format("当前覆盖：{0} ~ {1}（多数股票）　已下载 {2} 只", coverBegin, coverEnd, downloaded);
             else _dlAutoNote.Text = string.Format("已下载 {0} 只。", downloaded);
             if (!eligible) _dlAutoNote.Text += " 自动更新暂不可开启：请先补齐过期历史；已开启的仍可关闭。";
         }
@@ -444,17 +447,25 @@ namespace StockPool
                     if (tasks == null || tasks.Count == 0)
                     {
                         Ui(delegate { _dlTaskId = ""; _dlLastStatus = ""; DlStopPoll(); _dlBar.Value = 0;
-                            _dlStatus.Text = "状态：未开始"; _dlCount.Text = ""; _dlErrors.Text = "失败原因将在这里显示。"; DlRenderButtons("", 0); });
+                            _dlStatus.Text = "状态：未开始"; _dlCount.Text = ""; _dlRange.Text = ""; DlRenderButtons("", 0); });
                         return;
                     }
-                    var first = tasks[0] as Dictionary<string, object>;
+                    // 选要展示的任务：**正在运行 > 排队中 > 已暂停**。
+                    // 原来把三者同等对待取「第一个匹配」；后端列表里若「已暂停」排在
+                    // 「运行中」之前，就会挑中暂停任务——界面显示「已暂停」却忽略了真正
+                    // 占用下载通道的运行中任务，用户点操作却被「请先结束当前运行的任务」
+                    // 拒绝，显得状态自相矛盾。
+                    Dictionary<string, object> pickRun = null, pickQueue = null, pickPaused = null;
                     foreach (var item in tasks)
                     {
                         var candidate = item as Dictionary<string, object>;
+                        if (candidate == null) continue;
                         var status = Convert.ToString(J.GetFrom(candidate, "status"));
-                        if (status == "running" || status == "queued" || status == "paused")
-                        { first = candidate; break; }
+                        if (status == "running") { pickRun = candidate; break; }
+                        if (status == "queued" && pickQueue == null) pickQueue = candidate;
+                        if (status == "paused" && pickPaused == null) pickPaused = candidate;
                     }
+                    var first = pickRun ?? pickQueue ?? pickPaused ?? (tasks[0] as Dictionary<string, object>);
                     if (first == null) return;
                     var id = Convert.ToString(J.GetFrom(first, "id") ?? "");
                     if (string.IsNullOrEmpty(id)) return;
@@ -531,20 +542,23 @@ namespace StockPool
             _dlBar.Value = Math.Max(0, Math.Min(_dlBar.Maximum, value));
             _dlStatus.Text = "状态：" + DlStatusText(status, source)
                 + (string.IsNullOrEmpty(_dlTaskId) ? "" : "　任务 " + _dlTaskId);
-            int recent = J.Int(J.GetFrom(task, "phase1_done"));
             int skipped = J.Int(J.GetFrom(task, "skipped"));
             var extra = "";
-            if (recent > 0) extra += string.Format("　近期阶段已覆盖 {0} 只", recent);
             if (skipped > 0) extra += string.Format("　跳过 {0} 只（库里已足量）", skipped);
             _dlCount.Text = string.Format("已完成 {0} / 共 {1}　失败 {2}　剩余 {3}　进度 {4:0.0}%{5}",
                                           completed, total, failed, remaining, percent, extra);
-            var failures = J.GetFrom(task, "failures") as ArrayList;
-            var errors = new List<string>();
-            if (failures != null)
-                foreach (var failure in failures)
-                    errors.Add(Convert.ToString(J.GetFrom(failure, "code")) + "：" + Convert.ToString(J.GetFrom(failure, "error")));
-            _dlErrors.Text = errors.Count > 0 ? string.Join(Environment.NewLine, errors.ToArray()) : "暂无失败记录。";
-            if (status == "completed" && failed > 0) _dlStatus.Text += "（部分失败，请查看原因并重试）";
+            // 请求区间：后端按 mode 给出（增量模式不给下界，如实显示「仅补最近」）。
+            // 这是**用户请求的范围**，不是每只股票真正要下的区间：后端会按库内已有数据
+            // 只补缺口（更早段补 [起始日, 库内最早-1]，近期段补 [库内最新-重叠, 今天]），
+            // 所以必须加说明，否则会被误读成「已有 2021~2026 还要从 2020 重下一遍」。
+            string reqBegin = Convert.ToString(J.GetFrom(task, "requested_begin") ?? "");
+            string reqEnd = Convert.ToString(J.GetFrom(task, "requested_end") ?? "");
+            _dlRange.Text = (status == "running" || status == "queued" || status == "paused")
+                ? (reqBegin.Length > 0 && reqEnd.Length > 0
+                    ? "本次请求区间：" + reqBegin + " ~ " + reqEnd + "（按库内缺口增量补齐，已有区间不重下）"
+                    : "本次请求区间：增量（仅补最近）")
+                : "";
+            if (status == "completed" && failed > 0) _dlStatus.Text += "（部分失败，可点「重试失败项」）";
 
             DlRenderButtons(status, failed);
             if (status == "completed" || status == "cancelled")
@@ -562,16 +576,15 @@ namespace StockPool
             bool active = status == "running" || status == "queued";
             bool terminal = status == "completed" || status == "cancelled";
             _dlBtnStart.Enabled = !active && status != "paused";
-            _dlBtnPause.Enabled = active;
-            _dlBtnResume.Enabled = status == "paused";
-            _dlBtnCancel.Enabled = active || status == "paused";
+            // 合并按钮：文案跟着当前状态走，点了才发对应动作
+            _dlBtnToggle.Text = status == "paused" ? "继续" : "暂停";
+            _dlBtnToggle.Enabled = active || status == "paused";
             _dlBtnRetry.Enabled = failed > 0 && terminal;
             if (_dlTdxBtn != null) _dlTdxBtn.Enabled = !active && status != "paused";
             if (string.IsNullOrEmpty(status) && failed == 0) _dlBtnStart.Enabled = true;
             if (_dlCommandBusy)
             {
-                _dlBtnStart.Enabled = _dlBtnPause.Enabled = _dlBtnResume.Enabled = false;
-                _dlBtnCancel.Enabled = _dlBtnRetry.Enabled = false;
+                _dlBtnStart.Enabled = _dlBtnToggle.Enabled = _dlBtnRetry.Enabled = false;
                 if (_dlTdxBtn != null) _dlTdxBtn.Enabled = false;
             }
         }
