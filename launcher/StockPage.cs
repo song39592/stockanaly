@@ -327,6 +327,9 @@ namespace StockPool
             _stockChip.Owner = _stockKline;
             // 光标跟随：光标在 K 线上左右移动 → 筹码窗口切到那一天的分布
             _stockKline.OnHoverDate = delegate (string d) { if (_stockChip != null) _stockChip.SetCursorDate(d); };
+            // 窗口平移（键盘光标到边缘 auto-pan / 拖动）→ 筹码按新的可见窗口重算，
+            // 否则平移到更早日期后，光标日期会落到筹码快照之外（对不上 / 显示边界帧）。
+            _stockKline.OnViewChanged = delegate { ScheduleChipReload(); };
             _stockKline.PriceAxisChanged += delegate { if (_stockChip != null) _stockChip.Invalidate(); };
             _stockChip.BackColorChanged += delegate { _stockChip.Invalidate(); };
 
@@ -1218,6 +1221,7 @@ namespace StockPool
             private List<string> _dates = new List<string>();           // 逐日快照的日期
             private List<double[]> _frames = new List<double[]>();      // 逐日快照的占比（与 _bins 同序）
             private List<double[]> _grayFrames = null;                  // EMA 锁仓：逐日锁仓占比（与 _frames 同序；null=非锁仓模型）
+            private List<double[]> _redFrames = null;                   // 红叠层：逐日强换手占比（与 _frames 同序；null=非红叠模型）
             private List<ChipStats> _frameStats = new List<ChipStats>();
             private Dictionary<string, int> _dateIdx = new Dictionary<string, int>();
             private int _frame = -1;                // 当前显示的帧（默认最新）
@@ -1235,12 +1239,13 @@ namespace StockPool
             /// <summary>装入计算结果。dates / frames / frameStats 三者一一对应（逐日快照）。</summary>
             public void SetData(List<ChipBin> bins, List<string> dates,
                                 List<double[]> frames, List<ChipStats> frameStats, string note,
-                                List<double[]> grayFrames = null)
+                                List<double[]> grayFrames = null, List<double[]> redFrames = null)
             {
                 _bins = bins ?? new List<ChipBin>();
                 _dates = dates ?? new List<string>();
                 _frames = frames ?? new List<double[]>();
-                _grayFrames = (grayFrames != null && grayFrames.Count == frames.Count) ? grayFrames : null;
+                _grayFrames = (grayFrames != null && grayFrames.Count == _frames.Count) ? grayFrames : null;
+                _redFrames = (redFrames != null && redFrames.Count == _frames.Count) ? redFrames : null;
                 _frameStats = frameStats ?? new List<ChipStats>();
                 _dateIdx = new Dictionary<string, int>();
                 for (int i = 0; i < _dates.Count; i++)
@@ -1262,7 +1267,21 @@ namespace StockPool
             {
                 if (string.IsNullOrEmpty(date) || _dateIdx.Count == 0) return;
                 int idx;
-                if (!_dateIdx.TryGetValue(date, out idx)) return;
+                if (!_dateIdx.TryGetValue(date, out idx))
+                {
+                    // 日期不在快照内（光标落到快照区间之外，如滚轮放大后、或筹码与 K 线
+                    // 可见范围暂不一致）：二分夹到**最近的边界帧**，而不是保持旧帧不动——
+                    // 否则早于快照起点的日期会一直停在同一个帧，看起来「某日之前筹码峰不变」。
+                    // _dates 为升序（YYYY-MM-DD，字典序即时间序）。
+                    int lo = 0, hi = _dates.Count - 1, ans = 0;
+                    while (lo <= hi)
+                    {
+                        int mid = (lo + hi) >> 1;
+                        if (string.CompareOrdinal(_dates[mid], date) <= 0) { ans = mid; lo = mid + 1; }
+                        else hi = mid - 1;
+                    }
+                    idx = ans;
+                }
                 if (idx == _frame) return;
                 _frame = idx;
                 Invalidate();
@@ -1274,6 +1293,8 @@ namespace StockPool
                 _bins = new List<ChipBin>();
                 _dates = new List<string>();
                 _frames = new List<double[]>();
+                _grayFrames = null;
+                _redFrames = null;
                 _frameStats = new List<ChipStats>();
                 _dateIdx = new Dictionary<string, int>();
                 _frame = -1;
@@ -1345,16 +1366,72 @@ namespace StockPool
                     // 画面形状画成**三角形分布**：每个分箱取其占比换算的宽度与中心价，
                     // 相邻分箱的顶点**直线相连**成峰形轮廓（不再是一格格的方块阶梯）。
                     // 占比为 0 的分箱也参与连线（宽度 0），这样峰与峰之间的谷能真正归零。
+                    // 蓝/红/灰模型（chip_brg）：有 red 帧则以「蓝底 + 灰折旧段 + 红外沿叠层」渲染
+                    bool brgMode = (_redFrames != null && _grayFrames != null
+                                    && _frame >= 0 && _frame < _redFrames.Count);
                     // EMA 锁仓模型分支：有 gray 帧则画「红底 + 灰叠层」，否则走原盈亏两色逻辑
-                    bool emaMode = (_grayFrames != null && _frame >= 0 && _frame < _grayFrames.Count);
-                    double[] gray = emaMode ? _grayFrames[_frame] : null;
+                    bool emaMode = (!brgMode && _grayFrames != null && _frame >= 0 && _frame < _grayFrames.Count);
+                    double[] gray = (brgMode || emaMode) ? _grayFrames[_frame] : null;
+                    double[] red = brgMode ? _redFrames[_frame] : null;
 
                     // 横轴满宽 = 最高峰占比（两种模式共用；下方刻度标签也要用）
                     double maxPct = 0;
                     for (int i = 0; i < pct.Length; i++) if (pct[i] > maxPct) maxPct = pct[i];
                     if (maxPct <= 0) maxPct = 1;
 
-                    if (emaMode)
+                    if (brgMode)
+                    {
+                        // 红/灰都从左侧（底部）起画，不溢出面板；maxPct 仍用 pct 峰值即可
+                        Color blueC = C.LockedDark;                     // 蓝：base 原始筹码
+                        Color grayC = Color.FromArgb(150, 156, 168);    // 灰：沉淀折旧
+                        Color redC = C.Up;                              // 红：强换手叠层（外沿）
+                        var idxs = new List<int>();
+                        var baseWs = new List<int>();
+                        var grayWs = new List<int>();
+                        var redWs = new List<int>();
+                        var ys = new List<int>();
+                        for (int i = 0; i < pct.Length && i < _bins.Count; i++)
+                        {
+                            ChipBin b = _bins[i];
+                            if (b.Hi < lo || b.Lo > hi) continue;
+                            int w = (int)Math.Round(pct[i] / maxPct * plotW);
+                            if (w < 0) w = 0; if (w > plotW) w = plotW;
+                            int yc = (int)yOf(b.Price);
+                            if (yc < top) yc = top; if (yc > bottom) yc = bottom;
+                            idxs.Add(i); baseWs.Add(w); ys.Add(yc);
+                            int gw = (int)Math.Round((i < gray.Length ? gray[i] : 0) / maxPct * plotW);
+                            if (gw < 0) gw = 0; if (gw > w) gw = w;
+                            grayWs.Add(gw);
+                            int rw = (int)Math.Round((i < red.Length ? red[i] : 0) / maxPct * plotW);
+                            if (rw < 0) rw = 0; if (rw > plotW) rw = plotW;
+                            redWs.Add(rw);
+                        }
+                        if (idxs.Count > 0)
+                        {
+                            // 蓝底（base 全量堆积）
+                            var poly = new List<Point>();
+                            poly.Add(new Point(LeftPad, ys[0]));
+                            for (int t = 0; t < idxs.Count; t++) poly.Add(new Point(LeftPad + baseWs[t], ys[t]));
+                            poly.Add(new Point(LeftPad, ys[idxs.Count - 1]));
+                            using (var br = new SolidBrush(blueC)) g.FillPolygon(br, poly.ToArray());
+
+                            // 灰折旧段：base 内左段 [0, grayW]，表示这部分蓝已沉淀
+                            var gp = new List<Point>();
+                            gp.Add(new Point(LeftPad, ys[0]));
+                            for (int t = 0; t < idxs.Count; t++) gp.Add(new Point(LeftPad + grayWs[t], ys[t]));
+                            gp.Add(new Point(LeftPad, ys[idxs.Count - 1]));
+                            using (var br = new SolidBrush(grayC)) g.FillPolygon(br, gp.ToArray());
+
+                            // 红叠层：从左侧（底部）起覆盖蓝底左段 [0, redW]，与灰段同侧起点；
+                            // 强换手档位显示红、沉淀档位显示灰、其余为蓝
+                            var rp = new List<Point>();
+                            rp.Add(new Point(LeftPad, ys[0]));
+                            for (int t = 0; t < idxs.Count; t++) rp.Add(new Point(LeftPad + redWs[t], ys[t]));
+                            rp.Add(new Point(LeftPad, ys[idxs.Count - 1]));
+                            using (var br = new SolidBrush(redC)) g.FillPolygon(br, rp.ToArray());
+                        }
+                    }
+                    else if (emaMode)
                     {
                         // 先画红底（= 全量分布：强换手+锁仓），再在红底上叠灰（锁仓）。
                         // gray 与 pct 同一归一尺度、单箱 ≤ pct，故灰宽永不超过红宽。
@@ -1518,6 +1595,9 @@ namespace StockPool
             private int _wstart;                          // 当前可见窗口的全局起始索引（图例取光标数值用）
             public string Period = "day";                      // K 线周期（图例显示 日K / 周K / 月K）
             public Action<int> OnRangeChanged;                 // 缩放改变范围时通知外部刷新高亮
+            /// <summary>可见窗口**平移**（_offset 变、_range 不变，如键盘光标到边缘 auto-pan / 拖动）时通知外部，
+            /// 让右侧筹码按新的可见窗口重算——否则平移到更早日期后，光标会落到筹码快照之外对不上。</summary>
+            public Action OnViewChanged;
             /// <summary>光标所在 K 线的日期（移出时保留最后一次）——右侧筹码窗口据此切换到那一天。</summary>
             public Action<string> OnHoverDate;
             private string _hoverDate = null;
@@ -1690,6 +1770,7 @@ namespace StockPool
                     _hoverIndex = -1;
                     _tip.Hide(this);
                     Invalidate();
+                    if (OnViewChanged != null) OnViewChanged();   // 拖动平移：让筹码按新窗口重算（前端防抖）
                     return;
                 }
 
@@ -1751,6 +1832,7 @@ namespace StockPool
                 int total = _bars.Count;
                 if (_hoverIndex < 0) _hoverIndex = n - 1;        // 首次按键从最新一根起步
                 int next = _hoverIndex + delta;
+                int oldOffset = _offset;
                 if (next < 0)
                 {   // 已在最左：把窗口往早期挪，露出更老的 K 线
                     if (_offset < total - n) _offset = Math.Min(_offset + 1, total - n);
@@ -1763,6 +1845,7 @@ namespace StockPool
                 }
                 _hoverIndex = next;
                 Invalidate();
+                if (_offset != oldOffset && OnViewChanged != null) OnViewChanged();   // 平移了：让筹码按新窗口重算
                 PublishHoverDate();
                 ShowHoverTip();
             }
@@ -1828,6 +1911,18 @@ namespace StockPool
                 count = Math.Min(n, total - start);
             }
 
+            /// <summary>当前可见窗口起点到最新一根之间的根数（= total - start，含被平移藏到右侧的最新段）。
+            /// 右侧筹码窗口用它作 days，frames 才能覆盖 K 线当前可见窗口（含键盘 / 拖动平移到更早的部分），
+            /// 避免光标日期早于筹码快照起点时对不上。</summary>
+            public int ViewBarsToLatest()
+            {
+                int total = _bars.Count;
+                if (total <= 0) return 0;
+                int s, c;
+                VisibleWindow(out s, out c);
+                return total - s;
+            }
+
             private List<KBar> VisibleBars()
             {
                 int s, c;
@@ -1840,6 +1935,71 @@ namespace StockPool
             {
                 if (v >= 10000) return (v / 10000).ToString("F2") + "万";
                 return v.ToString("F0");
+            }
+
+            // ---- 主图标记图标（marker）：前端预设常用图标，后端只传【图标序号】 ----
+            // 序号约定（前后端共享，务必同步）：
+            //   0 = 无   1 = 上箭头(红)   2 = 下箭头(绿)   3 = 钱袋(金)   4 = 菱形(黄)
+            //   5 = 叉(警示红)            6 = 圆点(灰)
+            private static readonly Color[] _iconColors = new Color[]
+            {
+                Color.Transparent,                      // 0 无
+                Color.FromArgb(255, 152, 0),            // 1 上箭头（橙，区别于涨跌红绿）
+                Color.FromArgb(38, 198, 218),           // 2 下箭头（青，区别于涨跌红绿）
+                Color.FromArgb(212, 175, 55),           // 3 钱袋（金）
+                C.RpsYellow,                            // 4 菱形（黄）
+                C.UpErr,                                // 5 叉（警示红）
+                C.FlatWarm,                             // 6 圆点（灰）
+            };
+
+            private static void DrawIcon(Graphics g, int iconId, int x, int y, int size)
+            {
+                if (iconId <= 0 || iconId >= _iconColors.Length) return;
+                Color c = _iconColors[iconId];
+                switch (iconId)
+                {
+                    case 1: // 上箭头
+                        using (var br = new SolidBrush(c))
+                            g.FillPolygon(br, new Point[] {
+                                new Point(x, y - size * 2), new Point(x - size, y), new Point(x + size, y) });
+                        break;
+                    case 2: // 下箭头
+                        using (var br = new SolidBrush(c))
+                            g.FillPolygon(br, new Point[] {
+                                new Point(x, y + size * 2), new Point(x - size, y), new Point(x + size, y) });
+                        break;
+                    case 3: // 钱袋
+                        DrawMoneyBag(g, x, y, size, c);
+                        break;
+                    case 4: // 菱形
+                        using (var br = new SolidBrush(c))
+                            g.FillPolygon(br, new Point[] {
+                                new Point(x, y - size * 2), new Point(x + size, y),
+                                new Point(x, y + size * 2), new Point(x - size, y) });
+                        break;
+                    case 5: // 叉
+                        using (var pen = new Pen(c, 2f))
+                        {
+                            g.DrawLine(pen, x - size, y - size, x + size, y + size);
+                            g.DrawLine(pen, x + size, y - size, x - size, y + size);
+                        }
+                        break;
+                    case 6: // 圆点
+                        using (var br = new SolidBrush(c))
+                            g.FillEllipse(br, x - size, y - size, size * 2, size * 2);
+                        break;
+                }
+            }
+
+            private static void DrawMoneyBag(Graphics g, int x, int y, int size, Color c)
+            {
+                using (var br = new SolidBrush(c))
+                using (var pen = new Pen(c, 2f))
+                {
+                    int w = size * 2, h = size * 2;
+                    g.FillEllipse(br, x - w / 2, y - h / 2 + 2, w, h - 2);          // 袋身
+                    g.DrawLine(pen, x - size / 2, y - h / 2 + 2, x + size / 2, y - h / 2 + 2);  // 束口
+                }
             }
 
             protected override void OnPaint(PaintEventArgs e)
@@ -1906,16 +2066,19 @@ namespace StockPool
                 VisibleWindow(out wstart, out wcount);
                 _wstart = wstart;
                 // 主图叠加指标（MA / CYC 等）一并纳入价格区间，避免线画到图外（与副图同一规则）
+                // marker 是信号值（+1/-1/0），不是价格，必须排除，否则价格轴会被撑到 -1
                 foreach (ChartSeries s in _mainIndicators)
-                    if (s.Data != null)
-                        for (int i = 0; i < n; i++)
-                        {
-                            int gi = wstart + i;
-                            if (gi >= s.Data.Count) continue;
-                            double v = s.Data[gi];
-                            if (double.IsNaN(v)) continue;
-                            if (v < pmin) pmin = v; if (v > pmax) pmax = v;
-                        }
+                {
+                    if (s.Data == null || s.Kind == "marker") continue;
+                    for (int i = 0; i < n; i++)
+                    {
+                        int gi = wstart + i;
+                        if (gi >= s.Data.Count) continue;
+                        double v = s.Data[gi];
+                        if (double.IsNaN(v)) continue;
+                        if (v < pmin) pmin = v; if (v > pmax) pmax = v;
+                    }
+                }
                 if (pmax <= pmin) pmax = pmin + 1;
                 double pad = (pmax - pmin) * 0.04;
                 pmin -= pad; pmax += pad;
@@ -1965,11 +2128,43 @@ namespace StockPool
                     }
                 }
 
-                // 主图叠加指标（main 面板）：在价格轴范围内绘制线 / 柱
+                // 主图叠加指标（main 面板）：在价格轴范围内绘制线 / 柱 / 箭头
                 foreach (ChartSeries s in _mainIndicators)
                 {
                     if (s.Data == null) continue;
-                    if (s.Kind == "bar")
+                    if (s.Kind == "marker")
+                    {
+                        // 后端传图标序号（0=无），前端按 _iconColors 预设渲染。
+                        // 锚点约定：上箭头(1)的 y 是【底边】，下箭头(2)的 y 是【顶边】；
+                        // 箭头整体落在 K 线外侧并留 4px 间隙，避免与影线重合。
+                        int size = 4;
+                        for (int i = 0; i < n; i++)
+                        {
+                            int gi = wstart + i;
+                            if (gi >= s.Data.Count) continue;
+                            double v = s.Data[gi];
+                            if (double.IsNaN(v) || v == 0) continue;
+                            int iconId = (int)Math.Round(v);
+                            int x = (int)xOf(i);
+                            KBar kb = vis[i];
+                            int y;
+                            if (iconId == 2)
+                            {
+                                // 下箭头：顶边在最高价上方 4 + 2*size，整体在高点上方
+                                y = (int)yOf(kb.H) - 4 - size * 2;
+                                if (y < plotTop) y = plotTop;
+                            }
+                            else
+                            {
+                                // 上箭头：底边在最低价下方 4 + 2*size，整体在低点下方
+                                y = (int)yOf(kb.L) + 4 + size * 2;
+                                if (y > plotBottom) y = plotBottom;
+                            }
+                            DrawIcon(g, iconId, x, y, size);
+                        }
+                        continue;
+                    }
+                    else if (s.Kind == "bar")
                     {
                         using (var br = new SolidBrush(s.Color))
                         {
@@ -2194,6 +2389,20 @@ namespace StockPool
                     // 主图叠加指标（MA / CYC 等）：名称 + 光标处数值 —— 全部走同一套规则
                     foreach (ChartSeries s in _mainIndicators)
                     {
+                        if (s.Kind == "marker")
+                        {
+                            // 图例：画一个代表性图标（hover 时取当日图标序号，否则用 1=上箭头）
+                            int iconId = 1;
+                            if (hoverIdx >= 0 && s.Data != null && _wstart + hoverIdx < s.Data.Count)
+                            {
+                                double hv = s.Data[_wstart + hoverIdx];
+                                if (!double.IsNaN(hv) && hv != 0) iconId = (int)Math.Round(hv);
+                            }
+                            DrawIcon(g, iconId, x + 7, y + 5, 5);
+                            g.DrawString(s.Name, Font, b, x + 18, y);
+                            x += (int)(g.MeasureString(s.Name, Font).Width) + 14;
+                            continue;
+                        }
                         double v = double.NaN;
                         if (hoverIdx >= 0 && s.Data != null && _wstart + hoverIdx < s.Data.Count)
                             v = s.Data[_wstart + hoverIdx];

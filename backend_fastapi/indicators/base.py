@@ -54,7 +54,7 @@ from . import data
 REGISTRY: dict[str, "IndicatorMeta"] = {}
 
 VALID_PANELS = ("main", "lower", "none")      # 无 "right"，理由见模块 docstring
-VALID_KINDS = ("line", "bar", "dist")         # dist = 价格轴共享的分发布局（热力图），见 series_dist
+VALID_KINDS = ("line", "bar", "dist", "marker")  # dist=分发布局；marker=主图箭头信号（+1/-1/0）
 
 
 @dc.dataclass
@@ -76,6 +76,18 @@ def series_line(name: str, data) -> dict:
 def series_bar(name: str, data) -> dict:
     """构造一条「柱」型序列（标准化输出单元），如 MACD 柱、成交量。"""
     return {"name": name, "kind": "bar", "data": data}
+
+
+def series_marker(name: str, data) -> dict:
+    """构造一条「标记」型序列（标准化输出单元）。
+
+    用于主图图标信号：data 中每个值是一个【图标序号】（0 = 不画），由前端预设图标库渲染。
+    序号约定（前后端必须同步）：
+        0 = 无   1 = 上箭头(红)   2 = 下箭头(绿)   3 = 钱袋(金)
+        4 = 菱形(黄)   5 = 叉(警示红)   6 = 圆点(灰)
+    与 line/bar 一样按日期对齐，前端按序号调 DrawIcon 渲染，不画折线。
+    """
+    return {"name": name, "kind": "marker", "data": data}
 
 
 def series_dist(name: str, axis, data, side: str = "right") -> dict:
