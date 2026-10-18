@@ -447,14 +447,22 @@ namespace StockPool
                             _dlStatus.Text = "状态：未开始"; _dlCount.Text = ""; _dlErrors.Text = "失败原因将在这里显示。"; DlRenderButtons("", 0); });
                         return;
                     }
-                    var first = tasks[0] as Dictionary<string, object>;
+                    // 选要展示的任务：**正在运行 > 排队中 > 已暂停**。
+                    // 原来把三者同等对待取「第一个匹配」；后端列表里若「已暂停」排在
+                    // 「运行中」之前，就会挑中暂停任务——界面显示「已暂停」却忽略了真正
+                    // 占用下载通道的运行中任务，用户点操作却被「请先结束当前运行的任务」
+                    // 拒绝，显得状态自相矛盾。
+                    Dictionary<string, object> pickRun = null, pickQueue = null, pickPaused = null;
                     foreach (var item in tasks)
                     {
                         var candidate = item as Dictionary<string, object>;
+                        if (candidate == null) continue;
                         var status = Convert.ToString(J.GetFrom(candidate, "status"));
-                        if (status == "running" || status == "queued" || status == "paused")
-                        { first = candidate; break; }
+                        if (status == "running") { pickRun = candidate; break; }
+                        if (status == "queued" && pickQueue == null) pickQueue = candidate;
+                        if (status == "paused" && pickPaused == null) pickPaused = candidate;
                     }
+                    var first = pickRun ?? pickQueue ?? pickPaused ?? (tasks[0] as Dictionary<string, object>);
                     if (first == null) return;
                     var id = Convert.ToString(J.GetFrom(first, "id") ?? "");
                     if (string.IsNullOrEmpty(id)) return;
