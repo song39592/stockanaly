@@ -327,6 +327,9 @@ namespace StockPool
             _stockChip.Owner = _stockKline;
             // 光标跟随：光标在 K 线上左右移动 → 筹码窗口切到那一天的分布
             _stockKline.OnHoverDate = delegate (string d) { if (_stockChip != null) _stockChip.SetCursorDate(d); };
+            // 窗口平移（键盘光标到边缘 auto-pan / 拖动）→ 筹码按新的可见窗口重算，
+            // 否则平移到更早日期后，光标日期会落到筹码快照之外（对不上 / 显示边界帧）。
+            _stockKline.OnViewChanged = delegate { ScheduleChipReload(); };
             _stockKline.PriceAxisChanged += delegate { if (_stockChip != null) _stockChip.Invalidate(); };
             _stockChip.BackColorChanged += delegate { _stockChip.Invalidate(); };
 
@@ -1264,7 +1267,21 @@ namespace StockPool
             {
                 if (string.IsNullOrEmpty(date) || _dateIdx.Count == 0) return;
                 int idx;
-                if (!_dateIdx.TryGetValue(date, out idx)) return;
+                if (!_dateIdx.TryGetValue(date, out idx))
+                {
+                    // 日期不在快照内（光标落到快照区间之外，如滚轮放大后、或筹码与 K 线
+                    // 可见范围暂不一致）：二分夹到**最近的边界帧**，而不是保持旧帧不动——
+                    // 否则早于快照起点的日期会一直停在同一个帧，看起来「某日之前筹码峰不变」。
+                    // _dates 为升序（YYYY-MM-DD，字典序即时间序）。
+                    int lo = 0, hi = _dates.Count - 1, ans = 0;
+                    while (lo <= hi)
+                    {
+                        int mid = (lo + hi) >> 1;
+                        if (string.CompareOrdinal(_dates[mid], date) <= 0) { ans = mid; lo = mid + 1; }
+                        else hi = mid - 1;
+                    }
+                    idx = ans;
+                }
                 if (idx == _frame) return;
                 _frame = idx;
                 Invalidate();
@@ -1578,6 +1595,9 @@ namespace StockPool
             private int _wstart;                          // 当前可见窗口的全局起始索引（图例取光标数值用）
             public string Period = "day";                      // K 线周期（图例显示 日K / 周K / 月K）
             public Action<int> OnRangeChanged;                 // 缩放改变范围时通知外部刷新高亮
+            /// <summary>可见窗口**平移**（_offset 变、_range 不变，如键盘光标到边缘 auto-pan / 拖动）时通知外部，
+            /// 让右侧筹码按新的可见窗口重算——否则平移到更早日期后，光标会落到筹码快照之外对不上。</summary>
+            public Action OnViewChanged;
             /// <summary>光标所在 K 线的日期（移出时保留最后一次）——右侧筹码窗口据此切换到那一天。</summary>
             public Action<string> OnHoverDate;
             private string _hoverDate = null;
@@ -1750,6 +1770,7 @@ namespace StockPool
                     _hoverIndex = -1;
                     _tip.Hide(this);
                     Invalidate();
+                    if (OnViewChanged != null) OnViewChanged();   // 拖动平移：让筹码按新窗口重算（前端防抖）
                     return;
                 }
 
@@ -1811,6 +1832,7 @@ namespace StockPool
                 int total = _bars.Count;
                 if (_hoverIndex < 0) _hoverIndex = n - 1;        // 首次按键从最新一根起步
                 int next = _hoverIndex + delta;
+                int oldOffset = _offset;
                 if (next < 0)
                 {   // 已在最左：把窗口往早期挪，露出更老的 K 线
                     if (_offset < total - n) _offset = Math.Min(_offset + 1, total - n);
@@ -1823,6 +1845,7 @@ namespace StockPool
                 }
                 _hoverIndex = next;
                 Invalidate();
+                if (_offset != oldOffset && OnViewChanged != null) OnViewChanged();   // 平移了：让筹码按新窗口重算
                 PublishHoverDate();
                 ShowHoverTip();
             }
@@ -1886,6 +1909,18 @@ namespace StockPool
                 int off = Math.Max(0, Math.Min(_offset, total - n));
                 start = Math.Max(0, total - n - off);
                 count = Math.Min(n, total - start);
+            }
+
+            /// <summary>当前可见窗口起点到最新一根之间的根数（= total - start，含被平移藏到右侧的最新段）。
+            /// 右侧筹码窗口用它作 days，frames 才能覆盖 K 线当前可见窗口（含键盘 / 拖动平移到更早的部分），
+            /// 避免光标日期早于筹码快照起点时对不上。</summary>
+            public int ViewBarsToLatest()
+            {
+                int total = _bars.Count;
+                if (total <= 0) return 0;
+                int s, c;
+                VisibleWindow(out s, out c);
+                return total - s;
             }
 
             private List<KBar> VisibleBars()

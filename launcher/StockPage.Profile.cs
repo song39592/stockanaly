@@ -305,9 +305,14 @@ bool ok = J.IsOk(j);
             int round = _stockRound;
             _stockChip.SetStatus("筹码计算中…", false);
             string adjust = string.IsNullOrEmpty(_stockAdjust) ? "qfq" : _stockAdjust;
+            // days 覆盖 K 线**当前可见窗口到最新**的根数（含 auto-pan / 拖动平移到更早的部分），
+            // 这样筹码 frames 一定包含光标可能落到的每一个可见交易日；取不到再退回范围根数。
+            int span = 0;
+            if (_stockKline != null) { try { span = _stockKline.ViewBarsToLatest(); } catch { span = 0; } }
+            if (span <= 0) span = _stockRange;
             string url = "http://127.0.0.1:8000/api/chip/dist?code=" + code
                        + "&adjust=" + adjust
-                       + "&days=" + (_stockRange > 0 ? _stockRange.ToString() : "0")
+                       + "&days=" + (span > 0 ? span.ToString() : "0")
                        + "&bins=80";
             if (!string.IsNullOrEmpty(_stockChipFormulaId))
                 url += "&formula=" + Uri.EscapeDataString(_stockChipFormulaId);

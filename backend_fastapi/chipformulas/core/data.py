@@ -94,6 +94,24 @@ def load_input(code: str, start: str | None = None, end: str | None = None,
     """
     period = normalize(period)
     full = ind_data.get_ohlcv(code, start, end, adjust=adjust, period=period)
+    # 剔除「数据开头连续相同的占位段」：数据源补齐 / 重复出来的恒定 bar
+    # （即便 volume>0，只要 OHLC 整天不变）会让这段区间的筹码饱和成恒定峰
+    # （表现为某日之前的筹码峰始终不变）。仅当开头有**较长**恒定段（>=5 天）才剔除，
+    # 以免误删真实首日或真实短期横盘。
+    if len(full) > 5:
+        c0 = float(full["close"].iloc[0])
+        close_arr = full["close"].astype(float).to_numpy()
+        diff0 = np.absolute(close_arr - c0) > 1e-6
+        idxs = np.where(diff0)[0]
+        if len(idxs):
+            L = int(idxs[0])
+            if L >= 5 and L < len(full):
+                full = full.iloc[L:]
+    # 剔除无成交的占位行（volume<=0）：这类行不参与筹码累积，与上一步互补。
+    vol = full["volume"].astype(float)
+    valid = full[vol > 0]
+    if len(valid) >= 2:                 # 兜底：极端情况下不丢数据
+        full = valid
     n_all = len(full)
     win = int(days) if days and int(days) > 0 else n_all
     win = max(1, min(win, n_all))
