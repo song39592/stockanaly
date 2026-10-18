@@ -404,17 +404,33 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
     source = options.get("source") or SOURCE_ONLINE
 
     begin, stop = None, None
+    no_early_gap = False
     if mode == MODE_FULL:
         split = _option_date(options, "split_date") or _split_date()
         oldest = _option_date(options, "start_date") or _default_start_date()
         if phase == 1:
             begin, stop = max(oldest, split), None
         else:
-            begin, stop = oldest, split        # 远：起始日 → 分界点
+            begin, stop = oldest, split        # 更早段：起始日 → 分界点
+            # 增量补更早历史：库里已有更晚起步的数据时，**只补「更早缺口段」**。
+            # 原实现固定拉 [起始日 → 分界点]，导致每次把起始日往前挪一格，
+            # 库里已有的近段（如 2021+）就被整段重复下载一遍，浪费流量和时间。
+            # 这里把 end 裁到「库内最早日期 − 1 天」，只下载库里还缺的那段；
+            # 库内最早已不晚于起始日 → 没有更早缺口，本阶段直接算完成。
+            have = price_store.earliest_bar_date(code, "raw")
+            if have:
+                gap_end = dt.date.fromisoformat(have) - dt.timedelta(days=1)
+                if gap_end < begin:
+                    no_early_gap = True
+                else:
+                    stop = gap_end
 
     try:
         errors: list[str] = []
         if runtime.stop.is_set():
+            return
+        if no_early_gap:
+            download_store.finish_code(task_id, seq, ok=True)   # 无更早缺口：算完成（不算失败）
             return
         # 库里已有足量历史 → 这只不动作（增量任务本身只拉最近几天，不需要这道判断）
         if mode != MODE_INCREMENTAL and _skip_if_covered(task_id, code, options, source):
