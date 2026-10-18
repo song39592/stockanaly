@@ -340,6 +340,28 @@ def code_latest_dates(adjust: str = "raw") -> dict[str, str]:
     return result
 
 
+def code_earliest_dates(adjust: str = "raw") -> dict[str, str]:
+    """**一次性**取回每只已下载股票的最早日 K 日期 {code: YYYY-MM-DD}。
+
+    `code_latest_dates` 的对偶版本，同样是「每个分片一次聚合 + 内存取全局最小」，
+    不能逐只调 `earliest_bar_date`。成本是一次全表扫描，调用方需自行缓存。
+    """
+    store_adjust = _store_adjust(adjust)
+    result: dict[str, str] = {}
+    for year in _shard_years():
+        with db.connect(db.bars_db(year)) as conn:
+            for row in conn.execute(
+                "SELECT code, MIN(trade_date) AS d FROM daily_bars "
+                "WHERE adjust=? GROUP BY code", (store_adjust,)):
+                day = row["d"]
+                if not day:
+                    continue
+                code = row["code"]
+                if code not in result or day < result[code]:
+                    result[code] = day
+    return result
+
+
 def _digest_is_broken(conn, code: str) -> bool:
     """该股**既有**指纹是否已不匹配（供写入前判定）。无指纹记录时视为正常。
 

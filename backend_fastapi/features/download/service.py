@@ -410,6 +410,16 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
         oldest = _option_date(options, "start_date") or _default_start_date()
         if phase == 1:
             begin, stop = max(oldest, split), None
+            # 近期阶段同样按库内已有数据裁剪。库内最新已到 2026-10 时，
+            # 若仍固定「分界点(2021-10) → 今天」拉一遍，等于把 2021~今天 整段重下；
+            # 用户把起始年份往前挪（如 2021→2020）就会触发，表现为「明明已有 21~26，
+            # 却又从 20 下到 26」。这里把起点抬到「库内最新 − 重叠天数」，只补尾部增量；
+            # 库内数据比用户起点还旧时由 max(oldest, …) 兜底为用户起点，避免漏掉
+            # [库内最新, 用户起点] 之间的缺口段。
+            have = price_store.latest_bar_date(code, "raw")
+            if have:
+                tail = dt.date.fromisoformat(have) - dt.timedelta(days=price_service.OVERLAP_DAYS)
+                begin = max(oldest, tail)
         else:
             begin, stop = oldest, split        # 更早段：起始日 → 分界点
             # 增量补更早历史：库里已有更晚起步的数据时，**只补「更早缺口段」**。
@@ -435,6 +445,16 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
         # 库里已有足量历史 → 这只不动作（增量任务本身只拉最近几天，不需要这道判断）
         if mode != MODE_INCREMENTAL and _skip_if_covered(task_id, code, options, source):
             return
+        # 增量（每日自动更新）只负责「补最新」：库里已到最近应有交易日 → 零请求跳过。
+        # 兜底作用：`_kick_auto_update` 已改成只排真正落后的股票，但旧任务（创建时
+        # 就把全市场排进队列）或运行途中被别处补齐的股票，仍会走到这里；不跳过的话
+        # 每只都要发一次 14 天重叠请求，明明没新数据也要跑十几分钟。
+        if mode == MODE_INCREMENTAL:
+            expected = _expected_data_day()
+            have_latest = price_store.latest_bar_date(code, "raw")
+            if expected and have_latest and have_latest >= expected:
+                download_store.finish_code(task_id, seq, ok=True)
+                return
         if source == SOURCE_TDX:
             # 本机通达信是唯一来源：有几年的日线就同步几年，不联网补更早的历史
             _import_tdx_bars(_tdx_root(options), code)
@@ -611,6 +631,60 @@ def _is_trade_day(day: dt.date) -> bool:
     return day.weekday() < 5
 
 
+def _median_day(days: list[str]) -> str | None:
+    """一组 YYYY-MM-DD 的中位数（ISO 字符串排序即日期序，可直接排）。"""
+    if not days:
+        return None
+    ordered = sorted(str(day) for day in days if day)
+    if not ordered:
+        return None
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return min(ordered[mid - 1], ordered[mid])
+
+
+# 覆盖区间与「陈旧度」都要用全库聚合，同一轮刷新里复用同一份结果：
+SPAN_CACHE_TTL = 60.0
+_span_cache: dict[str, tuple[float, dict[str, str]]] = {}
+
+
+def _span_dates(kind: str, loader) -> dict[str, str]:
+    """`code_latest_dates` / `code_earliest_dates` 的带缓存包装。
+
+    两者都是全表聚合（几千只 × 各年份分片），而「陈旧度」和「覆盖区间」
+    在一次刷新里都要用到 latest。缓存 TTL 很短：只为消掉同一次刷新里的
+    重复扫描，代价是下载过程中覆盖区间最多滞后 SPAN_CACHE_TTL 秒。
+    """
+    hit = _span_cache.get(kind)
+    now = time.time()
+    if hit and now - hit[0] < SPAN_CACHE_TTL:
+        return hit[1]
+    try:
+        result = loader()
+    except Exception:                             # noqa: BLE001 - 聚合失败按无数据处理
+        return {}
+    _span_cache[kind] = (now, result)
+    return result
+
+
+def _coverage_span() -> tuple[str | None, str | None]:
+    """**多数股票都覆盖到的区间**（下载页展示用）。
+
+    不用「库里最早 / 最晚」，那会被一只极端股票带偏：某只 2005 年上市的
+    老票会把起点拉到 2005，看起来像「全库覆盖 20 年」，其实多数票没有。
+    也不用交集（交集会被那一只最短的票压到很窄）。因此两端各取**中位数**：
+    一半股票比它早、一半比它晚，代表「典型水平」的覆盖边界。
+    """
+    earliest = _span_dates("earliest", price_store.code_earliest_dates)
+    latest = _span_dates("latest", price_store.code_latest_dates)
+    shared = set(earliest) & set(latest)
+    if not shared:
+        return None, None
+    return (_median_day([earliest[code] for code in shared]),
+            _median_day([latest[code] for code in shared]))
+
+
 def _downloaded_staleness() -> tuple[int, int, list[str], str | None]:
     """(已下载只数, 数据陈旧的只数, 陈旧示例, 库里最新的日K日期)。
 
@@ -621,7 +695,7 @@ def _downloaded_staleness() -> tuple[int, int, list[str], str | None]:
     最多让阈值偏松 4 天（长假后连续几个交易日都被判成「不陈旧」）。
     现改为按 `_expected_data_day()`给出的应有日期逐票判定。
     """
-    latest = price_store.code_latest_dates()
+    latest = _span_dates("latest", price_store.code_latest_dates)
     if not latest:
         return 0, 0, [], None
     expected = _expected_data_day()
@@ -762,9 +836,20 @@ def _find_pending_auto_task() -> str | None:
 
 
 def _kick_auto_update() -> str | None:
-    """给「库里已下载的股票」补最新数据（每日自动更新）。"""
-    codes = sorted(price_store.code_latest_dates())
-    if not codes or _has_alive_task():
+    """给「库里已下载的股票」补最新数据（每日自动更新）。
+
+    只排「库内最新 < 应有交易日」的股票：都已最新时**根本不建任务**。
+    原先固定把全部已下载股票排进队列，于是每天都要把 5585 只全程巡检一遍
+    （每只都发一次 14 天重叠请求），用户看到的就像「增量刚补完又开始重新下了」；
+    而且只要上一个任务没跑完（重启/暂停），`auto_last_run` 就不会登记，重启后再排一遍。
+    """
+    latest = price_store.code_latest_dates()
+    if not latest or _has_alive_task():
+        return None
+    expected = _expected_data_day()
+    codes = sorted(code for code, day in latest.items()
+                   if not expected or str(day) < expected)
+    if not codes:
         return None
     _ensure_disk_space(len(codes), MODE_INCREMENTAL)
     options = _options_for(MODE_INCREMENTAL, concurrency=_idle_concurrency())
@@ -945,11 +1030,29 @@ def start_task(*, scope: str = "all", source: str = SOURCE_ONLINE,
     return task_id
 
 
+def _requested_span(task: dict[str, Any]) -> tuple[str | None, str | None]:
+    """这个任务**请求下载的时间段**（下载页展示用），空值表示不限/增量。
+
+    完整历史：从 options 里的起始日到今天；增量模式只补最近，不设下界，
+    起止都返回 None，前端就显示「增量（仅补最近）」而不是编一个日期。
+    """
+    options = task.get("options") or {}
+    if str(options.get("mode") or MODE_FULL) != MODE_FULL:
+        return None, None
+    begin = _option_date(options, "start_date")
+    if begin is None:
+        return None, None
+    return begin.isoformat(), dt.date.today().isoformat()
+
+
 def _decorate(task: dict[str, Any]) -> dict[str, Any]:
     done = task["completed"] + task["failed"]
     task["percent"] = round(done * 100.0 / max(1, task["total"]), 1)
     task["remaining"] = download_store.remaining(task["id"])
     task["failures"] = download_store.failures(task["id"])
+    requested_begin, requested_end = _requested_span(task)
+    task["requested_begin"] = requested_begin
+    task["requested_end"] = requested_end
     with _runtimes_lock:
         runtime = _runtimes.get(task["id"])
     task["alive"] = bool(runtime is not None and runtime.manager is not None
@@ -1063,12 +1166,15 @@ def auto_state(force: bool = False) -> dict[str, Any]:
         cached["cached"] = True
         return cached
     downloaded, stale, examples, latest_date = _downloaded_staleness()
+    cover_begin, cover_end = _coverage_span()
     state = dict(settings_view())
     state.update({
         "downloaded": downloaded,
         "stale": stale,
         "stale_examples": examples,
         "latest_date": latest_date,
+        "cover_begin": cover_begin,
+        "cover_end": cover_end,
         "eligible": _auto_eligible(downloaded, stale),
         "freshness_days": FRESHNESS_DAYS,
         "checked_at": db.now_iso(),
