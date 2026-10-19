@@ -29,6 +29,17 @@ from features.market.service import _ak
 _CACHE: dict[str, tuple[float, Any]] = {}
 _TTL = 6 * 3600                      # 股东 / 行业这类低频数据的缓存时长（秒）
 
+# 锁仓系数的落盘缓存（见 `core.price_store.lockup_cache`）：
+#  · 股东数据按**季度**披露，缓存按「报告期」判新鲜，而不是死 TTL；
+#  · `_LOCKUP_DISCLOSURE_LAG_DAYS` 是法定披露时限（季报约 1 个月、年报 4 个月）再留的余量，
+#    用来算「到今天为止应已出齐的最新报告期」；
+#  · `_LOCKUP_MIN_REFRESH_DAYS` 只在「缓存报告期旧于应有水平」时生效（新季已出、
+#    或该股数据源只到更早的期），限制重试频率，避免全市场天天打东财接口；
+#    报告期已最新的记录**一次请求都不发**，整个季度直接复用。
+_LOCKUP_DISCLOSURE_LAG_DAYS = 40
+_LOCKUP_MIN_REFRESH_DAYS = 7
+_LOCKUP_MIN_PCT = 5.0               # 缓存表不区分 min_pct，只对举牌线口径生效
+
 
 def _cached(key: str, producer) -> Any:
     now = time.time()
@@ -232,6 +243,85 @@ def free_top_holders(code: str) -> dict:
     return {"period": period, "items": items, "error": None}
 
 
+def expected_lockup_period(today: dt.date | None = None) -> str:
+    """到今天为止、按法定披露时限**应已出齐**的最新报告期（YYYYMMDD）。
+
+    用于判断落盘缓存是否过期：缓存里的 `period` 比它旧，就说明新一季
+    十大流通股东已经披露、该重取了。
+
+    取「季末 + 披露时限 ≤ 今天」的最近一个季末：季报法定披露期约 1 个月
+    （年报 4 个月），这里统一留 40 天余量。披露空窗期（如 4 月初年报还没出齐）
+    会返回上一个已出齐的报告期，此时旧缓存仍然有效，不会触发无谓重取。
+    """
+    day = today or dt.date.today()
+    lag = dt.timedelta(days=_LOCKUP_DISCLOSURE_LAG_DAYS)
+    for period in _report_periods(8):
+        try:
+            end = dt.datetime.strptime(period, "%Y%m%d").date()
+        except ValueError:
+            continue
+        if end + lag <= day:
+            return period
+    return _report_periods(8)[-1]
+
+
+def _lockup_age_days(stamp: Any) -> float | None:
+    """`lockup_cache.updated_at`（`db.now_iso()`，带时区的 ISO 串）距今天数。
+
+    解析不了返回 None（调用方按「未知」处理）。刻意不用 `strptime` 固定格式：
+    `now_iso()` 产出的是 `2026-10-19T07:48:41.424375+00:00`，按
+    `%Y-%m-%d %H:%M:%S` 解析会直接抛错，把缓存误判成永久过期。
+    """
+    try:
+        moment = dt.datetime.fromisoformat(str(stamp or ""))
+    except (TypeError, ValueError):
+        return None
+    if moment.tzinfo is not None:
+        moment = moment.astimezone().replace(tzinfo=None)
+    return (dt.datetime.now() - moment).total_seconds() / 86400.0
+
+
+def _lockup_stale(row: dict[str, Any] | None) -> bool:
+    """落盘的锁仓记录是否已过期（需要重取）。
+
+    报告期已是最新 → **直接复用，一次请求都不发**（本季内数据不会再变）。
+
+    报告期旧于「应已出齐」的水平时分两种：新一季确实已披露（该重取），
+    或该股数据源只到更早的期（披露空窗 / 数据源缺期，重取也是同样结果）。
+    后者无法从记录里区分，故用 `_LOCKUP_MIN_REFRESH_DAYS` 限制重试频率，
+    避免全市场天天为空窗期打东财接口。
+    """
+    if not row:
+        return True
+    period = str(row.get("period") or "")
+    if not period:
+        return True
+    if period >= expected_lockup_period():
+        return False
+    age = _lockup_age_days(row.get("updated_at"))
+    return age is None or age >= _LOCKUP_MIN_REFRESH_DAYS
+
+
+def _fetch_lockup(code: str, min_pct: float) -> dict:
+    """真实取数（akshare 东财），并写进程内缓存；**不读盘、不落盘**。"""
+    src = free_top_holders(code)
+    items = src.get("items") or []
+    locked = [it for it in items
+              if it.get("pct") is not None and float(it["pct"]) > float(min_pct)]
+    ratio = sum(float(it["pct"]) for it in locked) / 100.0
+    ratio = min(max(ratio, 0.0), 0.95)          # 防御：≥95% 无意义，且 1-r 不能为 0
+    result = {
+        "period": src.get("period"),
+        "ratio": ratio,
+        "factor": (1.0 / (1.0 - ratio)) if ratio > 0 else 1.0,
+        "holders": [{"name": it.get("name"), "pct": it.get("pct")} for it in locked],
+        "error": src.get("error"),
+    }
+    if not result.get("error"):                 # 失败不缓存，留待下次重试
+        _CACHE[f"lockup:{code}:{min_pct}"] = (time.time(), result)
+    return result
+
+
 def lockup_ratio(code: str, min_pct: float = 5.0) -> dict:
     """锁仓占流通股比例 r 与修正系数 1/(1-r)（供筹码峰衰减使用）。
 
@@ -245,33 +335,60 @@ def lockup_ratio(code: str, min_pct: float = 5.0) -> dict:
         系数 = 1 / (1 - r)        # 例：15.00% + 9.35% → 1/(1-24.35%) = 1.32
 
     返回 {period, ratio(小数), factor, holders(被计入户明细), error}。
-    取数失败不缓存（下次可重试），成功缓存 TTL 6 小时（股东数据一季度才变）。
+
+    取数分三级：进程内缓存（6h）→ **落盘缓存**（`price_store.lockup_cache`，
+    按报告期判新鲜，季度数据可跨重启复用）→ akshare 东财。取数失败不缓存，
+    下次可重试。
     """
     key = f"lockup:{code}:{min_pct}"
-
-    def produce() -> dict:
-        src = free_top_holders(code)
-        items = src.get("items") or []
-        locked = [it for it in items
-                  if it.get("pct") is not None and float(it["pct"]) > float(min_pct)]
-        ratio = sum(float(it["pct"]) for it in locked) / 100.0
-        ratio = min(max(ratio, 0.0), 0.95)          # 防御：≥95% 无意义，且 1-r 不能为 0
-        return {
-            "period": src.get("period"),
-            "ratio": ratio,
-            "factor": (1.0 / (1.0 - ratio)) if ratio > 0 else 1.0,
-            "holders": [{"name": it.get("name"), "pct": it.get("pct")} for it in locked],
-            "error": src.get("error"),
-        }
-
     now = time.time()
     hit = _CACHE.get(key)
     if hit is not None and now - hit[0] < _TTL:
         return hit[1]
-    result = produce()
-    if not result.get("error"):                     # 失败不缓存，留待下次重试
+
+    # 落盘缓存只覆盖举牌线口径：表里没存 min_pct，别的阈值无从判断是否同源
+    disk_ok = float(min_pct) == _LOCKUP_MIN_PCT
+    stored = price_store.get_lockup(code) if disk_ok else None
+    if stored is not None and not _lockup_stale(stored):
+        result = {"period": stored["period"], "ratio": stored["ratio"],
+                  "factor": stored["factor"], "holders": [], "error": None}
         _CACHE[key] = (now, result)
+        return result
+
+    result = _fetch_lockup(code, min_pct)
+    if not result.get("error") and disk_ok and result.get("period"):
+        price_store.put_lockup(code, result["period"], result["ratio"], result["factor"])
     return result
+
+
+def sync_lockup(code: str, min_pct: float = _LOCKUP_MIN_PCT,
+                force: bool = False) -> dict[str, Any]:
+    """采集锁仓系数并落盘（历史数据下载 / 单只补齐用）。
+
+    缓存里已是最新报告期 → **零请求**返回；`force=True` 强制重采（补救用）。
+
+    返回 {ok, cached, period, ratio, factor} 或 {ok=False, errors}。
+    """
+    key = f"lockup:{code}:{min_pct}"
+    _CACHE.pop(key, None)                      # 让本次判定只信落盘与数据源
+    disk_ok = float(min_pct) == _LOCKUP_MIN_PCT
+    if not force and disk_ok:
+        stored = price_store.get_lockup(code)
+        if stored is not None and str(stored.get("period") or "") >= expected_lockup_period():
+            result = {"period": stored["period"], "ratio": stored["ratio"],
+                      "factor": stored["factor"], "holders": [], "error": None}
+            _CACHE[key] = (time.time(), result)
+            return {"ok": True, "cached": True, "period": result["period"],
+                    "ratio": result["ratio"], "factor": result["factor"]}
+
+    result = _fetch_lockup(code, min_pct)
+    if result.get("error"):
+        return {"ok": False, "cached": False,
+                "errors": [str(result["error"]) or "未取到十大流通股东数据"]}
+    if disk_ok and result.get("period"):
+        price_store.put_lockup(code, result["period"], result["ratio"], result["factor"])
+    return {"ok": True, "cached": False, "period": result["period"],
+            "ratio": result["ratio"], "factor": result["factor"]}
 
 
 def company_info(code: str) -> dict:

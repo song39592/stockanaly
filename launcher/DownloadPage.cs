@@ -30,7 +30,9 @@ namespace StockPool
         private Button _dlBtnStart, _dlBtnToggle, _dlBtnRetry;
         private CheckBox _dlAuto, _dlIdle;
         private Label _dlAutoNote;
-        private bool _dlSettingsLoading;          // 程序回填控件值时抑制保存事件
+        private GroupBox _dlLockupGroup;         // 锁仓系数区块（有日K数据才显示）
+        private Label _dlLockupNote;
+        private Button _dlLockupBtn;        private bool _dlSettingsLoading;          // 程序回填控件值时抑制保存事件
         private GroupBox _dlTdxGroup;             // 本地通达信区块（配置有效才显示）
         private Label _dlTdxNote;
         private Button _dlTdxBtn;
@@ -38,7 +40,7 @@ namespace StockPool
         private string _dlTaskId = "";
         private string _dlLastStatus = "";
         private int _dlRound;                 // 本轮请求编号：上一轮的慢回调不再覆盖本轮
-        private int _dlHintRound, _dlSettingsRound;
+        private int _dlHintRound, _dlSettingsRound, _dlLockupRound;
         private bool _dlSavingSettings, _dlRefreshing, _dlCommandBusy;
 
         /// <summary>历史数据下载：① 范围与参数 → ② 控制与进度。</summary>
@@ -128,7 +130,25 @@ namespace StockPool
                 + "两者同时只有一个在跑。"))));
             AddRow(stack, g2);
 
-            // ---- ③ 本地通达信（配置了该目录才会显示）----
+            // ---- ③ 锁仓系数（十大流通股东 → r / L）----
+            // 筹码分布与筹码峰（PEAK）的衰减都要用它做锁仓修正。数据**按季度披露**，
+            // 取数走东财（慢、限流），所以落盘成库、按报告期判新鲜；
+            // 这里只报覆盖情况 + 给一个补采入口，真正的取数在后台任务里。
+            TableLayoutPanel b3;
+            var g3 = Group("锁仓系数（十大流通股东）", out b3);
+            _dlLockupNote = Mute(Lbl("正在检测锁仓系数覆盖…"));
+            _dlLockupNote.AutoSize = false;
+            _dlLockupNote.Width = 700;
+            _dlLockupNote.Height = 34;
+            AddRow(b3, Row(_dlLockupNote));
+            _dlLockupBtn = MiniBtn("补采锁仓系数", delegate { DlStartLockup(); }, 130);
+            AddRow(b3, Row(_dlLockupBtn));
+            AddRow(b3, Row(Mute(Lbl("只补「十大流通股东 → 锁仓系数」，不打日K；已是最新报告期的股票"
+                + "不会重复请求。勾选「每天自动更新数据」后，新季报出齐会自动补采。"))));
+            _dlLockupGroup = g3;
+            AddRow(stack, g3);
+
+            // ---- ④ 本地通达信（配置了该目录才会显示）----
             TableLayoutPanel b4;
             var g4 = Group("同步通达信历史数据（本地）", out b4);
             _dlTdxNote = Mute(Lbl("未检测到通达信目录：到「设置」页配置后出现本功能"));
@@ -294,8 +314,109 @@ namespace StockPool
         {
             DlUpdateHint();
             DlLoadAutoState(false);
+            DlLoadLockupState(false);
             DlRefreshTdx();
             DlPickLatestTask();
+        }
+
+        // ------------------------------------------------- 锁仓系数（覆盖状态 + 补采）
+
+        /// <summary>拉一次 /lockup/state：报告期、已最新 / 待补采只数、上次写入时间。</summary>
+        private void DlLoadLockupState(bool refresh)
+        {
+            if (_dlLockupNote == null) return;
+            int round = ++_dlLockupRound;
+            string query = "/lockup/state" + (refresh ? "?refresh=true" : "");
+            var th = new Thread(delegate()
+            {
+                string resp;
+                try
+                {
+                    if (!Probe(DlApi + query, 20000, out resp)) return;
+                    var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    Ui(delegate { if (round == _dlLockupRound) DlRenderLockup(root); });
+                }
+                catch { }
+            });
+            th.IsBackground = true;
+            th.Start();
+        }
+
+        private void DlRenderLockup(Dictionary<string, object> root)
+        {
+            if (_dlLockupNote == null || _dlLockupBtn == null) return;
+            var map = J.Map(J.GetFrom(root, "lockup"));
+            if (map == null) return;
+            int total = J.Int(J.GetFrom(map, "total"));
+            if (total == 0)
+            {
+                // 锁仓系数只在「有日K才算得出换手率」的票上有意义
+                _dlLockupNote.Text = "库里还没有日K数据：先下载历史行情，锁仓系数才有意义。";
+                _dlLockupBtn.Enabled = false;
+                return;
+            }
+            int fresh = J.Int(J.GetFrom(map, "fresh"));
+            int stale = J.Int(J.GetFrom(map, "stale"));
+            int missing = J.Int(J.GetFrom(map, "missing"));
+            string expected = Convert.ToString(J.GetFrom(map, "expected") ?? "");
+            string updated = Convert.ToString(J.GetFrom(map, "updated_at") ?? "");
+            _dlLockupBtn.Enabled = _dlLastStatus != "running" && _dlLastStatus != "queued";
+            string when = updated.Length >= 16 ? updated.Substring(0, 16).Replace('T', ' ') : updated;
+            _dlLockupNote.Text = string.Format(
+                "报告期 {0}：已最新 {1} / {2} 只，待补采 {3} 只（其中从未采集 {4} 只）{5}",
+                expected, fresh, total, stale + missing, missing,
+                when.Length > 0 ? "　上次更新 " + when : "");
+        }
+
+        /// <summary>补采锁仓系数：走同一个 /start，只是 kind=lockup（只取股东数据，不打日K）。</summary>
+        private void DlStartLockup()
+        {
+            if (_dlCommandBusy) return;
+            if (_dlLastStatus == "running" || _dlLastStatus == "queued")
+            {
+                Msg("已有任务正在运行，请先暂停或等它结束");
+                return;
+            }
+            var body = new Dictionary<string, object>();
+            body["scope"] = "all";
+            body["kind"] = "lockup";
+            body["mode"] = "incremental";
+            body["concurrency"] = 4;
+            body["rate_limit"] = 3.0;          // 与日K同一档限速：东财接口限流更严
+            body["with_reference"] = false;
+            string json = new JavaScriptSerializer().Serialize(body);
+
+            if (_dlLockupBtn != null) _dlLockupBtn.Enabled = false;
+            _dlCommandBusy = true;
+            ++_dlRound;
+            _dlStatus.Text = "状态：正在启动锁仓系数补采…";
+            var th = new Thread(delegate()
+            {
+                string resp;
+                // 队列是按「库里已下载日线的股票」过滤出来的，不用先拉 A 股清单，很快
+                if (!PostJson(DlApi + "/start", json, 60000, out resp))
+                {
+                    var err = JsonValue(resp, "detail");
+                    if (string.IsNullOrEmpty(err)) err = resp;
+                    Ui(delegate
+                    {
+                        _dlCommandBusy = false;
+                        if (_dlLockupBtn != null) _dlLockupBtn.Enabled = true;
+                        Msg("启动失败：" + err);
+                        DlRenderButtons(_dlLastStatus, 0);
+                    });
+                    return;
+                }
+                var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                Ui(delegate
+                {
+                    _dlCommandBusy = false;
+                    if (_dlLockupBtn != null) _dlLockupBtn.Enabled = true;
+                    DlRenderTask(root);
+                });
+            });
+            th.IsBackground = true;
+            th.Start();
         }
 
         // ------------------------------------------------- 本地通达信
@@ -537,10 +658,13 @@ namespace StockPool
             _dlLastStatus = status;
             // 来源决定用词：本地通达信是「同步」（读本机文件、不联网），在线才是「下载」
             var source = Convert.ToString(J.GetFrom(J.GetFrom(task, "options"), "source") ?? "");
+            // 任务类型：kind=lockup 是「只补锁仓系数」，词要与日K任务区分开，
+            // 否则用户看到「下载中」会以为在拉日K。
+            var kind = Convert.ToString(J.GetFrom(J.GetFrom(task, "options"), "kind") ?? "");
 
             int value = (int)Math.Round(percent * 10);
             _dlBar.Value = Math.Max(0, Math.Min(_dlBar.Maximum, value));
-            _dlStatus.Text = "状态：" + DlStatusText(status, source)
+            _dlStatus.Text = "状态：" + DlStatusText(status, source, kind)
                 + (string.IsNullOrEmpty(_dlTaskId) ? "" : "　任务 " + _dlTaskId);
             int skipped = J.Int(J.GetFrom(task, "skipped"));
             var extra = "";
@@ -553,11 +677,21 @@ namespace StockPool
             // 所以必须加说明，否则会被误读成「已有 2021~2026 还要从 2020 重下一遍」。
             string reqBegin = Convert.ToString(J.GetFrom(task, "requested_begin") ?? "");
             string reqEnd = Convert.ToString(J.GetFrom(task, "requested_end") ?? "");
-            _dlRange.Text = (status == "running" || status == "queued" || status == "paused")
-                ? (reqBegin.Length > 0 && reqEnd.Length > 0
-                    ? "本次请求区间：" + reqBegin + " ~ " + reqEnd + "（按库内缺口增量补齐，已有区间不重下）"
-                    : "本次请求区间：增量（仅补最近）")
-                : "";
+            if (kind == "lockup")
+            {
+                // 锁仓补采没有时间窗：范围是「股票」，新鲜度看报告期
+                _dlRange.Text = (status == "running" || status == "queued" || status == "paused")
+                    ? "本次请求：锁仓系数补采（按报告期过滤，已是最新的股票不入队）"
+                    : "";
+            }
+            else
+            {
+                _dlRange.Text = (status == "running" || status == "queued" || status == "paused")
+                    ? (reqBegin.Length > 0 && reqEnd.Length > 0
+                        ? "本次请求区间：" + reqBegin + " ~ " + reqEnd + "（按库内缺口增量补齐，已有区间不重下）"
+                        : "本次请求区间：增量（仅补最近）")
+                    : "";
+            }
             if (status == "completed" && failed > 0) _dlStatus.Text += "（部分失败，可点「重试失败项」）";
 
             DlRenderButtons(status, failed);
@@ -566,6 +700,8 @@ namespace StockPool
                 DlStopPoll();
                 // 跑完一轮后重算「是否只缺最近 10 天」——可能刚好攒够资格开启自动更新
                 DlLoadAutoState(true);
+                // 锁仓系数补采跑完时，覆盖情况要立刻刷新（否则卡片还显示旧的「待补采」）
+                if (kind == "lockup") DlLoadLockupState(true);
             }
             else DlStartPoll();
         }
@@ -581,17 +717,34 @@ namespace StockPool
             _dlBtnToggle.Enabled = active || status == "paused";
             _dlBtnRetry.Enabled = failed > 0 && terminal;
             if (_dlTdxBtn != null) _dlTdxBtn.Enabled = !active && status != "paused";
+            if (_dlLockupBtn != null) _dlLockupBtn.Enabled = !active && status != "paused";
             if (string.IsNullOrEmpty(status) && failed == 0) _dlBtnStart.Enabled = true;
             if (_dlCommandBusy)
             {
                 _dlBtnStart.Enabled = _dlBtnToggle.Enabled = _dlBtnRetry.Enabled = false;
                 if (_dlTdxBtn != null) _dlTdxBtn.Enabled = false;
+                if (_dlLockupBtn != null) _dlLockupBtn.Enabled = false;
             }
         }
 
-        /// <summary>状态文案按数据来源区分：本地通达信是「同步」，在线才是「下载」。</summary>
-        private static string DlStatusText(string status, string source)
+        /// <summary>
+        /// 状态文案按数据来源与任务类型区分：本地通达信是「同步」，
+        /// kind=lockup 是「补采锁仓系数」，在线日K才是「下载」。
+        /// </summary>
+        private static string DlStatusText(string status, string source, string kind)
         {
+            if (kind == "lockup")
+            {
+                switch (status)
+                {
+                    case "queued": return "排队中（补采锁仓系数）";
+                    case "running": return "补采锁仓系数中（联网取十大流通股东）";
+                    case "paused": return "已暂停（补采锁仓系数）";
+                    case "completed": return "锁仓系数补采完成";
+                    case "cancelled": return "已取消（补采锁仓系数）";
+                    default: return string.IsNullOrEmpty(status) ? "未开始" : status;
+                }
+            }
             bool tdx = source == "tdx";
             switch (status)
             {

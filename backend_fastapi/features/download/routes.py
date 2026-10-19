@@ -1,9 +1,10 @@
 """历史数据遍历下载的 HTTP 接口。
 
 任务在后端后台跑（worker 池 + 限速），前端只需轮询进度：
-    POST /api/history/download/start            启动任务
+    POST /api/history/download/start            启动任务（kind=bars 日K / lockup 锁仓系数）
     GET  /api/history/download/{id}             进度 + 失败清单
     POST /api/history/download/{id}/pause|resume|cancel|retry-failed
+    GET  /api/history/download/lockup/state     锁仓系数落盘状态（状态卡片）
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ class StartRequest(BaseModel):
     scope: str = Field(default="all", pattern=r"^(all|pool)$")
     mode: str = Field(default="full", pattern=r"^(full|incremental)$")
     source: str = Field(default="online", pattern=r"^(online|tdx)$")
+    kind: str = Field(default="bars", pattern=r"^(bars|lockup)$")
     start_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     concurrency: int = Field(default=4, ge=1, le=8)
     rate_limit: float = Field(default=3.0, gt=0, le=20)
@@ -57,15 +59,35 @@ def list_tasks(limit: int = 20):
 
 @router.post("/start")
 def start(req: StartRequest):
+    """启动下载任务。
+
+    `kind=bars`（默认）下载日 K；`kind=lockup` 只补锁仓系数
+    （十大流通股东 → r / L，按报告期过滤，已是最新的股票不入队）。
+    """
     try:
         task_id = download_service.start_task(
             scope=req.scope, source=req.source, mode=req.mode, start_date=req.start_date,
             concurrency=req.concurrency, rate_limit=req.rate_limit,
             with_reference=req.with_reference, force_reference=req.force_reference,
+            kind=req.kind,
         )
     except Exception as exc:                      # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"任务启动失败：{exc}")
     return {"ok": True, "task_id": task_id, "task": download_service.task_view(task_id)}
+
+
+@router.get("/lockup/state")
+def lockup_state(refresh: bool = False):
+    """**锁仓系数**的落盘状态（下载页的状态卡片用）。
+
+    返回今天应已出齐的报告期、已最新 / 已过期 / 从未采集的只数，
+    以及最近一次写入时间。`refresh=true` 跳过 TTL 缓存重新扫一遍
+    （用户手动点「刷新」时用；轮询不要传，扫全库不便宜）。
+    """
+    try:
+        return {"ok": True, "lockup": download_service.lockup_state(force=refresh)}
+    except Exception as exc:                      # noqa: BLE001 - 转成可读接口错误
+        raise HTTPException(status_code=500, detail=f"锁仓系数状态获取失败：{exc}")
 
 
 @router.get("/settings")

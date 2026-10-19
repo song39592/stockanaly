@@ -6,8 +6,14 @@
   - worker 池并发 + 令牌桶限速，既不慢成单线程，也不把数据源打挂；
   - 暂停 / 继续 / 取消 / 失败重试（指数退避）只改库里的一行，重启后依然有效。
 
-真正的采集复用 `price_service`（日K / 复权因子 / 除权），
-本模块只决定「下载谁、什么时候下载、失败怎么办」，不碰数据源细节、不碰存储结构。
+真正的采集复用 `price_service`（日K / 复权因子 / 除权）与
+`features.stock.profile`（锁仓系数），本模块只决定「下载谁、什么时候下载、
+失败怎么办」，不碰数据源细节、不碰存储结构。
+
+任务分两类（`kind`）：
+  * `bars`（默认）—— 日 K，带「先近后远」两轮与参考数据；
+  * `lockup` —— 只补锁仓系数（十大流通股东 → r / L），按报告期过滤队列，
+    已是最新报告期的股票根本不排进来。
 """
 from __future__ import annotations
 
@@ -29,6 +35,7 @@ from core import price_store
 from core import tdx_reader
 from core.fallback import first_ok      # bug-02：串行多源回退的总时间预算
 from features.market.service import _ak
+from features.stock import profile as stock_profile
 
 # 默认下载窗口：**最近 5 年**（界面「起始日期」可改）。
 # 系统里最长的需求是 MA60 / RPS ≈ 250 个交易日，5 年绰绰有余；
@@ -45,6 +52,9 @@ IDLE_SLEEP = 0.4                # 暂停时空转的轮询间隔
 
 MODE_FULL = "full"                  # 完整历史：先近后远两轮
 MODE_INCREMENTAL = "incremental"    # 增量：只补最新数据（日常更新用）
+
+KIND_BARS = "bars"                  # 任务类型：日 K（默认）
+KIND_LOCKUP = "lockup"              # 任务类型：只补锁仓系数（十大流通股东 → r / L）
 
 SOURCE_ONLINE = "online"            # 数据来源：在线 akshare（限速、能拿全历史）
 SOURCE_TDX = "tdx"                  # 数据来源：本机通达信日线（秒级，但只有最近几年）
@@ -211,6 +221,90 @@ def _resolve_codes(scope: str, source: str = SOURCE_ONLINE) -> list[str]:
     if scope == "all":
         return _universe_codes()
     raise ValueError(f"未知的下载范围：{scope}")
+
+
+# --------------------------------------------------------------------------- #
+# 锁仓系数（十大流通股东 → r / L）的补采范围与状态
+# --------------------------------------------------------------------------- #
+def _lockup_universe(scope: str) -> list[str]:
+    """锁仓补采的股票清单。
+
+    `scope=all` 取**库里已下载日线的股票**（`code_latest_dates`）而不是 akshare
+    全市场清单：锁仓系数只对「算得出筹码」的票有意义（没日线就算不出换手率），
+    顺带省掉一次最坏 180 秒的 A 股代码列表请求。
+    """
+    if scope == "pool":
+        return _normalize_codes(history_store.latest_snapshot_codes())
+    if scope == "all":
+        return sorted(price_store.code_latest_dates().keys())
+    raise ValueError(f"未知的下载范围：{scope}")
+
+
+def _lockup_pending(codes: list[str] | None = None) -> list[str]:
+    """报告期过期或从未采集的股票（**需要补采**的那些）。
+
+    只读一次 `lockup_cache` 的 GROUP BY（表就几千行），再和清单比对，
+    不逐只点查 —— 全市场 5585 只逐只查要点 5585 次库。
+    """
+    wanted = codes if codes is not None else _lockup_universe("all")
+    expected = stock_profile.expected_lockup_period()
+    periods = price_store.lockup_period_map()
+    return [code for code in wanted
+            if str(periods.get(code) or "") < expected]
+
+
+_lockup_state_cache: dict[str, Any] = {}
+_lockup_state_at = 0.0
+
+
+def lockup_state(force: bool = False) -> dict[str, Any]:
+    """锁仓系数的落盘状态（下载页展示 + 前端决定要不要提示补采）。
+
+    `total` 是**已下载日线的股票数**（锁仓系数的有效口径），`fresh` / `stale` /
+    `missing` 在它内部互斥且相加等于 total。`cached_codes` 是缓存表的全部条数
+    （可能含已下线的票），单独给出用于对账。
+
+    扫全库 + 读一次缓存表不算便宜，结果按 `AUTO_STATE_TTL` 缓存；
+    前端轮询时传 `force=true` 只在用户手动点「刷新」时用。
+    """
+    global _lockup_state_cache, _lockup_state_at
+    now = time.time()
+    if not force and _lockup_state_cache and now - _lockup_state_at < AUTO_STATE_TTL:
+        snapshot = dict(_lockup_state_cache)
+        snapshot["cached"] = True
+        return snapshot
+
+    universe = price_store.code_latest_dates()
+    expected = stock_profile.expected_lockup_period()
+    periods = price_store.lockup_period_map()
+    fresh = stale = 0
+    missing: list[str] = []
+    for code in universe:
+        period = str(periods.get(code) or "")
+        if not period:
+            missing.append(code)
+        elif period >= expected:
+            fresh += 1
+        else:
+            stale += 1
+    overview = price_store.lockup_overview()
+    state = {
+        "expected": expected,
+        "total": len(universe),
+        "fresh": fresh,
+        "stale": stale,
+        "missing": len(missing),
+        "missing_examples": missing[:10],
+        "pending": len(missing) + stale,
+        "cached_codes": overview["cached"],
+        "updated_at": overview["updated_at"],
+        "periods": overview["periods"],
+        "checked_at": db.now_iso(),
+        "cached": False,
+    }
+    _lockup_state_cache = dict(state)
+    _lockup_state_at = now
+    return dict(state)
 
 
 # --------------------------------------------------------------------------- #
@@ -388,6 +482,43 @@ def _skip_if_covered(task_id: str, code: str, options: dict[str, Any],
     return True
 
 
+def _download_lockup(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None:
+    """锁仓系数补采：**不打日 K**，只把「十大流通股东 → r / L」取来落盘。
+
+    与日 K 任务共用同一套队列 / 限速 / 暂停续传 / 失败退避，所以下载页上的
+    暂停、继续、重试失败项对它同样有效。
+
+    已是最新报告期的股票在 `start_task` 建队列时就被过滤掉，不会排进来；
+    单只内部再由 `stock_profile.sync_lockup` 按报告期兜一次底（零请求返回）。
+    """
+    code = item["code"]
+    seq = item["seq"]
+    options = runtime.options
+    try:
+        if runtime.stop.is_set():
+            return
+        runtime.limiter.acquire()
+        result = stock_profile.sync_lockup(
+            code, force=bool(options.get("force_reference", False)))
+        if not result.get("ok"):
+            raise RuntimeError("；".join(result.get("errors") or ["锁仓系数取数失败"]))
+    except Exception as exc:                      # noqa: BLE001 - 单只失败不影响整个任务
+        if runtime.stop.is_set():
+            return
+        message = f"{type(exc).__name__}: {exc}"
+        retries = int(item.get("retries") or 0)
+        if retries < MAX_RETRIES:
+            backoff = RETRY_BACKOFF_SECONDS[min(retries, len(RETRY_BACKOFF_SECONDS) - 1)]
+            download_store.requeue_code(task_id, seq, f"{message}（{backoff}s 后重试）")
+            time.sleep(backoff)
+            return
+        download_store.finish_code(task_id, seq, ok=False, error=message)
+        download_store.record_error(task_id, code, message)
+        return
+
+    download_store.finish_code(task_id, seq, ok=True)
+
+
 def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None:
     """下载一只股票的**某一个阶段**：日K（+ 可选复权因子 / 除权），失败退避重试。
 
@@ -395,11 +526,16 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
       完整历史 · 近期阶段：分界点 → 今天
       完整历史 · 更早阶段：起始日 → 分界点
       增量模式：交给 `sync_bars` 按库里最新日期 -14 天重叠，只补最新数据
+
+    `kind=lockup` 时只补锁仓系数，不走下面的时间窗与日 K 逻辑。
     """
     code = item["code"]
     seq = item["seq"]
     phase = int(item.get("phase") or 1)
     options = runtime.options
+    if (options.get("kind") or KIND_BARS) == KIND_LOCKUP:
+        _download_lockup(task_id, runtime, item)
+        return
     mode = options.get("mode") or MODE_FULL
     source = options.get("source") or SOURCE_ONLINE
 
@@ -535,7 +671,13 @@ def _run(task_id: str, concurrency: int) -> None:
         # 「今天已经跑过」，当天不会再起新任务；叠加任务随时会被停的正常工况，
         # 就出现了库里 17 个 auto 任务全部 paused 且进度停在半截的现象。
         if task.get("origin") == ORIGIN_AUTO:
-            download_store.set_setting("auto_last_run", dt.date.today().isoformat())
+            # 「今天跑过」按任务类型分别登记：日线的每日自动更新与锁仓系数的
+            # 定期刷新各用一个键。共用一个键会让后跑完的那个把另一个的
+            # 「已跑过」状态一起吃掉，另一个当天再也不被调度。
+            key = ("lockup_last_run"
+                   if (task.get("options") or {}).get("kind") == KIND_LOCKUP
+                   else "auto_last_run")
+            download_store.set_setting(key, dt.date.today().isoformat())
     with _runtimes_lock:
         _runtimes.pop(task_id, None)
 
@@ -723,20 +865,25 @@ def _options_for(mode: str, *, source: str = SOURCE_ONLINE, start_date: str | No
                  concurrency: int = DEFAULT_CONCURRENCY,
                  rate_limit: float = DEFAULT_RATE_LIMIT,
                  with_reference: bool = True,
-                 force_reference: bool = False) -> dict[str, Any]:
+                 force_reference: bool = False,
+                 kind: str = KIND_BARS) -> dict[str, Any]:
     """组装任务选项：手动 / 自动 / 闲时共用一套，分界点与分段数不重复实现。"""
     begin: dt.date | None = None
     if mode == MODE_FULL:
         begin = _option_date({"start_date": start_date}, "start_date") or _default_start_date()
     split = _split_date()
-    # 本地通达信只跑一轮：本机有几年的日线就同步几年，不再联网补更早的历史
-    #（系统里最长的需求是 MA60 / RPS≈250 日，5 年绰绰有余）
-    if source == SOURCE_TDX:
+    # 锁仓补采没有时间窗概念（股东数据按季披露），固定跑一轮
+    if kind == KIND_LOCKUP:
+        phases = 1
+    elif source == SOURCE_TDX:
+        # 本地通达信只跑一轮：本机有几年的日线就同步几年，不再联网补更早的历史
+        #（系统里最长的需求是 MA60 / RPS≈250 日，5 年绰绰有余）
         phases = 1
     else:
         phases = 2 if (mode == MODE_FULL and begin is not None and begin < split) else 1
     return {
         "mode": mode,
+        "kind": kind,
         "source": source,
         "start_date": begin.isoformat() if begin else None,
         "split_date": split.isoformat(),
@@ -798,7 +945,10 @@ def sync_one(code: str) -> dict[str, Any]:
     bars = price_service.sync_bars(code)
     detail: dict[str, Any] = {"bars": bars}
     for name, fn in (("factors", price_service.sync_factors),
-                     ("share_capital", price_service.sync_share_capital)):
+                     ("share_capital", price_service.sync_share_capital),
+                     # 锁仓系数一并补：K 线页进入就顺手把筹码峰的前置数据备齐，
+                     # 用户切到筹码 / 策略页时不必再等一次东财取数。
+                     ("lockup", stock_profile.sync_lockup)):
         try:
             detail[name] = fn(code)
         except Exception as exc:                   # noqa: BLE001 - 附加项失败不否决补齐
@@ -857,6 +1007,29 @@ def _kick_auto_update() -> str | None:
     download_store.create_task(task_id, "downloaded", options, codes, 1, origin=ORIGIN_AUTO)
     # `auto_last_run` **不在这里写**：它由 `_run` 在任务真正跑完时登记。
     # 启动即写等于「还没补完就先宣布今天跑过了」，进程一停当天就再也不会起新任务。
+    _spawn(task_id, options)
+    return task_id
+
+
+def _kick_lockup_update() -> str | None:
+    """锁仓系数的**定期刷新**：新一季十大流通股东出齐后自动补采。
+
+    与日线的每日自动更新分开排队（`_scheduler_tick` 里串行调用），
+    两者都慢，并行会互相抢带宽与东财配额。
+
+    当天已跑过（`lockup_last_run`，由 `_run` 在任务真正跑完时登记）就不再起；
+    没有待补采的股票时也登记一次，免得每天白扫一遍全表。
+    """
+    if _has_alive_task():
+        return None
+    pending = _lockup_pending()
+    if not pending:
+        download_store.set_setting("lockup_last_run", dt.date.today().isoformat())
+        return None
+    options = _options_for(MODE_INCREMENTAL, concurrency=_idle_concurrency(),
+                           with_reference=False, kind=KIND_LOCKUP)
+    task_id = "lk-" + uuid.uuid4().hex
+    download_store.create_task(task_id, "downloaded", options, pending, 1, origin=ORIGIN_AUTO)
     _spawn(task_id, options)
     return task_id
 
@@ -939,8 +1112,8 @@ def _scheduler_tick() -> None:
     if _has_alive_task():
         return
     stored = download_store.settings_map()
+    today = dt.date.today().isoformat()
     if stored.get("auto_update") == "1":
-        today = dt.date.today().isoformat()
         if stored.get("auto_last_run") != today and dt.datetime.now().hour >= AUTO_UPDATE_HOUR:
             # 今天还没跑完过（`auto_last_run` 现在只在任务真正跑完时登记）。
             # 若今天已有一个未完成的 auto 任务，**接着它跑**而不是另起一个 ——
@@ -953,6 +1126,11 @@ def _scheduler_tick() -> None:
             else:
                 _kick_auto_update()
             return
+        # 日线补完了（或今天不补），接着刷新锁仓系数。**串行**：两者都慢，
+        # 并行会互相抢带宽与东财请求配额。报告期没更新时 `_kick_lockup_update`
+        # 一个请求都不发，只会顺手登记「今天巡检过」。
+        if stored.get("lockup_last_run") != today and dt.datetime.now().hour >= AUTO_UPDATE_HOUR:
+            _kick_lockup_update()
     if stored.get("idle_download") == "1":
         _ensure_idle_task()
 
@@ -993,7 +1171,8 @@ def start_task(*, scope: str = "all", source: str = SOURCE_ONLINE,
                mode: str = MODE_FULL, start_date: str | None = None,
                concurrency: int = DEFAULT_CONCURRENCY,
                rate_limit: float = DEFAULT_RATE_LIMIT, with_reference: bool = True,
-               force_reference: bool = False) -> str:
+               force_reference: bool = False,
+               kind: str = KIND_BARS) -> str:
     """启动一个遍历下载任务，返回 task_id。
 
     mode=full（默认）走「先近后远」两轮：全市场先补齐最近 `RECENT_YEARS` 年，
@@ -1002,6 +1181,9 @@ def start_task(*, scope: str = "all", source: str = SOURCE_ONLINE,
 
     source=tdx 时**只同步本机通达信已有的日线**（实测约 5 年），走一轮、不联网：
     系统里最长的需求是 MA60 / RPS≈250 个交易日，5 年绰绰有余，不再联网补更早的历史。
+
+    kind=lockup 时**只补锁仓系数**（不打日 K）：范围取「已下载日线的股票」，
+    且只排「报告期过期或从未采集」的那些，已是最新的直接不进队列。
     """
     if _has_alive_task():
         raise RuntimeError("已有任务正在运行或暂停中，请继续该任务，或取消并等待收尾后再新建")
@@ -1009,6 +1191,14 @@ def start_task(*, scope: str = "all", source: str = SOURCE_ONLINE,
         raise ValueError(f"未知的下载模式：{mode}")
     if source not in (SOURCE_ONLINE, SOURCE_TDX):
         raise ValueError(f"未知的数据来源：{source}")
+    if kind not in (KIND_BARS, KIND_LOCKUP):
+        raise ValueError(f"未知的任务类型：{kind}")
+
+    if kind == KIND_LOCKUP:
+        return _start_lockup_task(
+            scope=scope, concurrency=concurrency, rate_limit=rate_limit,
+            force_reference=force_reference)
+
     if source == SOURCE_TDX:
         mode = MODE_FULL                # 本地同步的语义就是「把完整历史攒齐」
     resolved = _resolve_codes(scope, source)
@@ -1026,6 +1216,24 @@ def start_task(*, scope: str = "all", source: str = SOURCE_ONLINE,
     task_id = "dl-" + uuid.uuid4().hex
     download_store.create_task(task_id, scope, options, resolved,
                                options["phases"], origin=ORIGIN_MANUAL)
+    _spawn(task_id, options)
+    return task_id
+
+
+def _start_lockup_task(*, scope: str, concurrency: int,
+                       rate_limit: float, force_reference: bool) -> str:
+    """建一个「只补锁仓系数」的任务（手动入口，`lk-` 前缀便于在任务列表里认出来）。"""
+    resolved = _lockup_universe(scope)
+    if not resolved:
+        raise RuntimeError("还没有已下载日线的股票，请先下载历史行情")
+    pending = resolved if force_reference else _lockup_pending(resolved)
+    if not pending:
+        raise RuntimeError("所有股票的锁仓系数都已是最新报告期，无需补采")
+    options = _options_for(MODE_INCREMENTAL, concurrency=concurrency,
+                           rate_limit=rate_limit, with_reference=False,
+                           force_reference=force_reference, kind=KIND_LOCKUP)
+    task_id = "lk-" + uuid.uuid4().hex
+    download_store.create_task(task_id, scope, options, pending, 1, origin=ORIGIN_MANUAL)
     _spawn(task_id, options)
     return task_id
 
@@ -1050,6 +1258,7 @@ def _decorate(task: dict[str, Any]) -> dict[str, Any]:
     task["percent"] = round(done * 100.0 / max(1, task["total"]), 1)
     task["remaining"] = download_store.remaining(task["id"])
     task["failures"] = download_store.failures(task["id"])
+    task["kind"] = str((task.get("options") or {}).get("kind") or KIND_BARS)
     requested_begin, requested_end = _requested_span(task)
     task["requested_begin"] = requested_begin
     task["requested_end"] = requested_end
@@ -1079,6 +1288,7 @@ def settings_view() -> dict[str, Any]:
         "auto_update_hour": AUTO_UPDATE_HOUR,
         "idle_task_id": stored.get("idle_task_id") or "",
         "auto_last_run": stored.get("auto_last_run") or "",
+        "lockup_last_run": stored.get("lockup_last_run") or "",
         "tdx_path": stored.get("tdx_path") or "",
     }
 
