@@ -417,11 +417,37 @@ def _tdx_root(options: dict[str, Any]) -> str:
     return download_store.get_setting("tdx_path", "") or tdx_reader.auto_detect() or ""
 
 
-def _import_tdx_bars(root: str, code: str) -> None:
-    """阶段 ①：读本机通达信日线并落盘。**不联网、不占限速额度**。"""
+_tdx_valid_cache: dict[str, bool] = {}
+
+
+def _tdx_is_valid(root: str) -> bool:
+    """通达信目录是否可用（按 root 缓存，避免自动更新遍历全市场时每只都重扫目录）。"""
+    if not root:
+        return False
+    cached = _tdx_valid_cache.get(root)
+    if cached is None:
+        cached = bool(tdx_reader.detect(root).get("valid"))
+        _tdx_valid_cache[root] = cached
+    return cached
+
+
+def _import_tdx_bars(root: str, code: str,
+                     begin: dt.date | str | None = None) -> None:
+    """阶段 ①：读本机通达信日线并落盘。**不联网、不占限速额度**。
+
+    `begin` 给定时只导入该日（含）之后的本地数据——增量补最新时用来避免把
+    整只 .day（几年）全读一遍；`begin` 为 None（如「同步通达信历史」全量
+    同步）则导入本地全部日线。
+    """
     bars = tdx_reader.read_day_bars(root, code)
     if not bars:
         raise RuntimeError("本地通达信没有这只股票的日线文件")
+    if begin is not None:
+        if isinstance(begin, dt.date):
+            begin = begin.isoformat()
+        bars = [b for b in bars if str(b.get("date", ""))[:10] >= begin]
+        if not bars:
+            return                              # 本地这段没有比库内更新的，无需动作
     price_service.fill_missing_turnover(code, bars)      # 本地算不出换手率，先补回已有的
     price_service.import_bars(code, bars, source="通达信本地")
 
@@ -593,13 +619,30 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
             return
         # 纯增量(overlap=0)且库里已到最近应有交易日 → 零请求跳过；
         # 周度修订回收(overlap>0)要重拉最近窗口，即便已最新也要跑，故不跳过。
-        if mode == MODE_INCREMENTAL and overlap == 0:
+        used_tdx = False
+        if mode == MODE_INCREMENTAL and overlap == 0 and source == SOURCE_ONLINE:
             expected = _expected_data_day()
             have_latest = price_store.latest_bar_date(code, "raw")
             if expected and have_latest and have_latest >= expected:
                 download_store.finish_code(task_id, seq, ok=True)
                 return
-        if source == SOURCE_TDX:
+            # 优先本地通达信：本地比库内更新 → 直接读本地、不联网、不占限速额度。
+            # 这样「有本地数据就不必联网」——自动更新 / 手动增量都受益，且本地缺的
+            # 票（如新上市）会自然回落到下面的在线分支，不会漏数据。
+            root = _tdx_root(options)
+            if _tdx_is_valid(root):
+                span = tdx_reader.day_range(root, code)
+                if span and have_latest and span[1] >= str(have_latest)[:10]:
+                    try:
+                        _import_tdx_bars(
+                            root, code,
+                            dt.date.fromisoformat(str(have_latest)[:10]) + dt.timedelta(days=1))
+                        used_tdx = True
+                    except Exception:
+                        used_tdx = False                  # 本地异常：回落在线
+        if used_tdx:
+            pass                                          # 日线已由本地导入，跳过在线拉取
+        elif source == SOURCE_TDX:
             # 本机通达信是唯一来源：有几年的日线就同步几年，不联网补更早的历史
             _import_tdx_bars(_tdx_root(options), code)
         else:
@@ -612,7 +655,9 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
             errors.extend(bars.get("errors") or [])
 
         if options.get("with_reference", True):
-            errors.extend(_sync_reference(runtime, options, code, source))
+            # 本地优先导入的票：复权参考同样优先本地 gbbq（解不出才回落在线）
+            errors.extend(_sync_reference(runtime, options, code,
+                                         SOURCE_TDX if used_tdx else source))
 
         if errors:
             raise RuntimeError("；".join(errors))

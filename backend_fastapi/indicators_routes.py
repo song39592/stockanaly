@@ -132,6 +132,11 @@ def diagnose_indicators():
             except Exception as exc:           # noqa: BLE001 - 诊断要暴露原因
                 import_error = f"{type(exc).__name__}: {exc}"
                 messages.append("导入失败：" + import_error)
+            else:
+                # 动态导入可能把「后端启动后新增」的指标文件注册进 REGISTRY，必须重新判定；
+                # 否则导入成功也会落到下面的 not registered 分支，被误报成
+                # 「未在 REGISTRY 中注册 → 未通过」（PEAKB 曾因未重启后端踩此坑）。
+                registered = bool(pid) and pid in indicators.REGISTRY
 
         # 数据校验（仅对已注册指标做合成数据自检）
         data_ok = False
