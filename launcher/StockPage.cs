@@ -1527,7 +1527,7 @@ namespace StockPool
                     }
 
                     // 横坐标刻度：横轴满宽 = 最高峰占比，四等分画短刻度。
-                    // 只标最高峰那一处的百分比（= 满刻度值），其余不标以免小面板被数字挤满。
+                    // 峰值占比的具体百分比不再在此标注（改由 PEAK 指标统一呈现），避免与指标数字打架。
                     if (plotH > 30)
                     {
                         using (var penTick = new Pen(grid))
@@ -1538,10 +1538,6 @@ namespace StockPool
                                 g.DrawLine(penTick, xt, bottom, xt, bottom + 3);
                             }
                         }
-                        // 标签贴着横轴、右对齐（图形只到 Width-RightPad，不会压住最右侧一格）
-                        using (var bTick = new SolidBrush(C.Flat))
-                            g.DrawString(maxPct.ToString("F2") + "%", Font, bTick,
-                                         Width - RightPad, bottom - 14, FmtRight);
                     }
 
                     // 统计区（价格区之下）：平均成本 / 获利比例 / 峰位 / 集中度
