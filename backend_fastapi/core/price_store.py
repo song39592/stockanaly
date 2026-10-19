@@ -48,6 +48,7 @@ import pandas as pd
 
 from . import crypto
 from . import db
+from .db import now_iso
 
 # 可用的复权口径：raw 不复权 / hfq 后复权 / qfq 前复权
 BAR_ADJUSTS = ("qfq", "hfq", "raw")
@@ -246,11 +247,38 @@ def _ensure_share_table(conn) -> None:
     conn.execute(_SHARE_CAPITAL_TABLE)
 
 
+# 锁仓系数缓存：把「十大流通股东」算出的 r / L 落盘。
+#
+# 为什么落盘：股东数据**按季度披露**（见 `features.stock.profile._report_periods`），
+# 但取数走 akshare 东财——慢、限流、偶发被墙。原先只在进程内缓存 6 小时，
+# 后端一重启就全冷，全市场逐只联网能到小时级。
+#
+# 为什么按 period 做主键：季报每季出一期，`period` 变老就该重取。
+# 只按 code 存会让「新季报已出」无法自愈，故 PRIMARY KEY(code, period)，
+# 读取端比对「今天应已出齐的报告期」决定是否过期（见 profile.lockup_ratio）。
+_LOCKUP_TABLE = """
+CREATE TABLE IF NOT EXISTS lockup_cache (
+  code       TEXT NOT NULL,
+  period     TEXT NOT NULL,
+  ratio      REAL,
+  factor     REAL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(code, period)
+) WITHOUT ROWID;
+"""
+
+
+def _ensure_lockup_table(conn) -> None:
+    """幂等建锁仓缓存表（老库自愈）。"""
+    conn.execute(_LOCKUP_TABLE)
+
+
 def init_db() -> None:
     """建齐股价相关表：当前年份的日 K 分片 + 因子库。"""
     with db.connect(db.bars_db(dt.date.today().year)) as conn:
         _ensure_bars_table(conn)
     with db.connect(db.FACTORS_DB) as conn:
+        _ensure_lockup_table(conn)
         conn.executescript("""
         -- 复权因子：只存 hfq_factor（基准为「上市首日」，历史值不随新的除权变化）。
         -- qfq_factor 以「最新日」为基准、每天都在变，存下来等于又把会变的数据请回来，故不存。
@@ -731,6 +759,76 @@ def float_shares_at(code: str, date: str | None = None) -> float | None:
                 "ORDER BY as_of DESC LIMIT 1", (code,),
             ).fetchone()
     return None if row is None else row["float_shares"]
+
+
+# --------------------------------------------------------------------------- #
+# 锁仓系数缓存（r / L）
+# --------------------------------------------------------------------------- #
+def get_lockup(code: str) -> dict[str, Any] | None:
+    """取某只股票**最新报告期**的锁仓缓存；没有返回 None。
+
+    同一条 code 可能有多期记录（旧季报 + 新季报），按 period 降序取最新。
+    是否算「过期」由读取方按 `period` 与「今天应已出齐的报告期」比对决定
+    （见 `features.stock.profile.expected_lockup_period`），本层只负责存取。
+    """
+    with db.connect(db.FACTORS_DB) as conn:
+        _ensure_lockup_table(conn)
+        row = conn.execute(
+            "SELECT code,period,ratio,factor,updated_at FROM lockup_cache "
+            "WHERE code=? ORDER BY period DESC LIMIT 1", (code,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def put_lockup(code: str, period: str, ratio: float, factor: float) -> None:
+    """写入某一报告期的锁仓系数（按 code+period 覆盖，保留历史各期）。
+
+    `ratio` / `factor` 允许为 None（取到报告期但该期无有效比例时留空占位），
+    失败不入库由调用方保证 —— 存了错误值比不存更糟。
+    """
+    with db.connect(db.FACTORS_DB) as conn:
+        _ensure_lockup_table(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO lockup_cache(code,period,ratio,factor,updated_at) "
+            "VALUES(?,?,?,?,?)", (code, str(period), ratio, factor, now_iso()),
+        )
+
+
+def lockup_period_map() -> dict[str, str]:
+    """已缓存股票 → 各自**最新报告期**（一次 GROUP BY，表就几千行）。
+
+    供下载服务批量判断「哪些股票该补采」：逐只 `get_lockup` 在全市场 5585 只
+    上就是 5585 次点查，一次聚合查询 + 内存比对快一个量级。
+    """
+    with db.connect(db.FACTORS_DB) as conn:
+        _ensure_lockup_table(conn)
+        rows = conn.execute(
+            "SELECT code, MAX(period) AS period FROM lockup_cache GROUP BY code",
+        ).fetchall()
+    return {row["code"]: str(row["period"] or "") for row in rows}
+
+
+def lockup_overview() -> dict[str, Any]:
+    """锁仓缓存的整体覆盖情况（**只读 lockup_cache**，不扫行情库，便宜）。
+
+    返回已缓存只数、最新一次写入时间、按报告期的分布（[{period, n}]，降序）。
+    「还缺多少只 / 有多少只过期」需要和行情库的股票清单比对，由下载服务层算
+    （见 `features.download.service.lockup_state`）。
+    """
+    with db.connect(db.FACTORS_DB) as conn:
+        _ensure_lockup_table(conn)
+        cached = conn.execute(
+            "SELECT COUNT(DISTINCT code) AS n, MAX(updated_at) AS last FROM lockup_cache",
+        ).fetchone()
+        periods = conn.execute(
+            "SELECT period, COUNT(*) AS n FROM lockup_cache GROUP BY period "
+            "ORDER BY period DESC LIMIT 8",
+        ).fetchall()
+    return {
+        "cached": int(cached["n"] or 0),
+        "updated_at": cached["last"] or "",
+        "periods": [{"period": row["period"], "count": int(row["n"])} for row in periods],
+    }
 
 
 # --------------------------------------------------------------------------- #
