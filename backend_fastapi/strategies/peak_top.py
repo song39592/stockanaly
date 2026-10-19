@@ -29,47 +29,62 @@ import pandas as pd
 import chipformulas as chip_formulas
 from .core.base import strategy, ParamSpec, Signal, checkpoint
 
+# 锁仓系数公式下拉：中文标签 → 实际筹码公式 id（"全部用1" = 锁仓系数强制为 1，不修正）
+_LOCKUP_FORMULA = {
+    "带锁仓系数L": "tri_decay",
+    "全部用1": "tri_decay_nolock",
+}
 
-def _peak_series(code: str, fetch_start, end, bins: int) -> "pd.Series | None":
-    """取单只票的 PEAK 时间序列（每帧最高箱占比 %）；取不到返回 None。
+
+def _peak_series(code: str, fetch_start, end, bins: int, formula: str) -> "tuple[pd.Series | None, float]":
+    """取单只票的 PEAK 时间序列（每帧最高箱占比 %），并一并返回该票锁仓系数 L。
 
     ⚠️ `compute_matrix` 的**价格轴（分箱边界）取决于取数范围的最大/最小价**，所以
     必须和 PEAK 指标取同一份范围才能数值完全一致：这里固定传 `end=None`（铺满
     「上市→最新」全价格轴，与指标 `chip_rows_of` 同口径）。`end` 仅用于裁掉回测终点
     之后的帧，不参与价格轴计算。
+
+    锁仓系数 L = 1/(1-r) 直接取自 `compute_matrix` 的返回（chipformulas 已算过，不重复取数），
+    供策略把该票的锁仓系数写进信号 meta；公式选择（含是否带 L 修正）由 `formula` 决定。
     """
     try:
         res = chip_formulas.compute_matrix(
-            code, formula_id="tri_decay", start=fetch_start, end=None,
+            code, formula_id=formula, start=fetch_start, end=None,
             adjust="qfq", bins=bins, offline=False)
     except Exception:                        # noqa: BLE001 - 单只失败不拖垮整批
-        return None
+        return None, 1.0
     peak = np.nanmax(res.pct, axis=1)        # 每帧峰值占比（%）
     s = pd.Series(peak, index=list(res.dates))
     if end:
         s = s[s.index <= end]
-    return s
+    # 锁仓系数 L：tri_decay_nolock 内部把 lockup 强制为 1（不做锁仓放大），compute_matrix
+    # 回写的 lockup_factor 仍是真实锁仓，故这里按公式口径取：nolock→1.0，其余→真实 L。
+    L = 1.0 if formula == "tri_decay_nolock" else float(getattr(res, "lockup_factor", 1.0))
+    return s, L
 
 
 @strategy(
     id="peak_top",
     name="筹码峰占比 · 最大选股",
     category="筹码",
-    description="每 N 个交易日在池内按 PEAK（筹码分布最高峰占比）降序排名，"
-                "取最大的前 K 只等权持有，跌出榜单即移出；PEAK 越大筹码越集中。"
-                "PEAK 默认用全历史（与副图 PEAK 指标完全同口径）；window>0 才切近期窗口。",
+    description="每 N 个交易日在池内按 PEAK（筹码分布最高峰占比）降序排名，取前 K 只等权持有，"
+                "跌出榜单即移出；PEAK 越大筹码越集中。\n"
+                "PEAK 与副图 PEAK 指标同口径：默认全历史，window>0 才切近期窗口；"
+                "锁仓系数公式可选『带锁仓系数L』（默认）或『全部用1』（不做锁仓修正）。",
     inputs=["close"],
     outputs="目标权重向量(组合占比)",
     params=[
-        ParamSpec("top_n", "int", 1, min=1, max=200, label="持仓数量（PEAK 最大前 N）"),
-        ParamSpec("rebalance", "int", 1, min=1, max=60, label="调仓间隔（交易日）"),
-        ParamSpec("window", "int", 0, min=0, max=1000, label="筹码窗口（0=全历史，与 PEAK 指标同口径）"),
+        ParamSpec("top_n", "int", 1, min=1, max=200, label="持仓数量(N)"),
+        ParamSpec("rebalance", "int", 1, min=1, max=60, label="调仓间隔(日)"),
+        ParamSpec("window", "int", 0, min=0, max=1000, label="筹码窗口(0=全历史)"),
+        ParamSpec("formula", "choice", "带锁仓系数L",
+                  choices=["带锁仓系数L", "全部用1"], label="锁仓系数公式"),
         ParamSpec("bins", "int", 80, min=20, max=200, label="价格分箱数"),
         ParamSpec("position", "float", 1.0, min=0.1, max=1.0, label="总仓位系数"),
     ],
 )
-def peak_top(ctx, top_n: int = 1, rebalance: int = 1, window: int = 250,
-             bins: int = 80, position: float = 1.0) -> list:
+def peak_top(ctx, top_n: int = 1, rebalance: int = 1, window: int = 0,
+             bins: int = 80, position: float = 1.0, formula: str = "tri_decay") -> list:
     """按 PEAK 降序做横截面选股，返回完整目标组合的 list[Signal]。"""
     codes = [str(c).strip() for c in (ctx.codes or []) if str(c).strip()]
     if not codes:
@@ -79,6 +94,8 @@ def peak_top(ctx, top_n: int = 1, rebalance: int = 1, window: int = 250,
     window = int(window)                        # 0 = 全历史（与 PEAK 指标同口径）
     bins = max(20, int(bins))
     pos = min(1.0, max(0.0, float(position)))
+    formula = str(formula)                      # 下拉：带锁仓系数L / 全部用1
+    formula_id = _LOCKUP_FORMULA.get(formula, "tri_decay")   # 解析到实际公式 id
 
     end = str(ctx.end)[:10] if ctx.end else None
     win_start = str(ctx.start)[:10] if ctx.start else None
@@ -95,11 +112,12 @@ def peak_top(ctx, top_n: int = 1, rebalance: int = 1, window: int = 250,
         fetch_start = None                      # 全历史：compute_matrix 内部 win=n_all、warm=0
 
     cols: dict[str, pd.Series] = {}
+    lockups: dict[str, float] = {}
     for code in codes:
         # 逐标的检查点：本策略逐只算筹码矩阵，池子一大最慢，**必须**在这里查暂停/停止，
         # 否则「停止」按钮在这段完全无效。未安装控制器时（如注册冒烟、单测）这里是 no-op。
         checkpoint()
-        s = _peak_series(code, fetch_start, end, bins)
+        s, L = _peak_series(code, fetch_start, end, bins, formula_id)
         if s is None:
             continue
         if win_start:
@@ -108,6 +126,7 @@ def peak_top(ctx, top_n: int = 1, rebalance: int = 1, window: int = 250,
         if s.empty:
             continue
         cols[code] = s
+        lockups[code] = L
     if not cols:
         return []
 
@@ -129,7 +148,9 @@ def peak_top(ctx, top_n: int = 1, rebalance: int = 1, window: int = 250,
         # 「移出」根本没被登记，上一期持仓会继续持有。
         for code in sorted(held - picks):
             signals.append(Signal(code=code, time=day_s, weight=0.0,
-                                  reason=f"跌出 PEAK 前{top_n}", meta={"dropped": 1}))
+                                  reason=f"跌出 PEAK 前{top_n}",
+                                  meta={"dropped": 1, "lockup": round(lockups.get(code, 1.0), 3),
+                                        "formula": formula_id}))
 
         # 完整目标组合：等权分配总仓位
         w = (pos / len(picks)) if picks else 0.0
@@ -137,7 +158,9 @@ def peak_top(ctx, top_n: int = 1, rebalance: int = 1, window: int = 250,
             signals.append(Signal(
                 code=code, time=day_s, weight=w,
                 reason=f"PEAK 排名前{top_n}",
-                meta={"peak": round(float(row[code]), 2), "rank": ranked.index(code) + 1},
+                meta={"peak": round(float(row[code]), 2), "rank": ranked.index(code) + 1,
+                      "lockup": round(lockups.get(code, 1.0), 3),
+                      "formula": formula_id},
             ))
 
         held = picks

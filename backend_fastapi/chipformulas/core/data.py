@@ -78,6 +78,25 @@ def _lockup_of(code: str) -> tuple[float, float]:
     return 0.0, 1.0
 
 
+def lockup_factor_of(code: str) -> float:
+    """锁仓修正系数 L = 1 / (1 - r)，r 为前十大**流通**股东中占比 > 5% 者的合计占比。
+
+    真实换手只发生在可自由流通的筹码上，锁定部分不参与日常交易，故把名义换手率
+    放大 L 倍（等价于用「扣除锁定后的自由流通股本」重算换手率）。
+
+    **取数失败回退 1.0**（不修正）。与 `_lockup_of` 共用同一份取数，供指标
+    （chip_lockup）/ 策略在需要「当前锁仓系数」时直接调用，避免各算各的口径漂移。
+    """
+    _r, f = _lockup_of(code)
+    return float(f)
+
+
+def lockup_ratio_of(code: str) -> float:
+    """原始锁仓比例 r（前十大流通股东中占比 > 5% 者合计占比）；失败回退 0.0。"""
+    r, _f = _lockup_of(code)
+    return float(r)
+
+
 def load_input(code: str, start: str | None = None, end: str | None = None,
                adjust: str = "qfq", days: int | None = None,
                bins: int = 80, period: str = "day",
