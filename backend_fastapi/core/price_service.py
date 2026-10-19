@@ -29,7 +29,9 @@ from market_service import _ak
 SYNC_ADJUSTS = ("raw",)
 _AK_ADJUST = {"qfq": "qfq", "hfq": "hfq", "raw": ""}     # akshare 用空串表示不复权
 BACKFILL_DAYS = 730                                       # 首次同步的默认回看窗口（约 2 年）
-OVERLAP_DAYS = 14                                         # 增量重叠窗口，覆盖数据源事后修订
+OVERLAP_DAYS = 14                                         # 完整历史回补 / 修复路径的尾部重叠窗口，覆盖数据源事后修订；
+                                                            # 每日增量下载（sync_bars 无 start 时）已改为只拉库内最新日之后真正新增的交易日，不再回拉重叠。
+
 
 
 def market_symbol(code: str) -> str:
@@ -229,7 +231,10 @@ def sync_bars(code: str, adjust: str = "raw", start: dt.date | None = None,
               end: dt.date | None = None) -> dict[str, Any]:
     """同步单一口径（raw / hfq / qfq）的日 K。
 
-    `start` 为空时按已落盘的最新日期**增量**补齐（既有行为）；
+    `start` 为空时按已落盘的最新日期做**增量**补齐：只抓「库内最新日之后
+    真正新增的交易日」（最新日 + 1 → 今天），不回拉重叠窗口——
+    日常自动更新只要新增数据，数据源对更早日的事后修订不在每日增量里回收
+    （需要回收修订时走 `refetch_bars` 整体重抓）。
     给了 `start` 则从该日期起抓取——遍历下载传一个早于上市日的日期（如 1990-01-01），
     数据源会自行截断到上市首日，从而拿到完整历史。
     `end` 用于**分段时间窗**（先近后远）：只抓到该日为止，不碰更新的数据。
@@ -243,7 +248,8 @@ def sync_bars(code: str, adjust: str = "raw", start: dt.date | None = None,
     else:
         latest = price_store.latest_bar_date(code, store_adjust)
         if latest:
-            begin = dt.date.fromisoformat(latest) - dt.timedelta(days=OVERLAP_DAYS)
+            # 只拉库内最新日之后真正新增的交易日；不回拉重叠，避免每日把近段重下一遍
+            begin = dt.date.fromisoformat(latest) + dt.timedelta(days=1)
         else:
             begin = today - dt.timedelta(days=BACKFILL_DAYS)
     if begin > stop:
@@ -258,8 +264,9 @@ def sync_bars(code: str, adjust: str = "raw", start: dt.date | None = None,
 def refetch_bars(code: str, adjust: str = "raw") -> dict[str, Any]:
     """**全量重抓**某股日 K 并整体替换库中数据（指纹校验失败后的自动修复路径）。
 
-    与 `sync_bars` 的区别：后者只从库中最新日期往前重叠 14 天做增量补齐，
-    **碰不到更早的历史行**；因此若被改动的是历史区间，增量同步永远修不好。
+    与 `sync_bars` 的区别：后者（无 start 时）增量同步只从库中最新日期的次日
+    起补齐，不回拉重叠窗口，**碰不到更早的历史行**；因此若被改动的是历史区间，
+    增量同步永远修不好。
     本函数改从库中**既有的最早日期**开始抓取，并整体替换，
     从而能还原**任意位置**的改动，替换后重算指纹即恢复可信。
 

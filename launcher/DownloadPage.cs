@@ -677,6 +677,10 @@ namespace StockPool
             // 所以必须加说明，否则会被误读成「已有 2021~2026 还要从 2020 重下一遍」。
             string reqBegin = Convert.ToString(J.GetFrom(task, "requested_begin") ?? "");
             string reqEnd = Convert.ToString(J.GetFrom(task, "requested_end") ?? "");
+            // 增量任务区间是「各票窗口的并集」：终点=今天；起点取决于类型——
+            // 每日纯增量=最早那只的库内最新日+1（只补新增）；周度修订回收=最新日-overlap_days。
+            bool reqIncremental = J.Int(J.GetFrom(task, "requested_incremental")) == 1;
+            int reqOverlap = J.Int(J.GetFrom(task, "overlap_days"));   // >0 即周度修订回收任务
             if (kind == "lockup")
             {
                 // 锁仓补采没有时间窗：范围是「股票」，新鲜度看报告期
@@ -688,7 +692,12 @@ namespace StockPool
             {
                 _dlRange.Text = (status == "running" || status == "queued" || status == "paused")
                     ? (reqBegin.Length > 0 && reqEnd.Length > 0
-                        ? "本次请求区间：" + reqBegin + " ~ " + reqEnd + "（按库内缺口增量补齐，已有区间不重下）"
+                        ? "本次请求区间：" + reqBegin + " ~ " + reqEnd
+                            + (reqOverlap > 0
+                                ? "（周度修订回收：逐票回拉库内最新日之前 " + reqOverlap + " 天，兜回数据源事后修订）"
+                                : (reqIncremental
+                                    ? "（增量：逐票只补库内最新日之后的新增，已最新则跳过）"
+                                    : "（按库内缺口增量补齐，已有区间不重下）"))
                         : "本次请求区间：增量（仅补最近）")
                     : "";
             }

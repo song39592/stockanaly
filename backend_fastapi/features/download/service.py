@@ -74,6 +74,7 @@ FRESHNESS_DAYS = 10            # 「只缺最近 10 天」的判定窗口：超�
 SCHEDULER_INTERVAL = 60        # 调度线程轮询间隔（秒）
 AUTO_STATE_TTL = 300           # 覆盖度检测结果的缓存时间（秒）：全库扫描不便宜
 IDLE_CONCURRENCY = 2           # 闲时并发默认值（只能 1 或 2）
+WEEKLY_OVERLAP_DAYS = 10       # 周度修订回收重拉的窗口（≈上周 5 个交易日 + 缓冲）；每日纯增量不再回拉重叠
 
 ORIGIN_MANUAL = "manual"       # 任务来源：手动 / 每日自动更新 / 后台闲时
 ORIGIN_AUTO = "auto"
@@ -541,6 +542,7 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
 
     begin, stop = None, None
     no_early_gap = False
+    overlap = int(options.get("overlap_days") or 0)
     if mode == MODE_FULL:
         split = _option_date(options, "split_date") or _split_date()
         oldest = _option_date(options, "start_date") or _default_start_date()
@@ -570,6 +572,14 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
                     no_early_gap = True
                 else:
                     stop = gap_end
+    elif mode == MODE_INCREMENTAL:
+        # 增量起点：overlap=0（每日纯增量）只拉「库内最新日之后新增」(最新日+1→今天)；
+        # overlap>0（周度修订回收）把 [最新日-overlap, 今天] 重拉一遍，兜回数据源对
+        # 近段日线的事后修订——这是周检任务存在的目的。
+        have = price_store.latest_bar_date(code, "raw")
+        if have:
+            base = dt.date.fromisoformat(have)
+            begin = (base - dt.timedelta(days=overlap)) if overlap > 0 else (base + dt.timedelta(days=1))
 
     try:
         errors: list[str] = []
@@ -581,11 +591,9 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
         # 库里已有足量历史 → 这只不动作（增量任务本身只拉最近几天，不需要这道判断）
         if mode != MODE_INCREMENTAL and _skip_if_covered(task_id, code, options, source):
             return
-        # 增量（每日自动更新）只负责「补最新」：库里已到最近应有交易日 → 零请求跳过。
-        # 兜底作用：`_kick_auto_update` 已改成只排真正落后的股票，但旧任务（创建时
-        # 就把全市场排进队列）或运行途中被别处补齐的股票，仍会走到这里；不跳过的话
-        # 每只都要发一次 14 天重叠请求，明明没新数据也要跑十几分钟。
-        if mode == MODE_INCREMENTAL:
+        # 纯增量(overlap=0)且库里已到最近应有交易日 → 零请求跳过；
+        # 周度修订回收(overlap>0)要重拉最近窗口，即便已最新也要跑，故不跳过。
+        if mode == MODE_INCREMENTAL and overlap == 0:
             expected = _expected_data_day()
             have_latest = price_store.latest_bar_date(code, "raw")
             if expected and have_latest and have_latest >= expected:
@@ -674,10 +682,16 @@ def _run(task_id: str, concurrency: int) -> None:
             # 「今天跑过」按任务类型分别登记：日线的每日自动更新与锁仓系数的
             # 定期刷新各用一个键。共用一个键会让后跑完的那个把另一个的
             # 「已跑过」状态一起吃掉，另一个当天再也不被调度。
-            key = ("lockup_last_run"
-                   if (task.get("options") or {}).get("kind") == KIND_LOCKUP
-                   else "auto_last_run")
-            download_store.set_setting(key, dt.date.today().isoformat())
+            # 「今天跑过」按任务类型分别登记：日线、锁仓、周度修订回收各用一个键，
+            # 共用一个键会让后跑完的把另一个的「已跑过」状态一起吃掉。周度按 ISO 周
+            # 登记，故用 `_iso_week()` 而非自然日。
+            opts = task.get("options") or {}
+            if opts.get("weekly_refresh"):
+                download_store.set_setting("weekly_refresh_last_iso", _iso_week())
+            elif opts.get("kind") == KIND_LOCKUP:
+                download_store.set_setting("lockup_last_run", dt.date.today().isoformat())
+            else:
+                download_store.set_setting("auto_last_run", dt.date.today().isoformat())
     with _runtimes_lock:
         _runtimes.pop(task_id, None)
 
@@ -866,7 +880,9 @@ def _options_for(mode: str, *, source: str = SOURCE_ONLINE, start_date: str | No
                  rate_limit: float = DEFAULT_RATE_LIMIT,
                  with_reference: bool = True,
                  force_reference: bool = False,
-                 kind: str = KIND_BARS) -> dict[str, Any]:
+                 kind: str = KIND_BARS,
+                 overlap_days: int = 0,
+                 weekly_refresh: bool = False) -> dict[str, Any]:
     """组装任务选项：手动 / 自动 / 闲时共用一套，分界点与分段数不重复实现。"""
     begin: dt.date | None = None
     if mode == MODE_FULL:
@@ -892,6 +908,8 @@ def _options_for(mode: str, *, source: str = SOURCE_ONLINE, start_date: str | No
         "rate_limit": max(0.1, min(20.0, float(rate_limit or DEFAULT_RATE_LIMIT))),
         "with_reference": bool(with_reference),
         "force_reference": bool(force_reference),
+        "overlap_days": max(0, int(overlap_days or 0)),
+        "weekly_refresh": bool(weekly_refresh),
     }
 
 
@@ -985,6 +1003,38 @@ def _find_pending_auto_task() -> str | None:
     return best[0] if best else None
 
 
+def _iso_week() -> str:
+    """当前 ISO 周标签，如 '2026-W43'。用于「每周一次」去重——按 ISO 周而非死磕周五，
+    节假日顺延到新周首次调度也不会漏跑或重复跑。"""
+    return dt.date.today().strftime("%G-W%V")
+
+
+def _kick_weekly_refresh() -> str | None:
+    """**周度修订回收**：每个 ISO 周一次，把已下载股票的「最近 N 天」重拉一遍，
+    兜回数据源（akshare/东财）对近段日线的事后修订——每日纯增量已不再回拉重叠，
+    这类修订只能靠周期性重拉来回收。
+
+    按 `weekly_refresh_last_iso`（ISO 周）去重：本周没跑过才起，跑完登记；
+    周五碰上休市则顺延到新周首次调度。只排确有数据的股票；无待回收时登记一次，
+    免得每天空扫。任务带 `overlap_days>0`，`_download_one` 据此把起点抬到最新日-N 天。
+    """
+    if _has_alive_task():
+        return None
+    latest = price_store.code_latest_dates()
+    codes = sorted(c for c, d in latest.items() if d)      # 只排确有数据的
+    if not codes:
+        download_store.set_setting("weekly_refresh_last_iso", _iso_week())
+        return None
+    options = _options_for(MODE_INCREMENTAL, concurrency=_idle_concurrency(),
+                           overlap_days=WEEKLY_OVERLAP_DAYS, weekly_refresh=True)
+    # 展示窗口反映 overlap：起点=最早那只的 [最新日-N]；终点=今天
+    _stamp_span(options, codes, latest)
+    task_id = "wk-" + uuid.uuid4().hex
+    download_store.create_task(task_id, "downloaded", options, codes, 1, origin=ORIGIN_AUTO)
+    _spawn(task_id, options)
+    return task_id
+
+
 def _kick_auto_update() -> str | None:
     """给「库里已下载的股票」补最新数据（每日自动更新）。
 
@@ -1003,6 +1053,8 @@ def _kick_auto_update() -> str | None:
         return None
     _ensure_disk_space(len(codes), MODE_INCREMENTAL)
     options = _options_for(MODE_INCREMENTAL, concurrency=_idle_concurrency())
+    # 增量窗口：每只从库内最新日 -14 天补到今天，这里记下并集供下载页展示
+    _stamp_span(options, codes, latest)
     task_id = "dl-" + uuid.uuid4().hex
     download_store.create_task(task_id, "downloaded", options, codes, 1, origin=ORIGIN_AUTO)
     # `auto_last_run` **不在这里写**：它由 `_run` 在任务真正跑完时登记。
@@ -1109,6 +1161,12 @@ def _scheduler_tick() -> None:
     except Exception:                         # noqa: BLE001 - 清理失败绝不能影响下载调度
         pass
 
+    # 老增量任务补算时间窗（只补一次；同样放在 alive 判断之前，运行中的任务也要补）
+    try:
+        _backfill_spans()
+    except Exception:                         # noqa: BLE001 - 补展示不能影响调度
+        pass
+
     if _has_alive_task():
         return
     stored = download_store.settings_map()
@@ -1131,6 +1189,12 @@ def _scheduler_tick() -> None:
         # 一个请求都不发，只会顺手登记「今天巡检过」。
         if stored.get("lockup_last_run") != today and dt.datetime.now().hour >= AUTO_UPDATE_HOUR:
             _kick_lockup_update()
+        # 周度修订回收：每个 ISO 周一次，把已下载股票的近段重拉一遍回收修订。
+        # 后台自动、无交互；本周没跑过才起，节假日顺延到新周首次调度。
+        # 与日线/锁仓串行，避免三套慢任务同时抢带宽。
+        if (stored.get("weekly_refresh_last_iso") != _iso_week()
+                and dt.datetime.now().hour >= AUTO_UPDATE_HOUR):
+            _kick_weekly_refresh()
     if stored.get("idle_download") == "1":
         _ensure_idle_task()
 
@@ -1213,6 +1277,8 @@ def start_task(*, scope: str = "all", source: str = SOURCE_ONLINE,
                            concurrency=concurrency, rate_limit=rate_limit,
                            with_reference=with_reference,
                            force_reference=force_reference)
+    # 增量任务没有统一时间窗，算一次并集写进 options，前端才能显示真实日期
+    _stamp_span(options, resolved)
     task_id = "dl-" + uuid.uuid4().hex
     download_store.create_task(task_id, scope, options, resolved,
                                options["phases"], origin=ORIGIN_MANUAL)
@@ -1238,15 +1304,78 @@ def _start_lockup_task(*, scope: str, concurrency: int,
     return task_id
 
 
-def _requested_span(task: dict[str, Any]) -> tuple[str | None, str | None]:
-    """这个任务**请求下载的时间段**（下载页展示用），空值表示不限/增量。
+def _stamp_span(options: dict[str, Any], codes: list[str],
+                latest: dict[str, str] | None = None) -> None:
+    """给**增量**任务记下这次真正请求的时间窗（下载页展示用）。
 
-    完整历史：从 options 里的起始日到今天；增量模式只补最近，不设下界，
-    起止都返回 None，前端就显示「增量（仅补最近）」而不是编一个日期。
+    增量是「逐票只拉库内最新日之后真正新增的交易日」（最新日 + 1 → 今天），
+    没有统一区间，所以展示取这些窗口的**并集**：起点取最早那只的起点，终点取今天。
+    创建任务时算一次写进 options，轮询时零成本；老任务没有这两个键就回退成
+    「仅补最近」（前端已兼容）。
+
+    完整历史任务不做任何事（它的窗口就是 options.start_date ~ 今天）。
+    """
+    if str(options.get("mode") or MODE_FULL) != MODE_INCREMENTAL:
+        return
+    overlap = int(options.get("overlap_days") or 0)
+    days = latest if latest is not None else price_store.code_latest_dates()
+    begin: dt.date | None = None
+    for code in codes:
+        day = str(days.get(code) or "")
+        if not day:
+            continue
+        try:
+            moment = dt.date.fromisoformat(day)
+        except ValueError:
+            continue
+        # overlap>0（周度修订回收）：窗口是 [最新日-overlap, 今天]；
+        # 否则（每日纯增量）：只拉新增 [最新日次日, 今天]。与 _download_one 口径一致。
+        start = (moment - dt.timedelta(days=overlap)) if overlap > 0 else (moment + dt.timedelta(days=1))
+        begin = start if begin is None or start < begin else begin
+    if begin is None:                       # 全都没下过：就是从头拉，不编区间
+        return
+    options["span_begin"] = begin.isoformat()
+    options["span_end"] = dt.date.today().isoformat()
+
+
+def _backfill_spans() -> None:
+    """给**早于 `_stamp_span` 之前建的**增量任务补算时间窗（只补一次）。
+
+    老任务的 options 里没有 `span_begin`，下载页只能显示「仅补最近」。这里在
+    调度器里补一次并写回 options，之后轮询就有真实日期了。
+    """
+    for task in download_store.list_tasks(20):
+        options = task.get("options") or {}
+        if str(options.get("mode") or MODE_FULL) != MODE_INCREMENTAL:
+            continue
+        if options.get("span_begin"):
+            continue
+        if task["status"] not in ("running", "queued", "paused"):
+            continue
+        try:
+            codes = sorted(download_store.task_code_set(task["id"]))
+        except Exception:                       # noqa: BLE001 - 补展示不能影响调度
+            continue
+        before = dict(options)
+        _stamp_span(options, codes)
+        if options != before:
+            download_store.update_options(task["id"], options)
+
+
+def _requested_span(task: dict[str, Any]) -> tuple[str | None, str | None]:
+    """这个任务**请求下载的时间段**（下载页展示用），空值表示不限。
+
+    完整历史：从 options 里的起始日到今天；
+    增量：创建时由 `_stamp_span` 算好的并集窗口（逐票其实是从各自库内最新
+    日期前推的重叠段，展示的是这些窗口的并集）。
     """
     options = task.get("options") or {}
+    if str(options.get("kind") or KIND_BARS) == KIND_LOCKUP:
+        return None, None                   # 锁仓补采没有时间窗，看报告期
     if str(options.get("mode") or MODE_FULL) != MODE_FULL:
-        return None, None
+        begin = str(options.get("span_begin") or "")
+        end = str(options.get("span_end") or "")
+        return (begin or None), (end or None)
     begin = _option_date(options, "start_date")
     if begin is None:
         return None, None
@@ -1262,6 +1391,12 @@ def _decorate(task: dict[str, Any]) -> dict[str, Any]:
     requested_begin, requested_end = _requested_span(task)
     task["requested_begin"] = requested_begin
     task["requested_end"] = requested_end
+    # 增量任务的区间是「各票窗口的并集」，前端要据此换一种说法
+    task["requested_incremental"] = (
+        str((task.get("options") or {}).get("mode") or MODE_FULL) == MODE_INCREMENTAL
+        and bool(requested_begin))
+    # overlap_days>0 表示这是「周度修订回收」任务（重拉近段而非只补新增），前端据此区分文案
+    task["overlap_days"] = int((task.get("options") or {}).get("overlap_days") or 0)
     with _runtimes_lock:
         runtime = _runtimes.get(task["id"])
     task["alive"] = bool(runtime is not None and runtime.manager is not None
