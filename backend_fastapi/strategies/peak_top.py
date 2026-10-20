@@ -17,19 +17,21 @@ PEAKB = 每日筹码分布里**主峰簇**的占比（%），与 PEAK（只取�
 口径（与 PEAKB 指标一致）：
     - formula_id="tri_decay"，adjust="qfq"，offline=False（带锁仓修正）。
     - bins=80 与 PEAKB 指标默认一致；band_pct / tol 即 PEAKB 指标的「峰宽 / 衰减容差」。
-    - 代价：offline=False 会在线取流通股本 / 锁仓比例，池子一大（尤其全市场）
-      可能偏慢或被限流；建议用「股票池」跑，别直接挂全市场。
+    - 代价：offline=False 会在线取流通股本 / 锁仓比例；现已多线程并行取数（与周榜一致），
+      全市场仍较重，建议用「股票池」跑，别直接挂全市场。
 """
 from __future__ import annotations
 
 import datetime as dt
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
 
 import chipformulas as chip_formulas
 from chipformulas.core.peak import peak_band_series
-from .core.base import strategy, ParamSpec, Signal, checkpoint
+from .core.base import strategy, ParamSpec, Signal, checkpoint, Cancelled
 
 # 锁仓系数公式下拉：中文标签 → 实际筹码公式 id（"全部用1" = 锁仓系数强制为 1，不修正）
 _LOCKUP_FORMULA = {
@@ -123,20 +125,36 @@ def peak_top(ctx, top_n: int = 1, rebalance: int = 1, window: int = 0,
 
     cols: dict[str, pd.Series] = {}
     lockups: dict[str, float] = {}
-    for code in codes:
-        # 逐标的检查点：本策略逐只算筹码矩阵，池子一大最慢，**必须**在这里查暂停/停止，
-        # 否则「停止」按钮在这段完全无效。未安装控制器时（如注册冒烟、单测）这里是 no-op。
-        checkpoint()
-        s, L = _peak_series(code, fetch_start, end, bins, formula_id, band_pct, tol)
-        if s is None:
-            continue
-        if win_start:
-            s = s[s.index >= win_start]         # 预热段不参与选股
-        s = s.dropna()
-        if s.empty:
-            continue
-        cols[code] = s
-        lockups[code] = L
+    # 逐票算全历史筹码矩阵很重：用线程池并行（与 features/chip/rank_service.py 的批量口径一致，
+    # 该服务已稳定用线程池跑同款 compute_matrix）。numpy 重算会释放 GIL；进度点仍在主线程
+    # 逐只 checkpoint（支持暂停/停止）；被取消时 checkpoint 抛 Cancelled 中止整批。
+    def _work(code):
+        return (code,) + _peak_series(code, fetch_start, end, bins, formula_id, band_pct, tol)
+
+    nworkers = max(1, min(os.cpu_count() or 4, 12))
+    _ex = ThreadPoolExecutor(max_workers=nworkers)
+    futs = {_ex.submit(_work, c): c for c in codes}
+    try:
+        for _fut in as_completed(futs):
+            c = futs[_fut]
+            try:
+                c, s, L = _fut.result()
+            except Exception:                        # noqa: BLE001 - 单只异常不拖垮整批
+                s, L = None, 1.0
+            if s is not None:
+                if win_start:
+                    s = s[s.index >= win_start]     # 预热段不参与选股
+                s = s.dropna()
+                if not s.empty:
+                    cols[c] = s
+                    lockups[c] = L
+            checkpoint()                            # 暂停/停止点（未装控制器时为 no-op）
+    except Cancelled:                               # 用户停止：取消尚未开始的票，避免继续算完整个池子
+        for _f in futs:
+            _f.cancel()
+        raise
+    finally:
+        _ex.shutdown(wait=True)
     if not cols:
         return []
 

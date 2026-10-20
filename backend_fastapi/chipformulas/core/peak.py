@@ -58,13 +58,67 @@ def peak_band_series(pct: np.ndarray, centers: np.ndarray,
     """对每日筹码矩阵（行=日期、列=价格分箱，行合计 100）逐帧算主峰簇占比。
 
     返回长度 = 帧数的 ndarray；整行 NaN 的帧保持 NaN（缺数据日）。
+
+    纯 numpy 向量化：用前缀和 + “首个不满足索引”的扫描，**一次算完整段**，
+    不再逐帧 Python 循环（原逐帧循环 ~1250 次/只，约 30ms/只）。
     """
     pct = np.asarray(pct, dtype=float)
     centers = np.asarray(centers, dtype=float)
-    out = np.full(pct.shape[0], np.nan)
-    for i in range(pct.shape[0]):
-        row = pct[i]
-        if np.all(np.isnan(row)):
-            continue
-        out[i] = peak_band(row, centers, band_pct, tol)
+    n, b = pct.shape
+    out = np.full(n, np.nan)
+    bad = np.isnan(pct).all(axis=1)
+    good = ~bad
+    if not good.any():
+        return out
+
+    gi = np.where(good)[0]                              # 只在（非全 NaN）行上算
+    P = pct[gi]
+    # NaN 箱当 0 仅用于求和；是否「可延续」由 valid 控制（NaN 箱会打断累加）。
+    valid = ~np.isnan(P)
+    rows = np.where(valid, P, 0.0)
+    band = max(0.0, float(band_pct)) / 100.0
+    t = max(0.0, float(tol)) / 100.0
+
+    peak_i = np.nanargmax(P, axis=1)                   # 每帧峰位箱 (m,)
+    peak_price = centers[peak_i]                       # (m,)
+    half = band * np.abs(peak_price)                   # (m,) 价格带宽
+
+    # 价格带掩码（随票不同）：|centers[j] - 峰位价| <= 带宽
+    in_band = np.abs(centers[None, :] - peak_price[:, None]) <= half[:, None]   # (m,b)
+
+    csum = np.cumsum(rows, axis=1)                     # 前缀和
+    csum2 = np.concatenate([np.zeros((len(gi), 1)), csum], axis=1)  # csum2[:, j+1] = csum[:, j]
+
+    # ---- 右侧：peak_i+1 起，要求 in_band 且 row[j] < row[j-1]*(1-t)，首个不满足即停 ----
+    not_ok_r = np.ones((len(gi), b), dtype=bool)
+    not_ok_r[:, 1:] = ~(valid[:, 1:]
+                        & (rows[:, 1:] < rows[:, :-1] * (1.0 - t))
+                        & in_band[:, 1:])
+    idx_r = np.where(not_ok_r, np.arange(b), b)
+    next_false = np.minimum.accumulate(idx_r[:, ::-1], axis=1)[:, ::-1]  # 首个 >=k 的 not_ok 索引
+    pi1 = peak_i + 1
+    col_r = np.where(pi1 < b, pi1, 0)                  # 防越界取数（pi1==b 时结果会被覆盖）
+    k = next_false[np.arange(len(gi)), col_r]
+    k = np.where(pi1 < b, k, b)
+    e = np.minimum(k - 1, b - 1)
+    right_sum = csum[np.arange(len(gi)), e] - csum[np.arange(len(gi)), peak_i]
+    right_sum[pi1 >= b] = 0.0                          # 峰值在末箱 → 无右侧
+
+    # ---- 左侧：peak_i-1 向下，要求 in_band 且 row[j] < row[j+1]*(1-t)，首个不满足即停 ----
+    not_ok_l = np.ones((len(gi), b), dtype=bool)
+    not_ok_l[:, :-1] = ~(valid[:, :-1]
+                         & (rows[:, :-1] < rows[:, 1:] * (1.0 - t))
+                         & in_band[:, :-1])
+    idx_l = np.where(not_ok_l, np.arange(b), -1)
+    prev_false = np.maximum.accumulate(idx_l, axis=1)  # 最后一个 <=j 的 not_ok 索引（无则 -1）
+    pi0 = peak_i - 1
+    col_l = np.clip(pi0, 0, b - 1)                     # 防 -1 越界取数（pi0<0 时结果会被覆盖）
+    m = prev_false[np.arange(len(gi)), col_l]
+    m = np.where(pi0 >= 0, m, -1)
+    left_sum = (csum[np.arange(len(gi)), np.clip(pi0, 0, b - 1)]
+                - csum2[np.arange(len(gi)), np.clip(m, -1, b - 1) + 1])
+    left_sum[pi0 < 0] = 0.0                            # 峰值在首箱 → 无左侧
+
+    total = rows[np.arange(len(gi)), peak_i] + right_sum + left_sum
+    out[gi] = total
     return out
