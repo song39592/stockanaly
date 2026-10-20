@@ -1380,7 +1380,10 @@ def _stamp_span(options: dict[str, Any], codes: list[str],
     if begin is None:                       # 全都没下过：就是从头拉，不编区间
         return
     options["span_begin"] = begin.isoformat()
-    options["span_end"] = dt.date.today().isoformat()
+    # 终点用「应有交易日」，不要用创建任务时的 dt.date.today() 写死：任务创建于
+    # 昨日或创建时尚未收盘，都会让写死的 end 比实际下载目标（_expected_data_day）
+    # 少一天，造成「请求区间停在 10-19 而非 10-20」的展示错误。
+    options["span_end"] = _expected_data_day() or dt.date.today().isoformat()
 
 
 def _backfill_spans() -> None:
@@ -1419,8 +1422,12 @@ def _requested_span(task: dict[str, Any]) -> tuple[str | None, str | None]:
         return None, None                   # 锁仓补采没有时间窗，看报告期
     if str(options.get("mode") or MODE_FULL) != MODE_FULL:
         begin = str(options.get("span_begin") or "")
-        end = str(options.get("span_end") or "")
-        return (begin or None), (end or None)
+        if not begin:
+            return None, None
+        # 终点随「应有交易日」动态刷新，不用创建任务时写死的 span_end：
+        # 任务创建于昨日 / 创建时尚未收盘都会让写死的 end 比实际下载目标少一天。
+        end = _expected_data_day() or str(options.get("span_end") or "")
+        return begin, end
     begin = _option_date(options, "start_date")
     if begin is None:
         return None, None
@@ -1601,6 +1608,10 @@ def resume(task_id: str) -> dict[str, Any]:
         if _has_alive_task():
             raise RuntimeError("请先结束当前运行的任务")
         download_store.requeue_running(task_id)
+    # 重新检查日期：把已完成（done）的项退回待下载，由 _download_one 实时重判
+    # （已最新走 `have_latest >= expected` 秒跳过，滞后的补最新）。否则「暂停→跨天→继续」
+    # 会漏掉已完成票在暂停期间新增的交易日（如 10-19 完成、10-20 数据出来后不再补）。
+    download_store.requeue_done(task_id)
     download_store.update_task(task_id, status="running")
     _spawn(task_id, task["options"])
     return task_view(task_id)
