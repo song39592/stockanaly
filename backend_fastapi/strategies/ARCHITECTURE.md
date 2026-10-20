@@ -13,6 +13,14 @@
 ```
 具体策略导入框架一律走 `from .core import ...`。
 
+> 🆕 **与指标共用同一份计算，不得各写一遍**：策略若需要某个「同时也是副图指标」的口径
+> （如筹码峰簇占比 PEAKB、集中度 SCR 等），**必须复用 `chip_formulas/core/` 下的计算内核**
+> （`core/peak.py` 的 `peak_band` / `peak_band_series`、`core/scr.py` 的 `scr_series`），
+> 而不是在策略里把指标算法再实现一遍。对应指标文件（`indicators/chip_peak_band.py` 等）
+> 也只做展示包装、import 同一个内核。这样「策略选股」与「副图显示」同源、可逐日直接对照，
+> 不会因为两处各算各的而漂移。策略取行情/框架仍只走 `from .core import ...`，纯计算口径
+> 则统一从 `chip_formulas.core` 取，不落地到策略文件内。
+
 ---
 
 ## 本次修订摘要（重点修改点）

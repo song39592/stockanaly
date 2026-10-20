@@ -1,21 +1,22 @@
 # -*- coding: utf-8 -*-
-"""筹码峰占比（PEAK）· 最大选股策略。
+"""筹码峰簇占比（PEAKB）· 最大选股策略。
 
-逻辑：每 `rebalance` 个交易日，在回测池内按**当日 PEAK（筹码分布最高峰占比）**
+逻辑：每 `rebalance` 个交易日，在回测池内按**当日 PEAKB（筹码分布主峰簇占比）**
 降序排名，取前 `top_n` 只等权持有，跌出榜单即移出（`top_n` 默认 1 = 只买最大的那只）。
 
-PEAK = 每日筹码分布里**最高峰（最集中价格分箱）**的占比（max(每行分布)，合计 100）。
-数值越大说明筹码越向单一价位集中。本策略与 K 线副图 PEAK 指标**同一口径**：
-`tri_decay` 公式、`qfq`、带锁仓修正、`bins` 同参数（`get_chip_frames` 的默认）。
+PEAKB = 每日筹码分布里**主峰簇**的占比（%），与 PEAK（只取最高单箱）不同：把峰值两侧
+**连续衰减**的箱也归入同一座峰（遇回升 / 超出峰位 ±band_pct% 即停）。数值越大说明
+筹码越向主峰簇集中。本策略与 K 线下方副图 **PEAKB 指标同一口径**（含 band_pct / tol 参数）。
 
 **为什么能回测（关键）**：`chip_formulas` 的筹码矩阵是**因果**的 —— 第 i 帧只由
 第 0..i 天的换手与价格推出（`chips *= (1-k)` 后再铺当日筹码），所以一次算完某只票就
-得到**整段历史**的 PEAK 序列，可以逐日做横截面排序，不存在未来函数。为让窗口首日
+得到**整段历史**的 PEAKB 序列，可以逐日做横截面排序，不存在未来函数。为让窗口首日
 不退化成「只累积了一天」的尖刺，取数区间在 start 之前再往前多取约 1.5×window 个
 自然日 —— 这些帧只养状态、不参与选股。
 
-口径（与 PEAK 指标一致，非 SCR90 周榜口径）：
+口径（与 PEAKB 指标一致）：
     - formula_id="tri_decay"，adjust="qfq"，offline=False（带锁仓修正）。
+    - bins=80 与 PEAKB 指标默认一致；band_pct / tol 即 PEAKB 指标的「峰宽 / 衰减容差」。
     - 代价：offline=False 会在线取流通股本 / 锁仓比例，池子一大（尤其全市场）
       可能偏慢或被限流；建议用「股票池」跑，别直接挂全市场。
 """
@@ -27,6 +28,7 @@ import numpy as np
 import pandas as pd
 
 import chipformulas as chip_formulas
+from chipformulas.core.peak import peak_band_series
 from .core.base import strategy, ParamSpec, Signal, checkpoint
 
 # 锁仓系数公式下拉：中文标签 → 实际筹码公式 id（"全部用1" = 锁仓系数强制为 1，不修正）
@@ -36,13 +38,16 @@ _LOCKUP_FORMULA = {
 }
 
 
-def _peak_series(code: str, fetch_start, end, bins: int, formula: str) -> "tuple[pd.Series | None, float]":
-    """取单只票的 PEAK 时间序列（每帧最高箱占比 %），并一并返回该票锁仓系数 L。
+def _peak_series(code: str, fetch_start, end, bins: int, formula: str,
+                 band_pct: float = 20.0, tol: float = 0.5) -> "tuple[pd.Series | None, float]":
+    """取单只票的 **PEAKB（主峰簇占比 %）** 时间序列，并一并返回该票锁仓系数 L。
 
     ⚠️ `compute_matrix` 的**价格轴（分箱边界）取决于取数范围的最大/最小价**，所以
-    必须和 PEAK 指标取同一份范围才能数值完全一致：这里固定传 `end=None`（铺满
-    「上市→最新」全价格轴，与指标 `chip_rows_of` 同口径）。`end` 仅用于裁掉回测终点
-    之后的帧，不参与价格轴计算。
+    固定传 `end=None`（铺满「上市→最新」全价格轴，与 PEAKB 指标 `chip_rows_of` 同口径），
+    `end` 仅用于裁掉回测终点之后的帧，不参与价格轴计算。
+
+    PEAKB 与 PEAK（只取最高单箱）不同：沿主峰两侧累加「连续衰减」的箱，遇回升或超出
+    峰位 ±band_pct% 即停；`band_pct` / `tol` 即 PEAKB 指标的「峰宽 / 衰减容差」。
 
     锁仓系数 L = 1/(1-r) 直接取自 `compute_matrix` 的返回（chipformulas 已算过，不重复取数），
     供策略把该票的锁仓系数写进信号 meta；公式选择（含是否带 L 修正）由 `formula` 决定。
@@ -53,8 +58,10 @@ def _peak_series(code: str, fetch_start, end, bins: int, formula: str) -> "tuple
             adjust="qfq", bins=bins, offline=False)
     except Exception:                        # noqa: BLE001 - 单只失败不拖垮整批
         return None, 1.0
-    peak = np.nanmax(res.pct, axis=1)        # 每帧峰值占比（%）
-    s = pd.Series(peak, index=list(res.dates))
+    # 计算层（峰簇占比）在 chipformulas.core.peak，与 PEAKB 副图指标同一份实现，
+    # 这里直接用矩阵结果逐帧算，无需再走指标展示层。
+    s = pd.Series(peak_band_series(res.pct, res.centers, band_pct, tol),
+                  index=list(res.dates))
     if end:
         s = s[s.index <= end]
     # 锁仓系数 L：tri_decay_nolock 内部把 lockup 强制为 1（不做锁仓放大），compute_matrix
@@ -65,12 +72,12 @@ def _peak_series(code: str, fetch_start, end, bins: int, formula: str) -> "tuple
 
 @strategy(
     id="peak_top",
-    name="筹码峰占比 · 最大选股",
+    name="筹码峰簇占比(PEAKB) · 最大选股",
     category="筹码",
-    description="每 N 个交易日在池内按 PEAK（筹码分布最高峰占比）降序排名，取前 K 只等权持有，"
-                "跌出榜单即移出；PEAK 越大筹码越集中。\n"
-                "PEAK 与副图 PEAK 指标同口径：默认全历史，window>0 才切近期窗口；"
-                "锁仓系数公式可选『带锁仓系数L』（默认）或『全部用1』（不做锁仓修正）。",
+    description="每 N 个交易日在池内按 PEAKB（筹码分布主峰簇占比 %）降序排名，取前 K 只等权持有，"
+                "跌出榜单即移出；PEAKB 越大筹码越向主峰簇集中。\n"
+                "PEAKB 与下方副图 PEAKB 指标同口径（含峰宽 band_pct / 衰减容差 tol）：默认全历史，"
+                "window>0 才切近期窗口；锁仓系数公式可选『带锁仓系数L』（默认）或『全部用1』。",
     inputs=["close"],
     outputs="目标权重向量(组合占比)",
     params=[
@@ -80,11 +87,14 @@ def _peak_series(code: str, fetch_start, end, bins: int, formula: str) -> "tuple
         ParamSpec("formula", "choice", "带锁仓系数L",
                   choices=["带锁仓系数L", "全部用1"], label="锁仓系数公式"),
         ParamSpec("bins", "int", 80, min=20, max=200, label="价格分箱数"),
+        ParamSpec("band_pct", "float", 20.0, min=1.0, max=100.0, label="峰宽(价格±%)"),
+        ParamSpec("tol", "float", 0.5, min=0.0, max=5.0, label="衰减容差%"),
         ParamSpec("position", "float", 1.0, min=0.1, max=1.0, label="总仓位系数"),
     ],
 )
 def peak_top(ctx, top_n: int = 1, rebalance: int = 1, window: int = 0,
-             bins: int = 80, position: float = 1.0, formula: str = "tri_decay") -> list:
+             bins: int = 80, position: float = 1.0, formula: str = "tri_decay",
+             band_pct: float = 20.0, tol: float = 0.5) -> list:
     """按 PEAK 降序做横截面选股，返回完整目标组合的 list[Signal]。"""
     codes = [str(c).strip() for c in (ctx.codes or []) if str(c).strip()]
     if not codes:
@@ -117,7 +127,7 @@ def peak_top(ctx, top_n: int = 1, rebalance: int = 1, window: int = 0,
         # 逐标的检查点：本策略逐只算筹码矩阵，池子一大最慢，**必须**在这里查暂停/停止，
         # 否则「停止」按钮在这段完全无效。未安装控制器时（如注册冒烟、单测）这里是 no-op。
         checkpoint()
-        s, L = _peak_series(code, fetch_start, end, bins, formula_id)
+        s, L = _peak_series(code, fetch_start, end, bins, formula_id, band_pct, tol)
         if s is None:
             continue
         if win_start:
@@ -148,7 +158,7 @@ def peak_top(ctx, top_n: int = 1, rebalance: int = 1, window: int = 0,
         # 「移出」根本没被登记，上一期持仓会继续持有。
         for code in sorted(held - picks):
             signals.append(Signal(code=code, time=day_s, weight=0.0,
-                                  reason=f"跌出 PEAK 前{top_n}",
+                                  reason=f"跌出峰簇前{top_n}",
                                   meta={"dropped": 1, "lockup": round(lockups.get(code, 1.0), 3),
                                         "formula": formula_id}))
 
@@ -157,8 +167,8 @@ def peak_top(ctx, top_n: int = 1, rebalance: int = 1, window: int = 0,
         for code in sorted(picks):
             signals.append(Signal(
                 code=code, time=day_s, weight=w,
-                reason=f"PEAK 排名前{top_n}",
-                meta={"peak": round(float(row[code]), 2), "rank": ranked.index(code) + 1,
+                reason=f"峰簇占比(PEAKB) 排名前{top_n}",
+                meta={"peakb": round(float(row[code]), 2), "rank": ranked.index(code) + 1,
                       "lockup": round(lockups.get(code, 1.0), 3),
                       "formula": formula_id},
             ))
