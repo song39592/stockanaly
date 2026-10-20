@@ -301,6 +301,15 @@ lowerPanels: Series[][]          // 每个 lower 指标一组，纵向堆叠成�
 > 本包要让指标拿到矩阵，只能在 `data.py` / `registry.py` 的**函数内延迟 import** 那个包
 > （模块级互导会形成环）。指标实现文件不得 import 它。
 
+> ⚠️ **指标与策略必须复用同一份计算，不得各写一遍**：若一个延伸量同时被「副图指标」
+> 与「策略选股」使用（如 PEAKB：副图 `chip_peak_band` 与 `strategies/peak_top.py`、
+> `peak_thresh.py` 都消费它），其**纯计算**必须抽成 `chip_formulas/core/` 下的内核模块
+> （`core/peak.py` 的 `peak_band` / `peak_band_series`、`core/scr.py` 的 `scr_series`）：
+> 指标 import 它只做**展示包装**，策略 import 它做**横截面选股**。这样「副图显示」与
+> 「策略选股」同源、可逐日直接对照，不会因两处各实现一遍而悄悄漂移。受禁的仍是指标
+> 文件 import 那个包的**取数 / 矩阵构造**模块（防循环依赖）；纯 numpy 的计算内核无副作用，
+> 可安全双向引用。
+
 ## 12. 与现有架构的关系
 
 - `price_store.py` 是底层存储层（SQLite 分片，提供 `load_bars` 等）。本包**不碰存储**，

@@ -137,7 +137,14 @@ def tri_decay(ctx: ChipContext, decay: float = 1.0) -> np.ndarray:
 
 指标侧经 `indicators/data.py` 的 `get_chip_frames()` 拿矩阵，**函数内延迟 import 本包**
 以打断 `indicators.data ↔ chipformulas.core.data` 的循环依赖；指标实现文件本身
-不得 import 本包（保持 §2 的单向依赖）。
+不得 import 本包的**取数 / 矩阵构造**模块（保持 §2 的单向依赖）。
+
+> ⚠️ 延伸量的**纯计算**（不取数、不碰矩阵构造）应抽成本包 `core/` 下的**计算内核**
+> 模块（`core/scr.py` 的 `scr_series` / `scr_frame`、`core/peak.py` 的 `peak_band` /
+> `peak_band_series`）：指标文件 import 它们只做**展示包装**，策略（如 `strategies/peak_top.py`、
+> `peak_thresh.py`）也直接 import 它们做**横截面选股**。这样「副图显示」与「策略选股」
+> 同源、可逐日直接对照，不再手动两边同步。计算内核只依赖 numpy、无副作用，可安全双向引用；
+> 受禁的仍是指标 import 本包的取数 / 矩阵构造模块（避免循环依赖）。
 
 ---
 

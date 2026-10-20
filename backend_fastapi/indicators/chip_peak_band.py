@@ -19,6 +19,7 @@ import pandas as pd
 
 from .base import ParamSpec, indicator, series_line
 from .data import chip_rows_of
+from chipformulas.core.peak import peak_band_series
 
 
 @indicator(
@@ -34,47 +35,9 @@ from .data import chip_rows_of
 )
 def chip_peak_band(df: pd.DataFrame, formula: str = "tri_decay",
                    band_pct: float = 20.0, tol: float = 0.5) -> dict:
+    # 计算层（峰簇占比）在 chipformulas.core.peak，与策略共用同一份实现；
+    # 本函数只负责把结果包装成副图展示 —— 指标与策略数值天然一致，不必手动两边同步。
     rows, frames = chip_rows_of(df, formula_id=formula)
     centers = np.asarray(frames.centers, dtype=float)
-    band_pct = max(0.0, float(band_pct))
-    out = []
-    for i in range(len(rows)):
-        row = rows[i]
-        if np.all(np.isnan(row)):
-            out.append(float("nan"))
-            continue
-        out.append(float(_peak_band(row, centers, band_pct, tol)))
+    out = peak_band_series(rows, centers, band_pct, tol)
     return {"series": [series_line("峰簇占比%", pd.Series(out, index=df.index))]}
-
-
-def _peak_band(row: np.ndarray, centers: np.ndarray, band_pct: float, tol: float) -> float:
-    """沿峰值两侧累加「连续衰减」箱；遇回升、或价格超出峰位 ±band_pct% 即停。
-
-    返回主峰簇占比（%）。`centers` 为各价格分箱中心（与 `row` 等长）。
-    """
-    tol = max(0.0, float(tol)) / 100.0            # 百分比 → 比例
-    n = len(row)
-    peak_i = int(np.nanargmax(row))
-    peak = float(row[peak_i])
-    peak_price = float(centers[peak_i])
-    half = band_pct / 100.0 * abs(peak_price)     # 价格带宽（围绕峰位）
-    total = peak
-    # 向右：超出价格带宽或非连续衰减（回升）即停
-    j = peak_i + 1
-    while j < n:
-        if abs(float(centers[j]) - peak_price) > half:
-            break
-        if row[j] >= row[j - 1] * (1.0 - tol):    # 不再衰减 → 停
-            break
-        total += float(row[j])
-        j += 1
-    # 向左：对称
-    j = peak_i - 1
-    while j >= 0:
-        if abs(float(centers[j]) - peak_price) > half:
-            break
-        if row[j] >= row[j + 1] * (1.0 - tol):
-            break
-        total += float(row[j])
-        j -= 1
-    return total

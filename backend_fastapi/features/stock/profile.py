@@ -40,6 +40,12 @@ _LOCKUP_DISCLOSURE_LAG_DAYS = 40
 _LOCKUP_MIN_REFRESH_DAYS = 7
 _LOCKUP_MIN_PCT = 5.0               # 缓存表不区分 min_pct，只对举牌线口径生效
 
+# 取不到十大流通股东时的兜底口径：按**全流通**处理（r=0、L=1.0，不修正换手率）。
+# 次新股（上市不足一个季报周期、尚未披露首份季报）、停牌/退市/长期无交易、
+# 以及数据源缺期的股票都会走这里——它们本来也算不出锁仓，中性不修正最稳妥。
+_FULL_CIRCULATION_RATIO = 0.0
+_FULL_CIRCULATION_FACTOR = 1.0
+
 
 def _cached(key: str, producer) -> Any:
     now = time.time()
@@ -303,9 +309,27 @@ def _lockup_stale(row: dict[str, Any] | None) -> bool:
 
 
 def _fetch_lockup(code: str, min_pct: float) -> dict:
-    """真实取数（akshare 东财），并写进程内缓存；**不读盘、不落盘**。"""
+    """真实取数（akshare 东财），并写进程内缓存；**不读盘、不落盘**。
+
+    取不到十大流通股东时（次新股尚未披露首份季报 / 停牌退市 / 数据源缺期），
+    按**全流通**兜底：r=0、L=1.0（不修正换手率），并标记 `fallback=True`。
+    这与 `_first_report_frame` 里既有的降级口径一致，区别是这里把它**显式返回**
+    给调用方落盘——否则这些股票每轮补采都当失败重试，永远显示「失败」。
+    报告期推进到下一季后 `period` 变旧，会自然重取覆盖，不必人工干预。
+    """
     src = free_top_holders(code)
     items = src.get("items") or []
+    if not items:
+        result = {
+            "period": expected_lockup_period(),
+            "ratio": _FULL_CIRCULATION_RATIO,
+            "factor": _FULL_CIRCULATION_FACTOR,
+            "holders": [],
+            "error": None,
+            "fallback": True,
+        }
+        _CACHE[f"lockup:{code}:{min_pct}"] = (time.time(), result)
+        return result
     locked = [it for it in items
               if it.get("pct") is not None and float(it["pct"]) > float(min_pct)]
     ratio = sum(float(it["pct"]) for it in locked) / 100.0
@@ -315,10 +339,10 @@ def _fetch_lockup(code: str, min_pct: float) -> dict:
         "ratio": ratio,
         "factor": (1.0 / (1.0 - ratio)) if ratio > 0 else 1.0,
         "holders": [{"name": it.get("name"), "pct": it.get("pct")} for it in locked],
-        "error": src.get("error"),
+        "error": None,
+        "fallback": False,
     }
-    if not result.get("error"):                 # 失败不缓存，留待下次重试
-        _CACHE[f"lockup:{code}:{min_pct}"] = (time.time(), result)
+    _CACHE[f"lockup:{code}:{min_pct}"] = (time.time(), result)
     return result
 
 
@@ -367,7 +391,11 @@ def sync_lockup(code: str, min_pct: float = _LOCKUP_MIN_PCT,
 
     缓存里已是最新报告期 → **零请求**返回；`force=True` 强制重采（补救用）。
 
-    返回 {ok, cached, period, ratio, factor} 或 {ok=False, errors}。
+    取不到十大流通股东（次新股未披露季报 / 停牌退市 / 数据源缺期）时**不算失败**：
+    按全流通兜底（r=0、L=1.0）落盘并返回 `fallback=True`，使补采任务能正常收尾、
+    不再把这类股票永久标成「失败」；下一报告期会自然重取覆盖。
+
+    返回 {ok, cached, period, ratio, factor, fallback} 或 {ok=False, errors}。
     """
     key = f"lockup:{code}:{min_pct}"
     _CACHE.pop(key, None)                      # 让本次判定只信落盘与数据源
@@ -388,7 +416,8 @@ def sync_lockup(code: str, min_pct: float = _LOCKUP_MIN_PCT,
     if disk_ok and result.get("period"):
         price_store.put_lockup(code, result["period"], result["ratio"], result["factor"])
     return {"ok": True, "cached": False, "period": result["period"],
-            "ratio": result["ratio"], "factor": result["factor"]}
+            "ratio": result["ratio"], "factor": result["factor"],
+            "fallback": bool(result.get("fallback"))}
 
 
 def company_info(code: str) -> dict:
