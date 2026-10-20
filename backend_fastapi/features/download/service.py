@@ -409,6 +409,40 @@ def _no_older_history(code: str, split: dt.date) -> bool:
         return False
 
 
+def _is_suspended(code: str, expected: dt.date | None, *,
+                  latest: str | None = None, earliest: str | None = None) -> bool:
+    """长期无新交易日（停牌 / 退市）：库里有过正常历史、但最新日远落后于应有日。
+
+    用来把这类票和「今天还没出 / 数据源延迟 / 新股上市晚」区分开：前者补也补不到，
+    调用方应直接算完成、不记失败、不占限速额度。判定结合了「最新日落后幅度」
+    （`SUSPENDED_GAP_DAYS`）与「是否曾有正常交易历史」（`SUSPENDED_HISTORY_MIN_DAYS`），
+    后者用 earliest 排除上市不久的新股（新股由 `_no_older_history` 处理）。
+    """
+    if expected is None:
+        return False
+    if latest is None:
+        latest = price_store.latest_bar_date(code, "raw")
+    if not latest:
+        return False
+    try:
+        last = dt.date.fromisoformat(str(latest)[:10])
+    except (TypeError, ValueError):
+        return False
+    if last >= expected:
+        return False
+    if (expected - last).days < SUSPENDED_GAP_DAYS:
+        return False
+    if earliest is None:
+        earliest = price_store.earliest_bar_date(code, "raw")
+    if not earliest:
+        return False
+    try:
+        first = dt.date.fromisoformat(str(earliest)[:10])
+    except (TypeError, ValueError):
+        return False
+    return (expected - first).days >= SUSPENDED_HISTORY_MIN_DAYS
+
+
 # --------------------------------------------------------------------------- #
 # worker
 # --------------------------------------------------------------------------- #
@@ -626,6 +660,10 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
             if expected and have_latest and have_latest >= expected:
                 download_store.finish_code(task_id, seq, ok=True)
                 return
+            if expected and have_latest and _is_suspended(code, expected):
+                # 停牌 / 退市：补也补不到，直接算完成——不记失败、不占限速额度。
+                download_store.finish_code(task_id, seq, ok=True)
+                return
             # 优先本地通达信：本地比库内更新 → 直接读本地、不联网、不占限速额度。
             # 这样「有本地数据就不必联网」——自动更新 / 手动增量都受益，且本地缺的
             # 票（如新上市）会自然回落到下面的在线分支，不会漏数据。
@@ -670,6 +708,10 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
             backoff = RETRY_BACKOFF_SECONDS[min(retries, len(RETRY_BACKOFF_SECONDS) - 1)]
             download_store.requeue_code(task_id, seq, f"{message}（{backoff}s 后重试）")
             time.sleep(backoff)
+            return
+        if _is_suspended(code, _expected_data_day()):
+            # 停牌 / 退市导致的失败：数据本来补不到，不计入失败、不刷屏。
+            download_store.finish_code(task_id, seq, ok=True)
             return
         download_store.finish_code(task_id, seq, ok=False, error=message)
         download_store.record_error(task_id, code, message)
@@ -903,7 +945,14 @@ def _downloaded_staleness() -> tuple[int, int, list[str], str | None]:
     if expected is None:
         # 交易日历与本地数据都给不出基准时，退回原先的自然日口径
         expected = (dt.date.today() - dt.timedelta(days=FRESHNESS_DAYS)).isoformat()
-    stale = sorted(code for code, day in latest.items() if str(day) < expected)
+    expected_date = dt.date.fromisoformat(expected) if expected else None
+    earliest = _span_dates("earliest", price_store.code_earliest_dates)
+    # 停牌 / 退市票长期落后是「补也补不到」，不计入陈旧，避免拖垮自动更新资格。
+    stale = sorted(
+        code for code, day in latest.items()
+        if str(day) < expected
+        and not _is_suspended(code, expected_date, latest=str(day), earliest=earliest.get(code))
+    )
     return len(latest), len(stale), stale[:10], max(str(day) for day in latest.values())
 
 
@@ -911,6 +960,11 @@ def _downloaded_staleness() -> tuple[int, int, list[str], str | None]:
 # 允许「落后超过 FRESHNESS_DAYS 天的只数」在 10 只或已下载总数的 1% 以内（取大者）。
 STALE_TOLERANCE_MIN = 10
 STALE_TOLERANCE_RATIO = 0.01
+
+# 停牌 / 退市判定：库里曾有正常交易历史，但最新日长期落后于应有交易日。
+# 用来避免把「补也补不到」的票记成失败（反复重试、刷屏、拖累自动更新资格）。
+SUSPENDED_GAP_DAYS = 10             # 最新日落后超过此自然日数（≈一周多交易日）才算「长期」
+SUSPENDED_HISTORY_MIN_DAYS = 60     # 且曾有至少这么长的交易历史（区别于上市不久的新股）
 
 
 def _auto_eligible(downloaded: int, stale: int) -> bool:
@@ -1380,7 +1434,10 @@ def _stamp_span(options: dict[str, Any], codes: list[str],
     if begin is None:                       # 全都没下过：就是从头拉，不编区间
         return
     options["span_begin"] = begin.isoformat()
-    options["span_end"] = dt.date.today().isoformat()
+    # 终点用「应有交易日」，不要用创建任务时的 dt.date.today() 写死：任务创建于
+    # 昨日或创建时尚未收盘，都会让写死的 end 比实际下载目标（_expected_data_day）
+    # 少一天，造成「请求区间停在 10-19 而非 10-20」的展示错误。
+    options["span_end"] = _expected_data_day() or dt.date.today().isoformat()
 
 
 def _backfill_spans() -> None:
@@ -1419,8 +1476,12 @@ def _requested_span(task: dict[str, Any]) -> tuple[str | None, str | None]:
         return None, None                   # 锁仓补采没有时间窗，看报告期
     if str(options.get("mode") or MODE_FULL) != MODE_FULL:
         begin = str(options.get("span_begin") or "")
-        end = str(options.get("span_end") or "")
-        return (begin or None), (end or None)
+        if not begin:
+            return None, None
+        # 终点随「应有交易日」动态刷新，不用创建任务时写死的 span_end：
+        # 任务创建于昨日 / 创建时尚未收盘都会让写死的 end 比实际下载目标少一天。
+        end = _expected_data_day() or str(options.get("span_end") or "")
+        return begin, end
     begin = _option_date(options, "start_date")
     if begin is None:
         return None, None
@@ -1601,6 +1662,10 @@ def resume(task_id: str) -> dict[str, Any]:
         if _has_alive_task():
             raise RuntimeError("请先结束当前运行的任务")
         download_store.requeue_running(task_id)
+    # 重新检查日期：把已完成（done）的项退回待下载，由 _download_one 实时重判
+    # （已最新走 `have_latest >= expected` 秒跳过，滞后的补最新）。否则「暂停→跨天→继续」
+    # 会漏掉已完成票在暂停期间新增的交易日（如 10-19 完成、10-20 数据出来后不再补）。
+    download_store.requeue_done(task_id)
     download_store.update_task(task_id, status="running")
     _spawn(task_id, task["options"])
     return task_view(task_id)

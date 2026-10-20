@@ -318,6 +318,27 @@ def reset_failed(task_id: str) -> int:
     return int(cursor.rowcount or 0)
 
 
+def requeue_done(task_id: str) -> int:
+    """resume 时把已完成（done）的代码退回待下载，重新检查日期。
+
+    增量任务跨天「暂停→继续」时，已完成项在暂停前已「落定」到当时的最新日；
+    若那之后又有了新交易日（或库内被别处更新），这些代码不该被当作永久完成而漏掉。
+    退回 pending 后由 `features.download.service._download_one` 实时重判：已最新的走
+    `have_latest >= expected` 秒跳过（零联网），滞后的补最新。
+
+    同时清零 completed / phase1_done / skipped 计数——这些项重跑后由 finish_code
+    重新累计，进度条从 0 重新涨（已最新的几乎零成本跳过，只闪一下）。
+    """
+    with connect() as conn:
+        cursor = conn.execute(
+            "UPDATE download_codes SET status='pending', retries=0, error='' "
+            "WHERE task_id=? AND status='done'", (task_id,))
+        conn.execute(
+            "UPDATE download_tasks SET completed=0, phase1_done=0, skipped=0, "
+            "errors_json='[]', updated_at=? WHERE id=?", (now_iso(), task_id))
+    return int(cursor.rowcount or 0)
+
+
 def skip_stock(task_id: str, code: str) -> int:
     """这只股票库里的数据已经够了，**整只跳过**：所有未完成阶段一并标完成。
 
