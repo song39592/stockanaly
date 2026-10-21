@@ -84,6 +84,17 @@ namespace StockPool
             private readonly List<string> _origHeader = new List<string>();
             // ---- 排序（第 20 项）----
             private readonly List<string[]> _src = new List<string[]>();  // 原始行（未排序）
+            /// <summary>与 <see cref="_src"/> 一一对应：单元格的自定义前景色（null = 未设置）。
+            /// 直接 `Rows.Add` 填充的表格采集快照时连带存下，重建后恢复，否则排一次序涨幅红/绿就全丢了。</summary>
+            private readonly List<Color?[]> _srcColors = new List<Color?[]>();
+            /// <summary>视图被控件外部直接改过（`Rows.Add` / `Rows.Clear`），此时 `_src` 不可信，
+            /// 下次排序前必须从当前 Rows 重新采集。由 RowsAdded/RowsRemoved 自动置位。
+            /// 这正是盘面涨停/炸板/跌停等表「点排序后整表空白」的根因：
+            /// 它们一直用 `Rows.Add` 填数据、从不走 SetRows，`_src` 恒为空，
+            /// 排序时 `Rows.Clear()` 之后没有任何行能加回来。</summary>
+            private bool _viewDirty;
+            /// <summary>ShowSorted 自己在重建行，期间触发的 RowsAdded/RowsRemoved 不算外部改动。</summary>
+            private bool _suppressDirty;
             private bool _sortable;
             private int _sortCol = -1;
             private bool _sortAsc = true;
@@ -125,6 +136,9 @@ namespace StockPool
                 CellClick += OnCellClick;
                 CellMouseMove += OnCellMouseMove;
                 ColumnHeaderMouseClick += OnHeaderClick;   // 排序（第 20 项）
+                // 外部直接填行时把 _src 标脏，排序前会从当前视图重新采集（见 _viewDirty）。
+                RowsAdded += delegate { if (!_suppressDirty) _viewDirty = true; };
+                RowsRemoved += delegate { if (!_suppressDirty) _viewDirty = true; };
             }
 
             /// <summary>设置列（会清空现有列）。</summary>
@@ -184,8 +198,10 @@ namespace StockPool
             public void SetRows(IList<string[]> rows)
             {
                 _src.Clear();
+                _srcColors.Clear();           // 调用方给的是纯文本，无颜色可继承
                 if (rows != null)
                     for (int i = 0; i < rows.Count; i++) _src.Add(rows[i]);
+                _viewDirty = false;           // 数据源以本次传入为准
                 ResolveSortCol();
                 ShowSorted();
             }
@@ -202,49 +218,100 @@ namespace StockPool
 
             private void ShowSorted()
             {
-                Rows.Clear();
-                List<string[]> view = _src;
-                if (_sortCol >= 0 && _sortCol < Columns.Count)
+                // 外部直接 Rows.Add 填充的表格：先把当前视图（含颜色）采集成快照。
+                // 少了这一步，下面的 Rows.Clear() 会把它们清空，且没有任何行能加回来。
+                if (_viewDirty && !_suppressDirty)
                 {
-                    int col = _sortCol;
-                    bool numeric = Columns[col].DefaultCellStyle.Alignment
-                                   == DataGridViewContentAlignment.MiddleRight;
-                    var order = new int[_src.Count];
-                    for (int i = 0; i < order.Length; i++) order[i] = i;
-                    // 稳定排序：相等时按原下标，升降序切换也不会让同值行乱跳
-                    Array.Sort(order, delegate(int a, int b)
-                    {
-                        // ⚠️ 缺值必须在**取反之前**判定：CompareCell 里「缺值返回 1
-                        // （排后）」本身是对的，但下面降序要对结果取反，一取反缺值
-                        // 就被翻到**最前面**了 —— 实测「—」会跑到榜首。
-                        // 语义要求：缺值恒沉底，不随升降序变化。
-                        if (numeric)
-                        {
-                            bool ma = !NumericOf(CellOf(_src[a], col)).HasValue;
-                            bool mb = !NumericOf(CellOf(_src[b], col)).HasValue;
-                            if (ma || mb)
-                            {
-                                if (ma && mb) return a.CompareTo(b);
-                                return ma ? 1 : -1;
-                            }
-                        }
-                        int c = CompareCell(a, b, col, numeric);
-                        if (c != 0) return _sortAsc ? c : -c;
-                        return a.CompareTo(b);
-                    });
-                    view = new List<string[]>(_src.Count);
-                    foreach (int i in order) view.Add(_src[i]);
+                    if (Rows.Count > 0) CaptureFromView();
+                    else { _src.Clear(); _srcColors.Clear(); }
+                    _viewDirty = false;
                 }
-                for (int i = 0; i < view.Count; i++)
+
+                _suppressDirty = true;
+                try
                 {
-                    // 序号列重排：排序后 # 必须跟着走，否则会出现「#3」出现在第 5 行
-                    if (_ordinalCol >= 0 && view[i].Length > _ordinalCol)
+                    Rows.Clear();
+                    List<string[]> view = new List<string[]>(_src);
+                    List<Color?[]> viewColors = _srcColors.Count == _src.Count ? _srcColors : null;
+                    if (_sortCol >= 0 && _sortCol < Columns.Count)
                     {
-                        string[] copy = (string[])view[i].Clone();
-                        copy[_ordinalCol] = (i + 1).ToString(CultureInfo.InvariantCulture);
-                        view[i] = copy;
+                        int col = _sortCol;
+                        bool numeric = Columns[col].DefaultCellStyle.Alignment
+                                       == DataGridViewContentAlignment.MiddleRight;
+                        var order = new int[_src.Count];
+                        for (int i = 0; i < order.Length; i++) order[i] = i;
+                        // 稳定排序：相等时按原下标，升降序切换也不会让同值行乱跳
+                        Array.Sort(order, delegate(int a, int b)
+                        {
+                            // ⚠️ 缺值必须在**取反之前**判定：CompareCell 里「缺值返回 1
+                            // （排后）」本身是对的，但下面降序要对结果取反，一取反缺值
+                            // 就被翻到**最前面**了 —— 实测「—」会跑到榜首。
+                            // 语义要求：缺值恒沉底，不随升降序变化。
+                            if (numeric)
+                            {
+                                bool ma = !NumericOf(CellOf(_src[a], col)).HasValue;
+                                bool mb = !NumericOf(CellOf(_src[b], col)).HasValue;
+                                if (ma || mb)
+                                {
+                                    if (ma && mb) return a.CompareTo(b);
+                                    return ma ? 1 : -1;
+                                }
+                            }
+                            int c = CompareCell(a, b, col, numeric);
+                            if (c != 0) return _sortAsc ? c : -c;
+                            return a.CompareTo(b);
+                        });
+                        view = new List<string[]>(_src.Count);
+                        viewColors = new List<Color?[]>(_src.Count);
+                        foreach (int i in order)
+                        {
+                            view.Add(_src[i]);
+                            viewColors.Add(i < _srcColors.Count ? _srcColors[i] : null);
+                        }
                     }
-                    Rows.Add(view[i]);
+                    for (int i = 0; i < view.Count; i++)
+                    {
+                        // 序号列重排：排序后 # 必须跟着走，否则会出现「#3」出现在第 5 行
+                        if (_ordinalCol >= 0 && view[i].Length > _ordinalCol)
+                        {
+                            string[] copy = (string[])view[i].Clone();
+                            copy[_ordinalCol] = (i + 1).ToString(CultureInfo.InvariantCulture);
+                            view[i] = copy;
+                        }
+                        Rows.Add(view[i]);
+                        // 恢复采集时的自定义前景色（涨幅红/绿等），否则排序即掉色
+                        Color?[] colors = viewColors != null && i < viewColors.Count ? viewColors[i] : null;
+                        if (colors != null)
+                            for (int j = 0; j < colors.Length && j < Columns.Count; j++)
+                                if (colors[j].HasValue) Rows[i].Cells[j].Style.ForeColor = colors[j].Value;
+                    }
+                }
+                finally
+                {
+                    _suppressDirty = false;
+                }
+                _viewDirty = false;
+            }
+
+            /// <summary>把当前显示的 Rows 采集为「字符串 + 每格前景色」快照，供排序使用。</summary>
+            private void CaptureFromView()
+            {
+                _src.Clear();
+                _srcColors.Clear();
+                int n = Columns.Count;
+                for (int i = 0; i < Rows.Count; i++)
+                {
+                    var cells = new string[n];
+                    var colors = new Color?[n];
+                    for (int j = 0; j < n; j++)
+                    {
+                        DataGridViewCell cell = Rows[i].Cells[j];
+                        cells[j] = Convert.ToString(cell.Value) ?? "";
+                        Color fc = cell.Style.ForeColor;
+                        if (!fc.IsEmpty) colors[j] = fc;
+                    }
+                    _src.Add(cells);
+                    _srcColors.Add(colors);
                 }
             }
 
@@ -279,16 +346,29 @@ namespace StockPool
 
             /// <summary>
             /// 把单元格显示值解析成数值；解析不出来返回 null（视作缺值）。
-            /// 容忍百分号与千分位逗号 —— 周榜的「涨幅%」列是 "12.34%"。
+            /// 容忍百分号、千分位逗号与中文单位 —— 周榜涨幅是 "12.34%"、
+            /// 涨停明细封板资金是 "12.34 亿"、振幅是 "8.21%"。
+            /// 单位按量级换算（亿/万/千），这样带单位的列也能按真实大小排，
+            /// 否则整列都会被当成缺值、点了排序像没反应。
             /// </summary>
             private static double? NumericOf(string text)
             {
                 if (string.IsNullOrEmpty(text)) return null;
-                string s = text.Trim().TrimEnd('%', '‰').Replace(",", "").Replace(" ", "");
+                string s = text.Trim().Replace(",", "").Replace(" ", "");
                 if (s.Length == 0 || s == "—") return null;
+                double mul = 1;
+                while (s.Length > 0)
+                {
+                    char last = s[s.Length - 1];
+                    if (last == '%' || last == '‰' || last == '倍') s = s.Substring(0, s.Length - 1);
+                    else if (last == '亿') { mul *= 100000000d; s = s.Substring(0, s.Length - 1); }
+                    else if (last == '万') { mul *= 10000d; s = s.Substring(0, s.Length - 1); }
+                    else if (last == '千') { mul *= 1000d; s = s.Substring(0, s.Length - 1); }
+                    else break;
+                }
                 double v;
                 return double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out v)
-                    ? v : (double?)null;
+                    ? v * mul : (double?)null;
             }
 
             private void OnHeaderClick(object sender, DataGridViewCellMouseEventArgs e)
