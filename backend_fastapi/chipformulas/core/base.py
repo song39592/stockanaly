@@ -29,6 +29,7 @@ from core.paramspec import ParamSpec         # 第 13 项：定义收敛到 core
 
 from . import data
 from . import scr
+from . import matrix_cache
 
 FORMULAS: dict[str, "ChipFormulaMeta"] = {}
 DEFAULT_FORMULA_ID = "tri_decay"        # 未指定公式时用它；被删改则由调用方显式指定
@@ -219,19 +220,11 @@ def _params_from_key(key):
     return dict(key)
 
 
-@lru_cache(maxsize=24)
-def _compute_matrix_cached(code: str, formula_id: str | None, params_key,
-                           start: str | None, end: str | None, adjust: str,
-                           days: int | None, bins: int, period: str,
-                           offline: bool) -> ChipResult:
-    """`compute_matrix` 的**缓存实现**；签名只含可哈希项，故 `params` 走键。
-
-    ⚠️ `offline` 是**缓存键的一部分**，这是业务口径要求、不是可优化项：
-    `offline=True`（SCR90 周榜 / scr90 策略）与 `offline=False`（指标 / 右侧窗口）
-    的差别在于**要不要做锁仓修正**。`core/scr.py` 顶部已明确「有无锁仓修正是
-    业务口径差异，合并调用参数会让周榜与策略的数值整体偏移」，把它们混进同一条
-    缓存会让其中一个悄悄拿到另一个的数。
-    """
+def _build_matrix(code: str, formula_id: str | None, params_key,
+                  start: str | None, end: str | None, adjust: str,
+                  days: int | None, bins: int, period: str,
+                  offline: bool) -> ChipResult:
+    """按公式算出**筹码矩阵**（无缓存的原始计算）。缓存由 `_compute_matrix_cached` 负责。"""
     params = _params_from_key(params_key)
     fid = formula_id or DEFAULT_FORMULA_ID
     meta = FORMULAS.get(fid)
@@ -287,6 +280,31 @@ def _compute_matrix_cached(code: str, formula_id: str | None, params_key,
     )
 
 
+@lru_cache(maxsize=512)
+def _compute_matrix_cached(code: str, formula_id: str | None, params_key,
+                           start: str | None, end: str | None, adjust: str,
+                           days: int | None, bins: int, period: str,
+                           offline: bool) -> ChipResult:
+    """`compute_matrix` 的**缓存实现**：内存热缓存 + 磁盘持久两层，键只含可哈希项。
+
+    两层都委托给 `chipformulas.core.matrix_cache`（详见其模块说明）。
+
+    ⚠️ 缓存键含 `offline` 与 `start/end/window`：有无锁仓修正是业务口径差异，绝不能混；
+    `end=None`（取最新）额外带「当日日期」令牌，按天自失效，避免拿到过期的「最新」矩阵。
+
+    `band_pct/tol/top_n/threshold` 等**选股**参数**不在键里**——改它们只重跑矩阵后处理、
+    不重建矩阵，这正是磁盘缓存对「多次改参数回测」的提速来源（从 ~20 分钟降到分钟级）。
+    """
+    effective_end = end if end is not None else f"@TODAY={dt.date.today().isoformat()}"
+    key = (code, formula_id, params_key, start, effective_end, adjust, days, bins, period, offline)
+    hit = matrix_cache.load(key)
+    if hit is not None:
+        return hit
+    res = _build_matrix(code, formula_id, params_key, start, end, adjust, days, bins, period, offline)
+    matrix_cache.save(key, res)
+    return res
+
+
 def compute_matrix(code: str, formula_id: str | None = None, params: dict | None = None,
                    start: str | None = None, end: str | None = None,
                    adjust: str = "qfq", days: int | None = None,
@@ -322,12 +340,13 @@ def compute_matrix(code: str, formula_id: str | None = None, params: dict | None
 
 
 def clear_matrix_cache() -> None:
-    """清空筹码矩阵缓存（测试 / 切换数据源后调用）。
+    """清空筹码矩阵缓存（内存 + 磁盘；测试 / 切换数据源后调用）。
 
     指标侧的 `indicators.data.clear_cache` 会转调这里，两侧共用一份缓存后
     只需清一次。
     """
     _compute_matrix_cached.cache_clear()
+    matrix_cache.clear()
 
 
 def _chip_frames_payload(res: ChipResult, frame_stats: list) -> dict:

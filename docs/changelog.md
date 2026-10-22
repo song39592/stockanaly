@@ -18,6 +18,17 @@
   - 与 `/api/chip/rank` 周榜（SCR90）口径不同：批量走 `offline=False`（带锁仓修正），
     故对锁仓系数敏感的票会有差异；池子大建议用「股票池」跑，别直接挂全市场。
 
+- **筹码矩阵缓存落地（磁盘 + 内存两级）**：
+  - `compute_matrix` 的缓存由 `lru_cache(24)` 升级为 **磁盘持久 + 内存热缓存**：矩阵落盘到
+    `<data>/cache/matrices/`（仓库外的数据盘，不进 git），键沿用原有 10 元组（含 `offline` 与
+    `start/end/window`，保证锁仓修正等口径不混）。
+  - 矩阵只由 `(code, formula, bins, start/window, offline)` 决定，**选股参数
+    `band_pct/tol/top_n/threshold` 不动矩阵**；故「全量回测多次改时间参数」只重跑 4.4ms/只的
+    `peak_band_series`，从 ~20 分钟降到分钟级。实测 3 只票改 `band_pct` 由 1.13s → 0.06s。
+  - `end=None`（取最新）的键额外带「当日日期」令牌，按天自失效，避免拿到过期的「最新」矩阵。
+  - 内存热缓存限 512 条（避免全市场 ~4.5GB 驻留），全量由磁盘兜底；`clear_matrix_cache()`
+    一并清内存与磁盘。
+
 - **新增：SCR90 周榜表格增加「行业」与「流通市值」两列**：
   - **两列都是零成本本地取的，没有新增任何网络请求**：
     - 行业 ← `board_index`（个股页「所属板块」用的同一个本地 SQLite 索引，24h TTL）。
