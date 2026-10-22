@@ -34,23 +34,18 @@ from .core.base import ChipContext, ParamSpec, chip_formula
 from .core.spread import triangle_cdf
 
 
-@chip_formula(
-    id="tri_decay",
-    name="三角形分布 · 换手率衰减",
-    index="TRI",
-    category="chip",
-    description="当日成交按三角形分布（峰值=当日均价）摊到 [low, high]，"
-                "存量筹码按换手率 × 衰减系数衰减。",
-    params=[
-        ParamSpec("decay", "float", 1.0, min=0.0, max=5.0, label="衰减系数"),
-    ],
-)
-def tri_decay(ctx: ChipContext, decay: float = 1.0) -> np.ndarray:
-    """返回 shape = (交易日数, 分箱数) 的相对筹码量矩阵。"""
+def _tri_decay_core(ctx: ChipContext, decay: float = 1.0, seed_chips=None):
+    """tri_decay 的核心；返回 `(矩阵, 末日筹码状态)`。
+
+    `seed_chips` 为上一日末的筹码分布（绝对量），提供时从该状态**续算**（增量落盘用），
+    不提供时从零开始。末日筹码状态是续算所需的全部信息——下一日的衰减 + 当日注入
+    只依赖它，与更早的历史无关。
+    """
     n = ctx.days
     bins = ctx.bins
     lockup = float(getattr(ctx, "lockup_factor", 1.0) or 1.0)   # 1/(1-r)，自动
-    chips = np.zeros(bins, dtype=float)
+    chips = (np.asarray(seed_chips, dtype=float).copy()
+             if seed_chips is not None else np.zeros(bins, dtype=float))
     out = np.zeros((n, bins), dtype=float)
 
     for i in range(n):
@@ -71,4 +66,20 @@ def tri_decay(ctx: ChipContext, decay: float = 1.0) -> np.ndarray:
                 peak = min(max(peak, dlo), dhi)             # 均价必须落在当日区间内
                 chips += k * np.diff(triangle_cdf(ctx.edges, dlo, dhi, peak))
         out[i] = chips
-    return out
+    return out, chips
+
+
+@chip_formula(
+    id="tri_decay",
+    name="三角形分布 · 换手率衰减",
+    index="TRI",
+    category="chip",
+    description="当日成交按三角形分布（峰值=当日均价）摊到 [low, high]，"
+                "存量筹码按换手率 × 衰减系数衰减。",
+    params=[
+        ParamSpec("decay", "float", 1.0, min=0.0, max=5.0, label="衰减系数"),
+    ],
+)
+def tri_decay(ctx: ChipContext, decay: float = 1.0) -> np.ndarray:
+    """返回 shape = (交易日数, 分箱数) 的相对筹码量矩阵（ndarray，向后兼容）。"""
+    return _tri_decay_core(ctx, decay)[0]

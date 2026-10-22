@@ -29,6 +29,16 @@
   - 内存热缓存限 512 条（避免全市场 ~4.5GB 驻留），全量由磁盘兜底；`clear_matrix_cache()`
     一并清内存与磁盘。
 
+- **筹码矩阵每日增量落盘（SQLite，复用价格库格式）**：
+  - `tri_decay` 抽出核心 `_tri_decay_core`（额外返回末日筹码状态 seed）；新增 `chip_matrix_store`
+    （`<data>/cache/chip_matrix.db`，与 price_store 同款 SQLite）按
+    `(code, formula, bins, adjust, offline, period, params)` 存**全历史矩阵 + 末日 seed + 末日日期**。
+  - `compute_matrix` 改为「内存热缓存 + 磁盘增量持久」两层：数据推进时只从 seed 续算新增的天，
+    不再重算全历史（实测：1258 帧全量 ~0.10s，只算后半增量 ~0.07s；真实每日新增 1 天近乎 0 成本）。
+  - 复用 `price_store.latest_bar_date` 判定数据是否已推进；价格突破历史价格轴（±5%）或锁仓系数
+    中途变化则自动整体重建，保证口径正确。窗口/选股参数（`band_pct/tol/window/...`）改动只切存量、
+    不重建矩阵。`matrix_cache` 退化为纯内存热缓存（进程内 512 条），磁盘持久交给 SQLite。
+
 - **新增：SCR90 周榜表格增加「行业」与「流通市值」两列**：
   - **两列都是零成本本地取的，没有新增任何网络请求**：
     - 行业 ← `board_index`（个股页「所属板块」用的同一个本地 SQLite 索引，24h TTL）。
