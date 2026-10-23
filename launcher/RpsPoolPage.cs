@@ -30,6 +30,8 @@ namespace StockPool
         private Label _rpsPoolInCap, _rpsPoolEnterCap, _rpsPoolExitCap;
         private StockGrid _rpsPoolIn, _rpsPoolEnter, _rpsPoolExit;
         private bool _rpsPoolBusy;
+        private ComboBox _rpsPoolDate;        // 交易日选择（顶部「最新」+ 已落库交易日）
+        private bool _rpsPoolSyncing;         // 填充下拉项时忽略 SelectedIndexChanged
 
         private Panel BuildRpsPoolPage()
         {
@@ -57,6 +59,26 @@ namespace StockPool
             _rpsPoolStatus = Mute(Lbl("尚未加载"));
             head.Controls.Add(_rpsPoolStatus);
             root.Controls.Add(head);
+
+            // 日期选择行：选历史交易日查看（顶部「最新」+ 已落库交易日）
+            var dateRow = new FlowLayoutPanel();
+            dateRow.AutoSize = true;
+            dateRow.WrapContents = false;
+            dateRow.Margin = new Padding(0, 0, 0, 6);
+            dateRow.Controls.Add(Mute(Lbl("查看日期")));
+            _rpsPoolDate = new ComboBox();
+            _rpsPoolDate.DropDownStyle = ComboBoxStyle.DropDownList;
+            _rpsPoolDate.Width = 130;
+            _rpsPoolDate.Items.Add("最新");
+            _rpsPoolDate.SelectedIndex = 0;
+            _rpsPoolDate.SelectedIndexChanged += delegate
+            {
+                if (_rpsPoolSyncing) return;
+                string sel = _rpsPoolDate.SelectedItem as string;
+                RpsPoolLoad(sel == "最新" ? null : sel);
+            };
+            dateRow.Controls.Add(_rpsPoolDate);
+            root.Controls.Add(dateRow);
 
             // 汇总行：在池 / 入池 / 出池 计数 + RPS 口径说明
             _rpsPoolInfo = Mute(Lbl(""));
@@ -110,7 +132,7 @@ namespace StockPool
 
         // ---------------- 数据加载 ----------------
 
-        private void RpsPoolLoad()
+        private void RpsPoolLoad(string date = null)
         {
             if (_rpsPoolBusy) return;
             _rpsPoolBusy = true;
@@ -118,8 +140,10 @@ namespace StockPool
             RunUi<Dictionary<string, object>>(
                 delegate
                 {
+                    string url = "http://127.0.0.1:8000/api/history/rps-pool";
+                    if (!string.IsNullOrEmpty(date)) url += "?date=" + date;
                     string body;
-                    if (!GetText("http://127.0.0.1:8000/api/history/rps-pool", 60000, out body))
+                    if (!GetText(url, 60000, out body))
                         return null;
                     try
                     {
@@ -141,6 +165,9 @@ namespace StockPool
                     RpsPoolFill(_rpsPoolEnter, enArr);
                     RpsPoolFill(_rpsPoolExit, exArr);
 
+                    // 同步交易日下拉框，并定位到当前查看日
+                    RpsPoolSyncDates(J.Arr(J.Get(j, "dates")), J.Str(J.Get(j, "latest")));
+
                     string note = J.Str(J.Get(j, "note"));
                     int nin = inArr == null ? 0 : inArr.Count;
                     int nen = enArr == null ? 0 : enArr.Count;
@@ -160,6 +187,28 @@ namespace StockPool
                     RpsPoolSetStatus("读取失败：" + ex.Message, true);
                 },
                 null);
+        }
+
+        /// <summary>用后端返回的可用交易日重建下拉框（顶部「最新」+ 降序日期），
+        /// 并把选中项定位到 viewed（后端实际展示的日期）。填充期间忽略 SelectedIndexChanged。</summary>
+        private void RpsPoolSyncDates(ArrayList datesArr, string viewed)
+        {
+            if (_rpsPoolDate == null) return;
+            _rpsPoolSyncing = true;
+            _rpsPoolDate.Items.Clear();
+            _rpsPoolDate.Items.Add("最新");
+            if (datesArr != null)
+            {
+                foreach (object d in datesArr)
+                {
+                    string s = J.Str(d);
+                    if (s.Length > 0) _rpsPoolDate.Items.Add(s);
+                }
+            }
+            string viewedKey = string.IsNullOrEmpty(viewed) ? "最新" : viewed;
+            int sel = (viewedKey == "最新") ? 0 : _rpsPoolDate.Items.IndexOf(viewedKey);
+            _rpsPoolDate.SelectedIndex = sel >= 0 ? sel : 0;
+            _rpsPoolSyncing = false;
         }
 
         // ---------------- 刷新（触发后台每日计算 + 轮询进度） ----------------

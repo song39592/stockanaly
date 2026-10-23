@@ -20,7 +20,6 @@ import dataclasses as dc
 import datetime as dt
 import inspect
 import json
-from functools import lru_cache
 from typing import Any, Callable
 
 import numpy as np
@@ -29,6 +28,8 @@ from core.paramspec import ParamSpec         # 第 13 项：定义收敛到 core
 
 from . import data
 from . import scr
+from . import matrix_cache
+from . import chip_matrix_store
 
 FORMULAS: dict[str, "ChipFormulaMeta"] = {}
 DEFAULT_FORMULA_ID = "tri_decay"        # 未指定公式时用它；被删改则由调用方显式指定
@@ -219,18 +220,16 @@ def _params_from_key(key):
     return dict(key)
 
 
-@lru_cache(maxsize=24)
-def _compute_matrix_cached(code: str, formula_id: str | None, params_key,
-                           start: str | None, end: str | None, adjust: str,
-                           days: int | None, bins: int, period: str,
-                           offline: bool) -> ChipResult:
-    """`compute_matrix` 的**缓存实现**；签名只含可哈希项，故 `params` 走键。
+def _build_matrix(code: str, formula_id: str | None, params_key,
+                  start: str | None, end: str | None, adjust: str,
+                  days: int | None, bins: int, period: str,
+                  offline: bool, *, seed_chips=None, inp=None,
+                  fixed_edges=None) -> "tuple[ChipResult, object]":
+    """按公式算出**筹码矩阵**（无缓存的原始计算），返回 `(ChipResult, terminal_chips)`。
 
-    ⚠️ `offline` 是**缓存键的一部分**，这是业务口径要求、不是可优化项：
-    `offline=True`（SCR90 周榜 / scr90 策略）与 `offline=False`（指标 / 右侧窗口）
-    的差别在于**要不要做锁仓修正**。`core/scr.py` 顶部已明确「有无锁仓修正是
-    业务口径差异，合并调用参数会让周榜与策略的数值整体偏移」，把它们混进同一条
-    缓存会让其中一个悄悄拿到另一个的数。
+    `terminal_chips` 是末日筹码分布状态，供「增量落盘」下一次续算；非 tri_decay 公式返回 None。
+    `seed_chips`：从上一日状态续算（增量用）。`fixed_edges`：强制复用历史价格轴（增量拼接）。
+    `inp`：复用已取好的输入（增量校验用）。
     """
     params = _params_from_key(params_key)
     fid = formula_id or DEFAULT_FORMULA_ID
@@ -240,8 +239,13 @@ def _compute_matrix_cached(code: str, formula_id: str | None, params_key,
 
     bins = int(bins) if bins and int(bins) > 1 else DEFAULT_BINS
     kwargs = _fill_params(meta, params)
-    inp = data.load_input(code, start, end, adjust, days, bins, period=period,
-                          offline=offline)
+    if inp is None:
+        inp = data.load_input(code, start, end, adjust, days, bins, period=period,
+                              offline=offline)
+    if fixed_edges is not None:
+        fe = np.asarray(fixed_edges, dtype=float)
+        inp = dc.replace(inp, edges=fe, centers=(fe[:-1] + fe[1:]) / 2.0)
+
     ctx = ChipContext(
         dates=inp.dates, open=inp.open, high=inp.high, low=inp.low, close=inp.close,
         volume=inp.volume, turnover=inp.turnover, vwap=inp.vwap,
@@ -250,17 +254,25 @@ def _compute_matrix_cached(code: str, formula_id: str | None, params_key,
         lockup_ratio=float(getattr(inp, "lockup_ratio", 0.0)),
         lockup_factor=float(getattr(inp, "lockup_factor", 1.0)),
     )
-    raw = meta.func(ctx, **kwargs)
-    # 公式可返回 (矩阵, 附加字典) 元组：附加字典携带第二分布（如 EMA 锁仓的 gray），
-    # 与矩阵来自同一次计算，周期/口径天然一致；普通公式仍返回单矩阵（附加=None）。
-    extra = None
-    if isinstance(raw, tuple) and len(raw) == 2 and isinstance(raw[1], dict):
-        raw, extra = raw
-    matrix = _normalize_rows(_as_matrix(raw, ctx.days, ctx.bins))
+
+    fid_eff = meta.id
+    if fid_eff in ("tri_decay", "tri_decay_nolock"):
+        from ..tri_decay import _tri_decay_core   # 延迟导入：避免与 tri_decay 的循环依赖
+        ctx_eff = (dc.replace(ctx, lockup_factor=1.0, lockup_ratio=0.0)
+                   if fid_eff == "tri_decay_nolock" else ctx)
+        out, terminal = _tri_decay_core(ctx_eff, kwargs.get("decay", 1.0), seed_chips)
+        extra = None
+    else:
+        raw = meta.func(ctx, **kwargs)
+        terminal = None
+        extra = None
+        if isinstance(raw, tuple) and len(raw) == 2 and isinstance(raw[1], dict):
+            raw, extra = raw
+        out = raw
+
+    matrix = _normalize_rows(_as_matrix(out, ctx.days, ctx.bins))
 
     win = inp.win                                   # 只输出窗口内的帧（预热段不输出）
-    # 附加分布（如 EMA 锁仓的 gray）与 matrix 同为「含预热」的全序列，必须一起切到窗口：
-    # 否则 gray 行数 = ctx.days（含预热）> pct 行数 = win，前端按帧对齐会错位（被判为非本模型）。
     extra_gray = extra.get("gray") if extra else None
     if extra_gray is not None:
         extra_gray = np.asarray(extra_gray, dtype=float)
@@ -268,7 +280,6 @@ def _compute_matrix_cached(code: str, formula_id: str | None, params_key,
             raise ValueError(
                 f"附加 gray 形状必须与矩阵一致 {matrix.shape}（含预热），实际 {extra_gray.shape}")
         extra_gray = extra_gray[-win:]
-    # 附加 red 通道：与 gray 对称，承载强换手叠层分布（如 chip_brg）。
     extra_red = extra.get("red") if extra else None
     if extra_red is not None:
         extra_red = np.asarray(extra_red, dtype=float)
@@ -276,7 +287,7 @@ def _compute_matrix_cached(code: str, formula_id: str | None, params_key,
             raise ValueError(
                 f"附加 red 形状必须与矩阵一致 {matrix.shape}（含预热），实际 {extra_red.shape}")
         extra_red = extra_red[-win:]
-    return ChipResult(
+    res = ChipResult(
         dates=inp.dates[-win:], close=ctx.close[-win:], centers=ctx.centers,
         edges=ctx.edges, pct=matrix[-win:], turnover=ctx.turnover[-win:],
         float_shares=inp.float_shares, warm=inp.warm, adjust=inp.adjust,
@@ -285,6 +296,170 @@ def _compute_matrix_cached(code: str, formula_id: str | None, params_key,
         lockup_ratio=ctx.lockup_ratio, lockup_factor=ctx.lockup_factor,
         gray=extra_gray, red=extra_red,
     )
+    return res, terminal
+
+
+def _next_day(date_str: str) -> str:
+    """交易日字符串的下一日（日历日；非交易日在取数时被自然跳过）。"""
+    from datetime import date as _date, timedelta as _td
+    y, m, d = map(int, date_str.split("-"))
+    return (_date(y, m, d) + _td(days=1)).isoformat()
+
+
+class _NeedsFullRebuild(Exception):
+    """增量续算条件不满足（价格突破历史轴 / 锁仓系数变化），改走全量重建。"""
+    pass
+
+
+def _latest_data_date(code: str, adjust: str, period: str) -> "str | None":
+    """该票最新可用交易日（来自价格分片库，复用现有数据库）。"""
+    try:
+        import price_store
+        return price_store.latest_bar_date(code, "raw")
+    except Exception:
+        return None
+
+
+def _stored_from_res(res, terminal, last_date) -> dict:
+    """把 ChipResult 打包成「可持久化 / 可切窗口」的中间字典。"""
+    return {
+        "last_date": last_date,
+        "dates": list(res.dates),
+        "pct": np.asarray(res.pct, dtype=float),
+        "close": np.asarray(res.close, dtype=float),
+        "turnover": np.asarray(res.turnover, dtype=float),
+        "centers": np.asarray(res.centers, dtype=float),
+        "edges": np.asarray(res.edges, dtype=float),
+        "gray": (np.asarray(res.gray, dtype=float) if res.gray is not None else None),
+        "red": (np.asarray(res.red, dtype=float) if res.red is not None else None),
+        "terminal_chips": (np.asarray(terminal, dtype=float) if terminal is not None else None),
+        "meta": {
+            "float_shares": float(res.float_shares), "warm": int(res.warm),
+            "adjust": res.adjust, "period": res.period, "formula_id": res.formula_id,
+            "formula_name": res.formula_name, "params": res.params,
+            "lockup_ratio": float(res.lockup_ratio), "lockup_factor": float(res.lockup_factor),
+        },
+    }
+
+
+def _slice_stored(stored: dict, start, end, days):
+    """从全历史字典中按 start/end/days 切出窗口（复刻 load_input 的窗口选择）。"""
+    dates = stored["dates"]
+    n = len(dates)
+    idx = list(range(n))
+    if start:
+        idx = [i for i in idx if dates[i] >= str(start)]
+    if end:
+        idx = [i for i in idx if dates[i] <= str(end)]
+    if days:
+        idx = idx[-int(days):]
+    if not idx:
+        raise RuntimeError("行情不足：所选区间无数据")
+    idx = sorted(set(idx))
+    gray = (stored["gray"][idx] if stored["gray"] is not None else None)
+    red = (stored["red"][idx] if stored["red"] is not None else None)
+    return ChipResult(
+        dates=[dates[i] for i in idx], close=stored["close"][idx],
+        centers=stored["centers"], edges=stored["edges"], pct=stored["pct"][idx],
+        turnover=stored["turnover"][idx], float_shares=stored["meta"]["float_shares"],
+        warm=stored["meta"]["warm"], adjust=stored["meta"]["adjust"],
+        period=stored["meta"]["period"], formula_id=stored["meta"]["formula_id"],
+        formula_name=stored["meta"]["formula_name"], params=stored["meta"]["params"],
+        lockup_ratio=stored["meta"]["lockup_ratio"], lockup_factor=stored["meta"]["lockup_factor"],
+        gray=gray, red=red,
+    )
+
+
+def _build_incremental(code, formula_id, params_key, adjust, bins, period, offline, stored):
+    """从 seed 续算「新增的天」，拼接历史前缀，返回 `(全历史 ChipResult, terminal)`。"""
+    stored_edges = stored["edges"]
+    next_start = _next_day(stored["last_date"])
+    inp = data.load_input(code, start=next_start, end=None, adjust=adjust, bins=bins,
+                          period=period, offline=offline)
+    span = float(stored_edges[-1]) - float(stored_edges[0])
+    # 价格突破历史价格轴 → 无法复用历史 bin 边界，整体重建
+    inp_lo, inp_hi = float(np.min(inp.low)), float(np.max(inp.high))
+    if inp_lo < stored_edges[0] - 0.05 * span or inp_hi > stored_edges[-1] + 0.05 * span:
+        raise _NeedsFullRebuild()
+    new_res, terminal = _build_matrix(
+        code, formula_id, params_key, next_start, None, adjust, None, bins, period, offline,
+        seed_chips=stored["terminal_chips"], inp=inp, fixed_edges=stored_edges,
+    )
+    # 锁仓系数中途变化 → 前缀与新段口径不一致，整体重建
+    if abs(float(new_res.lockup_factor) - float(stored["meta"]["lockup_factor"])) > 1e-6:
+        raise _NeedsFullRebuild()
+    # 拼接：历史前缀 [IPO..stored_last] + 新段 [stored_last+1..data_last]
+    dates = list(stored["dates"]) + list(new_res.dates)
+    pct = np.vstack([np.asarray(stored["pct"], dtype=float), np.asarray(new_res.pct, dtype=float)])
+    close = np.concatenate([np.asarray(stored["close"], dtype=float), np.asarray(new_res.close, dtype=float)])
+    turnover = np.concatenate([np.asarray(stored["turnover"], dtype=float), np.asarray(new_res.turnover, dtype=float)])
+    gray = (np.vstack([stored["gray"], new_res.gray])
+            if (stored["gray"] is not None and new_res.gray is not None) else None)
+    red = (np.vstack([stored["red"], new_res.red])
+           if (stored["red"] is not None and new_res.red is not None) else None)
+    full = ChipResult(
+        dates=dates, close=close, centers=stored["centers"], edges=stored["edges"],
+        pct=pct, turnover=turnover, float_shares=stored["meta"]["float_shares"],
+        warm=stored["meta"]["warm"], adjust=stored["meta"]["adjust"], period=stored["meta"]["period"],
+        formula_id=stored["meta"]["formula_id"], formula_name=stored["meta"]["formula_name"],
+        params=stored["meta"]["params"], lockup_ratio=stored["meta"]["lockup_ratio"],
+        lockup_factor=stored["meta"]["lockup_factor"], gray=gray, red=red,
+    )
+    return full, terminal
+
+
+def _incremental_or_build(code, formula_id, params_key, start, end, adjust, days, bins, period, offline):
+    """先查增量持久层；未命中 / 数据推进时按「全量或增量」构建并回写。"""
+    fid = formula_id or DEFAULT_FORMULA_ID
+    cfg = (code, fid, int(bins), adjust, bool(offline), period, params_key)
+    stored = chip_matrix_store.load(*cfg)
+    data_last = _latest_data_date(code, adjust, period)
+    target_end = end or data_last
+
+    def _persist(res, terminal):
+        chip_matrix_store.save(*cfg, res=res, terminal_chips=terminal, last_date=res.dates[-1])
+        return _slice_stored(_stored_from_res(res, terminal, res.dates[-1]), start, end, days)
+
+    if stored is None:
+        res, terminal = _build_matrix(code, fid, params_key, None, None, adjust, None, bins, period, offline)
+        return _persist(res, terminal)
+    if stored["last_date"] >= target_end:
+        return _slice_stored(stored, start, end, days)
+    # 数据推进了：tri_decay/nolock 可增量续算，其余公式整体重建
+    if fid in ("tri_decay", "tri_decay_nolock") and stored["terminal_chips"] is not None:
+        try:
+            res, terminal = _build_incremental(code, fid, params_key, adjust, bins, period, offline, stored)
+            return _persist(res, terminal)
+        except _NeedsFullRebuild:
+            pass
+    res, terminal = _build_matrix(code, fid, params_key, None, None, adjust, None, bins, period, offline)
+    return _persist(res, terminal)
+
+
+def _compute_matrix_cached(code: str, formula_id: str | None, params_key,
+                           start: str | None, end: str | None, adjust: str,
+                           days: int | None, bins: int, period: str,
+                           offline: bool) -> ChipResult:
+    """`compute_matrix` 的**缓存实现**：内存热缓存 + 磁盘增量持久两层。
+
+    层 1（内存热缓存，`matrix_cache`）：进程内、最近 512 条，键含 start/end/window，
+      免去同进程内同请求的重复切片。
+    层 2（磁盘增量持久，`chip_matrix_store`，SQLite）：跨进程/跨天，存「全历史矩阵 + 末日 seed」；
+      数据推进时只从 seed 续算新增的天（不再重算全历史）。
+
+    ⚠️ 缓存键含 `offline`：有无锁仓修正是业务口径差异，绝不能混；`end=None`（取最新）
+    额外带「当日日期」令牌，按天自失效，避免拿到过期的「最新」矩阵。
+    `band_pct/tol/top_n/threshold` 等**选股**参数不在键里——改它们只重跑矩阵后处理、
+    不重建矩阵（多次改参数回测从 ~20 分钟降到分钟级）。
+    """
+    effective_end = end if end is not None else f"@TODAY={dt.date.today().isoformat()}"
+    key = (code, formula_id, params_key, start, effective_end, adjust, days, bins, period, offline)
+    hit = matrix_cache.load(key)
+    if hit is not None:
+        return hit
+    res = _incremental_or_build(code, formula_id, params_key, start, end, adjust, days, bins, period, offline)
+    matrix_cache.save(key, res)
+    return res
 
 
 def compute_matrix(code: str, formula_id: str | None = None, params: dict | None = None,
@@ -322,12 +497,13 @@ def compute_matrix(code: str, formula_id: str | None = None, params: dict | None
 
 
 def clear_matrix_cache() -> None:
-    """清空筹码矩阵缓存（测试 / 切换数据源后调用）。
+    """清空筹码矩阵缓存（内存 + 磁盘；测试 / 切换数据源后调用）。
 
     指标侧的 `indicators.data.clear_cache` 会转调这里，两侧共用一份缓存后
     只需清一次。
     """
-    _compute_matrix_cached.cache_clear()
+    matrix_cache.clear()
+    chip_matrix_store.clear()
 
 
 def _chip_frames_payload(res: ChipResult, frame_stats: list) -> dict:

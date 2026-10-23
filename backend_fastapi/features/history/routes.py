@@ -186,14 +186,17 @@ def rps_pool_job(job_id: str):
 
 
 @router.get("/rps-pool")
-def rps_pool():
-    """读取已落库的每日 RPS 强势池，并对比最新与上一交易日得出「在池 / 入池 / 出池」。
+def rps_pool(date: str | None = None):
+    """读取已落库的每日 RPS 强势池，并对比所选交易日与上一交易日得出「在池 / 入池 / 出池」。
+
+    可选查询参数 `date`（YYYY-MM-DD）：指定查看某交易日的强势池；省略时默认最新交易日。
+    所选日期若不在已落库范围内，会自动对齐到与之最接近（优先不晚于该日）的交易日，
+    并通过 `date_matched=False` 告知前端。`dates` 为可用交易日序列（降序），供前端做日期选择。
 
     口径：
-      · 在池 = 最新交易日命中的全部强股（按 RPS120 降序）；
-      · 入池 = 最新有、上一交易日没有的强股；
-      · 出池 = 上一交易日有、最新没有的强股。
-    `dates` 为最近交易日序列（降序），`retention_days` 为当前保留天数。
+      · 在池 = 所选交易日命中的全部强股（按 RPS120 降序）；
+      · 入池 = 所选交易日有、上一交易日没有的强股；
+      · 出池 = 上一交易日有、所选交易日没有的强股。
     """
     try:
         dates = history_store.rps_pool_dates()
@@ -201,25 +204,42 @@ def rps_pool():
         raise HTTPException(status_code=500, detail=f"读取 RPS 池失败：{exc}")
     if not dates:
         return {"ok": True, "latest": None, "prev": None, "dates": [],
+                "requested_date": date, "date_matched": True,
                 "in_pool": [], "entered": [], "exited": [],
                 "retention_days": 0,
                 "note": "尚未生成 RPS 强势池，点「刷新」触发全市场 RPS 计算"}
+    # 解析查看日期：精确命中 > 对齐到最接近（优先不晚于）的已落库交易日
+    requested = str(date).strip()[:10] if date else None
+    date_matched = True
+    if requested and requested in dates:
+        latest = requested
+    elif requested:
+        older = [d for d in dates if d <= requested]
+        newer = [d for d in dates if d > requested]
+        latest = older[0] if older else newer[-1]
+        date_matched = False
+    else:
+        latest = dates[0]
+    idx = dates.index(latest)
+    prev = dates[idx + 1] if idx + 1 < len(dates) else None
     data = history_store.load_rps_pool()
-    latest, prev = dates[0], (dates[1] if len(dates) >= 2 else None)
     in_codes = {x["code"] for x in data.get(latest, [])}
     prev_map = {x["code"]: x for x in data.get(prev, [])} if prev else {}
     entered = [x for x in data.get(latest, []) if x["code"] not in prev_map]
     exited = [x for x in data.get(prev, []) if x["code"] not in in_codes]
+    is_latest = (latest == dates[0])
     return {
         "ok": True,
         "latest": latest,
         "prev": prev,
+        "requested_date": requested,
+        "date_matched": date_matched,
         "dates": dates,
         "retention_days": len(dates),
         "in_pool": data.get(latest, []),
         "entered": entered,
         "exited": exited,
-        "note": (f"数据截至 {latest}"
+        "note": ((("数据截至 " if is_latest else "查看历史 ") + latest)
                  + (f" · 上一交易日 {prev}" if prev else " · 暂无上一交易日")
                  + f" · 保留最近 {len(dates)} 个交易日"),
     }

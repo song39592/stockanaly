@@ -6,6 +6,14 @@
 
 ### 变更
 
+- **RPS 强势池新增「选择日期查看」**：
+  - 后端 `GET /api/history/rps-pool` 新增可选 `date`（YYYY-MM-DD）参数：指定查看某交易日的
+    强势池（在池 / 入池 / 出池 仍相对该日的上一交易日计算）；省略时默认最新。
+  - 所选日期不在已落库范围内时自动对齐到最接近（优先不晚于该日）的交易日，并返回
+    `date_matched=False`、`requested_date` 告知前端；响应额外返回 `dates`（可用交易日序列）供前端做下拉。
+  - 前端 `RpsPoolPage` 增加「查看日期」下拉框（顶部「最新」+ 已落库交易日降序），切换即按
+    `?date=` 重载；每次加载后用后端返回的 `dates` 重建下拉并定位到当前查看日。
+
 - **策略 `peak_top` / `peak_thresh`：选股变量由 PEAK 改为 PEAKB（主峰簇占比）**：
   - 原来取「每日筹码分布最高单箱占比」(PEAK)；现改为与副图 **PEAKB 指标同口径**的
     「主峰簇占比 %」——沿主峰两侧累加**连续衰减**的箱（遇回升 / 超出峰位 ±`band_pct`% 即停）。
@@ -17,6 +25,38 @@
     可逐日直接对照，不再需要手动两边同步；同时消除了 `strategies → indicators` 的反向依赖。
   - 与 `/api/chip/rank` 周榜（SCR90）口径不同：批量走 `offline=False`（带锁仓修正），
     故对锁仓系数敏感的票会有差异；池子大建议用「股票池」跑，别直接挂全市场。
+
+- **修复：锁仓比例不再拿「上市前快照」充数（次新股 r=0、不修正）**：
+  - `_fetch_lockup` / 落盘命中路径新增**次新闸门**：十大流通股东报告期 **< 上市日**（用
+    `price_store.earliest_bar_date` 近似）时，视为「尚未披露上市后流通股东」，按全流通兜底
+    r=0、L=1.0（不放大换手），并标记 `fallback=True`。
+  - 背景：次新股（如 920238，2026-07-24 上市）的首份「十大流通股东」季报要等到上市后一个
+    季度才出；`_first_report_frame` 取到的 2026-06-30 是**上市前快照**（招股 / 挂牌期股东），
+    两人占满 100% 流通股 → r 被封顶 95% → 1/(1-r)=20 把换手放大 20 倍，筹码塌成针尖，与
+    通达信宽峰（90% 成本 51.93–67.77）严重不符。修正后 r=0，形态对齐通达信。
+  - `features/stock/profile.py`：`_listing_date`（进程内记忆）、`_lockup_stale(row, code)`
+    闸门前置、磁盘命中与 `sync_lockup` 同步接入；老股（报告期远晚于上市日）不受影响。
+
+- **筹码矩阵缓存落地（磁盘 + 内存两级）**：
+  - `compute_matrix` 的缓存由 `lru_cache(24)` 升级为 **磁盘持久 + 内存热缓存**：矩阵落盘到
+    `<data>/cache/matrices/`（仓库外的数据盘，不进 git），键沿用原有 10 元组（含 `offline` 与
+    `start/end/window`，保证锁仓修正等口径不混）。
+  - 矩阵只由 `(code, formula, bins, start/window, offline)` 决定，**选股参数
+    `band_pct/tol/top_n/threshold` 不动矩阵**；故「全量回测多次改时间参数」只重跑 4.4ms/只的
+    `peak_band_series`，从 ~20 分钟降到分钟级。实测 3 只票改 `band_pct` 由 1.13s → 0.06s。
+  - `end=None`（取最新）的键额外带「当日日期」令牌，按天自失效，避免拿到过期的「最新」矩阵。
+  - 内存热缓存限 512 条（避免全市场 ~4.5GB 驻留），全量由磁盘兜底；`clear_matrix_cache()`
+    一并清内存与磁盘。
+
+- **筹码矩阵每日增量落盘（SQLite，复用价格库格式）**：
+  - `tri_decay` 抽出核心 `_tri_decay_core`（额外返回末日筹码状态 seed）；新增 `chip_matrix_store`
+    （`<data>/cache/chip_matrix.db`，与 price_store 同款 SQLite）按
+    `(code, formula, bins, adjust, offline, period, params)` 存**全历史矩阵 + 末日 seed + 末日日期**。
+  - `compute_matrix` 改为「内存热缓存 + 磁盘增量持久」两层：数据推进时只从 seed 续算新增的天，
+    不再重算全历史（实测：1258 帧全量 ~0.10s，只算后半增量 ~0.07s；真实每日新增 1 天近乎 0 成本）。
+  - 复用 `price_store.latest_bar_date` 判定数据是否已推进；价格突破历史价格轴（±5%）或锁仓系数
+    中途变化则自动整体重建，保证口径正确。窗口/选股参数（`band_pct/tol/window/...`）改动只切存量、
+    不重建矩阵。`matrix_cache` 退化为纯内存热缓存（进程内 512 条），磁盘持久交给 SQLite。
 
 - **新增：SCR90 周榜表格增加「行业」与「流通市值」两列**：
   - **两列都是零成本本地取的，没有新增任何网络请求**：

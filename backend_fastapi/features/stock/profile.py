@@ -46,6 +46,25 @@ _LOCKUP_MIN_PCT = 5.0               # 缓存表不区分 min_pct，只对举牌�
 _FULL_CIRCULATION_RATIO = 0.0
 _FULL_CIRCULATION_FACTOR = 1.0
 
+_LISTING_MEMO: dict[str, "str | None"] = {}
+
+
+def _listing_date(code: str) -> "str | None":
+    """用「首根日 K 日期」近似上市日（YYYYMMDD）；次新股即首板日。
+
+    股票上市后才会披露首份含流通股东的季报，上市前的「十大流通股东」
+    快照（招股 / 挂牌期股东）不能参与锁仓计算——否则会出现「两大股东
+    占满 100% 流通股」这种退化口径。老股首根日虽只是本地数据起点，
+    但远早于任何报告期，不会误触发闸门。进程内记忆，避免批量调用时
+    反复开库取首根日。
+    """
+    if code in _LISTING_MEMO:
+        return _LISTING_MEMO[code]
+    d = price_store.earliest_bar_date(code, "raw")
+    v = str(d).replace("-", "") if d else None
+    _LISTING_MEMO[code] = v
+    return v
+
 
 def _cached(key: str, producer) -> Any:
     now = time.time()
@@ -287,7 +306,7 @@ def _lockup_age_days(stamp: Any) -> float | None:
     return (dt.datetime.now() - moment).total_seconds() / 86400.0
 
 
-def _lockup_stale(row: dict[str, Any] | None) -> bool:
+def _lockup_stale(row: dict[str, Any] | None, code: str | None = None) -> bool:
     """落盘的锁仓记录是否已过期（需要重取）。
 
     报告期已是最新 → **直接复用，一次请求都不发**（本季内数据不会再变）。
@@ -296,12 +315,20 @@ def _lockup_stale(row: dict[str, Any] | None) -> bool:
     或该股数据源只到更早的期（披露空窗 / 数据源缺期，重取也是同样结果）。
     后者无法从记录里区分，故用 `_LOCKUP_MIN_REFRESH_DAYS` 限制重试频率，
     避免全市场天天为空窗期打东财接口。
+
+    次新股闸门：报告期早于上市日 → 那是上市前快照（招股 / 挂牌期股东），
+    不属于上市后流通股东，视为无效、必须重算（重算会 fallback r=0）。
     """
     if not row:
         return True
     period = str(row.get("period") or "")
     if not period:
         return True
+    # 次新闸门放在最前：上市前快照无论是否「最新报告期」都强制重算
+    if code:
+        listing = _listing_date(code)
+        if listing and period < listing:
+            return True
     if period >= expected_lockup_period():
         return False
     age = _lockup_age_days(row.get("updated_at"))
@@ -319,6 +346,13 @@ def _fetch_lockup(code: str, min_pct: float) -> dict:
     """
     src = free_top_holders(code)
     items = src.get("items") or []
+    period = src.get("period")
+    # 次新：报告期早于上市日 → 上市前快照（招股 / 挂牌期股东），不算上市后
+    # 流通股东，视为无数据，走全流通兜底（r=0），避免「两大股东占满 100%
+    # 流通股」这种退化口径把换手率放大到封顶上限。
+    listing = _listing_date(code)
+    if items and period and listing and str(period) < listing:
+        items = []
     if not items:
         result = {
             "period": expected_lockup_period(),
@@ -373,7 +407,7 @@ def lockup_ratio(code: str, min_pct: float = 5.0) -> dict:
     # 落盘缓存只覆盖举牌线口径：表里没存 min_pct，别的阈值无从判断是否同源
     disk_ok = float(min_pct) == _LOCKUP_MIN_PCT
     stored = price_store.get_lockup(code) if disk_ok else None
-    if stored is not None and not _lockup_stale(stored):
+    if stored is not None and not _lockup_stale(stored, code):
         result = {"period": stored["period"], "ratio": stored["ratio"],
                   "factor": stored["factor"], "holders": [], "error": None}
         _CACHE[key] = (now, result)
@@ -402,7 +436,7 @@ def sync_lockup(code: str, min_pct: float = _LOCKUP_MIN_PCT,
     disk_ok = float(min_pct) == _LOCKUP_MIN_PCT
     if not force and disk_ok:
         stored = price_store.get_lockup(code)
-        if stored is not None and str(stored.get("period") or "") >= expected_lockup_period():
+        if stored is not None and not _lockup_stale(stored, code):
             result = {"period": stored["period"], "ratio": stored["ratio"],
                       "factor": stored["factor"], "holders": [], "error": None}
             _CACHE[key] = (time.time(), result)
