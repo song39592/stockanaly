@@ -27,6 +27,7 @@ namespace StockPool
         private Label _dlStatus;
         private Label _dlCount;
         private Label _dlRange;         // 本次请求下载的时间段
+        private Label _dlWeekly;        // 周度修订回收任务进度（后台自动，单独显示一行）
         private Button _dlBtnStart, _dlBtnToggle, _dlBtnRetry;
         private CheckBox _dlAuto, _dlIdle;
         private Label _dlAutoNote;
@@ -111,6 +112,11 @@ namespace StockPool
             // 请求区间：让用户随时看到「这次到底要下哪段」，不必回头翻起始年份
             _dlRange = Mute(Lbl(""));
             AddRow(b2, Row(_dlRange));
+            // 周度修订回收是后台自动、无交互的任务，用户很容易忽略它正在跑而以为
+            // 「自动更新没运行」——单独显示一行进度（有周任务时才显示，否则隐藏）。
+            _dlWeekly = Mute(Lbl(""));
+            _dlWeekly.Visible = false;
+            AddRow(b2, Row(_dlWeekly));
 
             // ---- 后台自动化：每日自动更新 / 闲时补历史 ----
             _dlAuto = Check("每天自动更新数据", false);
@@ -571,22 +577,8 @@ namespace StockPool
                             _dlStatus.Text = "状态：未开始"; _dlCount.Text = ""; _dlRange.Text = ""; DlRenderButtons("", 0); });
                         return;
                     }
-                    // 选要展示的任务：**正在运行 > 排队中 > 已暂停**。
-                    // 原来把三者同等对待取「第一个匹配」；后端列表里若「已暂停」排在
-                    // 「运行中」之前，就会挑中暂停任务——界面显示「已暂停」却忽略了真正
-                    // 占用下载通道的运行中任务，用户点操作却被「请先结束当前运行的任务」
-                    // 拒绝，显得状态自相矛盾。
-                    Dictionary<string, object> pickRun = null, pickQueue = null, pickPaused = null;
-                    foreach (var item in tasks)
-                    {
-                        var candidate = item as Dictionary<string, object>;
-                        if (candidate == null) continue;
-                        var status = Convert.ToString(J.GetFrom(candidate, "status"));
-                        if (status == "running") { pickRun = candidate; break; }
-                        if (status == "queued" && pickQueue == null) pickQueue = candidate;
-                        if (status == "paused" && pickPaused == null) pickPaused = candidate;
-                    }
-                    var first = pickRun ?? pickQueue ?? pickPaused ?? (tasks[0] as Dictionary<string, object>);
+                    // 选要展示的任务：**正在运行 > 排队中 > 已暂停**（见 DlPickFromList 注释）。
+                    var first = DlPickFromList(tasks);
                     if (first == null) return;
                     var id = Convert.ToString(J.GetFrom(first, "id") ?? "");
                     if (string.IsNullOrEmpty(id)) return;
@@ -596,6 +588,54 @@ namespace StockPool
             });
             th.IsBackground = true;
             th.Start();
+        }
+
+        /// <summary>从任务列表里挑「要展示进度的主任务」：运行中 &gt; 排队中 &gt; 已暂停。</summary>
+        /// <remarks>原先把三者同等对待取「第一个匹配」；后端列表里若「已暂停」排在
+        /// 「运行中」之前，就会挑中暂停任务——界面显示「已暂停」却忽略了真正占用下载通道的
+        /// 运行中任务，用户点操作却被「请先结束当前运行的任务」拒绝，显得状态自相矛盾。</remarks>
+        private static Dictionary<string, object> DlPickFromList(ArrayList tasks)
+        {
+            if (tasks == null || tasks.Count == 0) return null;
+            Dictionary<string, object> pickRun = null, pickQueue = null, pickPaused = null;
+            foreach (var item in tasks)
+            {
+                var candidate = item as Dictionary<string, object>;
+                if (candidate == null) continue;
+                var status = Convert.ToString(J.GetFrom(candidate, "status"));
+                if (status == "running") { pickRun = candidate; break; }
+                if (status == "queued" && pickQueue == null) pickQueue = candidate;
+                if (status == "paused" && pickPaused == null) pickPaused = candidate;
+            }
+            return pickRun ?? pickQueue ?? pickPaused ?? (tasks[0] as Dictionary<string, object>);
+        }
+
+        /// <summary>把「周度修订回收」后台任务进度单独显示一行（与用户主动发起的任务分开）。</summary>
+        private void DlRenderWeekly(ArrayList tasks)
+        {
+            Dictionary<string, object> w = null;
+            if (tasks != null)
+            {
+                foreach (var item in tasks)
+                {
+                    var t = item as Dictionary<string, object>;
+                    if (t == null) continue;
+                    bool weekly = false;
+                    try { weekly = Convert.ToBoolean(J.GetFrom(t, "weekly")); }
+                    catch { }
+                    if (!weekly && J.Int(J.GetFrom(t, "overlap_days")) <= 0) continue;
+                    w = t;
+                    break;
+                }
+            }
+            if (w == null) { _dlWeekly.Visible = false; _dlWeekly.Text = ""; return; }
+            _dlWeekly.Visible = true;
+            string status = Convert.ToString(J.GetFrom(w, "status") ?? "");
+            int total = J.Int(J.GetFrom(w, "total"));
+            int completed = J.Int(J.GetFrom(w, "completed"));
+            double pct = J.Num(J.GetFrom(w, "percent"));
+            _dlWeekly.Text = string.Format("周度修订回收（后台自动）：{0}　{1}/{2}　进度 {3:0.0}%",
+                                            DlStatusText(status, "", "bars"), completed, total, pct);
         }
 
         private void DlRefresh()
@@ -609,13 +649,22 @@ namespace StockPool
                 string resp;
                 try
                 {
-                    if (!Probe(DlApi + "/" + id, 8000, out resp))
+                    // 拉整份任务列表：既能渲染当前选中的任务，也能顺带把「周度修订回收」
+                    // 这类后台自动任务的进度单独显示出来（原先只看单任务，容易以为自动更新没跑）。
+                    if (!Probe(DlApi + "/list", 8000, out resp))
                     {
                         Ui(delegate { _dlStatus.Text = "进度暂不可用：请检查后端后刷新"; });
                         return;
                     }
                     var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    Ui(delegate { if (round == _dlRound && id == _dlTaskId && !_dlCommandBusy) DlRenderTask(root); });
+                    var tasks = J.GetFrom(root, "tasks") as ArrayList;
+                    Ui(delegate
+                    {
+                        if (round != _dlRound || id != _dlTaskId || _dlCommandBusy) return;
+                        var picked = DlPickFromList(tasks);
+                        if (picked != null) DlRenderTask(new Dictionary<string, object> { { "task", picked } });
+                        DlRenderWeekly(tasks);
+                    });
                 }
                 catch { }
                 finally { Ui(delegate { _dlRefreshing = false; }); }

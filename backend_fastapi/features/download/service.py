@@ -759,19 +759,18 @@ def _run(task_id: str, concurrency: int) -> None:
     task = download_store.get_task(task_id)
     if task and task["status"] == "running":
         left = download_store.remaining(task_id)
-        download_store.update_task(task_id, status="completed" if left == 0 else "paused",
-                                   finished=(left == 0))
-        # 「每日自动更新已跑过今天」只在**真的跑完时**登记（第 24 项）。
-        # 原先在 `_kick_auto_update` 启动瞬间就写，于是进程一停就等于
-        # 「今天已经跑过」，当天不会再起新任务；叠加任务随时会被停的正常工况，
-        # 就出现了库里 17 个 auto 任务全部 paused 且进度停在半截的现象。
-        if task.get("origin") == ORIGIN_AUTO:
-            # 「今天跑过」按任务类型分别登记：日线的每日自动更新与锁仓系数的
-            # 定期刷新各用一个键。共用一个键会让后跑完的那个把另一个的
-            # 「已跑过」状态一起吃掉，另一个当天再也不被调度。
-            # 「今天跑过」按任务类型分别登记：日线、锁仓、周度修订回收各用一个键，
-            # 共用一个键会让后跑完的把另一个的「已跑过」状态一起吃掉。周度按 ISO 周
-            # 登记，故用 `_iso_week()` 而非自然日。
+        finished = left == 0
+        download_store.update_task(task_id, status="completed" if finished else "paused",
+                                   finished=finished)
+        # 「今天跑过 / 本周跑过」只在**真的跑完（队列清空）时**登记（第 24 项）。
+        # 原先只要收尾就登记，于是任务中途退出（暂停 / 进程重启 / 异常）也被记成
+        # 「已跑过」，当天 / 本周调度器就不再重试，断点永远卡住（实测 dl- 任务
+        # 0/26 即退出却把 auto_last_run 登记成今天，当天再也不起新任务）。
+        # 现在未跑完（left > 0）一律不登记，让 60 秒一轮的调度在后续轮次接着续跑。
+        if finished and task.get("origin") == ORIGIN_AUTO:
+            # 「跑过」按任务类型分别登记：日线、锁仓、周度修订回收各用一个键，
+            # 共用一个键会让后跑完的把另一个的「已跑过」状态一起吃掉。
+            # 周度按 ISO 周登记，故用 `_iso_week()` 而非自然日。
             opts = task.get("options") or {}
             if opts.get("weekly_refresh"):
                 download_store.set_setting("weekly_refresh_last_iso", _iso_week())
@@ -1082,18 +1081,21 @@ def sync_one(code: str) -> dict[str, Any]:
 
 
 def _find_pending_auto_task() -> str | None:
-    """今天还没跑完的「自动更新」任务 id（取最近的一个），没有则 None。
+    """还没跑完的「自动更新」任务 id（取最近的一个），没有则 None。
 
     只认 `origin=auto`：手动任务是用户自己安排的，闲时任务走
-    `_ensure_idle_task`。候选里排除已取消的 —— 取消就该生效。
+    `_ensure_idle_task`。候选里排除已完成 / 已取消的 —— 取消就该生效；
+    remaining<=0 视为已跑完（只是没落 finished），交给调度重开。
+
+    不限「今天创建」—— 原先只认今天的 paused 任务，于是昨天 / 更早遗留的
+    断点永远卡在 paused、无人续跑（除非重启后端）。现在调度每轮都会接管它们。
     """
-    today = dt.date.today().isoformat()
     best: tuple[str, str] | None = None
     for task in download_store.list_tasks(200):
-        if task.get("origin") != ORIGIN_AUTO or task["status"] not in ("paused",):
+        if task.get("origin") != ORIGIN_AUTO:
             continue
-        if str(task.get("created_at") or "")[:10] != today:
-            continue                      # 昨天没跑完的交给启动时的续传，不在这重复排
+        if task["status"] in ("completed", "cancelled"):
+            continue
         if download_store.remaining(task["id"]) <= 0:
             continue
         stamp = str(task.get("created_at") or "")
@@ -1503,6 +1505,8 @@ def _decorate(task: dict[str, Any]) -> dict[str, Any]:
         and bool(requested_begin))
     # overlap_days>0 表示这是「周度修订回收」任务（重拉近段而非只补新增），前端据此区分文案
     task["overlap_days"] = int((task.get("options") or {}).get("overlap_days") or 0)
+    # weekly=True 明确标识「周度修订回收」任务，前端把它单独显示进度（后台自动、易忽略）
+    task["weekly"] = bool((task.get("options") or {}).get("weekly_refresh"))
     with _runtimes_lock:
         runtime = _runtimes.get(task["id"])
     task["alive"] = bool(runtime is not None and runtime.manager is not None
@@ -1719,6 +1723,12 @@ def _resume_auto_tasks() -> None:
             continue
         if download_store.remaining(task["id"]) <= 0:
             continue                      # 已跑完，只是没落finished，交给调度重开
+        # 一次只接一个断点：有任务在跑就停下，等下一轮调度（`_scheduler_tick` →
+        # `_find_pending_auto_task`）再接，不并发拉起多套 worker 抢带宽；
+        # 也避免 `resume()` 因「请先结束当前运行的任务」抛异常被吞、导致后续
+        # 断点永远卡住。放宽 `_find_pending_auto_task` 后，这些断点后续都能被调度接管。
+        if _has_alive_task():
+            break
         try:
             resume(task["id"])
         except Exception:                 # noqa: BLE001 - 一个续不上不影响其它
