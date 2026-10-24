@@ -41,11 +41,13 @@ class EmaLockResult:
     """EMA 锁仓模型的结构化结果（已按行归一化到 100）。"""
     dates: list[str]            # 与 ctx 同序（含预热）
     centers: np.ndarray         # 价格轴（分箱中心）
-    red: np.ndarray             # (days, bins) 强换手分布，行和=100
-    gray: np.ndarray            # (days, bins) 锁仓分布，行和=100
-    lock_ratio: np.ndarray      # (days, bins) 锁仓浓度 = gray/(red+gray)，范围 0~1
-    red_rel: np.ndarray         # (days, bins) 相对量（未归一；供 @chip_formula 返回总分布+灰叠层）
-    gray_rel: np.ndarray        # (days, bins) 相对量（未归一）
+    blue: np.ndarray            # (days, bins) 蓝底：全量换手 EMA 堆积（TRI 注入），行和=100
+    red: np.ndarray             # (days, bins) 强换手 EMA 叠层（红），行和=100
+    gray: np.ndarray            # (days, bins) 锁仓染灰（灰），行和=100
+    lock_ratio: np.ndarray      # (days, bins) 锁仓浓度 = gray/(blue+gray+red)，范围 0~1
+    blue_rel: np.ndarray        # (days, bins) 蓝底相对量（未归一）
+    red_rel: np.ndarray         # (days, bins) 红相对量（未归一）
+    gray_rel: np.ndarray        # (days, bins) 灰相对量（未归一）
     close: np.ndarray
 
 
@@ -79,7 +81,15 @@ def _turnover_to_n(turnover: np.ndarray) -> np.ndarray:
 
 
 def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float) -> EmaLockResult:
-    """方案③主计算（返回相对量；结构化结果由 compute_ema_lock 归一化）。"""
+    """三态主计算（蓝底 / 红叠层 / 灰折旧），红蓝均用 EMA 衰减（正常的 K 控制）。
+
+    蓝（blue）  ：每日**全量**换手按三角分布（TRI）铺到 [low, high]，EMA 递归堆积
+                 `chips = a×(换手×w) + (1−a)×chips`（a 由平均换手周期 N 与 k 决定，固定）。
+    红（red）   ：仅「换手率 > M_high×B」的强换手日注入当日 `换手×w`，同样 EMA 衰减，
+                 是蓝底中来自强换手日的子集（天然 ≤ 蓝底），叠在蓝上染红。
+    灰（gray）  ：「换手率 ≤ M_low×B」的锁仓日覆盖的档位标记为沉淀；灰 = 沉淀档位当前蓝 × R
+                 （默认 0.5），随蓝底同步、不独立累积；即「锁仓把蓝色的一半换成灰色」。
+    """
     n = ctx.days
     bins = ctx.bins
     turnover = np.asarray(ctx.turnover, dtype=float)
@@ -88,67 +98,69 @@ def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float) 
 
     N = _turnover_to_n(turnover)
     B = 1.0 / N                                   # 自然换手率（逐日）
-    span = N * k
-    alpha = 2.0 / (span + 1.0)                     # 逐日 EMA 系数
+    Nm = N[np.isfinite(N) & (N > 0)]
+    a = 2.0 / (float(np.mean(Nm)) * k + 1.0) if Nm.size else 0.1   # 固定 EMA 系数（正常的 K 控制衰减）
 
-    chips_red = np.zeros(bins, dtype=float)
-    chips_gray = np.zeros(bins, dtype=float)
+    chips_blue = np.zeros(bins, dtype=float)       # 蓝底：全量 EMA 堆积
+    chips_red = np.zeros(bins, dtype=float)        # 红叠层：强换手 EMA 堆积
+    lock_mask = np.zeros(bins, dtype=float)        # 沉淀档位标记（锁仓日覆盖 → 永久沉淀）
+    blue_rel = np.zeros((n, bins), dtype=float)
     red_rel = np.zeros((n, bins), dtype=float)
     gray_rel = np.zeros((n, bins), dtype=float)
 
     for t in range(n):
-        a = float(alpha[t])
         Bt = float(B[t])
         to = float(turnover[t])
-        active = to > M_high * Bt
-
-        # —— EMA 步进（每日都做：活跃日堆积、其余日仅 (1−α) 衰减）——
-        if active:
-            dlo = max(float(ctx.low[t]), p_lo)
-            dhi = min(float(ctx.high[t]), p_hi)
-            if dhi <= dlo:                          # 一字板 / 当日区间落在价格轴外
-                probe = (float(ctx.low[t]) if float(ctx.high[t]) <= float(ctx.low[t])
-                         else (dlo + dhi) / 2.0)
-                idx = int(np.searchsorted(edges, probe, side="right") - 1)
-                idx = min(max(idx, 0), bins - 1)
-                injected = np.zeros(bins)
-                injected[idx] = to - Bt
-            else:
-                peak = (float(ctx.vwap[t]) if np.isfinite(ctx.vwap[t])
-                        else (dlo + dhi) / 2.0)
-                peak = min(max(peak, dlo), dhi)     # 均价必须落在当日区间内
-                w = np.diff(triangle_cdf(edges, dlo, dhi, peak))   # Σ=1
-                injected = (to - Bt) * w
-            chips_red = a * injected + (1.0 - a) * chips_red
+        # —— TRI 注入：当日成交按三角分布铺到 [low, high]（峰值=vwap，Σ=1）——
+        dlo = max(float(ctx.low[t]), p_lo)
+        dhi = min(float(ctx.high[t]), p_hi)
+        if dhi <= dlo:                             # 一字板 / 当日区间落在价格轴外
+            probe = (float(ctx.low[t]) if float(ctx.high[t]) <= float(ctx.low[t])
+                     else (dlo + dhi) / 2.0)
+            idx = int(np.searchsorted(edges, probe, side="right") - 1)
+            idx = min(max(idx, 0), bins - 1)
+            w = np.zeros(bins)
+            w[idx] = 1.0
         else:
-            chips_red = (1.0 - a) * chips_red        # 滤除日 / 锁仓日：仅衰减、不注入
+            peak = (float(ctx.vwap[t]) if np.isfinite(ctx.vwap[t])
+                    else (dlo + dhi) / 2.0)
+            peak = min(max(peak, dlo), dhi)        # 均价必须落在当日区间内
+            w = np.diff(triangle_cdf(edges, dlo, dhi, peak))   # Σ=1
 
-        # —— 锁仓日：把红色按比例 R 染灰（红→灰，灰不超过红）——
+        # ① 蓝底：全量 EMA 堆积（正常的 K 衰减；a 固定，强换手日 to 大 → 注入大）
+        chips_blue = a * (to * w) + (1.0 - a) * chips_blue
+
+        # ② 红叠层：同 EMA 衰减；仅强换手日注入 to×w（强换手日 to 大 → 红色明显且不超蓝）
+        chips_red = (1.0 - a) * chips_red
+        if to > M_high * Bt:
+            chips_red += a * (to * w)
+
+        # ③ 灰折旧：锁仓日覆盖的档位标记为沉淀；灰 = 沉淀档位当前蓝 × R（默认 0.5），
+        #    即「蓝的一半」随蓝底同步、不独立累积（避免灰无限叠加淹没蓝底）。
         if to <= M_low * Bt:
-            transfer = chips_red * R
-            chips_red = chips_red - transfer
-            chips_gray = chips_gray + transfer
-            over = chips_gray > chips_red
-            chips_gray[over] = chips_red[over]
+            lock_mask[w > 1e-12] = 1.0
+        gray = lock_mask * R * chips_blue
 
+        blue_rel[t] = chips_blue
         red_rel[t] = chips_red
-        gray_rel[t] = chips_gray
+        gray_rel[t] = gray
 
-    def _norm(m: np.ndarray) -> np.ndarray:
-        s = m.sum(axis=1)
-        safe = np.where(s > 0, s, 1.0)
-        return m / safe[:, None] * 100.0
-
-    red_norm = _norm(red_rel)
-    gray_norm = _norm(gray_rel)
-    tot = red_rel + gray_rel
-    safe = np.where(tot > 0, tot, 1.0)
-    lock_ratio = np.where(tot > 0, gray_rel / safe, 0.0)   # 0/0 已用 safe 规避
+    # 蓝 / 红 / 灰 **同一尺度**归一化（都用蓝底的 rowsum）：
+    # 红、灰是叠在蓝底之上的层，宽度须不超过蓝（同档位），才能在蓝底上正确染色。
+    # 若各自归一化到行和 100，红会被放大到与蓝同宽、把蓝底整片盖住（显示不对的根因）。
+    base_sum = blue_rel.sum(axis=1)
+    safe = np.where(base_sum > 0, base_sum, 1.0)
+    blue_norm = blue_rel / safe[:, None] * 100.0
+    red_norm = red_rel / safe[:, None] * 100.0
+    gray_norm = gray_rel / safe[:, None] * 100.0
+    tot = blue_rel + red_rel + gray_rel
+    tot_safe = np.where(tot > 0, tot, 1.0)
+    lock_ratio = np.where(tot > 0, gray_rel / tot_safe, 0.0)
 
     return EmaLockResult(
         dates=list(ctx.dates), centers=np.asarray(ctx.centers, dtype=float),
-        red=red_norm, gray=gray_norm, lock_ratio=lock_ratio,
-        red_rel=red_rel, gray_rel=gray_rel,
+        blue=blue_norm, red=red_norm, gray=gray_norm, lock_ratio=lock_ratio,
+        blue_rel=blue_rel, red_rel=red_rel, gray_rel=gray_rel,
         close=np.asarray(ctx.close, dtype=float),
     )
 
@@ -158,8 +170,8 @@ def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float) 
     name="EMA换手峰·锁仓染色",
     index="EMLK",
     category="chip",
-    description="方案③：EMA 递归堆积强换手分布（红），锁仓日将红按比例染灰（灰）；"
-                "衰减全靠 EMA 时间权重，B 与记忆长度随换手周期自适应。",
+    description="三态筹码峰：蓝底=全量换手 TRI 分布（EMA 衰减，正常 K 控制），"
+                "红叠层=强换手日(to>M_high×B)的当日筹码，灰=锁仓日(to≤M_low×B)把蓝底按 R 染灰。",
     params=[
         # 默认 M_low=0.7（非方案③文档 §9 写的 1.0）：实测 M_low=1.0 时锁仓日占比高达 ~66%，
         # 远超文档 §10 自估的 25~40%；M_low=0.7 实测 ~35%，正好命中 §10 目标。B=1/N 为换手率均值，
@@ -172,19 +184,15 @@ def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float) 
 )
 def ema_lock(ctx: ChipContext, M_low: float = 0.7, M_high: float = 2.0,
              R: float = 0.5, k: float = 0.5):
-    """@chip_formula 入口：返回 **(总分布, {"gray": 锁仓占比})** 元组。
+    """@chip_formula 入口：返回 **(蓝底, {"red": 红叠层, "gray": 灰折旧})** 元组。
 
-    总分布 = 红(强换手) + 灰(锁仓)，core 按行归一化到 100（即筹码窗口整幅分布）；
-    gray 是「锁仓占该箱总量」的占比（与 pct 同一归一尺度，单箱 ≤ pct），供前端在红底上叠灰。
-    灰与红来自同一次 _compute，周期/口径天然一致；纯红/纯灰的按行归一分布仍走
-    compute_ema_lock_frames（供 path-B 双分布热力图）。
+    蓝底 = 全量 TRI 分布（按行归一化到 100）；红/灰与蓝底同尺度归一化，经 core 的
+    red / gray 通道进入响应 frames，前端以 brgMode 渲染「蓝底 + 红叠层 + 灰折旧」三层。
     """
     res = _compute(ctx, M_low, M_high, R, k)
-    total = res.red_rel + res.gray_rel
-    rowsum = total.sum(axis=1)
-    safe = np.where(rowsum > 0, rowsum, 1.0)
-    gray_overlay = res.gray_rel / safe[:, None] * 100.0   # 与 pct 同尺度：每行合计≤100，单箱≤pct
-    return (total, {"gray": gray_overlay})
+    # display = 蓝底（纯蓝，不含红/灰叠层），按行归一到 100；
+    # red / gray 经独立通道输出，前端以 brgMode 渲染「蓝底 + 红叠层 + 灰折旧」。
+    return (res.blue, {"red": res.red, "gray": res.gray})
 
 
 def compute_ema_lock(ctx: ChipContext, M_low: float = 0.7, M_high: float = 2.0,
