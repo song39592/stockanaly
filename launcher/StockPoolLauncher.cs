@@ -2004,6 +2004,67 @@ namespace StockPool
             }
         }
 
+        private static int PortOf(ServiceItem svc)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(svc.HealthUrl ?? "", @":(\d+)");
+            return m.Success ? int.Parse(m.Groups[1].Value) : 0;
+        }
+
+        /// <summary>返回占用指定 TCP 端口的 LISTENING 进程 PID；无则返回 0。</summary>
+        private static int PidOnPort(int port)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("cmd.exe", "/c netstat -ano | findstr :" + port)
+                {
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using (var p = Process.Start(psi))
+                {
+                    var outp = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit();
+                    foreach (var line in outp.Split('\n'))
+                    {
+                        var s = line.Trim();
+                        if (!s.Contains("LISTENING")) continue;
+                        var parts = System.Text.RegularExpressions.Regex.Split(s, @"\s+");
+                        for (int i = parts.Length - 1; i >= 0; i--)
+                        {
+                            int pid;
+                            if (int.TryParse(parts[i], out pid) && pid > 0) return pid;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return 0;
+        }
+
+        /// <summary>启动服务前，若目标端口被「不响应健康检查」的残留进程占着，清理之，
+        /// 避免 uvicorn / node 因 Address already in use 起不来。
+        /// 等价旧「启动系统.bat」里 kill 占用 8000 旧进程那段；若端口被健康进程占用
+        /// （Probe 成功）则不抢，由调用方复用。</summary>
+        private static void ClearDeadPort(ServiceItem svc)
+        {
+            if (Probe(svc.HealthUrl, 1200)) return;          // 健康进程在跑 → 不抢
+            int pid = PidOnPort(PortOf(svc));
+            if (pid <= 0) return;
+            try
+            {
+                var proc = Process.GetProcessById(pid);
+                proc.Kill();
+                proc.WaitForExit(3000);
+            }
+            catch { /* 已退出或无权限 */ }
+            for (int i = 0; i < 40; i++)                     // 等端口真正释放
+            {
+                if (PidOnPort(PortOf(svc)) <= 0) break;
+                Thread.Sleep(250);
+            }
+        }
+
         private void StartBackend(bool warn)
         {
             StartOne(_backend, warn);
@@ -2028,6 +2089,7 @@ namespace StockPool
                     Msg("未找到可执行文件：" + svc.Exe + "\n请在「设置」页指定正确路径。");
                     return;
                 }
+                ClearDeadPort(svc);
                 svc.Start(delegate(string line) { Log(svc.Name, line); });
                 Log("系统", svc.Name + " 已发起启动（" + Path.GetFileName(svc.Exe) + "）");
                 RefreshStatus(false);
