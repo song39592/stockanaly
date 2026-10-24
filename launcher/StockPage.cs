@@ -1374,9 +1374,14 @@ namespace StockPool
                     double[] gray = (brgMode || emaMode) ? _grayFrames[_frame] : null;
                     double[] red = brgMode ? _redFrames[_frame] : null;
 
-                    // 横轴满宽 = 最高峰占比（两种模式共用；下方刻度标签也要用）
+                    // 横轴满宽基准：brgMode（蓝+灰+红）优先用「灰峰」，让灰按真实占比铺满、
+                    // 蓝退为细线（满足「灰占全部筹码 90%+ 时视觉也铺满，蓝留一条细线」）；
+                    // 其余模式沿用 pct 峰值。
                     double maxPct = 0;
-                    for (int i = 0; i < pct.Length; i++) if (pct[i] > maxPct) maxPct = pct[i];
+                    if (brgMode && gray != null)
+                        for (int i = 0; i < gray.Length; i++) if (gray[i] > maxPct) maxPct = gray[i];
+                    if (maxPct <= 0)
+                        for (int i = 0; i < pct.Length; i++) if (pct[i] > maxPct) maxPct = pct[i];
                     if (maxPct <= 0) maxPct = 1;
 
                     if (brgMode)
@@ -1400,7 +1405,7 @@ namespace StockPool
                             if (yc < top) yc = top; if (yc > bottom) yc = bottom;
                             idxs.Add(i); baseWs.Add(w); ys.Add(yc);
                             int gw = (int)Math.Round((i < gray.Length ? gray[i] : 0) / maxPct * plotW);
-                            if (gw < 0) gw = 0; if (gw > w) gw = w;
+                            if (gw < 0) gw = 0; if (gw > plotW) gw = plotW;   // 不限制 ≤ 蓝宽，灰按真实占比铺满
                             grayWs.Add(gw);
                             int rw = (int)Math.Round((i < red.Length ? red[i] : 0) / maxPct * plotW);
                             if (rw < 0) rw = 0; if (rw > plotW) rw = plotW;
@@ -1429,6 +1434,19 @@ namespace StockPool
                             for (int t = 0; t < idxs.Count; t++) rp.Add(new Point(LeftPad + redWs[t], ys[t]));
                             rp.Add(new Point(LeftPad, ys[idxs.Count - 1]));
                             using (var br = new SolidBrush(redC)) g.FillPolygon(br, rp.ToArray());
+
+                            // 蓝色轮廓细线：灰铺满后蓝被覆盖，用蓝色描边保证「蓝至少一条细线」始终可见；
+                            // 只在**有筹码**（baseWs>0）的档位描边，无筹码档跳过，避免空白区画出竖线。
+                            using (var pen = new Pen(blueC, 1.5f))
+                            {
+                                var bp = new List<Point>();
+                                for (int t = 0; t < idxs.Count; t++)
+                                {
+                                    if (baseWs[t] <= 0) continue;   // 无筹码档不画
+                                    bp.Add(new Point(LeftPad + baseWs[t], ys[t]));
+                                }
+                                if (bp.Count >= 2) g.DrawLines(pen, bp.ToArray());
+                            }
                         }
                     }
                     else if (emaMode)

@@ -87,8 +87,9 @@ def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float) 
                  `chips = a×(换手×w) + (1−a)×chips`（a 由平均换手周期 N 与 k 决定，固定）。
     红（red）   ：仅「换手率 > M_high×B」的强换手日注入当日 `换手×w`，同样 EMA 衰减，
                  是蓝底中来自强换手日的子集（天然 ≤ 蓝底），叠在蓝上染红。
-    灰（gray）  ：「换手率 ≤ M_low×B」的锁仓日覆盖的档位标记为沉淀；灰 = 沉淀档位当前蓝 × R
-                 （默认 0.5），随蓝底同步、不独立累积；即「锁仓把蓝色的一半换成灰色」。
+    灰（gray）  ：「换手率 ≤ M_low×B」的锁仓日把**当前蓝底**的 R（默认 0.5）抽离为灰（蓝→灰，可累积）；
+                 第一次锁仓灰=0.5×蓝（蓝剩半），短时间再锁仓灰 += 0.5×剩余蓝 → 累计 0.75。
+                 灰随与蓝相同的 EMA 衰减；即「锁仓把已沉淀的蓝色逐步换成灰色」。
     """
     n = ctx.days
     bins = ctx.bins
@@ -103,7 +104,7 @@ def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float) 
 
     chips_blue = np.zeros(bins, dtype=float)       # 蓝底：全量 EMA 堆积
     chips_red = np.zeros(bins, dtype=float)        # 红叠层：强换手 EMA 堆积
-    lock_mask = np.zeros(bins, dtype=float)        # 沉淀档位标记（锁仓日覆盖 → 永久沉淀）
+    chips_gray = np.zeros(bins, dtype=float)        # 灰：被锁仓从蓝抽离的累积量（EMA 衰减）
     blue_rel = np.zeros((n, bins), dtype=float)
     red_rel = np.zeros((n, bins), dtype=float)
     gray_rel = np.zeros((n, bins), dtype=float)
@@ -135,20 +136,24 @@ def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float) 
         if to > M_high * Bt:
             chips_red += a * (to * w)
 
-        # ③ 灰折旧：锁仓日覆盖的档位标记为沉淀；灰 = 沉淀档位当前蓝 × R（默认 0.5），
-        #    即「蓝的一半」随蓝底同步、不独立累积（避免灰无限叠加淹没蓝底）。
+        # ③ 灰折旧：锁仓日把「当前蓝底」的 R（默认 0.5）抽离为灰（蓝→灰，**可累积**）；
+        #    第一次锁仓：灰 = 0.5×蓝（蓝剩半）；短时间再锁仓：灰 += 0.5×剩余蓝 → 累计 0.75。
+        #    灰与蓝、红使用同一个 EMA 系数 a 衰减（正常的 K），未用 tri_decay 或其它衰减。
         if to <= M_low * Bt:
-            lock_mask[w > 1e-12] = 1.0
-        gray = lock_mask * R * chips_blue
+            transfer = chips_blue * R
+            chips_blue = chips_blue - transfer
+            chips_gray = (1.0 - a) * chips_gray + transfer
 
         blue_rel[t] = chips_blue
         red_rel[t] = chips_red
-        gray_rel[t] = gray
+        gray_rel[t] = chips_gray
 
     # 蓝 / 红 / 灰 **同一尺度**归一化（都用蓝底的 rowsum）：
     # 红、灰是叠在蓝底之上的层，宽度须不超过蓝（同档位），才能在蓝底上正确染色。
     # 若各自归一化到行和 100，红会被放大到与蓝同宽、把蓝底整片盖住（显示不对的根因）。
-    base_sum = blue_rel.sum(axis=1)
+    # 归一化分母用「蓝+灰」（=原始蓝总量，抽走灰之前的量），保证灰可累积且总量恒定；
+    # 红 ⊂ 蓝，用同一分母后 red_norm ≤ 100。
+    base_sum = (blue_rel + gray_rel).sum(axis=1)
     safe = np.where(base_sum > 0, base_sum, 1.0)
     blue_norm = blue_rel / safe[:, None] * 100.0
     red_norm = red_rel / safe[:, None] * 100.0
