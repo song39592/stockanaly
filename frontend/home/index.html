@@ -766,7 +766,7 @@
       <p style="margin:0 0 10px;"><b style="color:var(--text);">4. 表格排序</b>：点击表头切换排序；点击「细分行业」按行业分组（组内按连续天数降序）。</p>
       <p style="margin:0 0 10px;"><b style="color:var(--text);">5. 数据备份</b>：「导出备份」下载 JSON 文件；「恢复数据」从 JSON 导入；「数据管理」可按天删除或清空。</p>
       <p style="margin:0 0 10px;"><b style="color:var(--text);">6. 字段识别</b>：自动识别表头中的「代码 / 名称 / 细分行业 / 地区」列；行业为空归为「未分类」；股票代码自动补零到 6 位、自动去重。</p>
-      <p style="margin:0;"><b style="color:var(--text);">7. 个股研究详情</b>：点击表格/排行榜中的股票，查看真实日 K、均线、成交量、进出池标记和公告/新闻时间轴；详情页中的“AI 调研”按钮可继续生成主营业务、近期事项和多空观点报告。行情与调研依赖本地 FastAPI 后端，每次双击项目根目录的 <span style="font-family:ui-monospace,Consolas,monospace;">启动系统.bat</span> 即可自动启动。</p>
+      <p style="margin:0;"><b style="color:var(--text);">7. 个股研究详情</b>：点击表格/排行榜中的股票，查看真实日 K、均线、成交量、进出池标记和公告/新闻时间轴；详情页中的“AI 调研”按钮可继续生成主营业务、近期事项和多空观点报告。行情与调研依赖本地 FastAPI 后端，双击根目录的 <span style="font-family:ui-monospace,Consolas,monospace;">股票池追踪系统.exe</span>（launcher）即可自动启动。</p>
     </div>
     <div class="m-actions">
       <button class="btn primary" id="btnHelpClose">知道了</button>
@@ -1539,7 +1539,7 @@ function warnOutdatedBackend(health) {
     + 'font:14px/1.6 "Microsoft YaHei UI",sans-serif;box-shadow:0 2px 12px rgba(0,0,0,.35)';
   bar.textContent = `检测到旧版后端（api_version ${health?.api_version ?? '未知'}）：代码已更新，`
     + '但正在运行的后端还是旧进程，新接口会返回 404。'
-    + '请关闭旧后端窗口，重新运行「启动系统.bat」，再按 Ctrl+F5 刷新本页。';
+    + '请关闭旧后端窗口，重新启动「股票池追踪系统.exe」（launcher），再按 Ctrl+F5 刷新本页。';
   document.body.prepend(bar);
 }
 

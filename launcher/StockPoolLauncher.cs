@@ -2032,7 +2032,8 @@ namespace StockPool
                         var parts = System.Text.RegularExpressions.Regex.Split(s, @"\s+");
                         for (int i = parts.Length - 1; i >= 0; i--)
                         {
-                            if (int.TryParse(parts[i], out int pid) && pid > 0) return pid;
+                            int pid;
+                            if (int.TryParse(parts[i], out pid) && pid > 0) return pid;
                         }
                     }
                 }

@@ -15,11 +15,11 @@
 ## 范围与清单
 | 路径 | 类型 | 判断 | 风险 |
 |------|------|------|------|
-| `启动系统.bat` | 旧总启动器 | launcher 已取代（含后端/dsh/网页/健康检查/密钥） | **中**：bat 里有一段「kill 占用 8000 的旧 python 进程」逻辑，需先确认 launcher 是否也处理端口冲突，否则删后可能出现「端口被旧进程占住、launcher 起不来」 |
-| `examples/临时条件股20260813.xls`、`examples/临时条件股20260814.xls` | 用户临时导出的条件选股结果 | 非源码/非示例；全仓仅 `README.md`、`docs/changelog.md` 文本提及，**无代码 import** | **低**：删前确认无 import、并同步更新文档里的引用 |
-| `backend_fastapi/run_backend.bat`、`start_backend.bat`、`_restart_backend.bat` | 旧后端启动/重启脚本 | `启动系统.bat` 曾调用 `run_backend.bat`；launcher 现直接用 uvicorn 命令行，疑似冗余 | **中**：确认全仓无其他处调用 |
-| `agent_dsh/start-dsh.bat` | 旧 dsh 启动脚本 | launcher 现直接命令行启 dsh，疑似冗余 | **低-中** |
-| `backend_fastapi/清理日志与缓存.bat` | 维护脚本（清日志/缓存） | 功能独立、可能仍有人手动用 | **待确认**（保留优先，除非确认无用） |
+| `启动系统.bat` | 旧总启动器 | launcher 已取代（含后端/dsh/网页/健康检查/密钥） | **已删**：launcher 已等价处理端口冲突（ClearDeadPort 清理不健康的 8000 占用者），删除前已确认 |
+| `examples/临时条件股20260813.xls`、`examples/临时条件股20260814.xls` | 用户临时导出的条件选股结果 | 非源码/非示例，无代码 import | **已删**：两个 xls 已删除，并同步移除 `README.md` 中 `examples/` 目录描述 |
+| `backend_fastapi/run_backend.bat`、`start_backend.bat`、`_restart_backend.bat` | 旧后端启动/重启脚本 | `启动系统.bat` 曾调用 `run_backend.bat`；launcher 现直接用 uvicorn 命令行 | **已删**：全仓无其他处调用 |
+| `agent_dsh/start-dsh.bat` | 旧 dsh 启动脚本 | launcher 现直接命令行启 dsh | **已删** |
+| `backend_fastapi/清理日志与缓存.bat` | 维护脚本（清日志/缓存） | 功能独立、手动救急用（与 cleanup.py 配套） | **保留**：文档仍引用，作为后端起不来时的救急手段 |
 
 ## 明确不在本次范围（避免误删在用物）
 - `launcher/build_exe.bat`（编译 EXE，**刚用过**）、`launcher/install_env.bat`（装环境，**在用**）；

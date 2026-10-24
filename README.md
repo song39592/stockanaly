@@ -67,13 +67,11 @@ frontend/home/index.html（原生 HTML/JS 单页，浏览器本地 localStorage 
 | `backend_fastapi/` | FastAPI 调研后端（个股公告/新闻/调研采集 + LLM 调研接口） | Python 3.10+ / FastAPI / akshare |
 | `agent_dsh/` | 红色小牛 Agent（自定义 Tool 插件、Skill 角色规则库） | Node 22+ / @deepseek-ai/dsh |
 | `docs/` | 需求、变更日志、开发规范 | — |
-| `examples/` | 示例股票池 Excel（.xls） | — |
 
 ## 目录结构
 
 ```
 stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
-├── 启动系统.bat                  # 一键启动：后端 + dsh + 打开前端
 ├── 股票池追踪系统.exe            # 原生 Windows 窗口程序（由 launcher\build_exe.bat 编译，自带窗口、不加载 HTML）
 ├── launcher/                     # 上述 EXE 的源码：主窗体 StockPoolLauncher.cs + 各业务标签页
 │                                 #   （MarketPage / StockPage / ValuationPage / DownloadPage.cs）、
@@ -91,14 +89,11 @@ stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
 │   ├── download_store.py         # 下载任务与队列持久化（download_tasks / download_codes / download_settings）
 │   ├── tdx_reader.py             # 本机通达信 .day 日线文件解析（纯读取，不联网）
 │   ├── llm_client.py             # LLM 调用与错误翻译（各模块共用）
-│   ├── start_backend.bat         # 单独启动后端
 │   └── .env.example              # 密钥模板（复制为 .env）
 ├── agent_dsh/                    # dsh Agent（plugins/ + skills_library/）
-│   ├── start-dsh.bat             # 单独启动 dsh 服务
 │   ├── cordis.patch.yml          # 插件挂载 + 角色 persona 配置
 │   └── .env.example              # DEEPSEEK_API_KEY 模板
 ├── docs/                         # requirement / changelog / CONTRIBUTING
-├── examples/                     # 示例股票池 Excel
 ├── .gitignore
 ├── README.md
 └── LICENSE                       # MIT
@@ -110,8 +105,7 @@ stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
    - 后端：`backend_fastapi/.env` 填 `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`（模板见 `.env.example`）；
    - dsh：`agent_dsh/.env` 填 `DEEPSEEK_API_KEY`（模板见 `.env.example`），并已执行
      `cd D:\ai\agent_dsh && npm install`（依赖 `@deepseek-ai/dsh`）。
-2. **一键启动**：双击根目录 `启动系统.bat` —— 自动拉起 FastAPI 后端（:8000）与 dsh 服务（:3080，
-   已运行则跳过），随后打开 `frontend/home/index.html`。
+2. **一键启动**：双击根目录 `股票池追踪系统.exe`（launcher 原生窗口程序）即可，它内嵌拉起后端（:8000）/ dsh（:3080）并自带服务控制台、状态灯、托盘；点「打开完整网页版」按钮打开前端页面。
    - 也可以用原生窗口程序：双击 `launcher\build_exe.bat` 生成根目录 `股票池追踪系统.exe`
      （调用系统自带 `csc.exe` 编译，离线、零第三方依赖），之后双击该 EXE：
      **自带 WinForms 窗口**（服务控制台 / 个股查询 / 运行日志 / 设置），内嵌拉起两个服务、
@@ -121,9 +115,8 @@ stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
      装不上就弹出错误日志并退出，不会反复重试。设置页也有「检查 / 修复环境」可手动触发。
      Node 缺失只提示（AI 服务 :3080 起不来，后端与网页不受影响）。
 3. **单独启动 / 调试**：
-   - 后端：`backend_fastapi\start_backend.bat`，或手动
-     `D:/ai/backend_fastapi/venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000`；
-   - dsh：`agent_dsh\start-dsh.bat`，看到 `dsh web: http://127.0.0.1:3080` 即成功。
+   - 后端：手动 `D:/ai/backend_fastapi/venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000`；
+   - dsh：`cd D:\ai\agent_dsh && npx dsh web --patch cordis.patch.yml`，看到 `dsh web: http://127.0.0.1:3080` 即成功。
 4. 打开 `frontend/home/index.html`，右下角 🐂 开始对话；调试 Agent 轨迹看 `http://127.0.0.1:3080` webui。
 
 > 启动脚本与 `cordis.patch.yml` 中硬编码了 `D:\ai` 绝对路径，若移动项目目录需同步修改这些文件。
@@ -150,7 +143,7 @@ C:\Users\Admin\Desktop\stockanaly-main\agent_dsh\.env         →  DEEPSEEK_API_
   **三项必须来自同一平台**，混用会返回 401（典型坑：Key 取自腾讯云 TokenHub，地址却填成混元老平台）。
 - 两边填的 Key 可以不同；**只填一边时只有对应功能可用**（「个股调研报错、红色小牛正常」通常就是后端这处没填）。
 - `.env` 已被 `.gitignore` 忽略；**`.env.example` 会被提交，只能放占位符，切勿写入真实密钥**。
-- 修改 `.env` 后必须**重启对应服务**才生效（后端：关掉后端窗口后重新运行 `启动系统.bat`）。
+- 修改 `.env` 后必须**重启对应服务**才生效（后端：在 launcher 点「重启后端」，或关闭后端窗口后重新双击 `股票池追踪系统.exe`）。
 - 自查：`http://127.0.0.1:8000/health` 的 `llm_ready` 为 `true` 且 `llm_problem` 为空；
   调用报错时错误信息会附带上游原始说明，便于判断是哪家平台的 Key 有问题。
 - 常用平台配置对照：
