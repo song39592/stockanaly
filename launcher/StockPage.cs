@@ -1341,6 +1341,27 @@ namespace StockPool
                         if (hi <= lo) hi = lo + 1;
                         top = 20; bottom = Math.Max(30, Height - 18);
                     }
+                    // 纵向范围收紧到「有筹码」的区间（当前帧 pct/gray > 0），
+                    // 避免股价从未到过的低价区（如 12.2~14.4）在底部留出大片空白。
+                    if (_frames != null && _frames.Count > 0)
+                    {
+                        int fi = (_frame >= 0 && _frame < _frames.Count) ? _frame : _frames.Count - 1;
+                        double[] fp = _frames[fi];
+                        double[] fg = (_grayFrames != null && fi < _grayFrames.Count) ? _grayFrames[fi] : null;
+                        double clo = double.MaxValue, chi = double.MinValue;
+                        for (int i = 0; i < _bins.Count && i < fp.Length; i++)
+                        {
+                            double v = fp[i] + (fg != null && i < fg.Length ? fg[i] : 0.0);
+                            if (v <= 1e-9) continue;              // 无筹码箱跳过
+                            if (_bins[i].Lo < clo) clo = _bins[i].Lo;
+                            if (_bins[i].Hi > chi) chi = _bins[i].Hi;
+                        }
+                        if (chi > clo)
+                        {
+                            double cpad = (chi - clo) * 0.03;
+                            lo = clo - cpad; hi = chi + cpad;
+                        }
+                    }
                     int plotH = Math.Max(10, bottom - top);
                     int plotW = Math.Max(10, Width - LeftPad - RightPad);
                     double span = hi - lo;
@@ -1442,7 +1463,9 @@ namespace StockPool
                                 var bp = new List<Point>();
                                 for (int t = 0; t < idxs.Count; t++)
                                 {
-                                    if (baseWs[t] <= 0) continue;   // 无筹码档不画
+                                    // 以「真实占比 > 0」为据：极薄但有筹码的价位（之前因像素宽舍入=0 被误杀）
+                                    // 仍连入轮廓，避免峰形中间断开；纯空白档（真无筹码）才跳过。
+                                    if (pct[idxs[t]] <= 0) continue;
                                     bp.Add(new Point(LeftPad + baseWs[t], ys[t]));
                                 }
                                 if (bp.Count >= 2) g.DrawLines(pen, bp.ToArray());
