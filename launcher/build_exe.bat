@@ -4,12 +4,12 @@ rem ============================================================
 rem  Stock Pool Tracker - native EXE build script
 rem  Uses the built-in .NET Framework csc.exe compiler:
 rem    Offline build, zero third-party deps, no need to install Visual Studio / SDK
-rem  Output: <project root>\stockpool-tracker.exe
+rem  Output: <project root>\stockpool.exe
 rem ============================================================
 
 set "FW=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\"
 set "SRC=%~dp0StockPoolLauncher.cs"
-set "OUT=%~dp0..\量化分析平台.exe"
+set "OUT=%~dp0..\stockpool.exe"
 
 if not exist "%FW%csc.exe" (
   echo [错误] 未找到 csc.exe：%FW%
