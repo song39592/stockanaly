@@ -409,7 +409,7 @@ def _no_older_history(code: str, split: dt.date) -> bool:
         return False
 
 
-def _is_suspended(code: str, expected: dt.date | None, *,
+def _is_suspended(code: str, expected: dt.date | str | None, *,
                   latest: str | None = None, earliest: str | None = None) -> bool:
     """长期无新交易日（停牌 / 退市）：库里有过正常历史、但最新日远落后于应有日。
 
@@ -417,8 +417,15 @@ def _is_suspended(code: str, expected: dt.date | None, *,
     调用方应直接算完成、不记失败、不占限速额度。判定结合了「最新日落后幅度」
     （`SUSPENDED_GAP_DAYS`）与「是否曾有正常交易历史」（`SUSPENDED_HISTORY_MIN_DAYS`），
     后者用 earliest 排除上市不久的新股（新股由 `_no_older_history` 处理）。
+
+    `expected` 兼容 str / date：调用方多传 `_expected_data_day()` 的返回值（字符串），
+    此处统一解析成 `dt.date` 再比较，避免 `date >= str` 的 TypeError。
     """
     if expected is None:
+        return False
+    try:
+        exp = dt.date.fromisoformat(str(expected)[:10])
+    except (TypeError, ValueError):
         return False
     if latest is None:
         latest = price_store.latest_bar_date(code, "raw")
@@ -428,9 +435,9 @@ def _is_suspended(code: str, expected: dt.date | None, *,
         last = dt.date.fromisoformat(str(latest)[:10])
     except (TypeError, ValueError):
         return False
-    if last >= expected:
+    if last >= exp:
         return False
-    if (expected - last).days < SUSPENDED_GAP_DAYS:
+    if (exp - last).days < SUSPENDED_GAP_DAYS:
         return False
     if earliest is None:
         earliest = price_store.earliest_bar_date(code, "raw")
@@ -440,7 +447,7 @@ def _is_suspended(code: str, expected: dt.date | None, *,
         first = dt.date.fromisoformat(str(earliest)[:10])
     except (TypeError, ValueError):
         return False
-    return (expected - first).days >= SUSPENDED_HISTORY_MIN_DAYS
+    return (exp - first).days >= SUSPENDED_HISTORY_MIN_DAYS
 
 
 # --------------------------------------------------------------------------- #
