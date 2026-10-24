@@ -42,6 +42,19 @@ namespace StockPool
             };
             Application.Run(new MainForm());
         }
+
+        /// <summary>stderr 行分级：显式 INFO:/WARNING:/ERROR: 与 tqdm 进度条（含 \d+%| 或 it/s）降级为普通日志，
+        /// 其余（Traceback/Exception 等）才标 [err]。</summary>
+        internal static string TagStderrLine(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return line;
+            if (line.Contains("INFO:") || line.Contains("WARNING:") || line.Contains("ERROR:"))
+                return line;
+            if (System.Text.RegularExpressions.Regex.IsMatch(line, @"\d+%\|")
+                || line.Contains("it/s"))
+                return line;
+            return "[err] " + line;
+        }
     }
 
     /// <summary>日志条目（按来源分组，便于切换查看）。</summary>
@@ -99,7 +112,7 @@ namespace StockPool
                 };
                 p.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e)
                 {
-                    if (e.Data != null && log != null) log("[err] " + e.Data);
+                    if (e.Data != null && log != null) log(Program.TagStderrLine(e.Data));
                 };
                 p.Exited += delegate(object s, EventArgs e)
                 {
@@ -1788,8 +1801,9 @@ namespace StockPool
                     p.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e)
                     {
                         if (e.Data == null) return;
-                        if (sink != null) lock (sink) sink.AppendLine("[err] " + e.Data);
-                        if (onLine != null) onLine("[err] " + e.Data);
+                        var tagged = Program.TagStderrLine(e.Data);
+                        if (sink != null) lock (sink) sink.AppendLine(tagged);
+                        if (onLine != null) onLine(tagged);
                     };
                     p.Start();
                     p.BeginOutputReadLine();

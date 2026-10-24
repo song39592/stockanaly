@@ -170,6 +170,7 @@ class ChipFrames:
     close: np.ndarray       # 当日收盘价
     centers: np.ndarray     # 分箱中心价格
     pct: np.ndarray         # (天数, 分箱数)，每行合计 100
+    gray: np.ndarray | None = None   # 锁仓/折旧分布（与 pct 同尺度，分母=全部筹码100%）；三态公式(如 ema_lock)非空，其余为 None
 
 
 def code_of(df: pd.DataFrame) -> str:
@@ -194,7 +195,7 @@ def _chip_frames(code: str, formula_id: str | None, days: int | None,
     res = chip_formulas.compute_matrix(code, formula_id=formula_id, days=days,
                                        bins=bins, adjust=adjust)
     return ChipFrames(dates=list(res.dates), close=res.close,
-                      centers=res.centers, pct=res.pct)
+                      centers=res.centers, pct=res.pct, gray=res.gray)
 
 
 def get_chip_frames(code: str, formula_id: str | None = None,
@@ -210,14 +211,21 @@ def get_chip_frames(code: str, formula_id: str | None = None,
     return _chip_frames(code, formula_id, days, int(bins), adjust)
 
 
-def chip_rows_for(dates: list[str], frames: ChipFrames) -> np.ndarray:
-    """把筹码矩阵按 `dates` 对齐：缺失的日期填 NaN 行。"""
+def chip_rows_for(dates: list[str], frames: ChipFrames, field: str = "pct") -> np.ndarray:
+    """把筹码矩阵按 `dates` 对齐：缺失的日期填 NaN 行。
+
+    `field` 指定取哪个通道（默认 "pct" 全部筹码；"gray"/"red" 取三态叠层分布）。
+    """
+    mat = getattr(frames, field, None)
+    nbin = frames.pct.shape[1]
+    if mat is None:
+        return np.full((len(dates), nbin), np.nan)
+    out = np.full((len(dates), mat.shape[1]), np.nan)
     lookup = {d: i for i, d in enumerate(frames.dates)}
-    out = np.full((len(dates), frames.pct.shape[1]), np.nan)
     for i, day in enumerate(dates):
         j = lookup.get(str(day)[:10])
         if j is not None:
-            out[i] = frames.pct[j]
+            out[i] = mat[j]
     return out
 
 

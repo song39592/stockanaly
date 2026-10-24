@@ -1341,6 +1341,27 @@ namespace StockPool
                         if (hi <= lo) hi = lo + 1;
                         top = 20; bottom = Math.Max(30, Height - 18);
                     }
+                    // 纵向范围收紧到「有筹码」的区间（当前帧 pct/gray > 0），
+                    // 避免股价从未到过的低价区（如 12.2~14.4）在底部留出大片空白。
+                    if (_frames != null && _frames.Count > 0)
+                    {
+                        int fi = (_frame >= 0 && _frame < _frames.Count) ? _frame : _frames.Count - 1;
+                        double[] fp = _frames[fi];
+                        double[] fg = (_grayFrames != null && fi < _grayFrames.Count) ? _grayFrames[fi] : null;
+                        double clo = double.MaxValue, chi = double.MinValue;
+                        for (int i = 0; i < _bins.Count && i < fp.Length; i++)
+                        {
+                            double v = fp[i] + (fg != null && i < fg.Length ? fg[i] : 0.0);
+                            if (v <= 1e-9) continue;              // 无筹码箱跳过
+                            if (_bins[i].Lo < clo) clo = _bins[i].Lo;
+                            if (_bins[i].Hi > chi) chi = _bins[i].Hi;
+                        }
+                        if (chi > clo)
+                        {
+                            double cpad = (chi - clo) * 0.03;
+                            lo = clo - cpad; hi = chi + cpad;
+                        }
+                    }
                     int plotH = Math.Max(10, bottom - top);
                     int plotW = Math.Max(10, Width - LeftPad - RightPad);
                     double span = hi - lo;
@@ -1374,9 +1395,14 @@ namespace StockPool
                     double[] gray = (brgMode || emaMode) ? _grayFrames[_frame] : null;
                     double[] red = brgMode ? _redFrames[_frame] : null;
 
-                    // 横轴满宽 = 最高峰占比（两种模式共用；下方刻度标签也要用）
+                    // 横轴满宽基准：brgMode（蓝+灰+红）优先用「灰峰」，让灰按真实占比铺满、
+                    // 蓝退为细线（满足「灰占全部筹码 90%+ 时视觉也铺满，蓝留一条细线」）；
+                    // 其余模式沿用 pct 峰值。
                     double maxPct = 0;
-                    for (int i = 0; i < pct.Length; i++) if (pct[i] > maxPct) maxPct = pct[i];
+                    if (brgMode && gray != null)
+                        for (int i = 0; i < gray.Length; i++) if (gray[i] > maxPct) maxPct = gray[i];
+                    if (maxPct <= 0)
+                        for (int i = 0; i < pct.Length; i++) if (pct[i] > maxPct) maxPct = pct[i];
                     if (maxPct <= 0) maxPct = 1;
 
                     if (brgMode)
@@ -1400,7 +1426,7 @@ namespace StockPool
                             if (yc < top) yc = top; if (yc > bottom) yc = bottom;
                             idxs.Add(i); baseWs.Add(w); ys.Add(yc);
                             int gw = (int)Math.Round((i < gray.Length ? gray[i] : 0) / maxPct * plotW);
-                            if (gw < 0) gw = 0; if (gw > w) gw = w;
+                            if (gw < 0) gw = 0; if (gw > plotW) gw = plotW;   // 不限制 ≤ 蓝宽，灰按真实占比铺满
                             grayWs.Add(gw);
                             int rw = (int)Math.Round((i < red.Length ? red[i] : 0) / maxPct * plotW);
                             if (rw < 0) rw = 0; if (rw > plotW) rw = plotW;
@@ -1429,6 +1455,21 @@ namespace StockPool
                             for (int t = 0; t < idxs.Count; t++) rp.Add(new Point(LeftPad + redWs[t], ys[t]));
                             rp.Add(new Point(LeftPad, ys[idxs.Count - 1]));
                             using (var br = new SolidBrush(redC)) g.FillPolygon(br, rp.ToArray());
+
+                            // 蓝色轮廓细线：灰铺满后蓝被覆盖，用蓝色描边保证「蓝至少一条细线」始终可见；
+                            // 只在**有筹码**（baseWs>0）的档位描边，无筹码档跳过，避免空白区画出竖线。
+                            using (var pen = new Pen(blueC, 1.5f))
+                            {
+                                var bp = new List<Point>();
+                                for (int t = 0; t < idxs.Count; t++)
+                                {
+                                    // 以「真实占比 > 0」为据：极薄但有筹码的价位（之前因像素宽舍入=0 被误杀）
+                                    // 仍连入轮廓，避免峰形中间断开；纯空白档（真无筹码）才跳过。
+                                    if (pct[idxs[t]] <= 0) continue;
+                                    bp.Add(new Point(LeftPad + baseWs[t], ys[t]));
+                                }
+                                if (bp.Count >= 2) g.DrawLines(pen, bp.ToArray());
+                            }
                         }
                     }
                     else if (emaMode)

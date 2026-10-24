@@ -508,20 +508,26 @@ private void StRefreshRecoTitle()
             AddRow(stack, chartHost);
 
             TableLayoutPanel bg;
-            var g = Group("个股明细（按区间收益降序 · 点击行展开逐笔交易）", out bg);
-            // 不设 Jump：本表点击是「展开逐笔交易」，不是跳详情页（见 StPerStockCellClick）
+            var g = Group("个股明细（按区间收益降序 · 点击代码/名称跳个股详情）", out bg);
             _stPerStockGrid = NewGrid(new List<GridColumn> {
-                new GridColumn("代码", "code"),
-                new GridColumn("名称", "name") { MinWidth = 92 },
-                new GridColumn("区间收益", "ret", true),
+                new GridColumn("代码", "code") { IsCode = true, Jump = true },
+                NameColumn(),          // 名称列带 Jump：点名称同样可跳个股详情
+                new GridColumn("区间收益", "total_return", true),
                 new GridColumn("交易次数", "trades", true),
+                new GridColumn("买入日期", "buy_date"),
+                new GridColumn("卖出日期", "sell_date"),
+                new GridColumn("单笔收益", "ret", true),
             });
+            _stPerStockGrid.SetSortable(true);
             StPlaceGrid(_stPerStockGrid);
-            _stPerStockGrid.CellClick += StPerStockCellClick;
-            // 第 20 项：**刻意不开排序**。它是主从结构 —— StToggleExpand 按
-            // **行索引**记录展开状态，排序会让展开的明细与它的主行错位
-            // （点开一只票后排序，明细会跑到别的票下面）。要开排序得先改成
-            // 按代码记录展开状态，不在本次范围内。
+            // 兜底跳转：内置 OnCellClick 依赖列的 Jump 标记；若未接管（仍停在回测页），
+            // 按代码列取值直接 OpenStock，已接管则不重复触发。
+            _stPerStockGrid.CellClick += delegate(object s, DataGridViewCellEventArgs e)
+            {
+                if (e.RowIndex < 0 || _tabIndex == _stockTabIndex) return;
+                string c = Convert.ToString(_stPerStockGrid.Rows[e.RowIndex].Cells[0].Value);
+                if (!string.IsNullOrEmpty(c) && c.Trim().Length == 6) OpenStock(c.Trim());
+            };
             AddRow(bg, _stPerStockGrid);
             AddRow(stack, g);
         }
@@ -1427,11 +1433,16 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
             {
                 string code = J.StrOr(d["code"], "");
                 string name = (d.ContainsKey("name") && d["name"] != null) ? J.StrOr(d["name"], "") : "—";
-                int ri = _stPerStockGrid.Rows.Add("▸ " + code, name,
-                    J.Pct100Plain(J.Num(d["total_return"])), J.Int(d["trades"]).ToString());
+                string buyDate = J.StrOr(d.ContainsKey("buy_date") ? d["buy_date"] : null, "");
+                string sellDate = J.StrOr(d.ContainsKey("sell_date") ? d["sell_date"] : null, "");
+                object retObj = d.ContainsKey("ret") ? d["ret"] : null;
+                string retTxt = (retObj != null) ? J.Pct100Plain(J.Num(retObj)) : "—";
+                int ri = _stPerStockGrid.Rows.Add(
+                    code, name,
+                    J.Pct100Plain(J.Num(d["total_return"])), J.Int(d["trades"]).ToString(),
+                    buyDate, sellDate, retTxt);
                 var row = _stPerStockGrid.Rows[ri];
                 row.Tag = "main:" + code;
-                // 主行也不吃选中高亮（点击只做展开，界面保持干净）
                 row.DefaultCellStyle.SelectionBackColor = _cPanel;
                 row.DefaultCellStyle.SelectionForeColor = _cText;
             }

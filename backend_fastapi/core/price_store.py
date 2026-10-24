@@ -120,6 +120,33 @@ def _store_adjust(adjust: str) -> str:
     return "raw" if key in ("", "raw", "none") else key
 
 
+def _to_hand_volume(volume, amount, close) -> float | None:
+    """把任意数据源的成交量归一成**手**（项目统一口径），入库前统一调用。
+
+    判定依据：成交额 ≈ 收盘价 × 成交量(股)，因此
+      成交量(股) ≈ amount / close
+      成交量(手) ≈ amount / close / 100
+    若原始 volume 更接近「股」则 ÷100，更接近「手」则保持。
+    统一保留两位小数，与历史（通达信 股→手）格式一致。
+
+    与 `price_service._to_hand_volume` 同源逻辑，但**复制而非 import**：
+    price_service 反向依赖 price_store，在此 import 会形成环。
+    """
+    if volume is None:
+        return None
+    if amount and close and close > 0 and amount > 0:
+        try:
+            vol_shares = float(amount) / float(close)     # 反推的股数
+            vol_hands = vol_shares / 100.0                # 反推的手数
+        except (TypeError, ValueError, ZeroDivisionError):
+            return round(volume, 2)
+        # 100 倍差距远大于「成交均价 vs 收盘价」误差，判定稳定
+        if abs(volume - vol_shares) <= abs(volume - vol_hands):
+            return round(volume / 100.0, 2)               # 原始是股，转手
+        return round(volume, 2)                            # 原始已是手
+    return round(volume, 2)
+
+
 def _year_of(trade_date: str) -> int:
     return int(str(trade_date)[:4])
 
@@ -492,7 +519,7 @@ def upsert_bars(code: str, bars: list[dict[str, Any]], adjust: str = "raw",
             continue
         grouped.setdefault(_year_of(day), []).append((
             code, day, store_adjust, bar.get("open"), bar.get("high"), bar.get("low"),
-            bar.get("close"), bar.get("volume"), bar.get("amount"), bar.get("amplitude"),
+            bar.get("close"), _to_hand_volume(bar.get("volume"), bar.get("amount"), bar.get("close")), bar.get("amount"), bar.get("amplitude"),
             bar.get("change_pct"), bar.get("change_amount"), bar.get("turnover"),
             fetched_at, source,
         ))
@@ -534,7 +561,7 @@ def overwrite_bars(code: str, bars: list[dict[str, Any]], adjust: str = "raw",
             continue
         grouped.setdefault(_year_of(day), []).append((
             code, day, store_adjust, bar.get("open"), bar.get("high"), bar.get("low"),
-            bar.get("close"), bar.get("volume"), bar.get("amount"), bar.get("amplitude"),
+            bar.get("close"), _to_hand_volume(bar.get("volume"), bar.get("amount"), bar.get("close")), bar.get("amount"), bar.get("amplitude"),
             bar.get("change_pct"), bar.get("change_amount"), bar.get("turnover"),
             fetched_at, source,
         ))

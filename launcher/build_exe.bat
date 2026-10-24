@@ -1,15 +1,15 @@
 @echo off
 chcp 65001 >nul
 rem ============================================================
-rem  股票池追踪系统 · 原生 EXE 构建脚本
-rem  使用 Windows 自带的 .NET Framework 编译器 csc.exe：
-rem    离线编译、零第三方依赖、不需要安装 Visual Studio / SDK
-rem  产物：项目根目录\股票池追踪系统.exe
+rem  Stock Pool Tracker - native EXE build script
+rem  Uses the built-in .NET Framework csc.exe compiler:
+rem    Offline build, zero third-party deps, no need to install Visual Studio / SDK
+rem  Output: <project root>\stockpool.exe
 rem ============================================================
 
 set "FW=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\"
 set "SRC=%~dp0StockPoolLauncher.cs"
-set "OUT=%~dp0..\股票池追踪系统.exe"
+set "OUT=%~dp0..\stockpool.exe"
 
 if not exist "%FW%csc.exe" (
   echo [错误] 未找到 csc.exe：%FW%
