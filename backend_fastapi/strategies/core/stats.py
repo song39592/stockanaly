@@ -685,6 +685,16 @@ def _build_trades(codes, common, W, dw_all, nav, raw_by_code,
 
         _close(None)                          # 区间结束仍未平 → mark-to-market
         if n_periods:
+            # 首笔交易摘要：供前端「按股票平铺」表格直接用，避免再异步拉逐笔明细。
+            # 取该 code 买入日最早的一笔；未平仓的笔 sell_date 为空、ret 可能为 None。
+            code_trades = [t for t in trades if t.get("code") == code]
+            first = min(code_trades, key=lambda t: t.get("buy_date") or "") if code_trades else None
+            first_ret = None
+            if first is not None and first.get("ret") is not None:
+                try:
+                    first_ret = round(float(first["ret"]), 4)
+                except (TypeError, ValueError):
+                    first_ret = None
             per_stock.append({
                 "code": code,
                 "pnl": round(float(stock_pnl), 2),
@@ -692,6 +702,9 @@ def _build_trades(codes, common, W, dw_all, nav, raw_by_code,
                                  if stock_buy_amt > 0 else 0.0),
                 "trades": n_periods,
                 "closed": n_closed,
+                "buy_date": first.get("buy_date") if first else "",
+                "sell_date": first.get("sell_date") if first else "",
+                "ret": first_ret,
             })
         closed_all += n_closed
 
