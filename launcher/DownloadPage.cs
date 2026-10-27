@@ -629,32 +629,108 @@ namespace StockPool
             return pickRun ?? pickQueue ?? pickPaused ?? (tasks[0] as Dictionary<string, object>);
         }
 
-        /// <summary>把「周度修订回收」后台任务进度单独显示一行（与用户主动发起的任务分开）。</summary>
+        /// <summary>周度修订回收（每周一次）是后台自动任务，UI 上最容易被忽略，
+        /// 所以这里专门展示它的状态：
+        ///  · 在跑 → 显示实时进度（completed/total + 百分比）；
+        ///  · 已完成 → 显示「本周是否已跑过」（按 finished_at 落在本周一~周日判断）+ 上次完成时间 + 进度数字。
+        /// 没有周度任务在跑时，退而显示其他占用通道的后台任务（每日自动更新 / 闲时补历史）。</summary>
         private void DlRenderWeekly(ArrayList tasks)
         {
-            Dictionary<string, object> w = null;
+            Dictionary<string, object> weeklyTask = null;   // 周度修订回收（任意状态，优先在跑的）
+            Dictionary<string, object> bgTask = null;        // 其他后台自动任务（running/queued）
+
             if (tasks != null)
             {
                 foreach (var item in tasks)
                 {
                     var t = item as Dictionary<string, object>;
                     if (t == null) continue;
+                    string status = Convert.ToString(J.GetFrom(t, "status") ?? "");
                     bool weekly = false;
                     try { weekly = Convert.ToBoolean(J.GetFrom(t, "weekly")); }
                     catch { }
-                    if (!weekly && J.Int(J.GetFrom(t, "overlap_days")) <= 0) continue;
-                    w = t;
-                    break;
+                    if (weekly || J.Int(J.GetFrom(t, "overlap_days")) > 0)
+                    {
+                        // 周度任务可能多条，优先挑正在跑的；否则保留最新的那条
+                        if (weeklyTask == null) weeklyTask = t;
+                        else
+                        {
+                            string s0 = Convert.ToString(J.GetFrom(weeklyTask, "status") ?? "");
+                            if (s0 != "running" && s0 != "queued"
+                                && (status == "running" || status == "queued"))
+                                weeklyTask = t;
+                        }
+                    }
+                    else
+                    {
+                        string origin = Convert.ToString(J.GetFrom(t, "origin") ?? "");
+                        if ((origin == "idle" || origin == "auto")
+                            && (status == "running" || status == "queued"))
+                        {
+                            if (bgTask == null) bgTask = t;
+                        }
+                    }
                 }
             }
-            if (w == null) { _dlWeekly.Visible = false; _dlWeekly.Text = ""; return; }
-            _dlWeekly.Visible = true;
-            string status = Convert.ToString(J.GetFrom(w, "status") ?? "");
-            int total = J.Int(J.GetFrom(w, "total"));
-            int completed = J.Int(J.GetFrom(w, "completed"));
-            double pct = J.Num(J.GetFrom(w, "percent"));
-            _dlWeekly.Text = string.Format("周度修订回收（后台自动）：{0}　{1}/{2}　进度 {3:0.0}%",
-                                            DlStatusText(status, "", "bars"), completed, total, pct);
+
+            // 1) 优先展示周度修订回收
+            if (weeklyTask != null)
+            {
+                _dlWeekly.Visible = true;
+                string status = Convert.ToString(J.GetFrom(weeklyTask, "status") ?? "");
+                int total = J.Int(J.GetFrom(weeklyTask, "total"));
+                int completed = J.Int(J.GetFrom(weeklyTask, "completed"));
+                double pct = J.Num(J.GetFrom(weeklyTask, "percent"));
+                if (status == "running" || status == "queued")
+                {
+                    _dlWeekly.Text = string.Format(
+                        "周度修订回收（后台自动）：下载中　{0}/{1}　进度 {2:0.0}%",
+                        completed, total, pct);
+                    return;
+                }
+                // 已完成 / 暂停 / 取消：提示「本周是否已跑过」
+                string fin = Convert.ToString(J.GetFrom(weeklyTask, "finished_at") ?? "");
+                DateTime finDt;
+                string when;
+                if (DateTime.TryParse(fin, out finDt))
+                {
+                    // 落在本周（周一 00:00 ~ 周日 23:59，本地时区）即视为「本周已跑过」
+                    int diff = ((int)finDt.DayOfWeek - (int)DayOfWeek.Monday);
+                    if (diff < 0) diff += 7;
+                    DateTime monday = finDt.Date.AddDays(-diff);
+                    DateTime sundayEnd = monday.AddDays(7).AddSeconds(-1);
+                    when = (finDt >= monday && finDt <= sundayEnd)
+                        ? "本周已跑过（完成于 " + finDt.ToString("MM-dd HH:mm") + "）"
+                        : "本周尚未运行（上次完成 " + finDt.ToString("MM-dd HH:mm") + "）";
+                }
+                else
+                {
+                    when = "本周尚未运行";
+                }
+                _dlWeekly.Text = "周度修订回收（后台自动）：" + when
+                    + string.Format("　已完成 {0}/{1}　进度 {2:0.0}%", completed, total, pct);
+                return;
+            }
+
+            // 2) 无周度任务在跑，但有别的后台任务占用通道
+            if (bgTask != null)
+            {
+                _dlWeekly.Visible = true;
+                string origin = Convert.ToString(J.GetFrom(bgTask, "origin") ?? "");
+                string name = origin == "idle" ? "闲时补历史" : "每日自动更新";
+                string status = Convert.ToString(J.GetFrom(bgTask, "status") ?? "");
+                int total = J.Int(J.GetFrom(bgTask, "total"));
+                int completed = J.Int(J.GetFrom(bgTask, "completed"));
+                double pct = J.Num(J.GetFrom(bgTask, "percent"));
+                _dlWeekly.Text = string.Format(
+                    "后台任务（{0}）：{1}　{2}/{3}　进度 {4:0.0}%　—　占用下载通道，主任务需等它结束或先暂停它",
+                    name, DlStatusText(status, "", "bars"), completed, total, pct);
+                return;
+            }
+
+            // 3) 都没有
+            _dlWeekly.Visible = false;
+            _dlWeekly.Text = "";
         }
 
         private void DlRefresh()

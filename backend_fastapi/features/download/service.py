@@ -831,6 +831,46 @@ def _has_alive_task() -> bool:
                    for runtime in _runtimes.values())
 
 
+def _has_alive_work() -> bool:
+    """是否有**还有剩余工作**的任务在跑（区别于已完成、线程尚未退出的收尾任务）。
+
+    `_has_alive_task` 只看 manager 是否 alive：周度修订回收刚跑到 100%、或暂停任务
+    正在收尾时，线程还活着但已无待下载项，却被当成「在跑」，于是用户点「继续」被
+    「请先结束当前运行的任务」误拒（实测现象）。这里再按 remaining 判一次，
+    只有真正还有活的任务才拦。
+    """
+    with _runtimes_lock:
+        alive_ids = [tid for tid, rt in _runtimes.items()
+                     if rt.manager is not None and rt.manager.is_alive()]
+    for tid in alive_ids:
+        try:
+            if download_store.remaining(tid) > 0:
+                return True
+        except Exception:                     # noqa: BLE001 - 查不到就保守当有活
+            return True
+    return False
+
+
+def _pause_others(except_id: str | None = None) -> None:
+    """手动操作优先：把其他正在跑的后台任务停下来，让用户点的「继续 / 开始下载」立即执行。
+
+    后台任务（每日自动更新 / 周度修订回收 / 闲时补历史）的断点都在库里，
+    下一轮调度会接着跑，所以这里中断它们是安全的；否则手动任务会被
+    「请先结束当前运行的任务」永远挡在门外（用户看不到后台在跑、也无从结束）。
+    """
+    with _runtimes_lock:
+        others = [(tid, rt) for tid, rt in _runtimes.items()
+                  if tid != except_id and rt.manager is not None and rt.manager.is_alive()]
+    for tid, rt in others:
+        rt.stop.set()
+        try:
+            task = download_store.get_task(tid)
+            if task and task["status"] == "running":
+                download_store.update_task(tid, status="paused")
+        except Exception:                     # noqa: BLE001 - 单个失败不影响其它
+            pass
+
+
 def _expected_data_day(grace_days: int = 0) -> str | None:
     """**本地行情数据应有的最新日期**（交易日，不是今天）。
 
@@ -1671,8 +1711,10 @@ def resume(task_id: str) -> dict[str, Any]:
         runtime = _runtimes.get(task_id)
         alive = runtime is not None and runtime.manager is not None and runtime.manager.is_alive()
     if not alive:
-        if _has_alive_task():
-            raise RuntimeError("请先结束当前运行的任务")
+        if _has_alive_work():
+            # 手动优先：后台任务让路（断点在库里，下一轮调度会接着跑），
+            # 不再用「请先结束当前运行的任务」把用户挡在门外。
+            _pause_others(task_id)
         download_store.requeue_running(task_id)
     # 重新检查日期：把已完成（done）的项退回待下载，由 _download_one 实时重判
     # （已最新走 `have_latest >= expected` 秒跳过，滞后的补最新）。否则「暂停→跨天→继续」
