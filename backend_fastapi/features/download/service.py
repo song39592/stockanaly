@@ -667,10 +667,11 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
             if expected and have_latest and have_latest >= expected:
                 download_store.finish_code(task_id, seq, ok=True)
                 return
-            if expected and have_latest and _is_suspended(code, expected):
-                # 停牌 / 退市：补也补不到，直接算完成——不记失败、不占限速额度。
-                download_store.finish_code(task_id, seq, ok=True)
-                return
+            # ⚠️ 这里**不能**按「最新日落后 expected 很多天」就当成停牌跳过。
+            # 隔了一个长假或两周没跑下载时，正常活跃股的最新日同样会落后 10+ 天；
+            # 之前正是在这里用 _is_suspended 预判，把 3000+ 只正常股票误判成停牌，
+            # 任务 3 分钟就「全部完成、0 失败」，数据却停在旧日期（2026-10-13）。
+            # 停牌/退市只在**真正取数失败**后由下面 except 分支兜底，不在这里预判。
             # 优先本地通达信：本地比库内更新 → 直接读本地、不联网、不占限速额度。
             # 这样「有本地数据就不必联网」——自动更新 / 手动增量都受益，且本地缺的
             # 票（如新上市）会自然回落到下面的在线分支，不会漏数据。
@@ -969,7 +970,7 @@ STALE_TOLERANCE_RATIO = 0.01
 
 # 停牌 / 退市判定：库里曾有正常交易历史，但最新日长期落后于应有交易日。
 # 用来避免把「补也补不到」的票记成失败（反复重试、刷屏、拖累自动更新资格）。
-SUSPENDED_GAP_DAYS = 10             # 最新日落后超过此自然日数（≈一周多交易日）才算「长期」
+SUSPENDED_GAP_DAYS = 30             # 真正停牌/退市通常已落后一个月以上；10 天太短，会把「两周没跑下载」误判成停牌
 SUSPENDED_HISTORY_MIN_DAYS = 60     # 且曾有至少这么长的交易历史（区别于上市不久的新股）
 
 
