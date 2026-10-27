@@ -85,15 +85,32 @@ stats.py      ⑥ hfq 收盘价 → 净值曲线与指标（与策略无关）
 
 | 文件 | 角色 | 职责 | 允许依赖 |
 | --- | --- | --- | --- |
-| `data.py` | **数据层** | `load_bars(codes, fields) -> {code: DataFrame}`、`list_universe_codes(universe_mode)`、`load_bars_raw_for(codes)`；取数走 **`kline_service`**（全项目唯一的「取数 + 周期合样」出口）；包内**唯一**允许 `import price_store` 的地方 | `kline_service`、`price_store` |
+| `data.py` | **数据层** | `load_bars(codes, fields) -> {code: DataFrame}`、`list_universe_codes(universe_mode)`、`load_bars_raw_for(codes)`；原始分类数据 `load_names()` / `code_first_dates()` / `market_caps()`；取数走 **`kline_service`**（全项目唯一的「取数 + 周期合样」出口）；包内**唯一**允许 `import price_store` 的地方 | `kline_service`、`price_store` |
+| `universe.py` | **股票池层** | `build(spec)` 按规则（板块前缀/ST/上市日/市值）把基池筛成回测代码；`summary(spec)` 给前端预览；**小型键值缓存**（最多 8 种范围），范围不变直接复用；**不依赖 backtest** | `data` |
 | `base.py` | **契约层** | `@strategy` / `ParamSpec` / `Signal` / `StrategyContext`；`run()` 调策略、`signals_to_positions()` 信号→权重序列、**`diff_trades()` 权重→流水** | `data`（仅类型）、`pandas` |
 | `stats.py` | **统计引擎** | 目标权重序列 + hfq 收盘价 → 净值与指标；raw OHLCV → 可行性指标；**与策略完全解耦** | 仅 `numpy/pandas` |
-| `backtest.py` | **编排层** | 范围 → 策略信号 → 统计，串起来并规范化返回 | `data/base/stats` |
+| `backtest.py` | **编排层** | 股票池 `codes` → 策略信号 → 统计，串起来并规范化返回（只消费 codes，**不感知范围规则**） | `data/base/stats` |
 | `<id>.py` | **策略实现** | 主动拉数（`data.load_bars`）+ 算信号 | `base`、`data` |
 
 > 策略文件**不得**直接读写数据库/文件/网络；取数只能走 `data`，统计只能走 `stats`。
 > `stats.py` 不 import 任何策略，也不直接取数，可单独复用与单元测试。
 > 🆕 **策略层不含「下单/成交/成本」语义**：策略只表达"我想要什么样的持仓"。
+
+### 股票池层（`universe.py`）
+
+回测范围到代码列表的翻译**只发生在这里**，路由与编排层都不重复实现规则：
+
+```python
+spec = {"universe_mode": "interval_data", "start": ..., "end": ...,
+        "exclude": ["chinext", "star", "bse", "st", "star_st", "ipo", "sub_new", "micro"]}
+codes = universe.build(spec)      # 命中缓存直接返回；范围变了才重建
+```
+
+- 规则按「**排除**」语义：基池 = `data.list_universe_codes()`，勾选的特征从基池剔除；
+  各特征独立计算取并集；外部数据（名称/市值）不可用时**静默降级**（不剔除），绝不把池子搞空。
+- 键值缓存 key = 规范化 spec（模式/区间/基准日/排除项/阈值），最多 8 种范围，TTL 1h；
+  `invalidate()` 可手动清空（如刚下载完新股数据后希望重建）。
+- 阈值默认：新股 ≤90 自然日、次新 90~365 自然日、微盘 ≤30 亿总市值，均可在 spec 覆盖。
 
 ## 策略校验门槛（`registry.py`）
 

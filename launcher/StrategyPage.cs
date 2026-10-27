@@ -32,10 +32,10 @@ namespace StockPool
         private FlowLayoutPanel _stParamPanel;
         private readonly List<StParamEditor> _stParamEditors = new List<StParamEditor>();
 
-        // ② 回测范围
-        private RadioButton _stAll, _stCustom;
-        private TextBox _stCodes, _stComm, _stBench;
-        private Label _stCodeHint;
+        // ② 回测范围：基池=全部本地已下载股票，勾选即「排除」该特征
+        private CheckBox _stExChiNext, _stExStar, _stExBse, _stExSt, _stExStarSt, _stExIpo, _stExSubNew, _stExMicro;
+        private TextBox _stComm, _stBench;
+        private Label _stScopeHint;
         private DateTimePicker _stStart, _stEnd;
         private NumericUpDown _stCapital;
         private CheckBox _stBenchChk;
@@ -388,23 +388,21 @@ private void StRefreshRecoTitle()
         {
             TableLayoutPanel b;
 
-            var g1 = Group("股票池", out b);
-            _stAll = new RadioButton();
-            _stAll.Text = "全部本地已下载股票";
-            _stAll.AutoSize = true;
-            _stAll.Checked = true;
-            _stCustom = new RadioButton();
-            _stCustom.Text = "自定义代码";
-            _stCustom.AutoSize = true;
-            _stCodes = new TextBox();
-            _stCodes.Width = 360;
-            _stCodes.Enabled = false;
-            _stCodeHint = Mute(Lbl("本地共 0 只，填入代码（逗号/空格分隔，最多 800 只）"));
-            _stAll.CheckedChanged += delegate { _stCodes.Enabled = !_stAll.Checked; };
-            _stCustom.CheckedChanged += delegate { _stCodes.Enabled = _stCustom.Checked; };
-            AddRow(b, Row(_stAll));
-            AddRow(b, Row(_stCustom));
-            AddRow(b, Row(_stCodes, _stCodeHint));
+            var g1 = Group("股票池（基池=全部本地已下载，勾选即剔除该特征）", out b);
+            _stScopeHint = Mute(Lbl("本地共 0 只 · 剔除后 0 只"));
+            AddRow(b, Row(Lbl("基池"), Mute(Lbl("全部本地已下载股票")), _stScopeHint));
+
+            var exRow = new FlowLayoutPanel();
+            exRow.AutoSize = true;
+            exRow.WrapContents = true;
+            exRow.Margin = new Padding(0, 4, 0, 0);
+            _stExChiNext = ExChk("创业板"); _stExStar = ExChk("科创板"); _stExBse = ExChk("北交所");
+            _stExSt = ExChk("ST"); _stExStarSt = ExChk("*ST");
+            _stExIpo = ExChk("新股"); _stExSubNew = ExChk("次新股"); _stExMicro = ExChk("微盘股");
+            foreach (var cb in new[] { _stExChiNext, _stExStar, _stExBse, _stExSt, _stExStarSt, _stExIpo, _stExSubNew, _stExMicro })
+                cb.CheckedChanged += delegate { StScopePreview(); };
+            exRow.Controls.AddRange(new Control[] { _stExChiNext, _stExStar, _stExBse, _stExSt, _stExStarSt, _stExIpo, _stExSubNew, _stExMicro });
+            AddRow(b, Row(exRow));
             AddRow(stack, g1);
 
             var g2 = Group("时间范围", out b);
@@ -927,19 +925,72 @@ private void StRefreshRecoTitle()
             grid.Fit();
         }
 
+        // ---------------- 回测范围：排除特征筛选 ----------------
+        private CheckBox ExChk(string text)
+        {
+            var c = new CheckBox();
+            c.Text = text;
+            c.AutoSize = true;
+            c.Margin = new Padding(0, 0, 14, 0);
+            return c;
+        }
+
+        private List<string> StExcludeList()
+        {
+            var ex = new List<string>();
+            if (_stExChiNext != null && _stExChiNext.Checked) ex.Add("chinext");
+            if (_stExStar != null && _stExStar.Checked) ex.Add("star");
+            if (_stExBse != null && _stExBse.Checked) ex.Add("bse");
+            if (_stExSt != null && _stExSt.Checked) ex.Add("st");
+            if (_stExStarSt != null && _stExStarSt.Checked) ex.Add("star_st");
+            if (_stExIpo != null && _stExIpo.Checked) ex.Add("ipo");
+            if (_stExSubNew != null && _stExSubNew.Checked) ex.Add("sub_new");
+            if (_stExMicro != null && _stExMicro.Checked) ex.Add("micro");
+            return ex;
+        }
+
+        // 勾选排除特征时实时刷新「本地共 N 只 · 剔除后 M 只」（依赖后端 /universe/summary）。
+        private void StScopePreview()
+        {
+            if (_stScopeHint == null) return;
+            var ex = StExcludeList();
+            string q = ex.Count > 0 ? "?exclude=" + string.Join(",", ex) : "";
+            RunUi<Dictionary<string, object>>(delegate
+            {
+                string body;
+                if (!GetText("http://127.0.0.1:8000/api/strategies/universe/summary" + q, 20000, out body))
+                    return null;
+                try { return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body); }
+                catch { return null; }
+            }, delegate(Dictionary<string, object> j)
+            {
+                if (j == null || !J.IsOk(j))
+                {
+                    _stScopeHint.Text = "本地共 " + _stLocalCodeCount + " 只";
+                    return;
+                }
+                int baseN = (int)J.Num(J.Get(j, "base_count"));
+                int filtN = (int)J.Num(J.Get(j, "filtered_count"));
+                _stScopeHint.Text = "本地共 " + baseN + " 只 · 剔除后 " + filtN + " 只";
+            }, delegate(Exception ex2)
+            {
+                _stScopeHint.Text = "本地共 " + _stLocalCodeCount + " 只";
+            }, null);
+        }
+
         // ---------------- 通用小工具 ----------------
         // 回测 / 推荐共用请求体：策略、范围、资金、佣金都取「回测范围」页的设置。
         // window>0 时后端直接把区间定位到最近 N 个交易日（近期成果用）。
         // meta 由调用方传入（点击时取的快照），不在函数内部读列表选中项 —— 理由见 StSelectedMeta。
         private Dictionary<string, object> StRequest(Dictionary<string, object> meta, int window)
         {
-            var codes = _stAll.Checked ? new List<string>() : StParseCodes(_stCodes.Text);
             return new Dictionary<string, object>
             {
                 { "strategy_id", J.StrOr(meta["id"], "") },
                 { "params", StReadParams() },
-                { "use_all", _stAll.Checked },
-                { "codes", codes },
+                { "use_all", true },
+                { "codes", new List<string>() },
+                { "exclude", StExcludeList() },
                 { "start", StDate(_stStart) },
                 { "end", StDate(_stEnd) },
                 { "window", window > 0 ? (object)window : null },
@@ -1138,13 +1189,13 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
         private void StRunBacktestInner(Dictionary<string, object> meta)
         {
             string sid = J.StrOr(meta["id"], "");
-            var codes = _stAll.Checked ? new List<string>() : StParseCodes(_stCodes.Text);
             var req = new Dictionary<string, object>
             {
                 { "strategy_id", sid },
                 { "params", StReadParams() },
-                { "use_all", _stAll.Checked },
-                { "codes", codes },
+                { "use_all", true },
+                { "codes", new List<string>() },
+                { "exclude", StExcludeList() },
                 { "start", StDate(_stStart) },
                 { "end", StDate(_stEnd) },
                 { "initial_capital", (double)_stCapital.Value },
@@ -1154,9 +1205,10 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
 
             string start = StDate(_stStart) ?? "起点";
             string end = StDate(_stEnd) ?? "至今";
-            string scope = _stAll.Checked
+            var exList = StExcludeList();
+            string scope = exList.Count == 0
                 ? "全部本地(" + _stLocalCodeCount + "只)"
-                : "自定义(" + codes.Count + "只)";
+                : "剔除 " + string.Join("/", exList) + "(基线 " + _stLocalCodeCount + " 只)";
             double cap = (double)_stCapital.Value;
             _stResultHeader.Text = "策略：" + J.StrOr(meta["name"], sid) + " · 范围：" + scope + " "
                 + start + "~" + end + " · 初始 " + (cap / 10000).ToString("F1") + "万 · 佣金 "
@@ -1707,7 +1759,7 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
                         _stLocalCodeCount = cnt;
                         _stList.Items.Clear();
                         foreach (var m in list) _stList.Items.Add(J.StrOr(m["name"], J.StrOr(m["id"], "?")));
-                        if (_stCodeHint != null) _stCodeHint.Text = "本地共 " + cnt + " 只，填入代码（逗号/空格分隔，最多 800 只）";
+                        if (_stScopeHint != null) _stScopeHint.Text = "本地共 " + cnt + " 只 · 剔除后 " + cnt + " 只";
                         // 文案别写成「清单已加载（N 个策略 / M 只股票）」—— 那个「N 个策略」
 // 紧挨着「运行回测」按钮，读起来像是「本次要跑 N 个策略」。实际是**单选**：
 // 一次只跑列表里选中的那一个。策略页的 ListBox 是单选、后端 BacktestRequest

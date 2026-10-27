@@ -14,6 +14,23 @@
   - 前端 `RpsPoolPage` 增加「查看日期」下拉框（顶部「最新」+ 已落库交易日降序），切换即按
     `?date=` 重载；每次加载后用后端返回的 `dates` 重建下拉并定位到当前查看日。
 
+- **策略回测「股票池」改为「排除特征」筛选（去掉手动输入）**：
+  - 基池固定为「全部本地已下载股票」；勾选即**剔除**对应特征的票。分类键：
+    创业板 / 科创板 / 北交所（代码前缀）、ST / \*ST（名称）、新股（上市 ≤90 自然日）/
+    次新股（90~365 自然日）、微盘股（最新总市值 ≤30 亿）。
+  - 新增独立**股票池层** `strategies/core/universe.py`：`build(spec)` 按规则生成回测代码，
+    `summary(spec)` 给预览；**小型键值缓存**（最多 8 种范围，范围不变直接复用，TTL 1h）。`backtest` 只消费
+    codes、不感知规则；`routes` 只转发。原始数据（名称/上市日/市值）下沉到
+    `data.load_names / code_first_dates / market_caps`，`backtest._load_names` 改为其兼容别名。
+  - 后端 `BacktestRequest` 新增 `exclude: list[str]`，三个回测/推荐入口统一经 `_resolve_codes`
+    调 `universe.build` 解析。
+  - 新增 `GET /api/strategies/universe/summary?exclude=...` 返回基池/剔除后只数（复用同一缓存），
+    前端勾选时实时显示「本地共 N 只 · 剔除后 M 只」。
+  - 数据源：板块=纯代码；ST/*ST=`data.load_names`（akshare 全市场名称表，24h 缓存）；
+    上市日=`data.code_first_dates`；市值=`data.market_caps`（`share_capital` 总股本 ×
+    `bulk_latest_close`）。依赖外部数据的特征取数失败时静默降级（不剔除），不会把整池搞空。
+  - 移除原先「自定义代码」文本框与解析（手动输入不再支持）。
+
 - **策略 `peak_top` / `peak_thresh`：选股变量由 PEAK 改为 PEAKB（主峰簇占比）**：
   - 原来取「每日筹码分布最高单箱占比」(PEAK)；现改为与副图 **PEAKB 指标同口径**的
     「主峰簇占比 %」——沿主峰两侧累加**连续衰减**的箱（遇回升 / 超出峰位 ±`band_pct`% 即停）。

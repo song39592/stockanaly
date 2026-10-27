@@ -24,11 +24,13 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import datetime as dt
 import sys
+import time
 
 import pandas as pd
 
 import kline_service
 import price_store
+from core import db as _core_db
 
 # 只取异常类型（运行控制住在独立模块，避免数据层反向依赖契约层 base）
 from .runcontrol import Cancelled
@@ -205,6 +207,66 @@ def list_universe_codes(universe_mode: str = "interval_data",
             return sorted(price_store.code_latest_dates("raw").keys())
     # interval_data / index_constituent（后者待接入，暂同前者）
     return sorted(price_store.code_latest_dates("raw").keys())
+
+
+# ---------------------------------------------------------------- 名称 / 上市日 / 市值（原始数据）
+# 供 universe（股票池层）与 backtest（编排层）复用；这里只取数，不做「范围规则」判断。
+
+_NAME_TTL = 24 * 3600
+_name_cache: dict = {"at": 0.0, "map": {}}
+
+
+def load_names(codes: list[str]) -> dict[str, str]:
+    """批量取股票名称：akshare 全市场表一次拉齐，失败静默降级为空映射。
+
+    timeout=90：实测这张全市场表**冷启动要 50.8s**（5572 行），给 30s 会超时 →
+    返回空映射 → 周榜/回测的**名称整列空白**。名称是「锦上添花」，但整列空白很显眼，
+    所以宁可多等。结果进程内缓存 24h。
+    """
+    now = time.time()
+    if not _name_cache["map"] or now - _name_cache["at"] > _NAME_TTL:
+        try:
+            import akshare as ak
+            from market_service import _ak          # 统一的超时/降级封装
+            df = _ak(ak.stock_info_a_code_name, timeout=90)
+            if df is not None and not getattr(df, "empty", True):
+                _name_cache["map"] = {
+                    str(r["code"]).zfill(6): str(r["name"])
+                    for _, r in df.iterrows()
+                }
+                _name_cache["at"] = now
+        except Exception:                        # noqa: BLE001 - 名称拿不到就算了
+            pass
+    m = _name_cache["map"]
+    return {c: m.get(c) or m.get(c.zfill(6), "") for c in codes}
+
+
+def code_first_dates() -> dict[str, str]:
+    """{code: 最早日 K 日期}（raw 口径，≈上市日）。"""
+    return price_store.code_earliest_dates()
+
+
+def market_caps(codes) -> dict:
+    """{code: 总市值(元)}：总市值 = 最新总股本 × 最新收盘价（raw）。
+
+    总股本取 share_capital 最新一条；收盘价取 price_store.bulk_latest_close。
+    任一项缺失的票不进入结果（保守：它不会被当作微盘股剔除）。
+    """
+    closes = price_store.bulk_latest_close()
+    with _core_db.connect(_core_db.FACTORS_DB) as conn:
+        rows = conn.execute(
+            "SELECT code, total_shares FROM share_capital "
+            "WHERE (code, as_of) IN (SELECT code, MAX(as_of) "
+            "FROM share_capital GROUP BY code)"
+        ).fetchall()
+    shares = {r["code"]: r["total_shares"] for r in rows if r["total_shares"]}
+    caps: dict = {}
+    for code in codes:
+        s = shares.get(code)
+        c = closes.get(code)
+        if s and c:
+            caps[code] = float(s) * float(c)
+    return caps
 
 
 def survivorship_note(universe_mode: str, n_codes: int) -> str:
