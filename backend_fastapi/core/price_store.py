@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import time
 import re
 from typing import Any
 
@@ -415,6 +416,34 @@ def code_earliest_dates(adjust: str = "raw") -> dict[str, str]:
                 if code not in result or day < result[code]:
                     result[code] = day
     return result
+
+
+# ---- 批量特征辅助（回测范围「排除特征」筛选用；进程内缓存，避免每次提交全库扫描）----
+_LATEST_CLOSE_CACHE: dict = {"at": 0.0, "map": {}}
+
+
+def bulk_latest_close(ttl: int = 3600) -> dict[str, float]:
+    """每只已下载股票**最新交易日**的收盘价 {code: close}（raw 口径）。
+
+    用「(code, trade_date) IN (SELECT code, MAX(trade_date) ...)」一次性取各股最新收盘，
+    全库只扫一遍；结果进程内缓存 `ttl` 秒。回测范围「微盘股」按 总市值=总股本×收盘价 判定用。
+    """
+    now = time.time()
+    if _LATEST_CLOSE_CACHE["map"] and now - _LATEST_CLOSE_CACHE["at"] < ttl:
+        return _LATEST_CLOSE_CACHE["map"]
+    out: dict[str, float] = {}
+    adj = _store_adjust("raw")
+    for year in _shard_years():
+        with db.connect(db.bars_db(year)) as conn:
+            for code, close in conn.execute(
+                "SELECT code, close FROM daily_bars WHERE (code, trade_date) IN "
+                "(SELECT code, MAX(trade_date) FROM daily_bars WHERE adjust=? "
+                "GROUP BY code)", (adj,)):
+                if close is not None:
+                    out[code] = float(close)
+    _LATEST_CLOSE_CACHE["at"] = now
+    _LATEST_CLOSE_CACHE["map"] = out
+    return out
 
 
 def _digest_is_broken(conn, code: str) -> bool:

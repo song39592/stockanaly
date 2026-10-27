@@ -28,8 +28,8 @@ namespace StockPool
         private Label _dlCount;
         private Label _dlRange;         // 本次请求下载的时间段
         private Label _dlWeekly;        // 周度修订回收任务进度（后台自动，单独显示一行）
-        private Button _dlBtnStart, _dlBtnToggle, _dlBtnRetry;
-        private CheckBox _dlAuto, _dlIdle;
+        private Button _dlBtnStart, _dlBtnToggle, _dlBtnRetry, _dlBtnCancel;
+        private CheckBox _dlAuto, _dlIdle, _dlIncremental;
         private Label _dlAutoNote;
         private GroupBox _dlLockupGroup;         // 锁仓系数区块（有日K数据才显示）
         private Label _dlLockupNote;
@@ -80,8 +80,18 @@ namespace StockPool
 
             _dlReference = Check("同时下载复权因子 / 除权明细（用于复权与审计）", true);
             AddRow(b1, Row(_dlReference));
-            AddRow(b1, Row(Mute(Lbl("范围固定为全市场 A 股，模式为完整下载（先近后远）；"
-                + "并发与限速由后端统一控制。库里已覆盖该窗口的股票会自动跳过，不重复下载。"))));
+            // 「仅补最新」默认勾选：手动下载一般只是日常追新，走增量只补库内最新日之后的
+            // 新增，已有区间不重下（避免像之前把 14 天重叠窗口反复重拉，或整段重下）。
+            // 要补齐更早历史 / 首次建库时再取消勾选，用完整下载（按起始年份先近后远）。
+            _dlIncremental = Check("仅补最新（增量模式：只补库内最新日之后的新增，不重下已有区间）", true);
+            _dlIncremental.CheckedChanged += delegate
+            {
+                if (_dlYear != null) _dlYear.Enabled = !_dlIncremental.Checked;
+                DlUpdateHint();
+            };
+            AddRow(b1, Row(_dlIncremental));
+            AddRow(b1, Row(Mute(Lbl("不勾「仅补最新」则为完整下载（先近后远）：起始年份决定历史起点，"
+                + "用于首次建库或补齐更早历史；库里已覆盖的窗口会自动跳过，不重复下载。"))));
             AddRow(b1, Row(Mute(Lbl("默认最近 5 年，够 MA60 / RPS 等现有分析用；"
                 + "要更长历史就选更早的年份，数据源会自动截断到上市首日。"))));
             AddRow(stack, g1);
@@ -95,7 +105,8 @@ namespace StockPool
             // 原先两个按钮并排会让用户同时看到两个互斥动作，得先想清楚该点哪个。
             _dlBtnToggle = MiniBtn("暂停", delegate { DlControl(DlToggleAction()); }, 80);
             _dlBtnRetry = MiniBtn("重试失败项", delegate { DlControl("retry-failed"); }, 110);
-            AddRow(b2, Row(_dlBtnStart, _dlBtnToggle, _dlBtnRetry));
+            _dlBtnCancel = MiniBtn("取消", delegate { DlControl("cancel"); }, 80);
+            AddRow(b2, Row(_dlBtnStart, _dlBtnToggle, _dlBtnRetry, _dlBtnCancel));
 
             _dlBar = new ProgressBar();
             _dlBar.Width = 430;
@@ -189,9 +200,10 @@ namespace StockPool
         private void DlUpdateHint()
         {
             if (_dlHint == null) return;
-            // 范围与模式固定，容量预估只随起始年份变化
-            string query = "?scope=all&mode=full&source=online&start_date="
-                           + Uri.EscapeDataString(DlStartDate());
+            // 容量预估随模式与起始年份变化：增量模式不传 start_date（按库内最新日算）
+            string estMode = (_dlIncremental != null && _dlIncremental.Checked) ? "incremental" : "full";
+            string query = "?scope=all&mode=" + estMode + "&source=online"
+                + (estMode == "full" ? "&start_date=" + Uri.EscapeDataString(DlStartDate()) : "");
             _dlHint.Text = "预计：计算中…";
             int round = ++_dlHintRound;
             var th = new Thread(delegate()
@@ -248,13 +260,20 @@ namespace StockPool
                 Msg("已有任务正在下载，请先暂停");
                 return;
             }
-            // 范围 / 模式 / 并发 / 限速都不再暴露给界面：范围固定全市场，
-            // 模式固定完整下载，并发与限速用后端默认值（4 / 3）。
+            // 范围 / 并发 / 限速都不再暴露给界面：范围固定全市场，并发与限速用后端默认值（4 / 3）。
+            // 模式由「仅补最新」勾选框决定：勾选=增量（只补新增、不重下已有区间）；不勾=完整下载（补历史）。
             var body = new Dictionary<string, object>();
             body["scope"] = "all";
             body["source"] = source;
-            body["mode"] = "full";
-            body["start_date"] = DlStartDate();
+            if (_dlIncremental != null && _dlIncremental.Checked)
+            {
+                body["mode"] = "incremental";   // 起点由库内最新日决定，不传 start_date
+            }
+            else
+            {
+                body["mode"] = "full";
+                body["start_date"] = DlStartDate();
+            }
             body["with_reference"] = _dlReference.Checked;
             string json = new JavaScriptSerializer().Serialize(body);
 
@@ -774,12 +793,13 @@ namespace StockPool
             _dlBtnToggle.Text = status == "paused" ? "继续" : "暂停";
             _dlBtnToggle.Enabled = active || status == "paused";
             _dlBtnRetry.Enabled = failed > 0 && terminal;
+            _dlBtnCancel.Enabled = active || status == "paused";
             if (_dlTdxBtn != null) _dlTdxBtn.Enabled = !active && status != "paused";
             if (_dlLockupBtn != null) _dlLockupBtn.Enabled = !active && status != "paused";
             if (string.IsNullOrEmpty(status) && failed == 0) _dlBtnStart.Enabled = true;
             if (_dlCommandBusy)
             {
-                _dlBtnStart.Enabled = _dlBtnToggle.Enabled = _dlBtnRetry.Enabled = false;
+                _dlBtnStart.Enabled = _dlBtnToggle.Enabled = _dlBtnRetry.Enabled = _dlBtnCancel.Enabled = false;
                 if (_dlTdxBtn != null) _dlTdxBtn.Enabled = false;
                 if (_dlLockupBtn != null) _dlLockupBtn.Enabled = false;
             }

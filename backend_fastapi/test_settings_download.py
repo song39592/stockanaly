@@ -203,9 +203,26 @@ class DownloadSettingsTests(unittest.TestCase):
                            "split_date": "2023-01-01", "with_reference": False}
         with patch.object(service, "_skip_if_covered", return_value=False), \
              patch.object(service.price_service, "sync_all_adjusts", return_value={}) as sync, \
+             patch.object(service.price_store, "latest_bar_date", return_value=None), \
              patch.object(download_store, "finish_code"):
             service._download_one("test", runtime, {"code": "000001", "seq": 0, "phase": 1})
         self.assertEqual(sync.call_args.kwargs["start"], dt.date(2026, 1, 1))
+
+    def test_incremental_stale_stock_is_fetched_not_skipped(self):
+        """回落十几天的正常股不能被当成停牌跳过（回归：数据卡在 2026-10-13）。"""
+        runtime = Mock()
+        runtime.stop.is_set.return_value = False
+        runtime.options = {"mode": service.MODE_INCREMENTAL, "overlap_days": 0,
+                           "source": service.SOURCE_ONLINE, "with_reference": False}
+        with patch.object(service, "_expected_data_day", return_value="2026-10-26"), \
+             patch.object(service.price_store, "latest_bar_date", return_value="2026-10-13"), \
+             patch.object(service, "_tdx_is_valid", return_value=False), \
+             patch.object(service.price_service, "sync_all_adjusts", return_value={}) as sync, \
+             patch.object(download_store, "finish_code"):
+            service._download_one("test", runtime, {"code": "000001", "seq": 0, "phase": 1})
+        # 必须真的去取数（start = 库内最新 + 1 天），而不是 finish_code 后直接返回
+        sync.assert_called_once()
+        self.assertEqual(sync.call_args.kwargs["start"], dt.date(2026, 10, 14))
 
 
 if __name__ == "__main__":

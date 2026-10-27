@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -24,6 +24,7 @@ import strategies
 import strategies.core.backtest as backtest
 import strategies.core.data as sdata
 import strategies.core.registry as registry
+import strategies.core.universe as suniverse
 from strategies import report
 
 router = APIRouter(prefix="/api/strategies", tags=["策略回测"])
@@ -54,11 +55,46 @@ def list_codes():
     return {"codes": sdata.list_universe_codes()}
 
 
+def _universe_spec(req: BacktestRequest) -> dict:
+    """回测请求 → 股票池层的 spec（范围规则只在这一处翻译）。"""
+    return {
+        "universe_mode": req.universe_mode,
+        "start": req.start,
+        "end": req.end,
+        "as_of": req.end,
+        "exclude": req.exclude,
+    }
+
+
+def _resolve_codes(req: BacktestRequest):
+    """把请求解析成最终回测代码列表。
+
+    · use_all=True → 交给股票池层 `universe.build`（带进程内缓存）：基池 = 本地全部，
+      按 exclude 剔除对应特征；连续不改范围时直接复用内存结果，不重复扫描/联网。
+    · use_all=False → 用 codes（自定义，兼容旧前端）。
+    """
+    if not req.use_all:
+        return [str(c).strip() for c in (req.codes or []) if str(c).strip()]
+    return suniverse.build(_universe_spec(req))
+
+
+@router.get("/universe/summary")
+def universe_summary(exclude: list[str] = Query(default=[])):
+    """回测范围预览：基池数量 + 按 exclude 剔除后的数量（复用股票池层缓存）。
+
+    供前端在勾选「排除特征」时实时显示「本地共 N 只 · 剔除后 M 只」。
+    """
+    out = suniverse.summary({"exclude": list(exclude)})
+    out.update({"ok": True, "exclude": list(exclude)})
+    return out
+
+
 class BacktestRequest(BaseModel):
     strategy_id: str
     params: dict = {}
     codes: list[str] = []        # 自定义代码；为空且 use_all=True 时取全部本地
     use_all: bool = False        # True → 股票池 = 本地全部已下载股票
+    exclude: list[str] = []      # 回测范围「排除特征」：chinext/star/bse/st/star_st/ipo/sub_new/micro
     start: Optional[str] = None
     end: Optional[str] = None
     window: Optional[int] = None   # 最近 N 个交易日（给了则覆盖 start/end，用于「近期成果」）
@@ -86,9 +122,7 @@ _guard = apiutil.guard
 @router.post("/backtest")
 @_guard(code=_CODE_ERR)
 def do_backtest(req: BacktestRequest):
-    codes = [str(c).strip() for c in (req.codes or []) if str(c).strip()]
-    if req.use_all:
-        codes = sdata.list_universe_codes()
+    codes = _resolve_codes(req)
     # window 交给编排层处理（取数会额外向前预热，只统计最近 N 日）
     result = backtest.run_backtest(
         req.strategy_id, req.params, codes, req.start, req.end,
@@ -121,9 +155,7 @@ def do_backtest_start(req: BacktestRequest):
     同一时间只允许一个任务（两个全市场并行会互相拖慢）。小股票池仍可用同步
     的 `/backtest`，更快。
     """
-    codes = [str(c).strip() for c in (req.codes or []) if str(c).strip()]
-    if req.use_all:
-        codes = sdata.list_universe_codes()
+    codes = _resolve_codes(req)
     if not codes:
         raise ValueError("股票池为空，请先选择回测范围")
     out = backtest.start_task(
@@ -208,9 +240,7 @@ def do_recommend(req: BacktestRequest):
 
     同一时间只允许一个任务（两个全市场并行互相拖慢）。
     """
-    codes = [str(c).strip() for c in (req.codes or []) if str(c).strip()]
-    if req.use_all:
-        codes = sdata.list_universe_codes()
+    codes = _resolve_codes(req)
     if not codes:
         raise ValueError("股票池为空，请先选择回测范围")
     out = backtest.start_reco_task(

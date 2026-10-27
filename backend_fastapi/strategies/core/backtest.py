@@ -53,34 +53,13 @@ _WARMUP_BARS = 250    # 短窗口回测的指标预热根数（约一年，够 M
 # 按 result_id 展开时经 trades_for 现算，避免全量明细 JSON 打到 10MB 级。
 _BT_CTX: dict | None = None
 
-# ---- 代码→名称映射（进程内缓存 24h）----
-_NAME_TTL = 24 * 3600
-_name_cache: dict = {"at": 0.0, "map": {}}
-
-
 def _load_names(codes: list[str]) -> dict[str, str]:
-    """批量取股票名称：akshare 全市场表一次拉齐，失败静默降级为空映射
-    （名称缺失时前端显示「—」，不影响回测本身）。"""
-    now = time.time()
-    if not _name_cache["map"] or now - _name_cache["at"] > _NAME_TTL:
-        try:
-            import akshare as ak
-            from market_service import _ak          # 统一的超时/降级封装
-            # timeout=90：实测这张全市场表**冷启动要 50.8s**（5572 行）。原来给 30s
-            # 在接口变慢时就会超时 → 返回空映射 → 周榜/回测的**名称整列空白**。
-            # （2026-10-06 实测：同一接口 31.4s 超时失败、50.8s 成功。）
-            # 名称是「锦上添花」，但整列空白很显眼，所以宁可多等。
-            df = _ak(ak.stock_info_a_code_name, timeout=90)
-            if df is not None and not getattr(df, "empty", True):
-                _name_cache["map"] = {
-                    str(r["code"]).zfill(6): str(r["name"])
-                    for _, r in df.iterrows()
-                }
-                _name_cache["at"] = now
-        except Exception:                        # noqa: BLE001 - 名称拿不到就算了
-            pass
-    m = _name_cache["map"]
-    return {c: m.get(c) or m.get(c.zfill(6), "") for c in codes}
+    """兼容别名：名称加载已下沉到 `data.load_names`（进程内 24h 缓存）。
+
+    保留此函数，是因为 `chip_rank_service` / `features.*` 仍按旧路径
+    `from strategies.core.backtest import _load_names` 引用；实现只此一份。
+    """
+    return data.load_names(codes)
 
 
 def _prepare(codes: list[str], start: str | None, end: str | None,
