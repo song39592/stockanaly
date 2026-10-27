@@ -388,17 +388,17 @@ private void StRefreshRecoTitle()
         {
             TableLayoutPanel b;
 
-            var g1 = Group("股票池（基池=全部本地已下载，勾选即剔除该特征）", out b);
-            _stScopeHint = Mute(Lbl("本地共 0 只 · 剔除后 0 只"));
-            AddRow(b, Row(Lbl("基池"), Mute(Lbl("全部本地已下载股票")), _stScopeHint));
+            var g1 = Group("股票池", out b);
+            _stScopeHint = Mute(Lbl("共 0 只 · 剔除后 0 只"));
+            AddRow(b, Row(Mute(Lbl("基池：全部本地已下载")), _stScopeHint));
 
             var exRow = new FlowLayoutPanel();
             exRow.AutoSize = true;
             exRow.WrapContents = true;
             exRow.Margin = new Padding(0, 4, 0, 0);
-            _stExChiNext = ExChk("创业板"); _stExStar = ExChk("科创板"); _stExBse = ExChk("北交所");
-            _stExSt = ExChk("ST"); _stExStarSt = ExChk("*ST");
-            _stExIpo = ExChk("新股"); _stExSubNew = ExChk("次新股"); _stExMicro = ExChk("微盘股");
+            _stExChiNext = ExChk("剔除创业板"); _stExStar = ExChk("剔除科创板"); _stExBse = ExChk("剔除北交所");
+            _stExSt = ExChk("剔除ST"); _stExStarSt = ExChk("剔除*ST");
+            _stExIpo = ExChk("剔除新股"); _stExSubNew = ExChk("剔除次新股"); _stExMicro = ExChk("剔除微盘股");
             foreach (var cb in new[] { _stExChiNext, _stExStar, _stExBse, _stExSt, _stExStarSt, _stExIpo, _stExSubNew, _stExMicro })
                 cb.CheckedChanged += delegate { StScopePreview(); };
             exRow.Controls.AddRange(new Control[] { _stExChiNext, _stExStar, _stExBse, _stExSt, _stExStarSt, _stExIpo, _stExSubNew, _stExMicro });
@@ -966,15 +966,15 @@ private void StRefreshRecoTitle()
             {
                 if (j == null || !J.IsOk(j))
                 {
-                    _stScopeHint.Text = "本地共 " + _stLocalCodeCount + " 只";
+                    _stScopeHint.Text = "共 " + _stLocalCodeCount + " 只";
                     return;
                 }
                 int baseN = (int)J.Num(J.Get(j, "base_count"));
                 int filtN = (int)J.Num(J.Get(j, "filtered_count"));
-                _stScopeHint.Text = "本地共 " + baseN + " 只 · 剔除后 " + filtN + " 只";
+                _stScopeHint.Text = "共 " + baseN + " 只 · 剔除后 " + filtN + " 只";
             }, delegate(Exception ex2)
             {
-                _stScopeHint.Text = "本地共 " + _stLocalCodeCount + " 只";
+                _stScopeHint.Text = "共 " + _stLocalCodeCount + " 只";
             }, null);
         }
 
@@ -1759,7 +1759,7 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
                         _stLocalCodeCount = cnt;
                         _stList.Items.Clear();
                         foreach (var m in list) _stList.Items.Add(J.StrOr(m["name"], J.StrOr(m["id"], "?")));
-                        if (_stScopeHint != null) _stScopeHint.Text = "本地共 " + cnt + " 只 · 剔除后 " + cnt + " 只";
+                        if (_stScopeHint != null) _stScopeHint.Text = "共 " + cnt + " 只 · 剔除后 " + cnt + " 只";
                         // 文案别写成「清单已加载（N 个策略 / M 只股票）」—— 那个「N 个策略」
 // 紧挨着「运行回测」按钮，读起来像是「本次要跑 N 个策略」。实际是**单选**：
 // 一次只跑列表里选中的那一个。策略页的 ListBox 是单选、后端 BacktestRequest
