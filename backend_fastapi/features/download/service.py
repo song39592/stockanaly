@@ -69,7 +69,9 @@ ESTIMATED_BYTES_PER_STOCK_TDX = 200 * 1024
 DISK_RESERVE_BYTES = 1024 * 1024 * 1024      # 数据目录所在磁盘至少再留 1 GB
 
 # ---- 后台自动化 ----
-AUTO_UPDATE_HOUR = 18          # 每日自动更新的触发时刻（收盘后）
+AUTO_UPDATE_HOUR = 18          # 每日自动更新「收盘后」这一轮的基准时刻
+AUTO_RETRY_MINUTES = 30        # 自动更新相邻两次尝试的最小间隔：数据源当天未发布时
+                               # 不要每 60 秒重建任务，避免刷屏 / 反复联网
 FRESHNESS_DAYS = 10            # 「只缺最近 10 天」的判定窗口：超过即视为历史未补齐
 SCHEDULER_INTERVAL = 60        # 调度线程轮询间隔（秒）
 AUTO_STATE_TTL = 300           # 覆盖度检测结果的缓存时间（秒）：全库扫描不便宜
@@ -683,7 +685,18 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
                         _import_tdx_bars(
                             root, code,
                             dt.date.fromisoformat(str(have_latest)[:10]) + dt.timedelta(days=1))
-                        used_tdx = True
+                        # `span[1] >= have_latest` 只保证「本地不旧于库里」，并不保证
+                        # 「已经补到应有交易日」。本地通达信常常只到前一交易日
+                        # （当天盘后没下数据），此条件仍成立 → 若就此置 used_tdx=True，
+                        # 这批票会**完全不联网**，永远停在上一交易日。
+                        # 实测：tdx 全库 day_range 都是到 10-26，任务 5558 只全绿完成，
+                        # 一半股票却没拿到 10-27（600000 就是被短路的那只）。
+                        # 因此只有真补到 expected 才免联网，否则继续在线补尾。
+                        newest = price_store.latest_bar_date(code, "raw")
+                        used_tdx = bool(expected and newest and newest >= expected)
+                        if not used_tdx and newest:
+                            begin = (dt.date.fromisoformat(str(newest)[:10])
+                                     + dt.timedelta(days=1))
                     except Exception:
                         used_tdx = False                  # 本地异常：回落在线
         if used_tdx:
@@ -786,6 +799,13 @@ def _run(task_id: str, concurrency: int) -> None:
                 download_store.set_setting("lockup_last_run", dt.date.today().isoformat())
             else:
                 download_store.set_setting("auto_last_run", dt.date.today().isoformat())
+                # 同时记下这一轮补到的**目标末日**（span_end）。盘中（<15:00）跑的那一轮
+                # span_end 只到上一交易日，收盘后仍必须再补当天；只凭 `auto_last_run`
+                # 的日期判定会把「今天已经更新过」认成真，整天跳过收盘后那一轮。
+                # 实测 10-27：09:37 开启开关立即起跑（span_end=10-26），18:00 后调度器
+                # 直接跳过，10-27 的日线整天没补，次日全库 5549 只被判陈旧。
+                download_store.set_setting(
+                    "auto_last_span_end", str(opts.get("span_end") or ""))
     with _runtimes_lock:
         _runtimes.pop(task_id, None)
 
@@ -1021,6 +1041,49 @@ def _auto_eligible(downloaded: int, stale: int) -> bool:
     return stale <= max(STALE_TOLERANCE_MIN, int(downloaded * STALE_TOLERANCE_RATIO))
 
 
+def _auto_due_today(stored: dict[str, str]) -> bool:
+    """今天是否还需要再跑一轮自动更新（18:00 之后调用）。
+
+    只看 `auto_last_run == today` 不够：`update_settings(auto_update=True)` 是
+    「保存即生效」，会立刻起跑一轮。如果那时是**盘中**（<15:00），
+    `_expected_data_day()` 只能给出上一交易日，这一轮注定拿不到当天数据，
+    却被登记成「今天已更新」→ 收盘后那一轮被跳过 → 当天日线整天缺失。
+    因此再比一次「上一轮补到的 span_end」与「现在应到位的交易日」：
+    只有补到 `need` 才算今天真的跑过。
+    """
+    if stored.get("auto_last_run") != dt.date.today().isoformat():
+        return True
+    need = _expected_data_day() or ""
+    done = str(stored.get("auto_last_span_end") or "")
+    if not need or done < need:
+        return True
+    # 目标日盖到了，还要看**实际覆盖**：`auto_last_span_end` 只是那轮的目标日，
+    # 不代表每只票都真补到了（本地 tdx 只到前一日时，任务会「全绿完成」却整批
+    # 停在上一交易日）。这里复用 `auto_state` 的 `eligible`（自带 300 秒缓存，
+    # 不会每分钟扫一遍全库）。未达标就按 `_auto_retry_allowed` 的节奏继续补。
+    try:
+        return not bool(auto_state().get("eligible"))
+    except Exception:                         # noqa: BLE001 - 判定失败时保守重试
+        return True
+
+
+def _auto_retry_allowed(stored: dict[str, str]) -> bool:
+    """距离上一次 auto 尝试是否已超过 `AUTO_RETRY_MINUTES`。
+
+    `_auto_due_today` 为真时全天都会尝试补，但数据源当天若还没发布（比如刚收盘
+    东财还没出当日数据），任务跑完仍是落后 → 下一轮又会建任务。用「尝试时间戳」
+    限频：最近 N 分钟内已经发起过就不重建，避免每 60 秒刷一次。
+    """
+    raw = stored.get("auto_last_try_at")
+    if not raw:
+        return True
+    try:
+        last = float(raw)
+    except (TypeError, ValueError):
+        return True
+    return (time.time() - last) >= AUTO_RETRY_MINUTES * 60
+
+
 def _options_for(mode: str, *, source: str = SOURCE_ONLINE, start_date: str | None = None,
                  concurrency: int = DEFAULT_CONCURRENCY,
                  rate_limit: float = DEFAULT_RATE_LIMIT,
@@ -1206,8 +1269,9 @@ def _kick_auto_update() -> str | None:
     _stamp_span(options, codes, latest)
     task_id = "dl-" + uuid.uuid4().hex
     download_store.create_task(task_id, "downloaded", options, codes, 1, origin=ORIGIN_AUTO)
-    # `auto_last_run` **不在这里写**：它由 `_run` 在任务真正跑完时登记。
-    # 启动即写等于「还没补完就先宣布今天跑过了」，进程一停当天就再也不会起新任务。
+    # 记一次「尝试时间」，用于 `_auto_retry_allowed` 限频。注意 `auto_last_run` 仍只在
+    # 任务真正跑完时登记，这里只是「我发起过一次尝试」的时间戳。
+    download_store.set_setting("auto_last_try_at", str(time.time()))
     _spawn(task_id, options)
     return task_id
 
@@ -1321,29 +1385,25 @@ def _scheduler_tick() -> None:
     stored = download_store.settings_map()
     today = dt.date.today().isoformat()
     if stored.get("auto_update") == "1":
-        if stored.get("auto_last_run") != today and dt.datetime.now().hour >= AUTO_UPDATE_HOUR:
-            # 今天还没跑完过（`auto_last_run` 现在只在任务真正跑完时登记）。
-            # 若今天已有一个未完成的 auto 任务，**接着它跑**而不是另起一个 ——
-            # 全市场一轮要 60~80 分钟，一个 60 秒一轮的调度器不能每轮都新建。
-            # 这条同时也是断电续传的第二道保险：启动时 `_resume_auto_tasks`
-            # 没接上的（例如任务被暂停过），这里会再试一次。
+        # 日线自动更新**全天都会尝试**：库里还落后于「应有交易日」就补，不限于
+        # 收盘后。否则白天开机看到的永远是前一天；且盘中起的轮次会被 `_auto_due_today`
+        # 误判成「今天已更新」而整天跳过（10-27 的事故）。
+        # 限频由 `_auto_retry_allowed` 控制：数据源当天尚未发布时不会每 60 秒重建。
+        # `_kick_auto_update` 自身只排「库内最新 < expected」的票、且 `_has_alive_task`
+        # 拦截并发，所以全天触发也不会重复巡检全市场。
+        if _auto_due_today(stored):
             pending = _find_pending_auto_task()
             if pending:
                 _resume_idle(pending, download_store.get_task(pending))
-            else:
+            elif _auto_retry_allowed(stored):
                 _kick_auto_update()
-            return
-        # 日线补完了（或今天不补），接着刷新锁仓系数。**串行**：两者都慢，
-        # 并行会互相抢带宽与东财请求配额。报告期没更新时 `_kick_lockup_update`
-        # 一个请求都不发，只会顺手登记「今天巡检过」。
-        if stored.get("lockup_last_run") != today and dt.datetime.now().hour >= AUTO_UPDATE_HOUR:
-            _kick_lockup_update()
-        # 周度修订回收：每个 ISO 周一次，把已下载股票的近段重拉一遍回收修订。
-        # 后台自动、无交互；本周没跑过才起，节假日顺延到新周首次调度。
-        # 与日线/锁仓串行，避免三套慢任务同时抢带宽。
-        if (stored.get("weekly_refresh_last_iso") != _iso_week()
-                and dt.datetime.now().hour >= AUTO_UPDATE_HOUR):
-            _kick_weekly_refresh()
+        # 锁仓系数 / 周度修订回收都在收盘后才做（依赖当日收盘数据、且都慢），
+        # 故仍限定 `hour >= AUTO_UPDATE_HOUR`，且与日线串行避免抢带宽。
+        if dt.datetime.now().hour >= AUTO_UPDATE_HOUR:
+            if stored.get("lockup_last_run") != today:
+                _kick_lockup_update()
+            if stored.get("weekly_refresh_last_iso") != _iso_week():
+                _kick_weekly_refresh()
     if stored.get("idle_download") == "1":
         _ensure_idle_task()
 
@@ -1581,6 +1641,9 @@ def settings_view() -> dict[str, Any]:
         "auto_update_hour": AUTO_UPDATE_HOUR,
         "idle_task_id": stored.get("idle_task_id") or "",
         "auto_last_run": stored.get("auto_last_run") or "",
+        # 上一轮自动更新补到的目标末日：与 auto_last_run 一起看，才能判断
+        # 「今天跑过」到底是收盘后那一轮，还是盘中起的、拿不到当天数据的那一轮。
+        "auto_last_span_end": stored.get("auto_last_span_end") or "",
         "lockup_last_run": stored.get("lockup_last_run") or "",
         "tdx_path": stored.get("tdx_path") or "",
     }
