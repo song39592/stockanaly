@@ -27,6 +27,19 @@ namespace StockPool
         public bool llm_key = false;
     }
 
+    /// <summary>上次关闭前的界面状态：只记「看了什么 / 怎么显示」，不记行情或筹码矩阵等数据。</summary>
+    internal class LastSessionData
+    {
+        public string code = "";              // 当前个股代码（空 = 未打开）
+        public string period = "day";         // day / week / month
+        public string main_indicator = "ma";  // 主图指标 id（空 = 关闭）
+        public string sub_indicator = "";     // 副图指标 id（空 = 无）
+        public string chip_formula = "";      // 筹码公式 id（空 = 后端默认）
+        public int? range_idx = null;         // 范围档位 0/1/2/-1（-1 = 滚轮自定义）
+        public int? range_bars = null;        // 自定义时的可见根数（仅 range_idx = -1 用）
+        public string adjust = "qfq";         // qfq 前复权 / raw 不复权
+    }
+
     internal class SettingsData
     {
         public string Theme = "dark";
@@ -37,6 +50,7 @@ namespace StockPool
         public string EnvNode = "";
         public Dictionary<string, object> CustomThemes = new Dictionary<string, object>();
         public SecretStatus SecretStatus = new SecretStatus();
+        public LastSessionData LastSession = new LastSessionData();
     }
 
     internal static class UserSettings
@@ -90,6 +104,7 @@ namespace StockPool
             if (d.Palette == null) d.Palette = new Dictionary<string, string>();
             if (d.Window == null) d.Window = new WindowData();
             if (d.SecretStatus == null) d.SecretStatus = new SecretStatus();
+            if (d.LastSession == null) d.LastSession = new LastSessionData();
             Current = d;
             C.ApplyOverrides(Current.Palette);
         }
