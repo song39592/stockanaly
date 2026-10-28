@@ -1,4 +1,9 @@
-# 后期待办：统一为「用户本地设置文件」
+# 后期待办：统一为「用户本地设置文件」  ✅ 已实现（分支 refactor/user-settings）
+
+> 落地范围：`settings.json`（%APPDATA%\StockPoolLauncher\）作为非机密偏好的唯一源；
+> 主题 / 配色 / 窗口 / 下载起始年份 / 运行路径 全部读写它；密钥仅存 `secret_status` 只读标记，
+> 明文仍在 `.env` + DPAPI 通道。`Palette.C` 语义色改为可覆盖（默认零变化）。旧 `settings.ini` 仅作主题/路径回退。
+> 「补充待办：自动恢复上次界面状态（last_session）」按计划**留待下一步**，复用同一 settings.json。
 
 ## 背景
 现状是**同一类「用户本地配置」散落在多处**，且密钥有专门的加密通道：

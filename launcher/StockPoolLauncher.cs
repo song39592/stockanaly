@@ -440,6 +440,9 @@ namespace StockPool
         private CheckBox _ckStopOnExit;
         private CheckBox _ckRunOnBoot;
         private Label _lbEnvState;
+        private Label _lbSecretState;
+        private System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<Button, string>> _appearanceSwatches
+            = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<Button, string>>();
         private Button _btnTheme;
         private bool _light;   // true = 浅色主题（网页 + 本窗口都跟着这个按钮走）
         private bool _envChecked;   // 本次运行是否已做过环境检查（自动只做一次，装失败也不重试）
@@ -591,6 +594,8 @@ namespace StockPool
             _timer.Tick += delegate { RefreshStatus(false); };
             _timer.Start();
 
+            UserSettings.Load();
+            ApplySavedWindow();
             LoadSettings();
             InitServices();
             InitTray();
@@ -1184,6 +1189,11 @@ namespace StockPool
                 }
                 OpenDir(f);
             }, 130), Mute(Lbl("红色小牛问答专用"))));
+            UserSettings.DetectSecretStatus(_root);
+            _lbSecretState = Lbl("数据加密密钥：-；LLM 密钥：-");
+            Mute(_lbSecretState);
+            AddRow(body2, Row(_lbSecretState,
+                Mute(Lbl("标记仅记录「是否已配置」；密钥明文始终只在 .env + DPAPI 通道，绝不写进 settings.json"))));
             AddRow(stack, gb2);
 
             TableLayoutPanel body3;
@@ -1198,6 +1208,24 @@ namespace StockPool
             AddRow(body3, Row(MiniBtn("保存运行环境与行为", delegate { SaveSettings(); }, 170),
                 Mute(Lbl("数据目录和通达信目录请使用各自的保存按钮"))));
             AddRow(stack, gb3);
+
+            // ---- 外观（配色自定义，存于 settings.json）----
+            TableLayoutPanel bodyApp;
+            var gbApp = Group("外观（配色自定义 · settings.json）", out bodyApp);
+            AddRow(bodyApp, Row(Mute(Lbl("语义色可按字段名覆盖（如 Up / Down / Accent），改完即时换肤、重启保持；"
+                + "删除 settings.json 回落默认配色。"))));
+            AddRow(bodyApp, Row(
+                ColorPickButton("Up", "涨色"),
+                ColorPickButton("Down", "跌色"),
+                ColorPickButton("Accent", "强调色"),
+                MiniBtn("恢复默认配色", delegate
+                {
+                    C.ClearOverrides();
+                    ApplyTheme();
+                    SyncUserSettings();
+                    RefreshAppearanceButtons();
+                }, 110)));
+            AddRow(stack, gbApp);
 
             p.Controls.Add(stack);
             return p;
@@ -1326,6 +1354,10 @@ namespace StockPool
                 }
             }
             catch { }
+            // settings.json 优先（统一的非机密偏好源）；旧 settings.ini 仅作回退
+            if (!string.IsNullOrEmpty(UserSettings.Current.EnvPython)) python = UserSettings.Current.EnvPython;
+            if (!string.IsNullOrEmpty(UserSettings.Current.EnvNode)) node = UserSettings.Current.EnvNode;
+            theme = UserSettings.Current.Theme;
             if (_tbPython != null) _tbPython.Text = python ?? "";
             if (_tbNode != null) _tbNode.Text = node ?? "";
             if (_ckAutoStart != null) _ckAutoStart.Checked = auto;
@@ -1352,6 +1384,7 @@ namespace StockPool
                 sb.AppendLine("theme=" + (_light ? "light" : "dark"));
                 File.WriteAllText(_settingsPath, sb.ToString(), Encoding.UTF8);
                 ApplyRunOnBoot(_ckRunOnBoot.Checked);
+                SyncUserSettings();
                 Msg("运行环境与行为已保存；Python / Node 路径在重启对应服务后生效。");
             }
             catch (Exception ex)
@@ -2408,16 +2441,90 @@ namespace StockPool
         /// <summary>窗口最小化时按需隐藏到托盘（右上角 × 不在这里处理，它就是退出）。</summary>
         private void OnResize(object sender, EventArgs e)
         {
-            if (WindowState != FormWindowState.Minimized) return;
-            if (_ckMinimize == null || !_ckMinimize.Checked) return;
-            Hide();
-            if (_tray != null)
-                _tray.ShowBalloonTip(2500, AppTitle, "已隐藏到托盘，双击图标可重新打开", ToolTipIcon.Info);
+            if (WindowState == FormWindowState.Minimized)
+            {
+                if (_ckMinimize == null || !_ckMinimize.Checked) return;
+                Hide();
+                if (_tray != null)
+                    _tray.ShowBalloonTip(2500, AppTitle, "已隐藏到托盘，双击图标可重新打开", ToolTipIcon.Info);
+                return;
+            }
+            CaptureWindow();   // 仅内存记录，落盘在退出 / 保存时
+        }
+
+        /// <summary>把当前窗口大小 / 位置记进 settings.json（仅内存，不触发写盘）。</summary>
+        private void CaptureWindow()
+        {
+            if (WindowState != FormWindowState.Normal) return;
+            UserSettings.Current.Window = new WindowData
+            {
+                w = Width,
+                h = Height,
+                x = Location.X,
+                y = Location.Y
+            };
+        }
+
+        /// <summary>启动时按 settings.json 恢复窗口大小 / 位置（无记录则保留默认居中）。</summary>
+        private void ApplySavedWindow()
+        {
+            var w = UserSettings.Current.Window;
+            if (w != null && w.w.HasValue && w.h.HasValue)
+            {
+                Size = new Size(Math.Max(w.w.Value, MinimumSize.Width), Math.Max(w.h.Value, MinimumSize.Height));
+                if (w.x.HasValue && w.y.HasValue)
+                {
+                    StartPosition = FormStartPosition.Manual;
+                    Location = new Point(w.x.Value, w.y.Value);
+                }
+            }
+        }
+
+        /// <summary>生成一个「语义色」编辑按钮：点击打开取色器，确认后覆盖该色并即时换肤、落盘。</summary>
+        private Button ColorPickButton(string name, string label)
+        {
+            var btn = MiniBtn(label, delegate
+            {
+                using (var dlg = new ColorDialog())
+                {
+                    dlg.Color = C.Get(name, Color.Black);
+                    dlg.FullOpen = true;
+                    if (dlg.ShowDialog(this) == DialogResult.OK)
+                    {
+                        C.SetOverride(name, dlg.Color);
+                        ApplyTheme();
+                        SyncUserSettings();
+                        RefreshAppearanceButtons();
+                    }
+                }
+            }, 88);
+            try
+            {
+                btn.BackColor = C.Get(name, Color.Black);
+                btn.ForeColor = (btn.BackColor.GetBrightness() > 0.5f) ? Color.Black : Color.White;
+            }
+            catch { }
+            _appearanceSwatches.Add(new System.Collections.Generic.KeyValuePair<Button, string>(btn, name));
+            return btn;
+        }
+
+        private void RefreshAppearanceButtons()
+        {
+            foreach (var kv in _appearanceSwatches)
+            {
+                try
+                {
+                    kv.Key.BackColor = C.Get(kv.Value, Color.Black);
+                    kv.Key.ForeColor = (kv.Key.BackColor.GetBrightness() > 0.5f) ? Color.Black : Color.White;
+                }
+                catch { }
+            }
         }
 
         /// <summary>右上角 × / 托盘「退出」：保存设置 → 按设置停止服务 → 关掉网页窗口 → 退出进程。</summary>
         private void OnFormClosing(object sender, FormClosingEventArgs e)
         {
+            CaptureWindow();
             SaveSettingsQuiet();
             if (_ckStopOnExit != null && _ckStopOnExit.Checked)
             {
@@ -2448,6 +2555,24 @@ namespace StockPool
                 sb.AppendLine("runonboot=" + (_ckRunOnBoot.Checked ? "1" : "0"));
                 sb.AppendLine("theme=" + (_light ? "light" : "dark"));
                 File.WriteAllText(_settingsPath, sb.ToString(), Encoding.UTF8);
+                SyncUserSettings();
+            }
+            catch { }
+        }
+
+        /// <summary>把主题 / 路径 / 窗口 / 配色 / 密钥标记同步进 settings.json（不写密钥明文）。</summary>
+        private void SyncUserSettings()
+        {
+            try
+            {
+                if (_tbPython != null) UserSettings.Current.EnvPython = _tbPython.Text ?? "";
+                if (_tbNode != null) UserSettings.Current.EnvNode = _tbNode.Text ?? "";
+                UserSettings.Current.Theme = _light ? "light" : "dark";
+                UserSettings.DetectSecretStatus(_root);
+                UserSettings.Save();
+                if (_lbSecretState != null)
+                    _lbSecretState.Text = "数据加密密钥：" + (UserSettings.Current.SecretStatus.data_secret ? "已配置" : "未配置")
+                        + "；LLM 密钥：" + (UserSettings.Current.SecretStatus.llm_key ? "已配置" : "未配置");
             }
             catch { }
         }
