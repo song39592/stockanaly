@@ -73,8 +73,17 @@ namespace StockPool
             _dlYear.DropDownStyle = ComboBoxStyle.DropDownList;
             _dlYear.Width = 74;
             for (int year = thisYear; year >= 1990; year--) _dlYear.Items.Add(year.ToString());
-            _dlYear.SelectedItem = (thisYear - 5).ToString();     // 默认最近 5 年
-            _dlYear.SelectedIndexChanged += delegate { DlUpdateHint(); };
+            _dlYear.SelectedItem = (thisYear - 5).ToString();     // 默认最近 5 年（进入页面时按 settings.json 覆盖）
+            _dlYear.SelectedIndexChanged += delegate
+            {
+                int y;
+                if (_dlYear != null && int.TryParse(Convert.ToString(_dlYear.SelectedItem), out y))
+                {
+                    UserSettings.Current.DownloadStartYear = y;
+                    UserSettings.Save();
+                }
+                DlUpdateHint();
+            };
             _dlHint = Mute(Lbl("预计：—"));
             AddRow(b1, Row(Lbl("起始年份"), _dlYear, _dlHint));
 
@@ -193,6 +202,7 @@ namespace StockPool
             int year;
             if (_dlYear == null || !int.TryParse(Convert.ToString(_dlYear.SelectedItem), out year))
                 year = DateTime.Today.Year - 5;
+            if (UserSettings.Current.DownloadStartYear.HasValue) year = UserSettings.Current.DownloadStartYear.Value;
             return year.ToString("0000") + "-01-01";
         }
 
@@ -337,6 +347,12 @@ namespace StockPool
         /// <summary>进入本页且有任务时，立刻拉一次进度并接着轮询。</summary>
         private void DlOnEnter()
         {
+            if (_dlYear != null)
+            {
+                int sy = UserSettings.Current.DownloadStartYear ?? (DateTime.Today.Year - 5);
+                _dlYear.SelectedItem = sy.ToString();
+                if (_dlYear.SelectedIndex < 0) _dlYear.SelectedItem = (DateTime.Today.Year - 5).ToString();
+            }
             DlUpdateHint();
             DlLoadAutoState(false);
             DlLoadLockupState(false);
