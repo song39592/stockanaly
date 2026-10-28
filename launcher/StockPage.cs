@@ -1413,17 +1413,17 @@ namespace StockPool
                         if (hi <= lo) hi = lo + 1;
                         top = 20; bottom = Math.Max(30, Height - 18);
                     }
-                    // 纵向范围收紧到「有筹码」的区间（当前帧 pct/gray > 0），
+                    // 纵向范围收紧到「有筹码」的区间（当前帧 pct > 0），
                     // 避免股价从未到过的低价区（如 12.2~14.4）在底部留出大片空白。
+                    // 灰/红都是蓝的子集（见后端 ema_lock），不再相加 —— 相加会把轴撑开。
                     if (_frames != null && _frames.Count > 0)
                     {
                         int fi = (_frame >= 0 && _frame < _frames.Count) ? _frame : _frames.Count - 1;
                         double[] fp = _frames[fi];
-                        double[] fg = (_grayFrames != null && fi < _grayFrames.Count) ? _grayFrames[fi] : null;
                         double clo = double.MaxValue, chi = double.MinValue;
                         for (int i = 0; i < _bins.Count && i < fp.Length; i++)
                         {
-                            double v = fp[i] + (fg != null && i < fg.Length ? fg[i] : 0.0);
+                            double v = fp[i];
                             if (v <= 1e-9) continue;              // 无筹码箱跳过
                             if (_bins[i].Lo < clo) clo = _bins[i].Lo;
                             if (_bins[i].Hi > chi) chi = _bins[i].Hi;
@@ -1467,14 +1467,13 @@ namespace StockPool
                     double[] gray = (brgMode || emaMode) ? _grayFrames[_frame] : null;
                     double[] red = brgMode ? _redFrames[_frame] : null;
 
-                    // 横轴满宽基准：brgMode（蓝+灰+红）优先用「灰峰」，让灰按真实占比铺满、
-                    // 蓝退为细线（满足「灰占全部筹码 90%+ 时视觉也铺满，蓝留一条细线」）；
-                    // 其余模式沿用 pct 峰值。
+                    // 横轴满宽基准 = 三层（蓝 pct / 灰 / 红）里的**最大占比**。
+                    // 后端已保证三层同一分母、单箱 灰 ≤ 蓝、红 ≤ 蓝，用同一 maxPct 缩放即可：
+                    // 谁都不会溢出画布，也不会像「取灰峰」那样把蓝裁成满宽（那会让灰/红看着比蓝长）。
                     double maxPct = 0;
-                    if (brgMode && gray != null)
-                        for (int i = 0; i < gray.Length; i++) if (gray[i] > maxPct) maxPct = gray[i];
-                    if (maxPct <= 0)
-                        for (int i = 0; i < pct.Length; i++) if (pct[i] > maxPct) maxPct = pct[i];
+                    for (int i = 0; i < pct.Length; i++) if (pct[i] > maxPct) maxPct = pct[i];
+                    if (gray != null) for (int i = 0; i < gray.Length; i++) if (gray[i] > maxPct) maxPct = gray[i];
+                    if (red != null) for (int i = 0; i < red.Length; i++) if (red[i] > maxPct) maxPct = red[i];
                     if (maxPct <= 0) maxPct = 1;
 
                     if (brgMode)

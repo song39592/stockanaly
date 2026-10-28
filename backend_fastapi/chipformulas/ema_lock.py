@@ -6,8 +6,10 @@
 
   · 红（强换手分布）：仅「换手率 > M_high×B」的交易日，把 (turnover−B) 按三角分布铺到当日
     [low, high]（峰值=当日均价 vwap），再按 EMA 递归堆积；衰减完全由 EMA 的 (1−α) 提供。
-  · 灰（锁仓分布）：仅「换手率 ≤ M_low×B」的交易日，从当前红色中按比例 R 「染灰」
-    （红→灰的状态转换，不是注入新量），且灰不超过红。
+  · 灰（锁仓分布）：仅「换手率 ≤ M_low×B」的交易日，把**当前蓝底**按比例 R 染灰。
+    染灰只是给已沉淀的筹码打状态标记，**不把筹码从蓝里搬走**，因此灰恒为蓝的子集
+    （灰 ≤ 蓝）：首次锁仓灰=0.5×蓝，再次锁仓灰 += 0.5×(蓝−灰) → 0.75、0.875… 逐步逼近蓝，
+    永不越过蓝。灰与蓝、红用**同一个衰减系数**，两次锁仓之间灰/蓝比例保持不变。
 
 **B 与 EMA 记忆长度都随票自适应**（不像 tri_decay 用固定衰减系数）：
   · N[t] = 100% 换手周期，由换手率序列「前缀和 + bisect」反推；B[t] = 1 / N[t]；
@@ -42,9 +44,9 @@ class EmaLockResult:
     dates: list[str]            # 与 ctx 同序（含预热）
     centers: np.ndarray         # 价格轴（分箱中心）
     blue: np.ndarray            # (days, bins) 蓝底：全量换手 EMA 堆积（TRI 注入），行和=100
-    red: np.ndarray             # (days, bins) 强换手 EMA 叠层（红），行和=100
-    gray: np.ndarray            # (days, bins) 锁仓染灰（灰），行和=100
-    lock_ratio: np.ndarray      # (days, bins) 锁仓浓度 = gray/(blue+gray+red)，范围 0~1
+    red: np.ndarray             # (days, bins) 强换手 EMA 叠层（红）：蓝的子集，单箱 ≤ 蓝
+    gray: np.ndarray            # (days, bins) 锁仓染灰（灰）：蓝的子集，单箱 ≤ 蓝
+    lock_ratio: np.ndarray      # (days, bins) 锁仓浓度 = gray/blue，范围 0~1
     blue_rel: np.ndarray        # (days, bins) 蓝底相对量（未归一）
     red_rel: np.ndarray         # (days, bins) 红相对量（未归一）
     gray_rel: np.ndarray        # (days, bins) 灰相对量（未归一）
@@ -84,12 +86,13 @@ def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float) 
     """三态主计算（蓝底 / 红叠层 / 灰折旧），红蓝均用 EMA 衰减（正常的 K 控制）。
 
     蓝（blue）  ：每日**全量**换手按三角分布（TRI）铺到 [low, high]，EMA 递归堆积
-                 `chips = a×(换手×w) + (1−a)×chips`（a 由平均换手周期 N 与 k 决定，固定）。
+                `chips = a×(换手×w) + (1−a)×chips`（a 由平均换手周期 N 与 k 决定，固定）。
+                蓝是**全量存量**，任何一步都不会被抽走 —— 灰/红都只是它的子集。
     红（red）   ：仅「换手率 > M_high×B」的强换手日注入当日 `换手×w`，同样 EMA 衰减，
-                 是蓝底中来自强换手日的子集（天然 ≤ 蓝底），叠在蓝上染红。
-    灰（gray）  ：「换手率 ≤ M_low×B」的锁仓日把**当前蓝底**的 R（默认 0.5）抽离为灰（蓝→灰，可累积）；
-                 第一次锁仓灰=0.5×蓝（蓝剩半），短时间再锁仓灰 += 0.5×剩余蓝 → 累计 0.75。
-                 灰随与蓝相同的 EMA 衰减；即「锁仓把已沉淀的蓝色逐步换成灰色」。
+                是蓝底中来自强换手日的子集（天然单箱 ≤ 蓝），叠在蓝上染红。
+    灰（gray）  ：「换手率 ≤ M_low×B」的锁仓日把**当前蓝底**按 R（默认 0.5）染灰。
+                染灰是状态标记，不从蓝里搬量：灰 += R×(蓝−灰) → 0.5、0.75、0.875… 逼近蓝，
+                恒有 灰 ≤ 蓝；灰与蓝、红用同一 EMA 系数衰减，锁仓间隔内灰/蓝比例不变。
     """
     n = ctx.days
     bins = ctx.bins
@@ -102,9 +105,9 @@ def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float) 
     Nm = N[np.isfinite(N) & (N > 0)]
     a = 2.0 / (float(np.mean(Nm)) * k + 1.0) if Nm.size else 0.1   # 固定 EMA 系数（正常的 K 控制衰减）
 
-    chips_blue = np.zeros(bins, dtype=float)       # 蓝底：全量 EMA 堆积
-    chips_red = np.zeros(bins, dtype=float)        # 红叠层：强换手 EMA 堆积
-    chips_gray = np.zeros(bins, dtype=float)        # 灰：被锁仓从蓝抽离的累积量（EMA 衰减）
+    chips_blue = np.zeros(bins, dtype=float)       # 蓝底：全量 EMA 堆积（只增不减的相对量）
+    chips_red = np.zeros(bins, dtype=float)        # 红叠层：强换手 EMA 堆积（蓝的子集）
+    chips_gray = np.zeros(bins, dtype=float)       # 灰：锁仓染灰量（蓝的子集，恒 ≤ 蓝）
     blue_rel = np.zeros((n, bins), dtype=float)
     red_rel = np.zeros((n, bins), dtype=float)
     gray_rel = np.zeros((n, bins), dtype=float)
@@ -136,31 +139,30 @@ def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float) 
         if to > M_high * Bt:
             chips_red += a * (to * w)
 
-        # ③ 灰折旧：锁仓日把「当前蓝底」的 R（默认 0.5）抽离为灰（蓝→灰，**可累积**）；
-        #    第一次锁仓：灰 = 0.5×蓝（蓝剩半）；短时间再锁仓：灰 += 0.5×剩余蓝 → 累计 0.75。
-        #    灰与蓝、红使用同一个 EMA 系数 a 衰减（正常的 K），未用 tri_decay 或其它衰减。
+        # ③ 灰折旧：锁仓日把「当前蓝底」按 R（默认 0.5）染灰 —— **只打状态标记，不从蓝里搬量**。
+        #    灰 += R×(蓝−灰)：首次 0.5×蓝，再锁仓 0.75×蓝，再 0.875×蓝 … 逐步逼近蓝，
+        #    恒有 灰 ≤ 蓝（R ≤ 1 时归纳成立），所以画面上灰色永远画不出蓝底的右边界。
+        #    灰与蓝、红用同一个 EMA 系数 a 衰减：锁仓间隔内灰/蓝比例保持不变（衰减一致）。
+        chips_gray = (1.0 - a) * chips_gray
         if to <= M_low * Bt:
-            transfer = chips_blue * R
-            chips_blue = chips_blue - transfer
-            chips_gray = (1.0 - a) * chips_gray + transfer
+            chips_gray += R * (chips_blue - chips_gray)
 
         blue_rel[t] = chips_blue
         red_rel[t] = chips_red
         gray_rel[t] = chips_gray
 
-    # 蓝 / 红 / 灰 **同一尺度**归一化（都用蓝底的 rowsum）：
-    # 红、灰是叠在蓝底之上的层，宽度须不超过蓝（同档位），才能在蓝底上正确染色。
-    # 若各自归一化到行和 100，红会被放大到与蓝同宽、把蓝底整片盖住（显示不对的根因）。
-    # 归一化分母用「蓝+灰」（=原始蓝总量，抽走灰之前的量），保证灰可累积且总量恒定；
-    # 红 ⊂ 蓝，用同一分母后 red_norm ≤ 100。
-    base_sum = (blue_rel + gray_rel).sum(axis=1)
+    # 蓝 / 红 / 灰 **同一分母**（蓝底的全量行和）：
+    #   · 蓝是存量全量，行和 = 100；灰、红都是蓝的子集，同分母后**单箱必有 灰 ≤ 蓝、红 ≤ 蓝**；
+    #   · 前端 brgMode 三层用同一个 maxPct 缩放，灰/红就永远画不出蓝底之外。
+    # ⚠️ 旧版把灰从蓝里抽走、再用 (蓝+灰) 作分母：蓝被 core 再归一到 100 后与灰/红不同尺度，
+    #    实测 496/500 帧出现「灰 > 蓝」（画面上灰/红捅出蓝底）——不要改回这种做法。
+    base_sum = blue_rel.sum(axis=1)
     safe = np.where(base_sum > 0, base_sum, 1.0)
     blue_norm = blue_rel / safe[:, None] * 100.0
     red_norm = red_rel / safe[:, None] * 100.0
     gray_norm = gray_rel / safe[:, None] * 100.0
-    tot = blue_rel + red_rel + gray_rel
-    tot_safe = np.where(tot > 0, tot, 1.0)
-    lock_ratio = np.where(tot > 0, gray_rel / tot_safe, 0.0)
+    blue_safe = np.where(blue_rel > 0, blue_rel, 1.0)
+    lock_ratio = np.where(blue_rel > 0, gray_rel / blue_safe, 0.0)
 
     return EmaLockResult(
         dates=list(ctx.dates), centers=np.asarray(ctx.centers, dtype=float),
