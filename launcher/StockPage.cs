@@ -187,6 +187,7 @@ namespace StockPool
                 {
                     _stockRangeIdx = captured;
                     StockApplyRange();
+                    StockSessionSave();            // 记住范围档位
                     if (_stockCurrent != null) StockLoadChip(_stockCurrent);   // 窗口变了，筹码重新算
                 };
                 _stockRangeMap[btn] = r;
@@ -217,6 +218,7 @@ namespace StockPool
                 {
                     _stockAdjust = cap;
                     StockSetAdjustActive();
+                    StockSessionSave();            // 记住复权口径
                     if (_stockKline != null)
                     {
                         _stockKline.SetAdjust(_stockAdjust);
@@ -582,6 +584,7 @@ namespace StockPool
                         _stockSubIndicator = id;
                         _stockHint.Text = "副图指标已切换为：" + nm + "（输入 6 位代码则打开个股）";
                     }
+                    StockSessionSave();   // 记住主图 / 副图指标选择
                     if (_stockCurrent != null) StockLoadIndicators(_stockCurrent);
                     return;
                 }
@@ -594,6 +597,7 @@ namespace StockPool
                     _stockHint.ForeColor = C.Flat;
                     _stockHint.Text = "筹码模型已切换为：" + (StockChipNameOf(chipId) ?? chipId)
                                     + "（输入 6 位代码则打开个股）";
+                    StockSessionSave();   // 记住筹码公式选择
                     if (_stockCurrent != null) StockLoadChip(_stockCurrent);
                     return;
                 }
@@ -610,6 +614,7 @@ namespace StockPool
                 _stockHint.Text = "数据加载中…";
             }
             _stockCurrent = code;
+            StockSessionSave();            // 记住上次打开的个股
             StockRefreshIndicatorList();   // 每次打开同步后端指标清单（后端可能刚启动）
             StockAddHistory(code, null);   // 记录查看历史（名称稍后补全）
             StockLoadName(code);
@@ -617,6 +622,72 @@ namespace StockPool
             // （实测约 2 秒，页面等得起），补完再走下面那一串加载 —— 否则用户看到的
             // K 线、筹码、估值可能整体停在几天前，而界面上毫无提示。
             StockEnsureFresh(code, delegate { StockLoadRest(code); });
+        }
+
+        // ---- 上次界面状态（settings.json · last_session）----
+        // 只记界面偏好（个股 / 周期 / 主副图指标 / 筹码公式 / 范围 / 复权），绝不记行情或筹码矩阵。
+        // 写入点全是低频用户操作（切股 / 切周期 / 换指标 / 换筹码 / 点范围 / 点复权），
+        // 不在滚轮缩放等高频事件里落盘。
+
+        /// <summary>把当前个股页状态写进 settings.json 的 last_session。</summary>
+        private void StockSessionSave()
+        {
+            try
+            {
+                UserSettings.Current.LastSession = new LastSessionData
+                {
+                    code = _stockCurrent ?? "",
+                    period = string.IsNullOrEmpty(_stockPeriod) ? "day" : _stockPeriod,
+                    main_indicator = _stockMainIndicator ?? "",
+                    sub_indicator = _stockSubIndicator ?? "",
+                    chip_formula = _stockChipFormulaId ?? "",
+                    range_idx = _stockRangeIdx,
+                    range_bars = _stockRange,
+                    adjust = string.IsNullOrEmpty(_stockAdjust) ? "qfq" : _stockAdjust,
+                };
+                UserSettings.Save();
+            }
+            catch { }
+        }
+
+        private bool _stockSessionRestored;
+
+        /// <summary>后端就绪后恢复上次界面状态（只做一次；无记录或指标已删则静默跳过）。</summary>
+        private void StockRestoreSession()
+        {
+            if (_stockSessionRestored) return;
+            var ls = UserSettings.Current.LastSession;
+            if (ls == null) return;
+            _stockSessionRestored = true;
+            try
+            {
+                if (ls.period == "day" || ls.period == "week" || ls.period == "month")
+                    _stockPeriod = ls.period;
+                _stockMainIndicator = string.IsNullOrEmpty(ls.main_indicator) ? null : ls.main_indicator;
+                _stockSubIndicator = string.IsNullOrEmpty(ls.sub_indicator) ? null : ls.sub_indicator;
+                _stockChipFormulaId = string.IsNullOrEmpty(ls.chip_formula) ? null : ls.chip_formula;
+                if (ls.adjust == "qfq" || ls.adjust == "raw") _stockAdjust = ls.adjust;
+                if (ls.range_idx.HasValue) _stockRangeIdx = ls.range_idx.Value;
+                if (_stockRangeIdx == -1 && ls.range_bars.HasValue && ls.range_bars.Value > 0)
+                    _stockRange = ls.range_bars.Value;
+                else if (ls.range_idx.HasValue)
+                    _stockRange = StockRangeBars();
+                // 按钮高亮 / 图表口径与恢复值对齐
+                StockSetPeriodActive();
+                StockSetRangeActive();
+                StockSetAdjustActive();
+                if (_stockKline != null) _stockKline.SetAdjust(_stockAdjust);
+                // 启动早期后端未就绪，指标 / 筹码清单首次拉取会失败，这里补一次
+                StockRefreshIndicatorList();
+                StockLoadChipFormulas();
+                // 打开上次的个股：仅在还没打开任何票时，避免覆盖用户刚做的操作
+                if (_stockCurrent == null && !string.IsNullOrEmpty(ls.code) && Regex.IsMatch(ls.code, "^[0-9]{6}$"))
+                {
+                    _quickSearch.Text = ls.code;
+                    StockOpen();
+                }
+            }
+            catch { }
         }
 
         /// <summary>
@@ -967,6 +1038,7 @@ namespace StockPool
             if (_stockPeriod == period) return;
             _stockPeriod = period;
             StockSetPeriodActive();
+            StockSessionSave();            // 记住 K 线周期
             if (_stockCurrent != null)
             {
                 StockLoadHistory(_stockCurrent, false);   // 会顺带重算指标（见 StockRenderHistory）

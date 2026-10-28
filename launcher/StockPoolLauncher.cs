@@ -2264,6 +2264,8 @@ namespace StockPool
                     RefreshDataDir();
                     DlPickLatestTask();
                     DlRefreshTdx();
+                    // 后端就绪后恢复上次的个股 / 指标 / 筹码 / 周期（只做一次）
+                    StockRestoreSession();
                 }
                 var ver = JsonValue(body, "api_version");
                 var detail = JsonValue(body, "backend_detail");
@@ -2525,6 +2527,7 @@ namespace StockPool
         private void OnFormClosing(object sender, FormClosingEventArgs e)
         {
             CaptureWindow();
+            StockSessionSave();   // 退出前兜底记一次界面状态（低频）
             SaveSettingsQuiet();
             if (_ckStopOnExit != null && _ckStopOnExit.Checked)
             {
