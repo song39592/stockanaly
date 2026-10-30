@@ -1692,7 +1692,15 @@ namespace StockPool
                 int depCode;
                 var depOut = RunCapture(py, "-c \"import uvicorn, fastapi, akshare, pypdf, multipart\"", 180000, out depCode);
                 if (depCode != 0)
-                    r.Problems.Add("后端依赖不完整（requirements.txt 没装齐）" + Brief(depOut));
+                {
+                    // 依赖已装齐、只是 .pyd 被系统策略拦住时，报「依赖不完整」会把用户
+                    // 引向反复重装（越装越乱）。这类错误必须单独给可执行的处理办法。
+                    if (LooksLikeDllBlocked(depOut))
+                        r.Problems.Add("依赖已装好，但 Windows 拦住了 pandas 的 DLL 加载（应用程序控制策略）"
+                                     + "，需在本机关闭「智能应用控制」或把项目目录加入杀软信任区");
+                    else
+                        r.Problems.Add("后端依赖不完整（requirements.txt 没装齐）" + Brief(depOut));
+                }
             }
 
             string node = UiSync<string>(delegate
@@ -1867,6 +1875,15 @@ namespace StockPool
                     sb.AppendLine();
                     sb.AppendLine("完整日志：" + path);
                 }
+                if (LooksLikeDllBlocked(installLog))
+                {
+                    sb.AppendLine();
+                    sb.AppendLine("---- 这多半是本机安全策略拦了 pandas 的 DLL，不是依赖没装好 ----");
+                    sb.AppendLine("1) Win11 智能应用控制：设置 > 隐私和安全性 > Windows 安全中心 >");
+                    sb.AppendLine("   应用和浏览器控制 > 智能应用控制 > 关闭（需重启；关闭后不可再开）");
+                    sb.AppendLine("2) 杀毒 / 安全软件（360、火绒、电脑管家）：把项目目录加入信任区，或临时退出后重试");
+                    sb.AppendLine("3) 虚拟环境是从别的电脑拷来的：删除 backend_fastapi\\venv 与 .venv 后重跑安装");
+                }
                 sb.AppendLine();
                 sb.AppendLine("也可以手动运行 launcher\\install_env.bat 排查。");
                 MessageBox.Show(this, sb.ToString(), AppTitle + " - 环境错误",
@@ -1883,10 +1900,24 @@ namespace StockPool
                 case 2: return "本机没有可用的 Python 3，请先安装 3.9 及以上版本并勾选 Add to PATH";
                 case 3: return "创建虚拟环境 backend_fastapi\\.venv 失败，或里面没有 pip";
                 case 4: return "pip 安装依赖失败（默认源与清华镜像都失败，多为断网 / 代理 / 杀软拦截）";
-                case 5: return "依赖装完仍无法导入";
+                case 5: return "依赖装完仍无法导入（若日志出现「应用程序控制策略已阻止此文件」，是本机安全策略拦了 pandas 的 DLL）";
                 case -1: return "安装超时或无法启动安装进程";
                 default: return "未知错误";
             }
+        }
+
+        /// <summary>
+        /// 判断导入失败是不是「本机安全策略拦住了未签名的 .pyd」。
+        /// 典型文本：DLL load failed while importing _libs: 应用程序控制策略已阻止此文件 /
+        /// Application Control policy has blocked this file。这类问题重装依赖无效。
+        /// </summary>
+        private static bool LooksLikeDllBlocked(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+            if (text.IndexOf("应用程序控制策略", StringComparison.Ordinal) >= 0) return true;
+            if (text.IndexOf("DLL load failed", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (text.IndexOf("Application Control", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return false;
         }
 
         private static bool VersionAtLeast(string v, int major, int minor)

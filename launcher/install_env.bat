@@ -40,10 +40,18 @@ if not defined VENV_PY if exist "%BACKEND_DIR%\venv\Scripts\python.exe" set "VEN
 if defined VENV_PY (
   "%VENV_PY%" -m pip --version >nul 2>&1
   if not errorlevel 1 (
-    echo [1/4] 复用已有虚拟环境：%VENV_PY%
-    goto pip
+    rem venv 只是启动器，真正的解释器和 DLL 在 base 安装目录；pyvenv.cfg 指向的
+    rem 底座 Python 不在了，说明这是**从别的电脑拷来的** venv，必须重建。
+    call :venv_portable "%VENV_PY%"
+    if not errorlevel 1 (
+      echo [1/4] 复用已有虚拟环境：%VENV_PY%
+      goto pip
+    )
+    echo [WARN] 已有虚拟环境来自另一台电脑：pyvenv.cfg 里登记的底座 Python 不在本机。
+    echo        venv 不能跨机器拷贝（pandas 等包的 DLL 会加载失败），删除后重建。
+  ) else (
+    echo [WARN] 已有虚拟环境不可用（没有 pip，可能是旧版/损坏），删除后重建：%VENV_PY%
   )
-  echo [WARN] 已有虚拟环境不可用（没有 pip，可能是旧版/损坏），删除后重建：%VENV_PY%
   rmdir /s /q "%BACKEND_DIR%\.venv" >nul 2>&1
   rmdir /s /q "%BACKEND_DIR%\venv" >nul 2>&1
   set "VENV_PY="
@@ -125,12 +133,21 @@ if errorlevel 1 (
 :verify
 rem ---- 3. 校验依赖真的能导入 ----
 echo [3/4] 校验依赖导入...
-"%VENV_PY%" -c "import uvicorn, fastapi, akshare, pypdf, multipart, requests, bs4, dotenv"
-if errorlevel 1 (
-  echo [FATAL] 依赖装完还是导不进来，请看上面 pip 的输出。
-  if /i not "%SILENT%"=="silent" pause
-  exit /b 5
-)
+set "VERIFY_LOG=%TEMP%\stockpool_env_verify.log"
+"%VENV_PY%" -c "import uvicorn, fastapi, akshare, pypdf, multipart, requests, bs4, dotenv" >"%VERIFY_LOG%" 2>&1
+if not errorlevel 1 goto verify_ok
+type "%VERIFY_LOG%"
+echo.
+rem 依赖已装齐却导不进来，绝大多数是本机安全策略拦了 pandas 的 .pyd（不是装漏了）。
+findstr /i /c:"应用程序控制策略" /c:"Application Control" /c:"DLL load failed" /c:"无法加载" "%VERIFY_LOG%" >nul 2>&1
+if not errorlevel 1 call :dll_blocked
+findstr /i /c:"No module named" "%VERIFY_LOG%" >nul 2>&1
+if not errorlevel 1 echo [HINT] 依赖确实没装全：请检查网络 / 代理 / pip 源后重跑本脚本。
+echo [FATAL] 依赖装完还是导不进来，请看上面的导入报错。
+if /i not "%SILENT%"=="silent" pause
+exit /b 5
+
+:verify_ok
 echo        后端依赖校验通过。
 
 rem ---- 4. AI 服务依赖（可选：失败只警告，后端和网页不受影响）----
@@ -200,4 +217,41 @@ if not exist "%TARGET%\python.exe" (
   exit /b 1
 )
 echo        embeddable Python 就绪：%TARGET%\python.exe
+exit /b 0
+
+rem ============================================================
+rem  校验 venv 是不是「本机能用」的
+rem  venv 里只有启动器，真正的解释器和 DLL 在 pyvenv.cfg 登记的底座 Python
+rem  （home = ...）目录下。跨机器拷贝的 venv 底座路径在本机不存在，pandas 的
+rem  _libs 等 .pyd 就会加载失败。
+rem  返回 0 = 可用；1 = 底座 Python 不在本机（应删除重建）
+rem ============================================================
+:venv_portable
+set "CFG=%~dp1..\pyvenv.cfg"
+if not exist "%CFG%" exit /b 0
+set "BASE_PY="
+for /f "tokens=1,* delims==" %%a in ('findstr /b /i "home" "%CFG%" 2^>nul') do set "BASE_PY=%%b"
+if not defined BASE_PY exit /b 0
+rem pyvenv.cfg 形如「home = C:\Python311」，等号后带一个空格，先剥掉
+for /f "tokens=* delims= " %%c in ("%BASE_PY%") do set "BASE_PY=%%c"
+if not defined BASE_PY exit /b 0
+if not exist "%BASE_PY%\python.exe" exit /b 1
+exit /b 0
+
+rem ============================================================
+rem  「依赖装好了但 DLL 被拦」的诊断：这不是依赖缺失，而是本机安全策略
+rem  不让未签名的 .pyd 加载，只能在用户机器上放行，代码层面无解。
+rem ============================================================
+:dll_blocked
+echo [FATAL] 依赖已经装好，但 Windows 阻止了 pandas 的 DLL 加载。
+echo         典型报错：DLL load failed while importing _libs: 应用程序控制策略已阻止此文件
+echo.
+echo         这不是依赖没装全，请按顺序处理：
+echo         1) Win11「智能应用控制」：设置 ^> 隐私和安全性 ^> Windows 安全中心
+echo            ^> 应用和浏览器控制 ^> 智能应用控制 ^> 关闭（需重启；关闭后不可再开）
+echo         2) 杀毒 / 安全软件（360、火绒、电脑管家）的应用锁或驱动防护：
+echo            把项目目录加入信任区，或临时退出后重跑本脚本
+echo         3) 虚拟环境是从别的电脑拷来的：删除 backend_fastapi\venv 与
+echo            backend_fastapi\.venv 后重跑本脚本，由本机 Python 现场重建
+echo.
 exit /b 0
