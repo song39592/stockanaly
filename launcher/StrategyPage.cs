@@ -475,6 +475,7 @@ private void StRefreshRecoTitle()
 
             AddRow(stack, Row(
                 MiniBtn("运行回测（选中策略）", delegate { StRunBacktest(); }, 160),
+                MiniBtn("历史结果", delegate { StShowHistory(); }, 92),
                 // 暂停 / 继续 / 停止：全市场一次实测约 13 分钟（5578 只 × 3 年），
                 // 而并发上限是 1 —— 没有这三个按钮，用户改完策略想重跑就只能干等。
                 // 原来后端提示「请先点『停止』」而界面上根本没有这个按钮，属于死路。
@@ -1647,6 +1648,139 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
                     _stResultStatus.Text = "回测完成（参与统计 " + doneCount
                         + " 只，" + el.Count + " 只数据缺失/跳过）";
             }
+        }
+
+        // ---------------- 历史结果（加载已保存的回测报告） ----------------
+        /// <summary>列出已保存的回测报告，选一份加载，按回测结果的样式重放渲染。</summary>
+        private void StShowHistory()
+        {
+            RunUi<Dictionary<string, object>>(
+                delegate
+                {
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/reports?limit=100",
+                                           null, 15000);
+                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                },
+                delegate(Dictionary<string, object> j)
+                {
+                    var list = (j != null && j.ContainsKey("reports"))
+                        ? j["reports"] as System.Collections.IList : null;
+                    if (list == null || list.Count == 0)
+                    {
+                        SetErr(_stResultStatus, "暂无历史回测报告（先运行一次回测）");
+                        return;
+                    }
+                    string file = StPickReportDialog(list);
+                    if (!string.IsNullOrEmpty(file)) StLoadHistory(file);
+                },
+                delegate(Exception ex) { SetErr(_stResultStatus, "读取历史列表失败：" + ex.Message); },
+                null);
+        }
+
+        /// <summary>弹出历史报告选择框；返回选中的文件名（取消返回 null）。</summary>
+        private string StPickReportDialog(System.Collections.IList list)
+        {
+            var files = new List<string>();
+            using (var dlg = new Form())
+            {
+                dlg.Text = "历史回测结果";
+                dlg.StartPosition = FormStartPosition.CenterParent;
+                dlg.ShowInTaskbar = false;
+                dlg.MinimizeBox = false;
+                dlg.MaximizeBox = false;
+                dlg.Width = 840;
+                dlg.Height = 440;
+                dlg.MinimumSize = new Size(560, 300);
+
+                var lb = new ListBox();
+                lb.Dock = DockStyle.Fill;
+                lb.IntegralHeight = false;
+                lb.Font = new Font("Microsoft YaHei UI", 9f);
+                foreach (var it in list)
+                {
+                    var d = it as Dictionary<string, object>;
+                    if (d == null) continue;
+                    string f = J.StrOr(J.Get(d, "file"), "");
+                    if (f.Length == 0) continue;
+                    files.Add(f);
+                    lb.Items.Add(string.Format("{0}  |  {1}  |  {2} ~ {3}  |  收益 {4}",
+                        J.StrOr(J.Get(d, "generated_at"), ""),
+                        J.StrOr(J.Get(d, "strategy_name"), ""),
+                        J.StrOr(J.Get(d, "start"), ""),
+                        J.StrOr(J.Get(d, "end"), ""),
+                        J.Pct100Plain(J.Num(J.Get(d, "total_return")))));
+                }
+
+                var bottom = new Panel();
+                bottom.Dock = DockStyle.Bottom;
+                bottom.Height = 44;
+                var ok = new Button();
+                ok.Text = "加载";
+                ok.DialogResult = DialogResult.OK;
+                ok.Width = 88;
+                ok.Height = 28;
+                var cancel = new Button();
+                cancel.Text = "取消";
+                cancel.DialogResult = DialogResult.Cancel;
+                cancel.Width = 88;
+                cancel.Height = 28;
+                bottom.Controls.Add(ok);
+                bottom.Controls.Add(cancel);
+                bottom.Resize += delegate
+                {
+                    int right = bottom.ClientSize.Width;
+                    ok.Location = new Point(Math.Max(0, right - 196), 8);
+                    cancel.Location = new Point(Math.Max(0, right - 100), 8);
+                };
+
+                dlg.Controls.Add(lb);
+                dlg.Controls.Add(bottom);
+                dlg.AcceptButton = ok;
+                dlg.CancelButton = cancel;
+                lb.DoubleClick += delegate { dlg.DialogResult = DialogResult.OK; dlg.Close(); };
+                if (dlg.ShowDialog(this) != DialogResult.OK || lb.SelectedIndex < 0) return null;
+                return files[lb.SelectedIndex];
+            }
+        }
+
+        /// <summary>取回选中的历史报告全文，按回测结果的样式渲染（指标卡 / 净值曲线 / 个股明细）。</summary>
+        private void StLoadHistory(string file)
+        {
+            SetErr(_stResultStatus, "正在加载历史报告…");
+            RunUi<Dictionary<string, object>>(
+                delegate
+                {
+                    string resp = VRequest(
+                        "http://127.0.0.1:8000/api/strategies/backtest/reports/"
+                        + System.Uri.EscapeDataString(file), null, 60000);
+                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                },
+                delegate(Dictionary<string, object> j)
+                {
+                    if (j == null || J.IsFailed(j))
+                    {
+                        SetErr(_stResultStatus, "加载历史报告失败：" + J.ErrMsg(j));
+                        return;
+                    }
+                    // 老 schema 报告可能没有净值序列：补空，避免渲染时缺 key 抛异常
+                    if (!j.ContainsKey("dates")) j["dates"] = new System.Collections.ArrayList();
+                    if (!j.ContainsKey("equity")) j["equity"] = new System.Collections.ArrayList();
+                    StRenderResult(j);           // 与刚跑完的回测结果共用同一套渲染
+                    _stResultId = "";            // 历史报告的逐笔明细不在后端单槽缓存里，禁用展开
+                    var strat = j.ContainsKey("strategy") ? j["strategy"] as Dictionary<string, object> : null;
+                    var scope = j.ContainsKey("scope") ? j["scope"] as Dictionary<string, object> : null;
+                    string nm = strat != null ? J.StrOr(J.Get(strat, "name"), "") : "";
+                    string s = scope != null ? J.StrOr(J.Get(scope, "start"), "") : "";
+                    string e = scope != null ? J.StrOr(J.Get(scope, "end"), "") : "";
+                    // 覆盖成「历史」标识：否则用户会把它当成刚跑出来的结果
+                    if (nm.Length > 0)
+                        _stResultHeader.Text = "策略：" + nm + " · " + s + " ~ " + e + "（历史结果）";
+                    _stResultStatus.Text = "历史结果（生成于 "
+                        + J.StrOr(J.Get(j, "generated_at"), "") + "）";
+                    _stResultStatus.ForeColor = C.DownSoft;
+                },
+                delegate(Exception ex) { SetErr(_stResultStatus, "加载历史报告失败：" + ex.Message); },
+                null);
         }
 
         // ---------------- 个股明细展开 ----------------

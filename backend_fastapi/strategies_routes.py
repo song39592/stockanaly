@@ -236,6 +236,22 @@ def list_backtest_reports(limit: int = 50):
     return report.list_reports(limit)
 
 
+@router.get("/backtest/reports/{name}")
+def load_backtest_report(name: str):
+    """按文件名读取一份已保存报告全文：供「历史结果」重放渲染。
+
+    返回结构与回测结果一致（dates / equity / metrics / per_stock / scope 齐全），
+    前端可直接复用回测结果的渲染逻辑。
+    """
+    out = report.load_report(name)
+    if not out.get("ok"):
+        return JSONResponse(status_code=404,
+                            content={"ok": False,
+                                     "error": {"code": "NOT_FOUND",
+                                               "message": out.get("error") or "报告不存在"}})
+    return out
+
+
 @router.post("/recommend")
 @_guard(code=_CODE_ERR)
 def do_recommend(req: BacktestRequest):

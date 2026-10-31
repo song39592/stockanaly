@@ -289,3 +289,26 @@ def list_reports(limit: int = 50) -> dict:
                 "dir": str(config.REPORTS_DIR), "total": len(reports)}
     except Exception as exc:               # noqa: BLE001
         return {"ok": False, "reports": [], "error": str(exc)}
+
+
+def load_report(name: str) -> dict:
+    """按文件名读一份已保存报告全文；供前端「历史结果」重放渲染。
+
+    返回的报告结构与 `run_backtest` 的返回一致（dates / equity / metrics /
+    per_stock / scope 都在），前端可直接复用回测结果的渲染逻辑。
+    """
+    try:
+        raw = str(name or "").strip()
+        # 只允许纯文件名：挡掉 ../ 之类的目录穿越
+        if not raw or raw != os.path.basename(raw) or not raw.lower().endswith(".json"):
+            return {"ok": False, "error": "非法报告文件名"}
+        path = config.REPORTS_DIR / raw
+        if not path.is_file():
+            return {"ok": False, "error": "报告不存在"}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {"ok": False, "error": "报告格式错误"}
+        data["ok"] = True
+        return data
+    except Exception as exc:               # noqa: BLE001 - 读失败不拖垮接口
+        return {"ok": False, "error": str(exc)}
