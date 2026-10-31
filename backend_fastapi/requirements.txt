@@ -10,3 +10,8 @@ pydantic
 python-dotenv
 pypdf
 python-multipart
+
+# pandas / numpy 是 akshare 的传递依赖，但跨平台最易出现 _libs / ABI 不匹配
+# （macOS arm64 尤其），显式限版本，避免不同设备各自解析到不兼容的新版本。
+pandas>=2.2,<3.0
+numpy>=1.26,<2.2

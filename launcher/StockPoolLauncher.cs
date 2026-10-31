@@ -1261,6 +1261,23 @@ namespace StockPool
             return onPath;
         }
 
+        /// <summary>Windows 应用商店的 python.exe 是占位 stub（执行只报 "Python was not found"），
+        /// 不能当作可用解释器，必须跳过。</summary>
+        private static bool IsStoreStub(string path)
+        {
+            return !string.IsNullOrEmpty(path)
+                && path.ToLowerInvariant().IndexOf("windowsapps") >= 0;
+        }
+
+        /// <summary>解析出真正可用的 Python：优先设置页里填的（且不是 store stub），
+        /// 否则自动探测（优先项目自带 venv / 免安装 embeddable）。</summary>
+        private string ResolvePython()
+        {
+            var t = _tbPython != null ? (_tbPython.Text ?? "").Trim() : "";
+            if (!string.IsNullOrEmpty(t) && !IsStoreStub(t) && File.Exists(t)) return t;
+            return FindPython(_root);
+        }
+
         private static string FindNode()
         {
             var envN = Environment.GetEnvironmentVariable("STOCK_POOL_NODE");
@@ -1315,7 +1332,7 @@ namespace StockPool
                         if (kv.Length != 2) continue;
                         var k = kv[0].Trim();
                         var v = kv[1].Trim();
-                        if (k == "python" && File.Exists(v)) python = v;
+                        if (k == "python" && File.Exists(v) && !IsStoreStub(v)) python = v;
                         else if (k == "node" && File.Exists(v)) node = v;
                         else if (k == "autostart") auto = v == "1";
                         else if (k == "minimize") mini = v == "1";
@@ -1666,7 +1683,7 @@ namespace StockPool
 
             string py = UiSync<string>(delegate
             {
-                return !string.IsNullOrEmpty(_tbPython.Text) ? _tbPython.Text : FindPython(_root);
+                return ResolvePython();
             });
             r.Python = py;
 
@@ -1936,7 +1953,7 @@ namespace StockPool
 
         private void InitServices()
         {
-            var py = string.IsNullOrEmpty(_tbPython.Text) ? FindPython(_root) : _tbPython.Text;
+            var py = ResolvePython();
             var node = string.IsNullOrEmpty(_tbNode.Text) ? FindNode() : _tbNode.Text;
 
             _backend = new ServiceItem();
