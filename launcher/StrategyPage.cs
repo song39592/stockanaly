@@ -70,6 +70,11 @@ namespace StockPool
         private Label _stRecoStatus;
         private FlowLayoutPanel _stRecoCards;
         private StockGrid _stBuyGrid, _stSellGrid, _stHoldGrid;
+
+        // ⑥ 历史结果（已保存回测报告的独立页签）
+        private ListBox _stHistList;
+        private List<string> _stHistFiles = new List<string>();
+        private Label _stHistStatus;
         private List<string> _stEqDates;
         private List<double?> _stEq;
         private List<double?> _stEqBench;
@@ -166,6 +171,7 @@ namespace StockPool
             _stStrip.Add("回测结果", StBuildResult);
             _stStrip.Add("近期策略成果", StBuildRecent);
             _stStrip.Add("当前策略推荐", StBuildReco);
+            _stStrip.Add("历史结果", StBuildHistory);
 
             _stStrip.Select(0);
             return p;
@@ -474,8 +480,7 @@ private void StRefreshRecoTitle()
             AddRow(stack, _stResultHeader);
 
             AddRow(stack, Row(
-                MiniBtn("运行回测（选中策略）", delegate { StRunBacktest(); }, 160),
-                MiniBtn("历史结果", delegate { StShowHistory(); }, 92),
+                MiniBtn("开始回测", delegate { StRunBacktest(); }, 100),
                 // 暂停 / 继续 / 停止：全市场一次实测约 13 分钟（5578 只 × 3 年），
                 // 而并发上限是 1 —— 没有这三个按钮，用户改完策略想重跑就只能干等。
                 // 原来后端提示「请先点『停止』」而界面上根本没有这个按钮，属于死路。
@@ -583,6 +588,24 @@ private void StRefreshRecoTitle()
             _stRecentGrid.SetSortable(true);   // 第 20 项：可改按交易次数等排序
             AddRow(bg, _stRecentGrid);
             AddRow(stack, g);
+        }
+
+        private void StBuildHistory(TableLayoutPanel stack)
+        {
+            AddRow(stack, Mute(Lbl("已保存的回测报告（每次回测自动落盘）。选中一份后点「加载所选」，按回测结果的样式展示指标卡 / 净值曲线 / 个股明细。")));
+            _stHistList = new ListBox();
+            _stHistList.Font = new Font("Microsoft YaHei UI", 9f);
+            _stHistList.Height = 320;
+            TableLayoutPanel bg;
+            var g = Group("历史报告", out bg);
+            AddRow(bg, _stHistList);
+            AddRow(stack, g);
+            _stHistStatus = Mute(Lbl("尚未加载"));
+            AddRow(stack, Row(
+                MiniBtn("刷新列表", delegate { StHistRefresh(); }, 90),
+                MiniBtn("加载所选", delegate { StHistLoad(); }, 90),
+                _stHistStatus));
+            StHistRefresh();
         }
 
         private void StRunRecent()
@@ -1781,6 +1804,62 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
                 },
                 delegate(Exception ex) { SetErr(_stResultStatus, "加载历史报告失败：" + ex.Message); },
                 null);
+        }
+
+        /// <summary>历史结果页：刷新已保存报告列表。</summary>
+        private void StHistRefresh()
+        {
+            if (_stHistList == null) return;
+            RunUi<Dictionary<string, object>>(
+                delegate
+                {
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/reports?limit=100",
+                                           null, 15000);
+                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                },
+                delegate(Dictionary<string, object> j)
+                {
+                    if (_stHistList == null) return;
+                    _stHistList.Items.Clear();
+                    _stHistFiles.Clear();
+                    var list = (j != null && j.ContainsKey("reports"))
+                        ? j["reports"] as System.Collections.IList : null;
+                    if (list == null || list.Count == 0)
+                    {
+                        SetErr(_stHistStatus, "暂无历史报告（先运行一次回测）");
+                        return;
+                    }
+                    foreach (var it in list)
+                    {
+                        var d = it as Dictionary<string, object>;
+                        if (d == null) continue;
+                        string f = J.StrOr(J.Get(d, "file"), "");
+                        if (f.Length == 0) continue;
+                        _stHistFiles.Add(f);
+                        _stHistList.Items.Add(string.Format("{0}  |  {1}  |  {2} ~ {3}  |  收益 {4}",
+                            J.StrOr(J.Get(d, "generated_at"), ""),
+                            J.StrOr(J.Get(d, "strategy_name"), ""),
+                            J.StrOr(J.Get(d, "start"), ""),
+                            J.StrOr(J.Get(d, "end"), ""),
+                            J.Pct100Plain(J.Num(J.Get(d, "total_return")))));
+                    }
+                    SetErr(_stHistStatus, "共 " + _stHistFiles.Count + " 份");
+                },
+                delegate(Exception ex) { SetErr(_stHistStatus, "加载失败：" + ex.Message); },
+                null);
+        }
+
+        /// <summary>历史结果页：加载选中的报告，切到「回测结果」页按同样样式渲染。</summary>
+        private void StHistLoad()
+        {
+            if (_stHistList == null || _stHistList.SelectedIndex < 0)
+            {
+                SetErr(_stHistStatus, "先选一份报告");
+                return;
+            }
+            string file = _stHistFiles[_stHistList.SelectedIndex];
+            StLoadHistory(file);          // 复用回测结果渲染逻辑
+            _stStrip.Select(2);           // 切到「回测结果」页展示
         }
 
         // ---------------- 个股明细展开 ----------------
