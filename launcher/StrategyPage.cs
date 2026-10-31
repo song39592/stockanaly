@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.IO;
+using System.Text;
 using System.Windows.Forms;
 using System.Web.Script.Serialization;
 
@@ -34,6 +36,9 @@ namespace StockPool
 
         // ② 回测范围：基池=全部本地已下载股票，勾选即「排除」该特征
         private CheckBox _stExChiNext, _stExStar, _stExBse, _stExSt, _stExStarSt, _stExIpo, _stExSubNew, _stExMicro;
+        // 股票池筛选记忆：8 位 mask（1=剔除），持久化到 settings.ini 的 scope_exclude
+        private string _stScopeMask = "";
+        private bool _stScopeLoading;
         private TextBox _stComm, _stBench;
         private Label _stScopeHint;
         private DateTimePicker _stStart, _stEnd;
@@ -70,6 +75,10 @@ namespace StockPool
         private Label _stRecoStatus;
         private FlowLayoutPanel _stRecoCards;
         private StockGrid _stBuyGrid, _stSellGrid, _stHoldGrid;
+
+        // ⑥ 历史结果（已保存回测报告的独立页签）
+        private ListView _stHistList;
+        private Label _stHistStatus;
         private List<string> _stEqDates;
         private List<double?> _stEq;
         private List<double?> _stEqBench;
@@ -80,6 +89,14 @@ namespace StockPool
         private bool _stRecoBusy;
         private bool _stRecoPollBusy;      // 有一次轮询请求在飞（防tick 重叠）
         private int _stRecoRunId;          // 每次启动 +1：陈旧响应据此丢弃（同回测 _stPollRunId）
+        // 近期回测（最近 N 个交易日）也改走异步任务：全市场 3 年实测 761s，
+        // 同步接口固定 600s 必然超时（旧实现就死在这），故与推荐页同一套轮询模式。
+        private Timer _stRecentTimer;
+        private bool _stRecentBusy;
+        private bool _stRecentPollBusy;
+        private int _stRecentRunId;
+        private CheckBox _stRecentRuinChk;       // 近期回测：「破产截断」开关
+        private NumericUpDown _stRecentRuinPct;  // 破产阈值（%，0=净值归零）
         // 当前选中的策略名（第 23 项）。放在**顶部操作区**而不是「策略选择与编辑」
         // 子页里 —— 因为所有「运行回测 / 生成推荐」都读列表选中项，跑错策略时用户
         // 在别的子页看不到自己选了什么。顶部常驻，任何子页都一眼可见。
@@ -158,6 +175,7 @@ namespace StockPool
             _stStrip.Add("回测结果", StBuildResult);
             _stStrip.Add("近期策略成果", StBuildRecent);
             _stStrip.Add("当前策略推荐", StBuildReco);
+            _stStrip.Add("历史结果", StBuildHistory);
 
             _stStrip.Select(0);
             return p;
@@ -400,7 +418,13 @@ private void StRefreshRecoTitle()
             _stExSt = ExChk("剔除ST"); _stExStarSt = ExChk("剔除*ST");
             _stExIpo = ExChk("剔除新股"); _stExSubNew = ExChk("剔除次新股"); _stExMicro = ExChk("剔除微盘股");
             foreach (var cb in new[] { _stExChiNext, _stExStar, _stExBse, _stExSt, _stExStarSt, _stExIpo, _stExSubNew, _stExMicro })
-                cb.CheckedChanged += delegate { StScopePreview(); };
+                cb.CheckedChanged += delegate
+                {
+                    if (_stScopeLoading) return;
+                    _stScopeMask = StScopeMask();
+                    StSaveScopePrefs();        // 记住本次筛选，下次启动默认沿用
+                    StScopePreview();
+                };
             exRow.Controls.AddRange(new Control[] { _stExChiNext, _stExStar, _stExBse, _stExSt, _stExStarSt, _stExIpo, _stExSubNew, _stExMicro });
             AddRow(b, Row(exRow));
             AddRow(stack, g1);
@@ -449,6 +473,80 @@ private void StRefreshRecoTitle()
             _stBenchChk.CheckedChanged += delegate { _stBench.Enabled = _stBenchChk.Checked; };
             AddRow(b, Row(_stBenchChk, _stBench, Mute(Lbl("留空则不对比；指数可能无本地数据）"))));
             AddRow(stack, g4);
+
+            StLoadScopePrefs();      // 恢复上次的股票池筛选
+        }
+
+        /// <summary>当前 8 个排除勾选拼成 mask（如 "10100010"）。</summary>
+        private string StScopeMask()
+        {
+            var cbs = new[] { _stExChiNext, _stExStar, _stExBse, _stExSt, _stExStarSt, _stExIpo, _stExSubNew, _stExMicro };
+            var sb = new StringBuilder();
+            foreach (var cb in cbs) sb.Append(cb != null && cb.Checked ? '1' : '0');
+            return sb.ToString();
+        }
+
+        /// <summary>把 mask 应用到 8 个勾选；不足的位按「不剔除」处理。</summary>
+        private void StApplyScopeMask(string mask)
+        {
+            string m = (mask ?? "").Trim();
+            var cbs = new[] { _stExChiNext, _stExStar, _stExBse, _stExSt, _stExStarSt, _stExIpo, _stExSubNew, _stExMicro };
+            _stScopeLoading = true;
+            try
+            {
+                for (int i = 0; i < cbs.Length; i++)
+                {
+                    bool on = i < m.Length && m[i] == '1';
+                    if (cbs[i] != null) cbs[i].Checked = on;
+                }
+            }
+            finally { _stScopeLoading = false; }
+        }
+
+        /// <summary>从 settings.ini 读 scope_exclude 并应用；不存在则保持默认（全部不剔除）。</summary>
+        private void StLoadScopePrefs()
+        {
+            string mask = null;
+            try
+            {
+                if (File.Exists(_settingsPath))
+                {
+                    foreach (var line in File.ReadAllLines(_settingsPath, Encoding.UTF8))
+                    {
+                        var kv = line.Split(new char[] { '=' }, 2);
+                        if (kv.Length == 2 && kv[0].Trim() == "scope_exclude" && kv[1].Trim().Length > 0)
+                        {
+                            mask = kv[1].Trim();
+                            break;
+                        }
+                    }
+                }
+            }
+            catch { }
+            if (!string.IsNullOrEmpty(mask)) StApplyScopeMask(mask);
+            _stScopeMask = StScopeMask();
+        }
+
+        /// <summary>把当前 mask 写回 settings.ini（只改 scope_exclude 一行，保留其它键）。</summary>
+        private void StSaveScopePrefs()
+        {
+            try
+            {
+                var lines = File.Exists(_settingsPath)
+                    ? new List<string>(File.ReadAllLines(_settingsPath, Encoding.UTF8))
+                    : new List<string>();
+                string want = "scope_exclude=" + (_stScopeMask ?? "");
+                int idx = lines.FindIndex(delegate(string l)
+                {
+                    var kv = l.Split(new char[] { '=' }, 2);
+                    return kv.Length == 2 && kv[0].Trim() == "scope_exclude";
+                });
+                if (idx >= 0) lines[idx] = want; else lines.Add(want);
+                var dir = Path.GetDirectoryName(_settingsPath);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllLines(_settingsPath, lines.ToArray(), Encoding.UTF8);
+            }
+            catch { }
         }
 
         // ---------------- ③ 回测结果 ----------------
@@ -466,7 +564,7 @@ private void StRefreshRecoTitle()
             AddRow(stack, _stResultHeader);
 
             AddRow(stack, Row(
-                MiniBtn("运行回测（选中策略）", delegate { StRunBacktest(); }, 160),
+                MiniBtn("开始回测", delegate { StRunBacktest(); }, 100),
                 // 暂停 / 继续 / 停止：全市场一次实测约 13 分钟（5578 只 × 3 年），
                 // 而并发上限是 1 —— 没有这三个按钮，用户改完策略想重跑就只能干等。
                 // 原来后端提示「请先点『停止』」而界面上根本没有这个按钮，属于死路。
@@ -544,6 +642,18 @@ private void StRefreshRecoTitle()
             _stRecentDays.TabStop = false;
             AddRow(stack, Row(MiniBtn("运行近期回测", delegate { StRunRecent(); }, 120),
                 Lbl("交易日数"), _stRecentDays, _stRecentStatus = Mute(Lbl("尚未运行"))));
+            _stRecentRuinChk = new CheckBox();
+            _stRecentRuinChk.Text = "破产截断";
+            _stRecentRuinChk.Checked = true;
+            _stRecentRuinChk.TabStop = false;
+            _stRecentRuinPct = new NumericUpDown();
+            _stRecentRuinPct.Minimum = 0;
+            _stRecentRuinPct.Maximum = 100;
+            _stRecentRuinPct.Value = 0;
+            _stRecentRuinPct.Width = 60;
+            _stRecentRuinPct.TabStop = false;
+            AddRow(stack, Row(_stRecentRuinChk, Lbl("阈值%"), _stRecentRuinPct,
+                Mute(Lbl("(0=净值归零即断)"))));
 
             _stRecentCards = StCardRow();
             AddRow(stack, _stRecentCards);
@@ -555,6 +665,8 @@ private void StRefreshRecoTitle()
                 NameColumn(),
                 new GridColumn("区间收益", "ret", true),
                 new GridColumn("交易次数", "trades", true),
+                new GridColumn("买入时间", "buy_date"),
+                new GridColumn("卖出时间", "sell_date"),
             });
             StPlaceGrid(_stRecentGrid);
             _stRecentGrid.SetSortable(true);   // 第 20 项：可改按交易次数等排序
@@ -562,46 +674,214 @@ private void StRefreshRecoTitle()
             AddRow(stack, g);
         }
 
+        private void StBuildHistory(TableLayoutPanel stack)
+        {
+            AddRow(stack, Mute(Lbl("已保存的回测报告（每次回测自动落盘）。选中一份后点「加载所选」，按回测结果的样式展示指标卡 / 净值曲线 / 个股明细。")));
+            _stHistList = new ListView();
+            _stHistList.View = View.Details;
+            _stHistList.FullRowSelect = true;
+            _stHistList.GridLines = true;
+            _stHistList.HideSelection = false;
+            _stHistList.MultiSelect = false;
+            _stHistList.Font = new Font("Microsoft YaHei UI", 9f);
+            _stHistList.Height = 320;
+            _stHistList.Width = 880;              // 不设宽度会被表格布局压成第一列宽
+            _stHistList.Columns.Add("生成时间", 160);
+            _stHistList.Columns.Add("策略", 300);
+            _stHistList.Columns.Add("区间", 220);
+            _stHistList.Columns.Add("收益", 100);
+            _stHistList.DoubleClick += delegate { StHistLoad(); };
+            TableLayoutPanel bg;
+            var g = Group("历史报告", out bg);
+            AddRow(bg, _stHistList);
+            AddRow(stack, g);
+            _stHistStatus = Mute(Lbl("尚未加载"));
+            AddRow(stack, Row(
+                MiniBtn("刷新列表", delegate { StHistRefresh(); }, 90),
+                MiniBtn("加载所选", delegate { StHistLoad(); }, 90),
+                MiniBtn("删除所选", delegate { StHistDelete(); }, 90),
+                _stHistStatus));
+            StHistRefresh();
+        }
+
         private void StRunRecent()
         {
+            if (_stRecentBusy) return;      // 防叠加：全市场一次只能算一个
             var meta = StSelectedMeta();
             if (meta == null)
             {
                 SetErr(_stRecentStatus, "请先在「策略选择与编辑」里选一个策略");
                 return;
             }
-            var req = StRequest(meta, (int)_stRecentDays.Value);
-            _stRecentStatus.Text = "回测中…";
-            _stRecentStatus.ForeColor = _cSub;
+            int days = (int)_stRecentDays.Value;
+            double? ruin = (_stRecentRuinChk != null && _stRecentRuinChk.Checked)
+                ? (double?)_stRecentRuinPct.Value / 100.0 : null;
+            _stRecentBusy = true;
+            int myRun = ++_stRecentRunId;
+            var req = StRequest(meta, days, ruin);
+            SetErr(_stRecentStatus, "提交中…");
             string body = new JavaScriptSerializer().Serialize(req);
             System.Threading.Tasks.Task.Run(delegate
             {
                 try
                 {
-                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest", body, 600000);
+                    // 只等「启动」立即返回；旧实现是同步 /backtest + 600s 固定超时，
+                    // 全市场 3 年实测 761s 必然超时，这里不再继承那个坑。
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/start", body, 30000);
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    Invoke((Action)(() => StRenderRecent(j)));
+                    Invoke((Action)(() =>
+                    {
+                        if (myRun != _stRecentRunId) return;
+                        if (J.IsFailed(j))
+                        {
+                            _stRecentBusy = false;
+                            SetErr(_stRecentStatus, "无法启动：" + StErrMsg(j));
+                            return;
+                        }
+                        var st = (Dictionary<string, object>)J.Get(j, "state");
+                        int tot = st == null ? 0 : J.Int(st["total"]);
+                        SetErr(_stRecentStatus, string.Format(
+                            "回测中 0/{0}（0.0%）…", tot <= 0 ? "?" : tot.ToString()));
+                        StartRecentPoll();
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    string msg = ex.Message;
+                    // 启动请求超时/失败时，后端可能其实已经启动了任务（只是响应没赶上）。
+                    // 先探一次进度：已有任务在跑就直接接管并轮询，别误报「无法启动」让用户重复点。
+                    bool adopted = false;
+                    try
+                    {
+                        string pj = VRequest("http://127.0.0.1:8000/api/strategies/backtest/progress", null, 5000);
+                        var p = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(pj);
+                        var st = (Dictionary<string, object>)J.Get(p, "state");
+                        string state = st == null ? "" : J.StrAt(st, "state");
+                        if (state == "running" || state == "ready")
+                        {
+                            adopted = true;
+                            Invoke((Action)(() =>
+                            {
+                                if (myRun != _stRecentRunId) return;
+                                SetErr(_stRecentStatus, "已接管后台任务，读取进度…");
+                                StartRecentPoll();
+                            }));
+                        }
+                    }
+                    catch { /* 探测失败就走普通报错 */ }
+                    if (adopted) return;
+                    Invoke((Action)(() =>
+                    {
+                        if (myRun != _stRecentRunId) return;
+                        _stRecentBusy = false;
+                        SetErr(_stRecentStatus, "无法启动：" + msg);
+                    }));
+                }
+            });
+        }
+
+        /// <summary>启动 2 秒一次的近期回测进度轮询（幂等，重复调用只是重新 Start）。</summary>
+        private void StartRecentPoll()
+        {
+            if (_stRecentTimer == null)
+            {
+                _stRecentTimer = new Timer();
+                _stRecentTimer.Interval = 2000;
+                _stRecentTimer.Tick += delegate { StRecentPoll(); };
+            }
+            _stRecentTimer.Start();
+        }
+
+        /// <summary>轮询近期回测进度；ready 后停表取结果。</summary>
+        private void StRecentPoll()
+        {
+            if (_stRecentPollBusy) return;
+            _stRecentPollBusy = true;
+            int myRun = _stRecentRunId;
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/progress", null, 15000);
+                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    Invoke((Action)(() =>
+                    {
+                        _stRecentPollBusy = false;
+                        if (myRun != _stRecentRunId) return;
+                        var st = (Dictionary<string, object>)J.Get(j, "state");
+                        string state = st == null ? "" : J.StrAt(st, "state");
+                        string phase = st == null ? "" : J.StrAt(st, "phase");
+                        int done = st == null ? 0 : J.Int(st["done"]);
+                        int tot = st == null ? 0 : J.Int(st["total"]);
+                        double sec = st == null ? 0 : J.Num(st["elapsed"]);
+
+                        if (state == "error")
+                        {
+                            if (_stRecentTimer != null) _stRecentTimer.Stop();
+                            _stRecentBusy = false;
+                            SetErr(_stRecentStatus, "回测失败：" + J.StrAt(st, "error"));
+                            return;
+                        }
+                        if (state == "cancelled")
+                        {
+                            if (_stRecentTimer != null) _stRecentTimer.Stop();
+                            _stRecentBusy = false;
+                            SetErr(_stRecentStatus, "已被用户停止");
+                            return;
+                        }
+                        if (state == "running")
+                        {
+                            if (phase == "running")
+                                SetErr(_stRecentStatus, string.Format(
+                                    "回测中（{0}/{1}，正在算策略信号，已用 {2:F0} 秒）…", done, tot, sec));
+                            else
+                                SetErr(_stRecentStatus, string.Format(
+                                    "读取数据中 {0}/{1}（{2:F1}%），已用 {3:F0} 秒…",
+                                    done, tot, tot > 0 ? done * 100.0 / tot : 0, sec));
+                            return;
+                        }
+
+                        // ready：停表，取结果
+                        if (_stRecentTimer != null) _stRecentTimer.Stop();
+                        StRecentFetchResult(myRun);
+                    }));
                 }
                 catch (Exception ex)
                 {
                     string msg = ex.Message;
                     Invoke((Action)(() =>
                     {
-                        // ⚠️ 同步接口固定 600s 超时，而**全市场 3 年实测约 761s**
-                        //（2026-10-14 实测 5578 只 × 2023-10-14~2026-10-14）。
-                        // 超时后这里只会抛一句无信息量的 WebException，
-                        // 用户完全看不出「其实是跑太慢、换个池子或用异步按钮就好」。
-                        // 故把这类超时翻译成可操作的提示，而不是原样透出原始报文。
-                        if (msg.Contains("超时") || msg.Contains("timed out")
-                            || msg.Contains("Timeout") || msg.Contains("已超时"))
-                        {
-                            msg = "同步回测超过 600 秒仍未返回（通常是「全部本地」范围太大）。"
-                                + "请改用「运行回测」按钮走后台任务（有进度条、不受此限制），"
-                                + "或缩小回测范围后重试。";
-                        }
-                        SetErr(_stRecentStatus, "回测失败：" + msg);
+                        _stRecentPollBusy = false;
+                        if (myRun != _stRecentRunId) return;
+                        if (_stRecentTimer != null) _stRecentTimer.Stop();
+                        _stRecentBusy = false;
+                        SetErr(_stRecentStatus, "读取进度失败：" + msg);
                     }));
                 }
+            });
+        }
+
+        private void StRecentFetchResult(int myRun)
+        {
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                string resp = null, emsg = "";
+                Dictionary<string, object> j = null;
+                try
+                {
+                    resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/result", null, 60000);
+                    j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                }
+                catch (Exception ex) { emsg = ex.Message; }
+                var jj = j;
+                var ee = emsg;
+                Invoke((Action)(() =>
+                {
+                    if (myRun != _stRecentRunId) return;
+                    _stRecentBusy = false;
+                    if (jj == null) { SetErr(_stRecentStatus, "读取结果失败：" + ee); return; }
+                    StRenderRecent(jj);
+                }));
             });
         }
 
@@ -635,14 +915,30 @@ private void StRefreshRecoTitle()
                 {
                     var d = it as Dictionary<string, object>;
                     if (d == null) continue;
+                    // 买卖时间：per_stock 已带首笔交易的 buy_date / sell_date（未平仓时 sell_date 为空）
+                    string buyD = J.StrOr(J.Get(d, "buy_date"), "");
+                    string sellD = J.StrOr(J.Get(d, "sell_date"), "");
                     _stRecentGrid.Rows.Add(J.StrOr(d["code"], ""), StName(d),
-                        J.Pct100Plain(J.Num(d["total_return"])), J.Int(d["trades"]).ToString());
+                        J.Pct100Plain(J.Num(d["total_return"])), J.Int(d["trades"]).ToString(),
+                        buyD, sellD);
                 }
                 _stRecentGrid.ResumeLayout();
             }
             _stRecentGrid.Fit();
             _stRecentStatus.Text = "完成（最近 " + (int)_stRecentDays.Value + " 个交易日）";
             _stRecentStatus.ForeColor = C.DownSoft;
+            // 破产截断：账户净值跌破阈值后强制空仓，结果里明确标出，避免被当成「正常回测」
+            bool bankrupt = false;
+            object bk;
+            if (metrics.TryGetValue("bankrupt", out bk) && bk is bool) bankrupt = (bool)bk;
+            if (bankrupt)
+            {
+                var bd = J.Get(metrics, "bankrupt_day");
+                var br = J.Get(metrics, "bankrupt_ratio");
+                _stRecentStatus.Text = "⚠ 账户于 " + J.StrOr(bd, "") + " 破产（净值 "
+                    + J.Pct100Plain(J.Num(br)) + "），后续交易日已截断";
+                _stRecentStatus.ForeColor = C.UpErr;
+            }
         }
 
         // ---------------- ⑤ 当前策略推荐 ----------------
@@ -982,7 +1278,7 @@ private void StRefreshRecoTitle()
         // 回测 / 推荐共用请求体：策略、范围、资金、佣金都取「回测范围」页的设置。
         // window>0 时后端直接把区间定位到最近 N 个交易日（近期成果用）。
         // meta 由调用方传入（点击时取的快照），不在函数内部读列表选中项 —— 理由见 StSelectedMeta。
-        private Dictionary<string, object> StRequest(Dictionary<string, object> meta, int window)
+        private Dictionary<string, object> StRequest(Dictionary<string, object> meta, int window, double? ruinThreshold = null)
         {
             return new Dictionary<string, object>
             {
@@ -997,6 +1293,7 @@ private void StRefreshRecoTitle()
                 { "initial_capital", (double)_stCapital.Value },
                 { "commission", J.NumOr(_stComm.Text, 0.0003) },
                 { "benchmark", (_stBenchChk.Checked && _stBench.Text.Trim().Length > 0) ? _stBench.Text.Trim() : null },
+                { "ruin_threshold", ruinThreshold },
             };
         }
 
@@ -1470,6 +1767,228 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
                     _stResultStatus.Text = "回测完成（参与统计 " + doneCount
                         + " 只，" + el.Count + " 只数据缺失/跳过）";
             }
+        }
+
+        // ---------------- 历史结果（加载已保存的回测报告） ----------------
+        /// <summary>列出已保存的回测报告，选一份加载，按回测结果的样式重放渲染。</summary>
+        private void StShowHistory()
+        {
+            RunUi<Dictionary<string, object>>(
+                delegate
+                {
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/reports?limit=100",
+                                           null, 15000);
+                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                },
+                delegate(Dictionary<string, object> j)
+                {
+                    var list = (j != null && j.ContainsKey("reports"))
+                        ? j["reports"] as System.Collections.IList : null;
+                    if (list == null || list.Count == 0)
+                    {
+                        SetErr(_stResultStatus, "暂无历史回测报告（先运行一次回测）");
+                        return;
+                    }
+                    string file = StPickReportDialog(list);
+                    if (!string.IsNullOrEmpty(file)) StLoadHistory(file);
+                },
+                delegate(Exception ex) { SetErr(_stResultStatus, "读取历史列表失败：" + ex.Message); },
+                null);
+        }
+
+        /// <summary>弹出历史报告选择框；返回选中的文件名（取消返回 null）。</summary>
+        private string StPickReportDialog(System.Collections.IList list)
+        {
+            var files = new List<string>();
+            using (var dlg = new Form())
+            {
+                dlg.Text = "历史回测结果";
+                dlg.StartPosition = FormStartPosition.CenterParent;
+                dlg.ShowInTaskbar = false;
+                dlg.MinimizeBox = false;
+                dlg.MaximizeBox = false;
+                dlg.Width = 840;
+                dlg.Height = 440;
+                dlg.MinimumSize = new Size(560, 300);
+
+                var lb = new ListBox();
+                lb.Dock = DockStyle.Fill;
+                lb.IntegralHeight = false;
+                lb.Font = new Font("Microsoft YaHei UI", 9f);
+                foreach (var it in list)
+                {
+                    var d = it as Dictionary<string, object>;
+                    if (d == null) continue;
+                    string f = J.StrOr(J.Get(d, "file"), "");
+                    if (f.Length == 0) continue;
+                    files.Add(f);
+                    lb.Items.Add(string.Format("{0}  |  {1}  |  {2} ~ {3}  |  收益 {4}",
+                        J.StrOr(J.Get(d, "generated_at"), ""),
+                        J.StrOr(J.Get(d, "strategy_name"), ""),
+                        J.StrOr(J.Get(d, "start"), ""),
+                        J.StrOr(J.Get(d, "end"), ""),
+                        J.Pct100Plain(J.Num(J.Get(d, "total_return")))));
+                }
+
+                var bottom = new Panel();
+                bottom.Dock = DockStyle.Bottom;
+                bottom.Height = 44;
+                var ok = new Button();
+                ok.Text = "加载";
+                ok.DialogResult = DialogResult.OK;
+                ok.Width = 88;
+                ok.Height = 28;
+                var cancel = new Button();
+                cancel.Text = "取消";
+                cancel.DialogResult = DialogResult.Cancel;
+                cancel.Width = 88;
+                cancel.Height = 28;
+                bottom.Controls.Add(ok);
+                bottom.Controls.Add(cancel);
+                bottom.Resize += delegate
+                {
+                    int right = bottom.ClientSize.Width;
+                    ok.Location = new Point(Math.Max(0, right - 196), 8);
+                    cancel.Location = new Point(Math.Max(0, right - 100), 8);
+                };
+
+                dlg.Controls.Add(lb);
+                dlg.Controls.Add(bottom);
+                dlg.AcceptButton = ok;
+                dlg.CancelButton = cancel;
+                lb.DoubleClick += delegate { dlg.DialogResult = DialogResult.OK; dlg.Close(); };
+                if (dlg.ShowDialog(this) != DialogResult.OK || lb.SelectedIndex < 0) return null;
+                return files[lb.SelectedIndex];
+            }
+        }
+
+        /// <summary>取回选中的历史报告全文，按回测结果的样式渲染（指标卡 / 净值曲线 / 个股明细）。</summary>
+        private void StLoadHistory(string file)
+        {
+            SetErr(_stResultStatus, "正在加载历史报告…");
+            RunUi<Dictionary<string, object>>(
+                delegate
+                {
+                    string resp = VRequest(
+                        "http://127.0.0.1:8000/api/strategies/backtest/reports/"
+                        + System.Uri.EscapeDataString(file), null, 60000);
+                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                },
+                delegate(Dictionary<string, object> j)
+                {
+                    if (j == null || J.IsFailed(j))
+                    {
+                        SetErr(_stResultStatus, "加载历史报告失败：" + J.ErrMsg(j));
+                        return;
+                    }
+                    // 老 schema 报告可能没有净值序列：补空，避免渲染时缺 key 抛异常
+                    if (!j.ContainsKey("dates")) j["dates"] = new System.Collections.ArrayList();
+                    if (!j.ContainsKey("equity")) j["equity"] = new System.Collections.ArrayList();
+                    StRenderResult(j);           // 与刚跑完的回测结果共用同一套渲染
+                    _stResultId = "";            // 历史报告的逐笔明细不在后端单槽缓存里，禁用展开
+                    var strat = j.ContainsKey("strategy") ? j["strategy"] as Dictionary<string, object> : null;
+                    var scope = j.ContainsKey("scope") ? j["scope"] as Dictionary<string, object> : null;
+                    string nm = strat != null ? J.StrOr(J.Get(strat, "name"), "") : "";
+                    string s = scope != null ? J.StrOr(J.Get(scope, "start"), "") : "";
+                    string e = scope != null ? J.StrOr(J.Get(scope, "end"), "") : "";
+                    // 覆盖成「历史」标识：否则用户会把它当成刚跑出来的结果
+                    if (nm.Length > 0)
+                        _stResultHeader.Text = "策略：" + nm + " · " + s + " ~ " + e + "（历史结果）";
+                    _stResultStatus.Text = "历史结果（生成于 "
+                        + J.StrOr(J.Get(j, "generated_at"), "") + "）";
+                    _stResultStatus.ForeColor = C.DownSoft;
+                },
+                delegate(Exception ex) { SetErr(_stResultStatus, "加载历史报告失败：" + ex.Message); },
+                null);
+        }
+
+        /// <summary>历史结果页：刷新已保存报告列表。</summary>
+        private void StHistRefresh()
+        {
+            if (_stHistList == null) return;
+            RunUi<Dictionary<string, object>>(
+                delegate
+                {
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/reports?limit=100",
+                                           null, 15000);
+                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                },
+                delegate(Dictionary<string, object> j)
+                {
+                    if (_stHistList == null) return;
+                    _stHistList.Items.Clear();
+                    var list = (j != null && j.ContainsKey("reports"))
+                        ? j["reports"] as System.Collections.IList : null;
+                    if (list == null || list.Count == 0)
+                    {
+                        SetErr(_stHistStatus, "暂无历史报告（先运行一次回测）");
+                        return;
+                    }
+                    foreach (var it in list)
+                    {
+                        var d = it as Dictionary<string, object>;
+                        if (d == null) continue;
+                        string f = J.StrOr(J.Get(d, "file"), "");
+                        if (f.Length == 0) continue;
+                        var lvi = new ListViewItem(J.StrOr(J.Get(d, "generated_at"), ""));
+                        lvi.SubItems.Add(J.StrOr(J.Get(d, "strategy_name"), ""));
+                        lvi.SubItems.Add(J.StrOr(J.Get(d, "start"), "") + " ~ " + J.StrOr(J.Get(d, "end"), ""));
+                        lvi.SubItems.Add(J.Pct100Plain(J.Num(J.Get(d, "total_return"))));
+                        lvi.Tag = f;                    // 文件名随行携带，加载/删除都靠它
+                        _stHistList.Items.Add(lvi);
+                    }
+                    SetErr(_stHistStatus, "共 " + _stHistList.Items.Count + " 份");
+                },
+                delegate(Exception ex) { SetErr(_stHistStatus, "加载失败：" + ex.Message); },
+                null);
+        }
+
+        /// <summary>历史结果页：加载选中的报告，切到「回测结果」页按同样样式渲染。</summary>
+        private void StHistLoad()
+        {
+            if (_stHistList == null || _stHistList.SelectedItems.Count == 0)
+            {
+                SetErr(_stHistStatus, "先选一份报告");
+                return;
+            }
+            string file = _stHistList.SelectedItems[0].Tag as string;
+            if (string.IsNullOrEmpty(file)) { SetErr(_stHistStatus, "先选一份报告"); return; }
+            StLoadHistory(file);          // 复用回测结果渲染逻辑
+            _stStrip.Select(2);           // 切到「回测结果」页展示
+        }
+
+        /// <summary>历史结果页：删除选中的报告（后端删文件 + 索引行）。</summary>
+        private void StHistDelete()
+        {
+            if (_stHistList == null || _stHistList.SelectedItems.Count == 0)
+            {
+                SetErr(_stHistStatus, "先选一份报告");
+                return;
+            }
+            string file = _stHistList.SelectedItems[0].Tag as string;
+            if (string.IsNullOrEmpty(file)) { SetErr(_stHistStatus, "先选一份报告"); return; }
+            if (MessageBox.Show(this, "确定删除这份历史报告？\n" + file, "删除确认",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            SetErr(_stHistStatus, "正在删除…");
+            RunUi<Dictionary<string, object>>(
+                delegate
+                {
+                    string resp = VRequest(
+                        "http://127.0.0.1:8000/api/strategies/backtest/reports/"
+                        + System.Uri.EscapeDataString(file), null, 15000, "DELETE");
+                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                },
+                delegate(Dictionary<string, object> j)
+                {
+                    if (j == null || J.IsFailed(j))
+                    {
+                        SetErr(_stHistStatus, "删除失败：" + J.ErrMsg(j));
+                        return;
+                    }
+                    StHistRefresh();          // 重新拉列表，让删除即时可见
+                },
+                delegate(Exception ex) { SetErr(_stHistStatus, "删除失败：" + ex.Message); },
+                null);
         }
 
         // ---------------- 个股明细展开 ----------------

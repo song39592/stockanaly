@@ -108,6 +108,7 @@ class BacktestRequest(BaseModel):
     # ---- 样本口径 ----
     universe_mode: str = "interval_data"   # interval_data / pool_snapshot / index_constituent
     benchmark: Optional[str] = None        # 指数代码；不给则用「等权全池买入持有」作默认基准
+    ruin_threshold: Optional[float] = None  # 组合净值跌破「该比例 × 初始资金」即破产截断；None=不截断，0.0=归零截断
 
 
 _CODE_ERR = {
@@ -130,7 +131,7 @@ def do_backtest(req: BacktestRequest):
         stamp_duty=req.stamp_duty, slippage=req.slippage,
         min_commission=req.min_commission, lot_size=req.lot_size,
         benchmark=req.benchmark, window=req.window,
-        universe_mode=req.universe_mode,
+        universe_mode=req.universe_mode, ruin_threshold=req.ruin_threshold,
     )
     # 回测跑完**自动落盘一份报告**（策略 + 覆盖范围 + 指标 + 逐票汇总），
     # 便于事后对比不同策略 / 不同区间 —— 原来结果只在一次响应里，关掉就没了。
@@ -155,16 +156,23 @@ def do_backtest_start(req: BacktestRequest):
     同一时间只允许一个任务（两个全市场并行会互相拖慢）。小股票池仍可用同步
     的 `/backtest`，更快。
     """
-    codes = _resolve_codes(req)
-    if not codes:
-        raise ValueError("股票池为空，请先选择回测范围")
+    # ⚠️ 不在请求线程里解析股票池：全市场冷缓存要扫几千只，可能 >30s，
+    # 前端 `/backtest/start` 会先超时报「无法启动：操作超时」（用户实际遇到的就是这个）。
+    # 把解析放进后台线程（codes_resolver），启动接口立即返回、前端马上开始轮询。
+    def _resolve_codes_lazy():
+        codes = _resolve_codes(req)
+        if not codes:
+            raise ValueError("股票池为空，请先选择回测范围")
+        return codes
+
     out = backtest.start_task(
-        req.strategy_id, req.params, codes, req.start, req.end,
+        req.strategy_id, req.params, [], req.start, req.end,
         initial_capital=req.initial_capital, commission=req.commission,
         stamp_duty=req.stamp_duty, slippage=req.slippage,
         min_commission=req.min_commission, lot_size=req.lot_size,
         benchmark=req.benchmark, window=req.window,
-        universe_mode=req.universe_mode,
+        universe_mode=req.universe_mode, ruin_threshold=req.ruin_threshold,
+        codes_resolver=_resolve_codes_lazy,
     )
     if not out.get("ok"):
         return JSONResponse(status_code=409,
@@ -226,6 +234,34 @@ def do_backtest_resume():
 def list_backtest_reports(limit: int = 50):
     """已保存的回测报告索引（新到旧）：横向对比历史回测用。"""
     return report.list_reports(limit)
+
+
+@router.get("/backtest/reports/{name}")
+def load_backtest_report(name: str):
+    """按文件名读取一份已保存报告全文：供「历史结果」重放渲染。
+
+    返回结构与回测结果一致（dates / equity / metrics / per_stock / scope 齐全），
+    前端可直接复用回测结果的渲染逻辑。
+    """
+    out = report.load_report(name)
+    if not out.get("ok"):
+        return JSONResponse(status_code=404,
+                            content={"ok": False,
+                                     "error": {"code": "NOT_FOUND",
+                                               "message": out.get("error") or "报告不存在"}})
+    return out
+
+
+@router.delete("/backtest/reports/{name}")
+def delete_backtest_report(name: str):
+    """删除一份已保存报告（文件 + 索引行）：历史结果页的删除按钮用。"""
+    out = report.delete_report(name)
+    if not out.get("ok"):
+        return JSONResponse(status_code=404,
+                            content={"ok": False,
+                                     "error": {"code": "NOT_FOUND",
+                                               "message": out.get("error") or "报告不存在"}})
+    return out
 
 
 @router.post("/recommend")

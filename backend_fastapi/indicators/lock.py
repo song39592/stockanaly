@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """锁仓信号（主图箭头指标）：低换手沉淀成立 / 强换手解除。
 
-判定口径与 chip_brg 的灰层同源：
+判定口径与 EMA 锁仓筹码公式同源：
   · 自然换手率 B = 1/N，N 由换手率序列反推「100% 换手周期」；
   · 锁仓成立（+1，红上箭头）：换手率首次跌破 M_low × B（低换手沉淀开始）；
   · 锁仓解除（-1，绿下箭头）：处于锁仓态时换手率升破 M_high × B（筹码松动）。
@@ -19,7 +19,7 @@ from .base import ParamSpec, indicator, series_marker
 
 
 def _turnover_to_n(turnover: np.ndarray) -> np.ndarray:
-    """由换手率序列反推每日的『100% 换手周期』N[t]（与 chip_brg 同口径）。"""
+    """由换手率序列反推每日的『100% 换手周期』N[t]（与筹码公式同口径）。"""
     n = len(turnover)
     pref = np.concatenate(([0.0], np.cumsum(turnover)))
     n_est = (n / pref[n]) if pref[n] > 1e-12 else float(n)

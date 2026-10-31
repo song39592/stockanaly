@@ -583,6 +583,7 @@ namespace StockPool
                         _stockHint.Text = "副图指标已切换为：" + nm + "（输入 6 位代码则打开个股）";
                     }
                     if (_stockCurrent != null) StockLoadIndicators(_stockCurrent);
+                    StockPersistSelection();
                     return;
                 }
                 // 筹码模型（独立通道）：索引名 → 切换 K 线右侧筹码窗口的公式
@@ -595,6 +596,7 @@ namespace StockPool
                     _stockHint.Text = "筹码模型已切换为：" + (StockChipNameOf(chipId) ?? chipId)
                                     + "（输入 6 位代码则打开个股）";
                     if (_stockCurrent != null) StockLoadChip(_stockCurrent);
+                    StockPersistSelection();
                     return;
                 }
                 _stockHint.Text = "股票代码须是 6 位数字（如 600519）；或输入已注册指标名以切换主图 / 副图指标";
@@ -731,6 +733,16 @@ namespace StockPool
                 if (o.Name.IndexOf(typed, StringComparison.OrdinalIgnoreCase) >= 0)
                 { isMain = true; return o.Id; }
             return null;
+        }
+
+        /// <summary>把当前的指标 / 筹码选择写入 settings（复用 Launcher 的 _cfg* 字段 + SaveSettingsQuiet，
+        /// 与 theme/scope 走同一条持久化链路，避免「只存不读」导致重启后不生效）。</summary>
+        private void StockPersistSelection()
+        {
+            _cfgChipFormula = _stockChipFormulaId;
+            _cfgMainIndicator = _stockMainIndicator;
+            _cfgSubIndicator = _stockSubIndicator;
+            SaveSettingsQuiet();
         }
 
         /// <summary>输入 → 筹码公式 id（独立于指标通道）。匹配顺序同指标：先精确（索引名 / 名称 / 公式 id），
@@ -1387,7 +1399,7 @@ namespace StockPool
                     // 画面形状画成**三角形分布**：每个分箱取其占比换算的宽度与中心价，
                     // 相邻分箱的顶点**直线相连**成峰形轮廓（不再是一格格的方块阶梯）。
                     // 占比为 0 的分箱也参与连线（宽度 0），这样峰与峰之间的谷能真正归零。
-                    // 蓝/红/灰模型（chip_brg）：有 red 帧则以「蓝底 + 灰折旧段 + 红外沿叠层」渲染
+                    // 蓝/红/灰模型（ema_lock：蓝=TRI、灰=蓝×R、红=强换手叠加）：有 red 帧则以「蓝底 + 灰折旧段 + 红外沿叠层」渲染
                     bool brgMode = (_redFrames != null && _grayFrames != null
                                     && _frame >= 0 && _frame < _redFrames.Count);
                     // EMA 锁仓模型分支：有 gray 帧则画「红底 + 灰叠层」，否则走原盈亏两色逻辑
@@ -1395,14 +1407,12 @@ namespace StockPool
                     double[] gray = (brgMode || emaMode) ? _grayFrames[_frame] : null;
                     double[] red = brgMode ? _redFrames[_frame] : null;
 
-                    // 横轴满宽基准：brgMode（蓝+灰+红）优先用「灰峰」，让灰按真实占比铺满、
-                    // 蓝退为细线（满足「灰占全部筹码 90%+ 时视觉也铺满，蓝留一条细线」）；
-                    // 其余模式沿用 pct 峰值。
+                    // 横轴满宽基准：一律用 pct（蓝底）峰值。
+                    // ⚠️ 不能改用灰峰：灰 = 蓝 × gray_ratio（默认 0.5）恒为蓝的子集，
+                    // 用灰峰做分母会把蓝放大到约 2× 并被截断，视觉上灰就「反超」蓝，
+                    // 与指标定义（灰 ≤ 蓝）相悖。
                     double maxPct = 0;
-                    if (brgMode && gray != null)
-                        for (int i = 0; i < gray.Length; i++) if (gray[i] > maxPct) maxPct = gray[i];
-                    if (maxPct <= 0)
-                        for (int i = 0; i < pct.Length; i++) if (pct[i] > maxPct) maxPct = pct[i];
+                    for (int i = 0; i < pct.Length; i++) if (pct[i] > maxPct) maxPct = pct[i];
                     if (maxPct <= 0) maxPct = 1;
 
                     if (brgMode)
@@ -1426,7 +1436,7 @@ namespace StockPool
                             if (yc < top) yc = top; if (yc > bottom) yc = bottom;
                             idxs.Add(i); baseWs.Add(w); ys.Add(yc);
                             int gw = (int)Math.Round((i < gray.Length ? gray[i] : 0) / maxPct * plotW);
-                            if (gw < 0) gw = 0; if (gw > plotW) gw = plotW;   // 不限制 ≤ 蓝宽，灰按真实占比铺满
+                            if (gw < 0) gw = 0; if (gw > w) gw = w;   // 灰是蓝的沉淀子集，绝不宽于蓝
                             grayWs.Add(gw);
                             int rw = (int)Math.Round((i < red.Length ? red[i] : 0) / maxPct * plotW);
                             if (rw < 0) rw = 0; if (rw > plotW) rw = plotW;
@@ -1629,6 +1639,7 @@ namespace StockPool
             private int _dragStartOffset = 0;
             private readonly ToolTip _tip = new ToolTip();
             private int _hoverIndex = -1;
+            private int _hoverY = -1;          // 鼠标 Y（悬停水平十字线 + 左轴价格标签用）
             private int _wstart;                          // 当前可见窗口的全局起始索引（图例取光标数值用）
             public string Period = "day";                      // K 线周期（图例显示 日K / 周K / 月K）
             public Action<int> OnRangeChanged;                 // 缩放改变范围时通知外部刷新高亮
@@ -1805,6 +1816,7 @@ namespace StockPool
                     int deltaBars = (int)Math.Round(dx * (double)n / plotW);   // 右拖露出更早期数据
                     _offset = Math.Max(0, Math.Min(_dragStartOffset + deltaBars, total - n));
                     _hoverIndex = -1;
+                    _hoverY = -1;
                     _tip.Hide(this);
                     Invalidate();
                     if (OnViewChanged != null) OnViewChanged();   // 拖动平移：让筹码按新窗口重算（前端防抖）
@@ -1816,6 +1828,7 @@ namespace StockPool
                 if (idx < 0) idx = 0;
                 if (idx >= n) idx = n - 1;
                 _hoverIndex = idx;
+                _hoverY = e.Y;
                 Invalidate();
                 PublishHoverDate();
                 ShowHoverTip(e.X, e.Y);
@@ -1842,7 +1855,8 @@ namespace StockPool
                 else if (e.KeyCode == Keys.Right) { MoveCursor(1); e.Handled = true; e.SuppressKeyPress = true; }
             }
 
-            /// <summary>缩放：step&lt;0 放大（更少根），step&gt;0 缩小（更多根）。滚轮与 ↑↓ 共用。</summary>
+            /// <summary>缩放：step&lt;0 放大（更少根），step&gt;0 缩小（更多根）。滚轮与 ↑↓ 共用。
+            /// 以光标处 K 线为锚点缩放，避免「窗口总往最新端缩、看不到光标附近」。</summary>
             private void Zoom(int step)
             {
                 int total = _bars.Count;
@@ -1851,14 +1865,25 @@ namespace StockPool
                 // 缩放会改变每根 K 线的屏幕位置，不关的话浮窗就冻结在旧位置、显示旧数据，
                 // 在深色主题下就是一块醒目的白色小方块（用户报的「白块」症状之一）。
                 _tip.Hide(this);
+                int nOld = VisibleCount();
+                // 锚定全局索引：优先光标处，未悬停时用窗口中心
+                int anchor = (_hoverIndex >= 0 ? _hoverIndex : nOld / 2);
+                int curGi = _wstart + anchor;
+                double frac = nOld > 0 ? (anchor + 0.5) / nOld : 0.5;
                 int cur = _range > 0 ? _range : total;
                 int next = Math.Max(20, Math.Min(total, cur + step));
                 _range = (next >= total) ? 0 : next;
-                _offset = Math.Max(0, Math.Min(_offset, total - VisibleCount()));
-                int n = VisibleCount();
-                if (_hoverIndex >= n) _hoverIndex = n - 1;      // 缩小后光标可能越界
+                int nNew = VisibleCount();
+                if (nNew > 0)
+                {
+                    // 让锚定 K 线缩放后仍落在屏幕同一相对位置（frac）
+                    int newWstart = (int)Math.Round(curGi - frac * nNew);
+                    _offset = Math.Max(0, Math.Min(total - nNew, total - nNew - newWstart));
+                }
+                if (_hoverIndex >= nNew) _hoverIndex = nNew - 1;      // 缩小后光标可能越界
                 Invalidate();
                 if (OnRangeChanged != null) OnRangeChanged(_range);
+                if (OnViewChanged != null) OnViewChanged();           // 缩放也改了可见窗口，让筹码重算
             }
 
             /// <summary>光标左右移动一根；走到可视区边缘时**自动平移窗口**（与行情软件一致）。</summary>
@@ -1881,6 +1906,7 @@ namespace StockPool
                     next = n - 1;
                 }
                 _hoverIndex = next;
+                _hoverY = -1;
                 Invalidate();
                 if (_offset != oldOffset && OnViewChanged != null) OnViewChanged();   // 平移了：让筹码按新窗口重算
                 PublishHoverDate();
@@ -1897,25 +1923,31 @@ namespace StockPool
                 if (OnHoverDate != null) OnHoverDate(_hoverDate);
             }
 
-            /// <summary>在光标处显示 OHLC 浮窗。键盘调用时没有鼠标坐标，改用光标对应的 x。</summary>
+            /// <summary>在光标处显示 OHLC 多行浮窗（含涨跌幅/振幅）。键盘调用时没有鼠标坐标，改用光标对应的 x。</summary>
             private void ShowHoverTip(int mouseX = -1, int mouseY = -1)
             {
                 var vis = VisibleBars();
                 int idx = _hoverIndex;
                 if (idx < 0 || idx >= vis.Count) { _tip.Hide(this); return; }
                 KBar b = vis[idx];
+                double chg = b.O != 0 ? (b.C - b.O) / b.O : 0;     // 当日涨跌幅（相对开盘）
+                double amp = b.O != 0 ? (b.H - b.L) / b.O : 0;     // 振幅（相对开盘）
                 var sb = new StringBuilder();
-                sb.Append(b.Date);
-                sb.Append("  开 ").Append(b.O.ToString("F2"));
-                sb.Append("  收 ").Append(b.C.ToString("F2"));
-                sb.Append("  高 ").Append(b.H.ToString("F2"));
-                sb.Append("  低 ").Append(b.L.ToString("F2"));
-                sb.Append("  量 ").Append(VolumeText(b.V));
+                sb.AppendLine(b.Date);
+                sb.AppendLine(string.Format("开 {0:F2}  收 {1:F2}  高 {2:F2}  低 {3:F2}",
+                    b.O, b.C, b.H, b.L));
+                sb.AppendLine("量 " + VolumeText(b.V));
+                sb.AppendLine(string.Format("涨跌 {0}{1:0.00%}   振幅 {2:0.00%}",
+                    chg >= 0 ? "+" : "", chg, amp));
                 int n = VisibleCount();
                 int plotW = Math.Max(20, Width - LeftPad - RightPad);
                 int x = mouseX >= 0 ? mouseX
                     : (int)(LeftPad + (double)plotW / Math.Max(1, n) * (idx + 0.5));
-                int y = mouseY >= 0 ? mouseY + 16 : 18;
+                int y = mouseY >= 0 ? mouseY + 18 : TopPad + 4;
+                // 防止浮窗超出右/下边界（深色主题下白块很扎眼，越界更糟）
+                int tipW = 220;
+                if (x + tipW > Width) x = Math.Max(LeftPad, Width - tipW);
+                if (y + 72 > Height) y = Math.Max(TopPad, Height - 72);
                 _tip.Show(sb.ToString(), this, x, y);
             }
 
@@ -1929,8 +1961,24 @@ namespace StockPool
             {
                 base.OnMouseLeave(e);
                 _hoverIndex = -1;
+                _hoverY = -1;
                 _tip.Hide(this);
                 Invalidate();
+            }
+
+            /// <summary>双击重置视图：回到默认近 1 年（250 根），清空光标/平移。</summary>
+            protected override void OnMouseDoubleClick(MouseEventArgs e)
+            {
+                base.OnMouseDoubleClick(e);
+                if (_bars.Count == 0) return;
+                _range = 250;
+                _offset = 0;
+                _hoverIndex = -1;
+                _hoverY = -1;
+                _tip.Hide(this);
+                Invalidate();
+                if (OnRangeChanged != null) OnRangeChanged(_range);
+                if (OnViewChanged != null) OnViewChanged();
             }
 
             private int VisibleCount()
@@ -1972,6 +2020,15 @@ namespace StockPool
             {
                 if (v >= 10000) return (v / 10000).ToString("F2") + "万";
                 return v.ToString("F0");
+            }
+
+            /// <summary>价格轴标签智能格式化：高价股少小数位，避免「1234.56」越界挤压绘图区。</summary>
+            private static string PriceText(double p)
+            {
+                double a = Math.Abs(p);
+                if (a >= 1000) return p.ToString("F0");
+                if (a >= 100) return p.ToString("F1");
+                return p.ToString("F2");
             }
 
             // ---- 主图标记图标（marker）：前端预设常用图标，后端只传【图标序号】 ----
@@ -2141,7 +2198,8 @@ namespace StockPool
                         double p = pmin + span * i / gridN;
                         int y = (int)yOf(p);
                         g.DrawLine(pen, LeftPad, y, LeftPad + plotW, y);
-                        g.DrawString(p.ToString("F2"), Font, b2, 2, y - 7);
+                        g.DrawString(PriceText(p), Font, b2,
+                            new RectangleF(2, y - 7, LeftPad - 4, Font.Height + 2), FmtRight);
                     }
                     g.DrawLine(pen, LeftPad, volBottom, LeftPad + plotW, volBottom);
                 }
@@ -2380,18 +2438,31 @@ namespace StockPool
                 }
                 // 主图标记（入池/出池/事件的菱形、三角标注）已按需求移除
 
-                // 悬停竖线
+                // 悬停竖线 + 水平十字线 + 左轴光标价格标签
                 if (_hoverIndex >= 0 && _hoverIndex < vis.Count)
                 {
                     int x = (int)xOf(_hoverIndex);
                     using (var pen = new Pen(C.Flat))
+                    {
                         g.DrawLine(pen, x, plotTop, x, bottomMost);
+                        if (_hoverY >= plotTop && _hoverY <= plotBottom)
+                        {
+                            g.DrawLine(pen, LeftPad, _hoverY, LeftPad + plotW, _hoverY);
+                            double price = pmin + (plotBottom - _hoverY) / (plotBottom - plotTop) * span;
+                            using (var bb = new SolidBrush(C.Flat))
+                                g.DrawString(PriceText(price), Font, bb,
+                                    new RectangleF(2, _hoverY - 7, LeftPad - 4, Font.Height + 2), FmtRight);
+                        }
+                    }
                 }
 
-                // 日期刻度
+                // 日期刻度（跨年时显示 YY-MM-DD，否则 MM-DD）
                 int labelN = Math.Min(8, vis.Count);
                 if (labelN > 0)
                 {
+                    bool crossYear = vis.Count > 1
+                        && vis[0].Date.Length >= 4 && vis[vis.Count - 1].Date.Length >= 4
+                        && vis[0].Date.Substring(0, 4) != vis[vis.Count - 1].Date.Substring(0, 4);
                     using (var b3 = new SolidBrush(text))
                     {
                         int step = labelN > 1 ? (vis.Count - 1) / (labelN - 1) : 0;
@@ -2399,7 +2470,8 @@ namespace StockPool
                         {
                             int idx = i < labelN - 1 ? i * step : vis.Count - 1;
                             string d = vis[idx].Date;
-                            if (d.Length >= 5) d = d.Substring(5);   // MM-DD
+                            if (crossYear) { if (d.Length >= 7) d = d.Substring(2); }   // YY-MM-DD
+                            else if (d.Length >= 5) d = d.Substring(5);                 // MM-DD
                             int x = (int)xOf(idx);
                             int labelW = step > 0 ? step : 1;   // 标签间距（根），避免矩形过窄被裁
                             g.DrawString(d, Font, b3, new RectangleF((float)(x - labelW * slot / 2), (float)(bottomMost + 2), (float)(labelW * slot), (float)BottomPad), FmtCenter);
