@@ -1322,6 +1322,7 @@ namespace StockPool
             string node = FindNode();
             bool auto = true, mini = true, stop = true, boot = false;
             string theme = "dark";
+            string scopeMask = null;
             try
             {
                 if (File.Exists(_settingsPath))
@@ -1339,6 +1340,7 @@ namespace StockPool
                         else if (k == "stoponexit") stop = v == "1";
                         else if (k == "runonboot") boot = v == "1";
                         else if (k == "theme") theme = (v == "light" ? "light" : "dark");
+                        else if (k == "scope_exclude") scopeMask = v;
                     }
                 }
             }
@@ -1349,6 +1351,11 @@ namespace StockPool
             if (_ckMinimize != null) _ckMinimize.Checked = mini;
             if (_ckStopOnExit != null) _ckStopOnExit.Checked = stop;
             if (_ckRunOnBoot != null) _ckRunOnBoot.Checked = boot;
+            if (!string.IsNullOrEmpty(scopeMask))
+            {
+                _stScopeMask = scopeMask;
+                if (_stExChiNext != null) StApplyScopeMask(scopeMask);   // 页面已建好则立即回填筛选
+            }
             _light = (theme == "light");
             ApplyTheme();
         }
@@ -1367,6 +1374,7 @@ namespace StockPool
                 sb.AppendLine("stoponexit=" + (_ckStopOnExit.Checked ? "1" : "0"));
                 sb.AppendLine("runonboot=" + (_ckRunOnBoot.Checked ? "1" : "0"));
                 sb.AppendLine("theme=" + (_light ? "light" : "dark"));
+                sb.AppendLine("scope_exclude=" + (_stScopeMask ?? ""));
                 File.WriteAllText(_settingsPath, sb.ToString(), Encoding.UTF8);
                 ApplyRunOnBoot(_ckRunOnBoot.Checked);
                 Msg("运行环境与行为已保存；Python / Node 路径在重启对应服务后生效。");
@@ -2464,6 +2472,7 @@ namespace StockPool
                 sb.AppendLine("stoponexit=" + (_ckStopOnExit.Checked ? "1" : "0"));
                 sb.AppendLine("runonboot=" + (_ckRunOnBoot.Checked ? "1" : "0"));
                 sb.AppendLine("theme=" + (_light ? "light" : "dark"));
+                sb.AppendLine("scope_exclude=" + (_stScopeMask ?? ""));
                 File.WriteAllText(_settingsPath, sb.ToString(), Encoding.UTF8);
             }
             catch { }

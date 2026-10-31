@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.IO;
+using System.Text;
 using System.Windows.Forms;
 using System.Web.Script.Serialization;
 
@@ -34,6 +36,9 @@ namespace StockPool
 
         // ② 回测范围：基池=全部本地已下载股票，勾选即「排除」该特征
         private CheckBox _stExChiNext, _stExStar, _stExBse, _stExSt, _stExStarSt, _stExIpo, _stExSubNew, _stExMicro;
+        // 股票池筛选记忆：8 位 mask（1=剔除），持久化到 settings.ini 的 scope_exclude
+        private string _stScopeMask = "";
+        private bool _stScopeLoading;
         private TextBox _stComm, _stBench;
         private Label _stScopeHint;
         private DateTimePicker _stStart, _stEnd;
@@ -72,8 +77,7 @@ namespace StockPool
         private StockGrid _stBuyGrid, _stSellGrid, _stHoldGrid;
 
         // ⑥ 历史结果（已保存回测报告的独立页签）
-        private ListBox _stHistList;
-        private List<string> _stHistFiles = new List<string>();
+        private ListView _stHistList;
         private Label _stHistStatus;
         private List<string> _stEqDates;
         private List<double?> _stEq;
@@ -414,7 +418,13 @@ private void StRefreshRecoTitle()
             _stExSt = ExChk("剔除ST"); _stExStarSt = ExChk("剔除*ST");
             _stExIpo = ExChk("剔除新股"); _stExSubNew = ExChk("剔除次新股"); _stExMicro = ExChk("剔除微盘股");
             foreach (var cb in new[] { _stExChiNext, _stExStar, _stExBse, _stExSt, _stExStarSt, _stExIpo, _stExSubNew, _stExMicro })
-                cb.CheckedChanged += delegate { StScopePreview(); };
+                cb.CheckedChanged += delegate
+                {
+                    if (_stScopeLoading) return;
+                    _stScopeMask = StScopeMask();
+                    StSaveScopePrefs();        // 记住本次筛选，下次启动默认沿用
+                    StScopePreview();
+                };
             exRow.Controls.AddRange(new Control[] { _stExChiNext, _stExStar, _stExBse, _stExSt, _stExStarSt, _stExIpo, _stExSubNew, _stExMicro });
             AddRow(b, Row(exRow));
             AddRow(stack, g1);
@@ -463,6 +473,80 @@ private void StRefreshRecoTitle()
             _stBenchChk.CheckedChanged += delegate { _stBench.Enabled = _stBenchChk.Checked; };
             AddRow(b, Row(_stBenchChk, _stBench, Mute(Lbl("留空则不对比；指数可能无本地数据）"))));
             AddRow(stack, g4);
+
+            StLoadScopePrefs();      // 恢复上次的股票池筛选
+        }
+
+        /// <summary>当前 8 个排除勾选拼成 mask（如 "10100010"）。</summary>
+        private string StScopeMask()
+        {
+            var cbs = new[] { _stExChiNext, _stExStar, _stExBse, _stExSt, _stExStarSt, _stExIpo, _stExSubNew, _stExMicro };
+            var sb = new StringBuilder();
+            foreach (var cb in cbs) sb.Append(cb != null && cb.Checked ? '1' : '0');
+            return sb.ToString();
+        }
+
+        /// <summary>把 mask 应用到 8 个勾选；不足的位按「不剔除」处理。</summary>
+        private void StApplyScopeMask(string mask)
+        {
+            string m = (mask ?? "").Trim();
+            var cbs = new[] { _stExChiNext, _stExStar, _stExBse, _stExSt, _stExStarSt, _stExIpo, _stExSubNew, _stExMicro };
+            _stScopeLoading = true;
+            try
+            {
+                for (int i = 0; i < cbs.Length; i++)
+                {
+                    bool on = i < m.Length && m[i] == '1';
+                    if (cbs[i] != null) cbs[i].Checked = on;
+                }
+            }
+            finally { _stScopeLoading = false; }
+        }
+
+        /// <summary>从 settings.ini 读 scope_exclude 并应用；不存在则保持默认（全部不剔除）。</summary>
+        private void StLoadScopePrefs()
+        {
+            string mask = null;
+            try
+            {
+                if (File.Exists(_settingsPath))
+                {
+                    foreach (var line in File.ReadAllLines(_settingsPath, Encoding.UTF8))
+                    {
+                        var kv = line.Split(new char[] { '=' }, 2);
+                        if (kv.Length == 2 && kv[0].Trim() == "scope_exclude" && kv[1].Trim().Length > 0)
+                        {
+                            mask = kv[1].Trim();
+                            break;
+                        }
+                    }
+                }
+            }
+            catch { }
+            if (!string.IsNullOrEmpty(mask)) StApplyScopeMask(mask);
+            _stScopeMask = StScopeMask();
+        }
+
+        /// <summary>把当前 mask 写回 settings.ini（只改 scope_exclude 一行，保留其它键）。</summary>
+        private void StSaveScopePrefs()
+        {
+            try
+            {
+                var lines = File.Exists(_settingsPath)
+                    ? new List<string>(File.ReadAllLines(_settingsPath, Encoding.UTF8))
+                    : new List<string>();
+                string want = "scope_exclude=" + (_stScopeMask ?? "");
+                int idx = lines.FindIndex(delegate(string l)
+                {
+                    var kv = l.Split(new char[] { '=' }, 2);
+                    return kv.Length == 2 && kv[0].Trim() == "scope_exclude";
+                });
+                if (idx >= 0) lines[idx] = want; else lines.Add(want);
+                var dir = Path.GetDirectoryName(_settingsPath);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllLines(_settingsPath, lines.ToArray(), Encoding.UTF8);
+            }
+            catch { }
         }
 
         // ---------------- ③ 回测结果 ----------------
@@ -593,9 +677,20 @@ private void StRefreshRecoTitle()
         private void StBuildHistory(TableLayoutPanel stack)
         {
             AddRow(stack, Mute(Lbl("已保存的回测报告（每次回测自动落盘）。选中一份后点「加载所选」，按回测结果的样式展示指标卡 / 净值曲线 / 个股明细。")));
-            _stHistList = new ListBox();
+            _stHistList = new ListView();
+            _stHistList.View = View.Details;
+            _stHistList.FullRowSelect = true;
+            _stHistList.GridLines = true;
+            _stHistList.HideSelection = false;
+            _stHistList.MultiSelect = false;
             _stHistList.Font = new Font("Microsoft YaHei UI", 9f);
             _stHistList.Height = 320;
+            _stHistList.Width = 880;              // 不设宽度会被表格布局压成第一列宽
+            _stHistList.Columns.Add("生成时间", 160);
+            _stHistList.Columns.Add("策略", 300);
+            _stHistList.Columns.Add("区间", 220);
+            _stHistList.Columns.Add("收益", 100);
+            _stHistList.DoubleClick += delegate { StHistLoad(); };
             TableLayoutPanel bg;
             var g = Group("历史报告", out bg);
             AddRow(bg, _stHistList);
@@ -604,6 +699,7 @@ private void StRefreshRecoTitle()
             AddRow(stack, Row(
                 MiniBtn("刷新列表", delegate { StHistRefresh(); }, 90),
                 MiniBtn("加载所选", delegate { StHistLoad(); }, 90),
+                MiniBtn("删除所选", delegate { StHistDelete(); }, 90),
                 _stHistStatus));
             StHistRefresh();
         }
@@ -1821,7 +1917,6 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
                 {
                     if (_stHistList == null) return;
                     _stHistList.Items.Clear();
-                    _stHistFiles.Clear();
                     var list = (j != null && j.ContainsKey("reports"))
                         ? j["reports"] as System.Collections.IList : null;
                     if (list == null || list.Count == 0)
@@ -1835,15 +1930,14 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
                         if (d == null) continue;
                         string f = J.StrOr(J.Get(d, "file"), "");
                         if (f.Length == 0) continue;
-                        _stHistFiles.Add(f);
-                        _stHistList.Items.Add(string.Format("{0}  |  {1}  |  {2} ~ {3}  |  收益 {4}",
-                            J.StrOr(J.Get(d, "generated_at"), ""),
-                            J.StrOr(J.Get(d, "strategy_name"), ""),
-                            J.StrOr(J.Get(d, "start"), ""),
-                            J.StrOr(J.Get(d, "end"), ""),
-                            J.Pct100Plain(J.Num(J.Get(d, "total_return")))));
+                        var lvi = new ListViewItem(J.StrOr(J.Get(d, "generated_at"), ""));
+                        lvi.SubItems.Add(J.StrOr(J.Get(d, "strategy_name"), ""));
+                        lvi.SubItems.Add(J.StrOr(J.Get(d, "start"), "") + " ~ " + J.StrOr(J.Get(d, "end"), ""));
+                        lvi.SubItems.Add(J.Pct100Plain(J.Num(J.Get(d, "total_return"))));
+                        lvi.Tag = f;                    // 文件名随行携带，加载/删除都靠它
+                        _stHistList.Items.Add(lvi);
                     }
-                    SetErr(_stHistStatus, "共 " + _stHistFiles.Count + " 份");
+                    SetErr(_stHistStatus, "共 " + _stHistList.Items.Count + " 份");
                 },
                 delegate(Exception ex) { SetErr(_stHistStatus, "加载失败：" + ex.Message); },
                 null);
@@ -1852,14 +1946,49 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
         /// <summary>历史结果页：加载选中的报告，切到「回测结果」页按同样样式渲染。</summary>
         private void StHistLoad()
         {
-            if (_stHistList == null || _stHistList.SelectedIndex < 0)
+            if (_stHistList == null || _stHistList.SelectedItems.Count == 0)
             {
                 SetErr(_stHistStatus, "先选一份报告");
                 return;
             }
-            string file = _stHistFiles[_stHistList.SelectedIndex];
+            string file = _stHistList.SelectedItems[0].Tag as string;
+            if (string.IsNullOrEmpty(file)) { SetErr(_stHistStatus, "先选一份报告"); return; }
             StLoadHistory(file);          // 复用回测结果渲染逻辑
             _stStrip.Select(2);           // 切到「回测结果」页展示
+        }
+
+        /// <summary>历史结果页：删除选中的报告（后端删文件 + 索引行）。</summary>
+        private void StHistDelete()
+        {
+            if (_stHistList == null || _stHistList.SelectedItems.Count == 0)
+            {
+                SetErr(_stHistStatus, "先选一份报告");
+                return;
+            }
+            string file = _stHistList.SelectedItems[0].Tag as string;
+            if (string.IsNullOrEmpty(file)) { SetErr(_stHistStatus, "先选一份报告"); return; }
+            if (MessageBox.Show(this, "确定删除这份历史报告？\n" + file, "删除确认",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            SetErr(_stHistStatus, "正在删除…");
+            RunUi<Dictionary<string, object>>(
+                delegate
+                {
+                    string resp = VRequest(
+                        "http://127.0.0.1:8000/api/strategies/backtest/reports/"
+                        + System.Uri.EscapeDataString(file), null, 15000, "DELETE");
+                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                },
+                delegate(Dictionary<string, object> j)
+                {
+                    if (j == null || J.IsFailed(j))
+                    {
+                        SetErr(_stHistStatus, "删除失败：" + J.ErrMsg(j));
+                        return;
+                    }
+                    StHistRefresh();          // 重新拉列表，让删除即时可见
+                },
+                delegate(Exception ex) { SetErr(_stHistStatus, "删除失败：" + ex.Message); },
+                null);
         }
 
         // ---------------- 个股明细展开 ----------------

@@ -312,3 +312,38 @@ def load_report(name: str) -> dict:
         return data
     except Exception as exc:               # noqa: BLE001 - 读失败不拖垮接口
         return {"ok": False, "error": str(exc)}
+
+
+def delete_report(name: str) -> dict:
+    """删除一份已保存报告，并同步把它的摘要行从 index.json 移除。
+
+    文件与索引必须一起处理：只删文件会在索引里留下指向不存在文件的幽灵行；
+    只删索引文件还在，磁盘不会释放。索引清理失败不回滚（文件已删是既定事实）。
+    """
+    try:
+        raw = str(name or "").strip()
+        if not raw or raw != os.path.basename(raw) or not raw.lower().endswith(".json"):
+            return {"ok": False, "error": "非法报告文件名"}
+        path = config.REPORTS_DIR / raw
+        if not path.is_file():
+            return {"ok": False, "error": "报告不存在"}
+        path.unlink()
+        index_path = config.REPORTS_DIR / INDEX_NAME
+        if index_path.exists():
+            try:
+                data = json.loads(index_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and isinstance(data.get("reports"), list):
+                    data["reports"] = [
+                        r for r in data["reports"]
+                        if not (isinstance(r, dict) and r.get("file") == raw)
+                    ]
+                    data["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    tmp = index_path.with_suffix(".json.tmp")
+                    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                                   encoding="utf-8")
+                    os.replace(str(tmp), str(index_path))
+            except Exception:            # noqa: BLE001 - 索引清理失败不影响文件已删
+                logger.warning("删除报告后清理索引失败：%s", raw)
+        return {"ok": True, "file": raw}
+    except Exception as exc:               # noqa: BLE001
+        return {"ok": False, "error": str(exc)}

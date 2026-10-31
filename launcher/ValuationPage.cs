@@ -533,15 +533,15 @@ bool ok = J.IsOk(j);
             _vNote.Visible = true;
         }
 
-        /// <summary>向本机后端发请求：body=null 为 GET，否则 POST(JSON)。返回响应体；HTTP 4xx/5xx 时返回错误体便于显示。</summary>
-        private static string VRequest(string url, string body, int timeoutMs = 90000)
+        /// <summary>向本机后端发请求：body=null 为 GET，否则 POST(JSON)；method 可显式指定（如 DELETE）。返回响应体；HTTP 4xx/5xx 时返回错误体便于显示。</summary>
+        private static string VRequest(string url, string body, int timeoutMs = 90000, string method = null)
         {
             var req = (HttpWebRequest)WebRequest.Create(url);
             req.Proxy = null;                 // 本机直连，绕开系统代理 / 自动发现
             req.KeepAlive = false;
             req.Timeout = timeoutMs;
             req.ReadWriteTimeout = timeoutMs;
-            req.Method = (body == null) ? "GET" : "POST";
+            req.Method = method ?? ((body == null) ? "GET" : "POST");
             if (body != null)
             {
                 req.ServicePoint.Expect100Continue = false;
