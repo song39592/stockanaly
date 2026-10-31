@@ -1,29 +1,22 @@
 # -*- coding: utf-8 -*-
-"""筹码峰公式 · 方案③：EMA 换手峰 + 锁仓染色模型。
+"""筹码峰公式 · EMA换手峰 + 锁仓染色模型（用户定义，与 tri_decay 同一衰减引擎）。
 
-设计文档（用户给定）：chip-ema-lock-model.md。核心思想与 tri_decay（三角形分布 + 乘法衰减）不同——
-这里用 **EMA 时间权重**做衰减，并把筹码分成两态：
+三层口径（用户给定）：
+  · 蓝（base）：完全等同 tri_decay —— 存量筹码按「换手率 × 衰减系数 × 锁仓系数」衰减，
+                当日成交按三角形分布（峰值=均价 vwap）铺到 [low, high] 后注入。
+                即「蓝色 = TRI 的筹码峰」，外形与 tri_decay 完全一致。
+  · 灰（gray）：锁仓沉积。当日换手 ≤ M_low×B 的档位标记为沉淀态，该档位蓝的 R（默认 0.5）
+                染成灰（灰 = 蓝 × R，幂等不累积，恒 ≤ 蓝的一半）；
+                强换手（> M_high×B）冲刷解除沉淀。灰随蓝同一衰减系数同步衰减。
+  · 红（red）：强换手叠加。当日换手 > M_high×B 时，把「超出自然换手的额外部分」(k−kB)
+                按当日三角分布注入为红；红同样按同一衰减系数衰减（与蓝同节奏）。
 
-  · 红（强换手分布）：仅「换手率 > M_high×B」的交易日，把 (turnover−B) 按三角分布铺到当日
-    [low, high]（峰值=当日均价 vwap），再按 EMA 递归堆积；衰减完全由 EMA 的 (1−α) 提供。
-  · 灰（锁仓分布）：仅「换手率 ≤ M_low×B」的交易日，从当前红色中按比例 R 「染灰」
-    （红→灰的状态转换，不是注入新量），且灰不超过红。
-
-**B 与 EMA 记忆长度都随票自适应**（不像 tri_decay 用固定衰减系数）：
-  · N[t] = 100% 换手周期，由换手率序列「前缀和 + bisect」反推；B[t] = 1 / N[t]；
-  · span[t] = N[t] × k（用换手周期归一化，使不同票记忆长度含义一致），α[t] = 2 / (span[t]+1)。
-
-**EMA 递推的两种读法**（见文档 §4 与 §2 的张力），本实现采用更稳健的一种：
-  每一天都执行 `chips_red = α×injected + (1−α)×chips_red`——
-    - 活跃日：injected = (turnover−B) × 当日分箱权重（>0，堆积新筹码）；
-    - 滤除日 / 锁仓日：injected = 0，只剩 (1−α) 衰减（分布随时间自然遗忘，不会在静默期冻结）。
-  锁仓日再额外做红→灰染灰。若想要「静默期完全冻结、不衰减」的严格读法，把主循环里
-  非活跃日的 EMA 步进去掉即可（保留注释版）。
+  B[t] = 1 / N[t]，N[t] 为「100% 换手周期」（由换手率前缀和反推，同 tri_decay 口径）。
 
 输出：
-  · `ema_lock(ctx, **params)` —— @chip_formula 注册，返回**红**单矩阵（供现有筹码窗口，
-    经 core 按行归一化到 100）；
-  · `compute_ema_lock(ctx, **params)` —— 结构化结果（红/灰已按行归一化到 100、锁仓浓度），
+  · `ema_lock(ctx, **params)` —— @chip_formula 注册，返回 (蓝底, {"red": 红, "gray": 灰})；
+    蓝底经 core 按行归一化到 100；红/灰与蓝底同尺度归一化后经独立通道进入 frames。
+  · `compute_ema_lock(ctx, **params)` —— 结构化结果（蓝/红/灰已同尺度归一化到 100、锁仓浓度），
     供指标侧走 dist 双分布（共用价格轴的热力图）使用。
 """
 from __future__ import annotations
@@ -80,31 +73,29 @@ def _turnover_to_n(turnover: np.ndarray) -> np.ndarray:
     return N
 
 
-def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float) -> EmaLockResult:
-    """三态主计算（蓝底 / 红叠层 / 灰折旧），红蓝均用 EMA 衰减（正常的 K 控制）。
+def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float,
+             decay: float = 1.0) -> EmaLockResult:
+    """三态主计算（蓝底 / 红叠层 / 灰折旧），三层共用 tri_decay 的衰减引擎。
 
-    蓝（blue）  ：每日**全量**换手按三角分布（TRI）铺到 [low, high]，EMA 递归堆积
-                 `chips = a×(换手×w) + (1−a)×chips`（a 由平均换手周期 N 与 k 决定，固定）。
-    红（red）   ：仅「换手率 > M_high×B」的强换手日注入当日 `换手×w`，同样 EMA 衰减，
-                 是蓝底中来自强换手日的子集（天然 ≤ 蓝底），叠在蓝上染红。
-    灰（gray）  ：「换手率 ≤ M_low×B」的锁仓日把**当前蓝底**的 R（默认 0.5）抽离为灰（蓝→灰，可累积）；
-                 第一次锁仓灰=0.5×蓝（蓝剩半），短时间再锁仓灰 += 0.5×剩余蓝 → 累计 0.75。
-                 灰随与蓝相同的 EMA 衰减；即「锁仓把已沉淀的蓝色逐步换成灰色」。
+    蓝（blue）  ：等同 tri_decay —— 存量按 k_t = 换手×decay×锁仓系数 衰减，当日成交按三角分布注入。
+    红（red）   ：强换手日（to > M_high×B）把超出自然换手的额外量 (k−kB) 注入，同 k_t 衰减。
+    灰（gray）  ：锁仓档位（to ≤ M_low×B 覆盖）把蓝的 R 染灰（幂等，灰 = 蓝×R，恒 ≤ 蓝的一半）；
+                 强换手冲刷解除沉淀。灰随蓝同衰减（由蓝派生，蓝衰减则灰同衰减）。
+    k 参数为历史 EMA 记忆长度，现已不参与计算（保留以兼容旧参数）。
     """
     n = ctx.days
     bins = ctx.bins
     turnover = np.asarray(ctx.turnover, dtype=float)
     edges = np.asarray(ctx.edges, dtype=float)
     p_lo, p_hi = float(ctx.p_lo), float(ctx.p_hi)
+    lockup = float(getattr(ctx, "lockup_factor", 1.0) or 1.0)   # 1/(1-r)，与 tri_decay 一致
 
     N = _turnover_to_n(turnover)
     B = 1.0 / N                                   # 自然换手率（逐日）
-    Nm = N[np.isfinite(N) & (N > 0)]
-    a = 2.0 / (float(np.mean(Nm)) * k + 1.0) if Nm.size else 0.1   # 固定 EMA 系数（正常的 K 控制衰减）
 
-    chips_blue = np.zeros(bins, dtype=float)       # 蓝底：全量 EMA 堆积
-    chips_red = np.zeros(bins, dtype=float)        # 红叠层：强换手 EMA 堆积
-    chips_gray = np.zeros(bins, dtype=float)        # 灰：被锁仓从蓝抽离的累积量（EMA 衰减）
+    chips_blue = np.zeros(bins, dtype=float)       # 蓝底：TRI 衰减堆积
+    chips_red = np.zeros(bins, dtype=float)        # 红叠层：强换手叠加（同衰减）
+    gray_mask = np.zeros(bins, dtype=float)        # 1 = 该档当前沉淀态；0 = 已解除
     blue_rel = np.zeros((n, bins), dtype=float)
     red_rel = np.zeros((n, bins), dtype=float)
     gray_rel = np.zeros((n, bins), dtype=float)
@@ -128,32 +119,36 @@ def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float) 
             peak = min(max(peak, dlo), dhi)        # 均价必须落在当日区间内
             w = np.diff(triangle_cdf(edges, dlo, dhi, peak))   # Σ=1
 
-        # ① 蓝底：全量 EMA 堆积（正常的 K 衰减；a 固定，强换手日 to 大 → 注入大）
-        chips_blue = a * (to * w) + (1.0 - a) * chips_blue
+        k_t = min(1.0, max(0.0, to * decay * lockup))      # 当日被换手比例（同 tri_decay）
+        kB = min(1.0, max(0.0, Bt * decay * lockup))       # 自然换手对应的比例
 
-        # ② 红叠层：同 EMA 衰减；仅强换手日注入 to×w（强换手日 to 大 → 红色明显且不超蓝）
-        chips_red = (1.0 - a) * chips_red
+        # ① 蓝底：衰减 + 三角注入（与 tri_decay 完全一致）
+        if k_t > 0:
+            chips_blue *= (1.0 - k_t)
+            chips_blue += k_t * w
+
+        # ② 红叠层：与蓝同衰减；强换手日注入「超出自然换手的额外部分」
+        chips_red *= (1.0 - k_t)
         if to > M_high * Bt:
-            chips_red += a * (to * w)
+            extra = max(0.0, k_t - kB)
+            if extra > 0:
+                chips_red += extra * w
 
-        # ③ 灰折旧：锁仓日把「当前蓝底」的 R（默认 0.5）抽离为灰（蓝→灰，**可累积**）；
-        #    第一次锁仓：灰 = 0.5×蓝（蓝剩半）；短时间再锁仓：灰 += 0.5×剩余蓝 → 累计 0.75。
-        #    灰与蓝、红使用同一个 EMA 系数 a 衰减（正常的 K），未用 tri_decay 或其它衰减。
+        # ③ 灰折旧（幂等）：锁仓档位把蓝的 R 染灰，强换手冲刷解除沉淀
         if to <= M_low * Bt:
-            transfer = chips_blue * R
-            chips_blue = chips_blue - transfer
-            chips_gray = (1.0 - a) * chips_gray + transfer
+            gray_mask[w > 1e-12] = 1.0
+        elif to > M_high * Bt:
+            gray_mask[w > 1e-12] = 0.0
+        chips_gray = gray_mask * R * chips_blue
 
         blue_rel[t] = chips_blue
         red_rel[t] = chips_red
         gray_rel[t] = chips_gray
 
     # 蓝 / 红 / 灰 **同一尺度**归一化（都用蓝底的 rowsum）：
-    # 红、灰是叠在蓝底之上的层，宽度须不超过蓝（同档位），才能在蓝底上正确染色。
-    # 若各自归一化到行和 100，红会被放大到与蓝同宽、把蓝底整片盖住（显示不对的根因）。
-    # 归一化分母用「蓝+灰」（=原始蓝总量，抽走灰之前的量），保证灰可累积且总量恒定；
-    # 红 ⊂ 蓝，用同一分母后 red_norm ≤ 100。
-    base_sum = (blue_rel + gray_rel).sum(axis=1)
+    # 红、灰都是蓝底的子集（灰 = 蓝×R、红 ⊂ 蓝），同分母后 red_norm / gray_norm 都不会超过蓝，
+    # 在蓝底上染色才正确。蓝底本身归一化后即 TRI 标准筹码峰（外形与 tri_decay 一致）。
+    base_sum = blue_rel.sum(axis=1)
     safe = np.where(base_sum > 0, base_sum, 1.0)
     blue_norm = blue_rel / safe[:, None] * 100.0
     red_norm = red_rel / safe[:, None] * 100.0
@@ -175,35 +170,33 @@ def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float) 
     name="EMA换手峰·锁仓染色",
     index="EMLK",
     category="chip",
-    description="三态筹码峰：蓝底=全量换手 TRI 分布（EMA 衰减，正常 K 控制），"
-                "红叠层=强换手日(to>M_high×B)的当日筹码，灰=锁仓日(to≤M_low×B)把蓝底按 R 染灰。",
+    description="蓝=TRI(三角形分布+换手率衰减)标准筹码峰；低换手(≤M_low×B)把当前蓝的R染灰(锁仓)，"
+                "强换手(>M_high×B)把超出自然换手的额外量染红；灰/红与蓝共用同一衰减系数。",
     params=[
-        # 默认 M_low=0.7（非方案③文档 §9 写的 1.0）：实测 M_low=1.0 时锁仓日占比高达 ~66%，
-        # 远超文档 §10 自估的 25~40%；M_low=0.7 实测 ~35%，正好命中 §10 目标。B=1/N 为换手率均值，
-        # 换手率右偏，turnover ≤ M_low×B 覆盖日数随 M_low 下降而减少。
         ParamSpec("M_low", "float", 0.7, min=0.1, max=3.0, label="锁仓倍量阈值"),
         ParamSpec("M_high", "float", 2.0, min=0.5, max=5.0, label="强换手倍量阈值"),
         ParamSpec("R", "float", 0.5, min=0.05, max=1.0, label="每次染灰比例"),
-        ParamSpec("k", "float", 0.5, min=0.1, max=2.0, label="EMA记忆(k=N×k)"),
+        ParamSpec("decay", "float", 1.0, min=0.0, max=5.0, label="衰减系数(同TRI)"),
+        ParamSpec("k", "float", 0.5, min=0.1, max=2.0, label="EMA记忆(已弃用,保留兼容)"),
     ],
 )
 def ema_lock(ctx: ChipContext, M_low: float = 0.7, M_high: float = 2.0,
-             R: float = 0.5, k: float = 0.5):
+             R: float = 0.5, k: float = 0.5, decay: float = 1.0):
     """@chip_formula 入口：返回 **(蓝底, {"red": 红叠层, "gray": 灰折旧})** 元组。
 
-    蓝底 = 全量 TRI 分布（按行归一化到 100）；红/灰与蓝底同尺度归一化，经 core 的
-    red / gray 通道进入响应 frames，前端以 brgMode 渲染「蓝底 + 红叠层 + 灰折旧」三层。
+    蓝底 = TRI 分布（与 tri_decay 完全一致，按行归一化到 100）；红/灰与蓝底同尺度归一化，
+    经 core 的 red / gray 通道进入响应 frames，前端以 brgMode 渲染「蓝底 + 红叠层 + 灰折旧」三层。
     """
-    res = _compute(ctx, M_low, M_high, R, k)
+    res = _compute(ctx, M_low, M_high, R, k, decay=decay)
     # display = 蓝底（纯蓝，不含红/灰叠层），按行归一到 100；
     # red / gray 经独立通道输出，前端以 brgMode 渲染「蓝底 + 红叠层 + 灰折旧」。
     return (res.blue, {"red": res.red, "gray": res.gray})
 
 
 def compute_ema_lock(ctx: ChipContext, M_low: float = 0.7, M_high: float = 2.0,
-                     R: float = 0.5, k: float = 0.5) -> EmaLockResult:
+                     R: float = 0.5, k: float = 0.5, decay: float = 1.0) -> EmaLockResult:
     """结构化入口（已归一化）：供指标侧 dist 双分布 / 热力图使用。"""
-    return _compute(ctx, M_low, M_high, R, k)
+    return _compute(ctx, M_low, M_high, R, k, decay=decay)
 
 
 def compute_ema_lock_frames(code: str, params: dict | None = None,
@@ -228,4 +221,5 @@ def compute_ema_lock_frames(code: str, params: dict | None = None,
     M_high = float(params.get("M_high", 2.0))
     R = float(params.get("R", 0.5))
     k = float(params.get("k", 0.5))
-    return compute_ema_lock(ctx, M_low, M_high, R, k)
+    decay = float(params.get("decay", 1.0))
+    return compute_ema_lock(ctx, M_low, M_high, R, k, decay=decay)

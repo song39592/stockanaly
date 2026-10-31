@@ -1387,7 +1387,7 @@ namespace StockPool
                     // 画面形状画成**三角形分布**：每个分箱取其占比换算的宽度与中心价，
                     // 相邻分箱的顶点**直线相连**成峰形轮廓（不再是一格格的方块阶梯）。
                     // 占比为 0 的分箱也参与连线（宽度 0），这样峰与峰之间的谷能真正归零。
-                    // 蓝/红/灰模型（chip_brg）：有 red 帧则以「蓝底 + 灰折旧段 + 红外沿叠层」渲染
+                    // 蓝/红/灰模型（ema_lock：蓝=TRI、灰=蓝×R、红=强换手叠加）：有 red 帧则以「蓝底 + 灰折旧段 + 红外沿叠层」渲染
                     bool brgMode = (_redFrames != null && _grayFrames != null
                                     && _frame >= 0 && _frame < _redFrames.Count);
                     // EMA 锁仓模型分支：有 gray 帧则画「红底 + 灰叠层」，否则走原盈亏两色逻辑
@@ -1395,14 +1395,12 @@ namespace StockPool
                     double[] gray = (brgMode || emaMode) ? _grayFrames[_frame] : null;
                     double[] red = brgMode ? _redFrames[_frame] : null;
 
-                    // 横轴满宽基准：brgMode（蓝+灰+红）优先用「灰峰」，让灰按真实占比铺满、
-                    // 蓝退为细线（满足「灰占全部筹码 90%+ 时视觉也铺满，蓝留一条细线」）；
-                    // 其余模式沿用 pct 峰值。
+                    // 横轴满宽基准：一律用 pct（蓝底）峰值。
+                    // ⚠️ 不能改用灰峰：灰 = 蓝 × gray_ratio（默认 0.5）恒为蓝的子集，
+                    // 用灰峰做分母会把蓝放大到约 2× 并被截断，视觉上灰就「反超」蓝，
+                    // 与指标定义（灰 ≤ 蓝）相悖。
                     double maxPct = 0;
-                    if (brgMode && gray != null)
-                        for (int i = 0; i < gray.Length; i++) if (gray[i] > maxPct) maxPct = gray[i];
-                    if (maxPct <= 0)
-                        for (int i = 0; i < pct.Length; i++) if (pct[i] > maxPct) maxPct = pct[i];
+                    for (int i = 0; i < pct.Length; i++) if (pct[i] > maxPct) maxPct = pct[i];
                     if (maxPct <= 0) maxPct = 1;
 
                     if (brgMode)
@@ -1426,7 +1424,7 @@ namespace StockPool
                             if (yc < top) yc = top; if (yc > bottom) yc = bottom;
                             idxs.Add(i); baseWs.Add(w); ys.Add(yc);
                             int gw = (int)Math.Round((i < gray.Length ? gray[i] : 0) / maxPct * plotW);
-                            if (gw < 0) gw = 0; if (gw > plotW) gw = plotW;   // 不限制 ≤ 蓝宽，灰按真实占比铺满
+                            if (gw < 0) gw = 0; if (gw > w) gw = w;   // 灰是蓝的沉淀子集，绝不宽于蓝
                             grayWs.Add(gw);
                             int rw = (int)Math.Round((i < red.Length ? red[i] : 0) / maxPct * plotW);
                             if (rw < 0) rw = 0; if (rw > plotW) rw = plotW;

@@ -439,7 +439,7 @@ bool ok = J.IsOk(j);
                     }
                 }
 
-                // 红叠层通道（chip_brg）：与 gray 同尺度，前端在其上叠红。
+                // 红叠层通道（ema_lock 三态渲染）：与 gray 同尺度，前端在其上叠红。
                 var rArr = J.Arr(J.Get(frObj, "red"));
                 if (rArr != null)
                 {
