@@ -156,16 +156,23 @@ def do_backtest_start(req: BacktestRequest):
     同一时间只允许一个任务（两个全市场并行会互相拖慢）。小股票池仍可用同步
     的 `/backtest`，更快。
     """
-    codes = _resolve_codes(req)
-    if not codes:
-        raise ValueError("股票池为空，请先选择回测范围")
+    # ⚠️ 不在请求线程里解析股票池：全市场冷缓存要扫几千只，可能 >30s，
+    # 前端 `/backtest/start` 会先超时报「无法启动：操作超时」（用户实际遇到的就是这个）。
+    # 把解析放进后台线程（codes_resolver），启动接口立即返回、前端马上开始轮询。
+    def _resolve_codes_lazy():
+        codes = _resolve_codes(req)
+        if not codes:
+            raise ValueError("股票池为空，请先选择回测范围")
+        return codes
+
     out = backtest.start_task(
-        req.strategy_id, req.params, codes, req.start, req.end,
+        req.strategy_id, req.params, [], req.start, req.end,
         initial_capital=req.initial_capital, commission=req.commission,
         stamp_duty=req.stamp_duty, slippage=req.slippage,
         min_commission=req.min_commission, lot_size=req.lot_size,
         benchmark=req.benchmark, window=req.window,
         universe_mode=req.universe_mode, ruin_threshold=req.ruin_threshold,
+        codes_resolver=_resolve_codes_lazy,
     )
     if not out.get("ok"):
         return JSONResponse(status_code=409,

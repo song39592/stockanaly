@@ -773,8 +773,13 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
                min_commission: float = 5.0, lot_size: int = 100,
                benchmark: str | None = None, window: int | None = None,
                universe_mode: str = "interval_data",
-               ruin_threshold=None) -> dict:
+               ruin_threshold=None,
+               codes_resolver=None) -> dict:
     """启动一次后台回测并**立即返回**；已有任务在跑时返回 ok=false（不排队）。
+
+    `codes_resolver`：可选的「股票池解析函数」。给了它就在**后台线程**里调用
+    并解析出最终 codes —— 全市场冷缓存解析可能要扫几千只，放在启动请求里同步做
+    会让前端 `/backtest/start` 先超时（用户看到的「无法启动：操作超时」就是它）。
 
     并发上限为 1：两个全市场回测并行会把 CPU 与 SQLite 读盘打满，反而比串行更慢，
     且用户界面一次也只看不了两个结果。
@@ -815,12 +820,34 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
 
     def _work():
         global _BT_CTRL
+        nonlocal codes
         t0 = time.time()
         # 装控制器：装上之后 base.checkpoint() 才不是 no-op，
         # 暂停/停止标志也需要一个跨请求可见的落脚点。
         _BT_CTRL = base.RunControl()
         base.install_control(_BT_CTRL)
         try:
+            if codes_resolver is not None:
+                # 解析股票池（全市场冷缓存可能要扫几千只）放到后台，别卡启动响应
+                try:
+                    codes = codes_resolver() or []
+                except Exception as exc:
+                    with _BT_LOCK:
+                        _BT_TASK.update(state="error", phase="done",
+                                        finished_at=dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        elapsed=round(time.time() - t0, 1),
+                                        error=f"{type(exc).__name__}: {exc}")
+                    return
+                if not codes:
+                    with _BT_LOCK:
+                        _BT_TASK.update(state="error", phase="done",
+                                        finished_at=dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        elapsed=round(time.time() - t0, 1),
+                                        error="股票池为空，请先选择回测范围")
+                    return
+                with _BT_LOCK:
+                    _BT_TASK["total"] = len(codes)
+                    _BT_TASK["codes_count"] = len(codes)
             try:
                 out = run_backtest(strategy_id, params, codes, start, end,
                                    initial_capital, commission, stamp_duty,

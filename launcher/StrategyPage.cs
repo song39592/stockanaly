@@ -575,6 +575,8 @@ private void StRefreshRecoTitle()
                 NameColumn(),
                 new GridColumn("区间收益", "ret", true),
                 new GridColumn("交易次数", "trades", true),
+                new GridColumn("买入时间", "buy_date"),
+                new GridColumn("卖出时间", "sell_date"),
             });
             StPlaceGrid(_stRecentGrid);
             _stRecentGrid.SetSortable(true);   // 第 20 项：可改按交易次数等排序
@@ -620,18 +622,34 @@ private void StRefreshRecoTitle()
                         int tot = st == null ? 0 : J.Int(st["total"]);
                         SetErr(_stRecentStatus, string.Format(
                             "回测中 0/{0}（0.0%）…", tot <= 0 ? "?" : tot.ToString()));
-                        if (_stRecentTimer == null)
-                        {
-                            _stRecentTimer = new Timer();
-                            _stRecentTimer.Interval = 2000;
-                            _stRecentTimer.Tick += delegate { StRecentPoll(); };
-                        }
-                        _stRecentTimer.Start();
+                        StartRecentPoll();
                     }));
                 }
                 catch (Exception ex)
                 {
                     string msg = ex.Message;
+                    // 启动请求超时/失败时，后端可能其实已经启动了任务（只是响应没赶上）。
+                    // 先探一次进度：已有任务在跑就直接接管并轮询，别误报「无法启动」让用户重复点。
+                    bool adopted = false;
+                    try
+                    {
+                        string pj = VRequest("http://127.0.0.1:8000/api/strategies/backtest/progress", null, 5000);
+                        var p = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(pj);
+                        var st = (Dictionary<string, object>)J.Get(p, "state");
+                        string state = st == null ? "" : J.StrAt(st, "state");
+                        if (state == "running" || state == "ready")
+                        {
+                            adopted = true;
+                            Invoke((Action)(() =>
+                            {
+                                if (myRun != _stRecentRunId) return;
+                                SetErr(_stRecentStatus, "已接管后台任务，读取进度…");
+                                StartRecentPoll();
+                            }));
+                        }
+                    }
+                    catch { /* 探测失败就走普通报错 */ }
+                    if (adopted) return;
                     Invoke((Action)(() =>
                     {
                         if (myRun != _stRecentRunId) return;
@@ -640,6 +658,18 @@ private void StRefreshRecoTitle()
                     }));
                 }
             });
+        }
+
+        /// <summary>启动 2 秒一次的近期回测进度轮询（幂等，重复调用只是重新 Start）。</summary>
+        private void StartRecentPoll()
+        {
+            if (_stRecentTimer == null)
+            {
+                _stRecentTimer = new Timer();
+                _stRecentTimer.Interval = 2000;
+                _stRecentTimer.Tick += delegate { StRecentPoll(); };
+            }
+            _stRecentTimer.Start();
         }
 
         /// <summary>轮询近期回测进度；ready 后停表取结果。</summary>
@@ -765,8 +795,12 @@ private void StRefreshRecoTitle()
                 {
                     var d = it as Dictionary<string, object>;
                     if (d == null) continue;
+                    // 买卖时间：per_stock 已带首笔交易的 buy_date / sell_date（未平仓时 sell_date 为空）
+                    string buyD = J.StrOr(J.Get(d, "buy_date"), "");
+                    string sellD = J.StrOr(J.Get(d, "sell_date"), "");
                     _stRecentGrid.Rows.Add(J.StrOr(d["code"], ""), StName(d),
-                        J.Pct100Plain(J.Num(d["total_return"])), J.Int(d["trades"]).ToString());
+                        J.Pct100Plain(J.Num(d["total_return"])), J.Int(d["trades"]).ToString(),
+                        buyD, sellD);
                 }
                 _stRecentGrid.ResumeLayout();
             }
