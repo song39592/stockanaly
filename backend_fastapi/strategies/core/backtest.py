@@ -123,6 +123,7 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                  min_commission: float = 5.0, lot_size: int = 100,
                  benchmark: str | None = None, window: int | None = None,
                  universe_mode: str = "interval_data",
+                 ruin_threshold=None,
                  progress=None) -> dict:
     """执行回测，返回标准化结果字典。异常由路由层转成错误响应。
 
@@ -208,7 +209,8 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                          commission=commission, stamp_duty=stamp_duty,
                          slippage=slippage, min_commission=min_commission,
                          lot_size=lot_size, benchmark_close=bench_close,
-                         raw_by_code=raw_by_code, signal_meta=sig_index, tail=window)
+                         raw_by_code=raw_by_code, signal_meta=sig_index, tail=window,
+                         ruin_threshold=ruin_threshold)
 
     trades: list[dict] = core.pop("trades", []) or []
     flags: list[str] = core.pop("flags", []) or []
@@ -770,7 +772,8 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
                stamp_duty: float = 0.001, slippage: float = 0.0005,
                min_commission: float = 5.0, lot_size: int = 100,
                benchmark: str | None = None, window: int | None = None,
-               universe_mode: str = "interval_data") -> dict:
+               universe_mode: str = "interval_data",
+               ruin_threshold=None) -> dict:
     """启动一次后台回测并**立即返回**；已有任务在跑时返回 ok=false（不排队）。
 
     并发上限为 1：两个全市场回测并行会把 CPU 与 SQLite 读盘打满，反而比串行更慢，
@@ -823,7 +826,7 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
                                    initial_capital, commission, stamp_duty,
                                    slippage, min_commission, lot_size,
                                    benchmark, window, universe_mode,
-                                   progress=_on_progress)
+                                   ruin_threshold, progress=_on_progress)
             except base.Cancelled:
                 # 用户主动停止：**不是错误**。用 paused/cancelled 状态，
                 # 界面上按中性提示显示，绝不弹红色报错或堆栈。

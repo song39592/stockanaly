@@ -218,6 +218,7 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
             signal_meta: dict | None = None,
             lot_size: int = 100,
             tail: int | None = None,
+            ruin_threshold: float | None = None,
             drop_warn_ratio: float = 0.5) -> dict:
     """按目标权重序列 + 收盘价序列，统计组合净值、指标与逐笔明细。
 
@@ -311,8 +312,16 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
     cost_sum = {"commission": 0.0, "stamp_duty": 0.0, "slippage": 0.0, "min_commission": 0.0}
     cost_total = 0.0
 
+    # 「破产」截断：组合净值跌破 ruin_threshold × 初始资金（None=不截断；0.0=归零即断）
+    # 时清掉所有持仓，其后交易日强制空仓、净值冻结；逐笔明细（用 W/dw_all）也随之截断。
+    bankrupt_idx = -1
+
     for t in range(T):
-        wp = W[t - 1] if t > 0 else np.zeros(C)
+        if bankrupt_idx >= 0:
+            wp = np.zeros(C)
+            W[t] = 0.0                      # 已破产：清仓，后续交易日强制空仓
+        else:
+            wp = W[t - 1] if t > 0 else np.zeros(C)
         dw = W[t] - wp
         dw_all[t] = dw
         gross = float((wp * R[t]).sum())
@@ -349,6 +358,11 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
 
         ret[t] = gross - (cost / nav_prev if nav_prev > 0 else 0.0)
         nav[t] = nav_prev * (1.0 + ret[t])
+        # 破产检测：仅未破产时判一次；nav[t] 已含当日（破产当天仍是原持仓）
+        if bankrupt_idx < 0 and ruin_threshold is not None:
+            _limit = initial_capital * ruin_threshold
+            if nav[t] <= _limit:
+                bankrupt_idx = t
 
     ret_s = pd.Series(ret, index=common)
     nav_s = pd.Series(nav, index=common)
@@ -376,6 +390,13 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
             f"年换手 {np.mean(turnover) * _TRADING_DAYS:.0f} 倍 × 费率 ≈ "
             f"{(0.0003 + 0.001 + 0.0005) * 100:.2f}%/单位换手，成本会吃光净值。"
             f"请调大调仓间隔或降低 top_n，或用 min_commission=0 做研究口径对照。")
+    if bankrupt_idx >= 0:
+        _n_after = T - bankrupt_idx - 1
+        flags.append(
+            f"bankruptcy: 组合净值于 {common[bankrupt_idx]} 跌破阈值"
+            f"（{nav[bankrupt_idx] / initial_capital:.1%} of 初始资金），"
+            f"其后 {_n_after} 个交易日强制空仓、净值冻结。"
+            f"阈值由请求参数 ruin_threshold 控制（默认 0.0=净值归零截断）。")
     # ⚠️ 年化：净值**可以合法地变成非正**（成本吃光净值时 nav 会跌破 0）。
     #   负底数的小数次幂在 Python 里返回 **complex**，json 序列化直接抛异常；
     #   而这类结果的含义本身也不成立（年化增长率对「已爆仓」的曲线无意义），
@@ -490,6 +511,11 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
         "avg_positions": avg_positions,
         "max_positions": int(np.max(n_pos)) if T else 0,
         "trading_days": T,
+        "bankrupt": bankrupt_idx >= 0,
+        "bankrupt_day": (common[bankrupt_idx] if bankrupt_idx >= 0 else None),
+        "bankrupt_nav": (float(nav[bankrupt_idx]) if bankrupt_idx >= 0 else None),
+        "bankrupt_ratio": (float(nav[bankrupt_idx] / initial_capital)
+                           if bankrupt_idx >= 0 and initial_capital > 0 else None),
         "turnover_annual": float(np.mean(turnover) * _TRADING_DAYS),
         # ---- 成本画像：净值被成本吃光时，用户要能一眼看出是哪一项吃的 ----
         # 实测：日频调仓 top_n=20 的 MACD 年换手 139 倍，仅成本一年就吃掉约 32%，
@@ -506,6 +532,16 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
         "benchmark_return": bench_return,
         "alpha": alpha, "beta": beta, "ir": ir, "tracking_error": te,
     }
+
+    # 单票破产标记：某票累计收益使 (1+total_return) 跌破 ruin_threshold 时标 bankrupt。
+    if ruin_threshold is not None:
+        for _ps in per_stock:
+            _tr = _ps.get("total_return")
+            try:
+                if _tr is not None and (1.0 + float(_tr)) <= ruin_threshold:
+                    _ps["bankrupt"] = True
+            except (TypeError, ValueError):
+                pass
 
     # ⚠️ **整个返回值过一遍 json_safe**：这是「一个 inf 毁掉整个响应」的最后防线。
     # 上游每个指标都已各自判过有限性，但净值序列 / per_stock / trades 里

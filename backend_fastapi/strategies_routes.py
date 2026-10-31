@@ -108,6 +108,7 @@ class BacktestRequest(BaseModel):
     # ---- 样本口径 ----
     universe_mode: str = "interval_data"   # interval_data / pool_snapshot / index_constituent
     benchmark: Optional[str] = None        # 指数代码；不给则用「等权全池买入持有」作默认基准
+    ruin_threshold: Optional[float] = None  # 组合净值跌破「该比例 × 初始资金」即破产截断；None=不截断，0.0=归零截断
 
 
 _CODE_ERR = {
@@ -130,7 +131,7 @@ def do_backtest(req: BacktestRequest):
         stamp_duty=req.stamp_duty, slippage=req.slippage,
         min_commission=req.min_commission, lot_size=req.lot_size,
         benchmark=req.benchmark, window=req.window,
-        universe_mode=req.universe_mode,
+        universe_mode=req.universe_mode, ruin_threshold=req.ruin_threshold,
     )
     # 回测跑完**自动落盘一份报告**（策略 + 覆盖范围 + 指标 + 逐票汇总），
     # 便于事后对比不同策略 / 不同区间 —— 原来结果只在一次响应里，关掉就没了。
@@ -164,7 +165,7 @@ def do_backtest_start(req: BacktestRequest):
         stamp_duty=req.stamp_duty, slippage=req.slippage,
         min_commission=req.min_commission, lot_size=req.lot_size,
         benchmark=req.benchmark, window=req.window,
-        universe_mode=req.universe_mode,
+        universe_mode=req.universe_mode, ruin_threshold=req.ruin_threshold,
     )
     if not out.get("ok"):
         return JSONResponse(status_code=409,

@@ -86,6 +86,8 @@ namespace StockPool
         private bool _stRecentBusy;
         private bool _stRecentPollBusy;
         private int _stRecentRunId;
+        private CheckBox _stRecentRuinChk;       // 近期回测：「破产截断」开关
+        private NumericUpDown _stRecentRuinPct;  // 破产阈值（%，0=净值归零）
         // 当前选中的策略名（第 23 项）。放在**顶部操作区**而不是「策略选择与编辑」
         // 子页里 —— 因为所有「运行回测 / 生成推荐」都读列表选中项，跑错策略时用户
         // 在别的子页看不到自己选了什么。顶部常驻，任何子页都一眼可见。
@@ -550,6 +552,18 @@ private void StRefreshRecoTitle()
             _stRecentDays.TabStop = false;
             AddRow(stack, Row(MiniBtn("运行近期回测", delegate { StRunRecent(); }, 120),
                 Lbl("交易日数"), _stRecentDays, _stRecentStatus = Mute(Lbl("尚未运行"))));
+            _stRecentRuinChk = new CheckBox();
+            _stRecentRuinChk.Text = "破产截断";
+            _stRecentRuinChk.Checked = true;
+            _stRecentRuinChk.TabStop = false;
+            _stRecentRuinPct = new NumericUpDown();
+            _stRecentRuinPct.Minimum = 0;
+            _stRecentRuinPct.Maximum = 100;
+            _stRecentRuinPct.Value = 0;
+            _stRecentRuinPct.Width = 60;
+            _stRecentRuinPct.TabStop = false;
+            AddRow(stack, Row(_stRecentRuinChk, Lbl("阈值%"), _stRecentRuinPct,
+                Mute(Lbl("(0=净值归零即断)"))));
 
             _stRecentCards = StCardRow();
             AddRow(stack, _stRecentCards);
@@ -578,9 +592,11 @@ private void StRefreshRecoTitle()
                 return;
             }
             int days = (int)_stRecentDays.Value;
+            double? ruin = (_stRecentRuinChk != null && _stRecentRuinChk.Checked)
+                ? (double?)_stRecentRuinPct.Value / 100.0 : null;
             _stRecentBusy = true;
             int myRun = ++_stRecentRunId;
-            var req = StRequest(meta, days);
+            var req = StRequest(meta, days, ruin);
             SetErr(_stRecentStatus, "提交中…");
             string body = new JavaScriptSerializer().Serialize(req);
             System.Threading.Tasks.Task.Run(delegate
@@ -757,6 +773,18 @@ private void StRefreshRecoTitle()
             _stRecentGrid.Fit();
             _stRecentStatus.Text = "完成（最近 " + (int)_stRecentDays.Value + " 个交易日）";
             _stRecentStatus.ForeColor = C.DownSoft;
+            // 破产截断：账户净值跌破阈值后强制空仓，结果里明确标出，避免被当成「正常回测」
+            bool bankrupt = false;
+            object bk;
+            if (metrics.TryGetValue("bankrupt", out bk) && bk is bool) bankrupt = (bool)bk;
+            if (bankrupt)
+            {
+                var bd = J.Get(metrics, "bankrupt_day");
+                var br = J.Get(metrics, "bankrupt_ratio");
+                _stRecentStatus.Text = "⚠ 账户于 " + J.StrOr(bd, "") + " 破产（净值 "
+                    + J.Pct100Plain(J.Num(br)) + "），后续交易日已截断";
+                _stRecentStatus.ForeColor = C.UpErr;
+            }
         }
 
         // ---------------- ⑤ 当前策略推荐 ----------------
@@ -1096,7 +1124,7 @@ private void StRefreshRecoTitle()
         // 回测 / 推荐共用请求体：策略、范围、资金、佣金都取「回测范围」页的设置。
         // window>0 时后端直接把区间定位到最近 N 个交易日（近期成果用）。
         // meta 由调用方传入（点击时取的快照），不在函数内部读列表选中项 —— 理由见 StSelectedMeta。
-        private Dictionary<string, object> StRequest(Dictionary<string, object> meta, int window)
+        private Dictionary<string, object> StRequest(Dictionary<string, object> meta, int window, double? ruinThreshold = null)
         {
             return new Dictionary<string, object>
             {
@@ -1111,6 +1139,7 @@ private void StRefreshRecoTitle()
                 { "initial_capital", (double)_stCapital.Value },
                 { "commission", J.NumOr(_stComm.Text, 0.0003) },
                 { "benchmark", (_stBenchChk.Checked && _stBench.Text.Trim().Length > 0) ? _stBench.Text.Trim() : null },
+                { "ruin_threshold", ruinThreshold },
             };
         }
 
