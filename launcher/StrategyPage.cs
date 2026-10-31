@@ -80,6 +80,12 @@ namespace StockPool
         private bool _stRecoBusy;
         private bool _stRecoPollBusy;      // 有一次轮询请求在飞（防tick 重叠）
         private int _stRecoRunId;          // 每次启动 +1：陈旧响应据此丢弃（同回测 _stPollRunId）
+        // 近期回测（最近 N 个交易日）也改走异步任务：全市场 3 年实测 761s，
+        // 同步接口固定 600s 必然超时（旧实现就死在这），故与推荐页同一套轮询模式。
+        private Timer _stRecentTimer;
+        private bool _stRecentBusy;
+        private bool _stRecentPollBusy;
+        private int _stRecentRunId;
         // 当前选中的策略名（第 23 项）。放在**顶部操作区**而不是「策略选择与编辑」
         // 子页里 —— 因为所有「运行回测 / 生成推荐」都读列表选中项，跑错策略时用户
         // 在别的子页看不到自己选了什么。顶部常驻，任何子页都一眼可见。
@@ -564,44 +570,152 @@ private void StRefreshRecoTitle()
 
         private void StRunRecent()
         {
+            if (_stRecentBusy) return;      // 防叠加：全市场一次只能算一个
             var meta = StSelectedMeta();
             if (meta == null)
             {
                 SetErr(_stRecentStatus, "请先在「策略选择与编辑」里选一个策略");
                 return;
             }
-            var req = StRequest(meta, (int)_stRecentDays.Value);
-            _stRecentStatus.Text = "回测中…";
-            _stRecentStatus.ForeColor = _cSub;
+            int days = (int)_stRecentDays.Value;
+            _stRecentBusy = true;
+            int myRun = ++_stRecentRunId;
+            var req = StRequest(meta, days);
+            SetErr(_stRecentStatus, "提交中…");
             string body = new JavaScriptSerializer().Serialize(req);
             System.Threading.Tasks.Task.Run(delegate
             {
                 try
                 {
-                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest", body, 600000);
+                    // 只等「启动」立即返回；旧实现是同步 /backtest + 600s 固定超时，
+                    // 全市场 3 年实测 761s 必然超时，这里不再继承那个坑。
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/start", body, 30000);
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    Invoke((Action)(() => StRenderRecent(j)));
+                    Invoke((Action)(() =>
+                    {
+                        if (myRun != _stRecentRunId) return;
+                        if (J.IsFailed(j))
+                        {
+                            _stRecentBusy = false;
+                            SetErr(_stRecentStatus, "无法启动：" + StErrMsg(j));
+                            return;
+                        }
+                        var st = (Dictionary<string, object>)J.Get(j, "state");
+                        int tot = st == null ? 0 : J.Int(st["total"]);
+                        SetErr(_stRecentStatus, string.Format(
+                            "回测中 0/{0}（0.0%）…", tot <= 0 ? "?" : tot.ToString()));
+                        if (_stRecentTimer == null)
+                        {
+                            _stRecentTimer = new Timer();
+                            _stRecentTimer.Interval = 2000;
+                            _stRecentTimer.Tick += delegate { StRecentPoll(); };
+                        }
+                        _stRecentTimer.Start();
+                    }));
                 }
                 catch (Exception ex)
                 {
                     string msg = ex.Message;
                     Invoke((Action)(() =>
                     {
-                        // ⚠️ 同步接口固定 600s 超时，而**全市场 3 年实测约 761s**
-                        //（2026-10-14 实测 5578 只 × 2023-10-14~2026-10-14）。
-                        // 超时后这里只会抛一句无信息量的 WebException，
-                        // 用户完全看不出「其实是跑太慢、换个池子或用异步按钮就好」。
-                        // 故把这类超时翻译成可操作的提示，而不是原样透出原始报文。
-                        if (msg.Contains("超时") || msg.Contains("timed out")
-                            || msg.Contains("Timeout") || msg.Contains("已超时"))
-                        {
-                            msg = "同步回测超过 600 秒仍未返回（通常是「全部本地」范围太大）。"
-                                + "请改用「运行回测」按钮走后台任务（有进度条、不受此限制），"
-                                + "或缩小回测范围后重试。";
-                        }
-                        SetErr(_stRecentStatus, "回测失败：" + msg);
+                        if (myRun != _stRecentRunId) return;
+                        _stRecentBusy = false;
+                        SetErr(_stRecentStatus, "无法启动：" + msg);
                     }));
                 }
+            });
+        }
+
+        /// <summary>轮询近期回测进度；ready 后停表取结果。</summary>
+        private void StRecentPoll()
+        {
+            if (_stRecentPollBusy) return;
+            _stRecentPollBusy = true;
+            int myRun = _stRecentRunId;
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/progress", null, 15000);
+                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    Invoke((Action)(() =>
+                    {
+                        _stRecentPollBusy = false;
+                        if (myRun != _stRecentRunId) return;
+                        var st = (Dictionary<string, object>)J.Get(j, "state");
+                        string state = st == null ? "" : J.StrAt(st, "state");
+                        string phase = st == null ? "" : J.StrAt(st, "phase");
+                        int done = st == null ? 0 : J.Int(st["done"]);
+                        int tot = st == null ? 0 : J.Int(st["total"]);
+                        double sec = st == null ? 0 : J.Num(st["elapsed"]);
+
+                        if (state == "error")
+                        {
+                            if (_stRecentTimer != null) _stRecentTimer.Stop();
+                            _stRecentBusy = false;
+                            SetErr(_stRecentStatus, "回测失败：" + J.StrAt(st, "error"));
+                            return;
+                        }
+                        if (state == "cancelled")
+                        {
+                            if (_stRecentTimer != null) _stRecentTimer.Stop();
+                            _stRecentBusy = false;
+                            SetErr(_stRecentStatus, "已被用户停止");
+                            return;
+                        }
+                        if (state == "running")
+                        {
+                            if (phase == "running")
+                                SetErr(_stRecentStatus, string.Format(
+                                    "回测中（{0}/{1}，正在算策略信号，已用 {2:F0} 秒）…", done, tot, sec));
+                            else
+                                SetErr(_stRecentStatus, string.Format(
+                                    "读取数据中 {0}/{1}（{2:F1}%），已用 {3:F0} 秒…",
+                                    done, tot, tot > 0 ? done * 100.0 / tot : 0, sec));
+                            return;
+                        }
+
+                        // ready：停表，取结果
+                        if (_stRecentTimer != null) _stRecentTimer.Stop();
+                        StRecentFetchResult(myRun);
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    string msg = ex.Message;
+                    Invoke((Action)(() =>
+                    {
+                        _stRecentPollBusy = false;
+                        if (myRun != _stRecentRunId) return;
+                        if (_stRecentTimer != null) _stRecentTimer.Stop();
+                        _stRecentBusy = false;
+                        SetErr(_stRecentStatus, "读取进度失败：" + msg);
+                    }));
+                }
+            });
+        }
+
+        private void StRecentFetchResult(int myRun)
+        {
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                string resp = null, emsg = "";
+                Dictionary<string, object> j = null;
+                try
+                {
+                    resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/result", null, 60000);
+                    j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                }
+                catch (Exception ex) { emsg = ex.Message; }
+                var jj = j;
+                var ee = emsg;
+                Invoke((Action)(() =>
+                {
+                    if (myRun != _stRecentRunId) return;
+                    _stRecentBusy = false;
+                    if (jj == null) { SetErr(_stRecentStatus, "读取结果失败：" + ee); return; }
+                    StRenderRecent(jj);
+                }));
             });
         }
 
