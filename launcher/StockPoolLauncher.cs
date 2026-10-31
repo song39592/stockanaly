@@ -403,6 +403,9 @@ namespace StockPool
 
         private readonly string _root;
         private readonly string _settingsPath;
+        private string _cfgChipFormula = null;      // 记忆：上次选择的筹码公式 id（null = 后端默认）
+        private string _cfgMainIndicator = null;    // 记忆：上次主图指标 id
+        private string _cfgSubIndicator = null;     // 记忆：上次副图指标 id
         private readonly List<LogEntry> _logs = new List<LogEntry>();
 
         private readonly List<Button> _tabBtns = new List<Button>();
@@ -1341,6 +1344,9 @@ namespace StockPool
                         else if (k == "runonboot") boot = v == "1";
                         else if (k == "theme") theme = (v == "light" ? "light" : "dark");
                         else if (k == "scope_exclude") scopeMask = v;
+                        else if (k == "chip_formula") _cfgChipFormula = v;
+                        else if (k == "main_indicator") _cfgMainIndicator = v;
+                        else if (k == "sub_indicator") _cfgSubIndicator = v;
                     }
                 }
             }
@@ -1357,6 +1363,11 @@ namespace StockPool
                 if (_stExChiNext != null) StApplyScopeMask(scopeMask);   // 页面已建好则立即回填筛选
             }
             _light = (theme == "light");
+            // 恢复「上次打开的指标 / 筹码」选择（字段在 StockPage partial 定义，跨 partial 直接赋值；
+            // 此处在 BuildStockPage 之后、用户首次打开个股之前执行，时机正确）
+            if (!string.IsNullOrEmpty(_cfgChipFormula)) _stockChipFormulaId = _cfgChipFormula;
+            if (!string.IsNullOrEmpty(_cfgMainIndicator)) _stockMainIndicator = _cfgMainIndicator;
+            if (!string.IsNullOrEmpty(_cfgSubIndicator)) _stockSubIndicator = _cfgSubIndicator;
             ApplyTheme();
         }
 
@@ -1375,6 +1386,9 @@ namespace StockPool
                 sb.AppendLine("runonboot=" + (_ckRunOnBoot.Checked ? "1" : "0"));
                 sb.AppendLine("theme=" + (_light ? "light" : "dark"));
                 sb.AppendLine("scope_exclude=" + (_stScopeMask ?? ""));
+                sb.AppendLine("chip_formula=" + (_cfgChipFormula ?? ""));
+                sb.AppendLine("main_indicator=" + (_cfgMainIndicator ?? ""));
+                sb.AppendLine("sub_indicator=" + (_cfgSubIndicator ?? ""));
                 File.WriteAllText(_settingsPath, sb.ToString(), Encoding.UTF8);
                 ApplyRunOnBoot(_ckRunOnBoot.Checked);
                 Msg("运行环境与行为已保存；Python / Node 路径在重启对应服务后生效。");
@@ -2473,6 +2487,9 @@ namespace StockPool
                 sb.AppendLine("runonboot=" + (_ckRunOnBoot.Checked ? "1" : "0"));
                 sb.AppendLine("theme=" + (_light ? "light" : "dark"));
                 sb.AppendLine("scope_exclude=" + (_stScopeMask ?? ""));
+                sb.AppendLine("chip_formula=" + (_cfgChipFormula ?? ""));
+                sb.AppendLine("main_indicator=" + (_cfgMainIndicator ?? ""));
+                sb.AppendLine("sub_indicator=" + (_cfgSubIndicator ?? ""));
                 File.WriteAllText(_settingsPath, sb.ToString(), Encoding.UTF8);
             }
             catch { }

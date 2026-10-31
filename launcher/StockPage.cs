@@ -583,6 +583,7 @@ namespace StockPool
                         _stockHint.Text = "副图指标已切换为：" + nm + "（输入 6 位代码则打开个股）";
                     }
                     if (_stockCurrent != null) StockLoadIndicators(_stockCurrent);
+                    StockPersistSelection();
                     return;
                 }
                 // 筹码模型（独立通道）：索引名 → 切换 K 线右侧筹码窗口的公式
@@ -595,6 +596,7 @@ namespace StockPool
                     _stockHint.Text = "筹码模型已切换为：" + (StockChipNameOf(chipId) ?? chipId)
                                     + "（输入 6 位代码则打开个股）";
                     if (_stockCurrent != null) StockLoadChip(_stockCurrent);
+                    StockPersistSelection();
                     return;
                 }
                 _stockHint.Text = "股票代码须是 6 位数字（如 600519）；或输入已注册指标名以切换主图 / 副图指标";
@@ -731,6 +733,16 @@ namespace StockPool
                 if (o.Name.IndexOf(typed, StringComparison.OrdinalIgnoreCase) >= 0)
                 { isMain = true; return o.Id; }
             return null;
+        }
+
+        /// <summary>把当前的指标 / 筹码选择写入 settings（复用 Launcher 的 _cfg* 字段 + SaveSettingsQuiet，
+        /// 与 theme/scope 走同一条持久化链路，避免「只存不读」导致重启后不生效）。</summary>
+        private void StockPersistSelection()
+        {
+            _cfgChipFormula = _stockChipFormulaId;
+            _cfgMainIndicator = _stockMainIndicator;
+            _cfgSubIndicator = _stockSubIndicator;
+            SaveSettingsQuiet();
         }
 
         /// <summary>输入 → 筹码公式 id（独立于指标通道）。匹配顺序同指标：先精确（索引名 / 名称 / 公式 id），
