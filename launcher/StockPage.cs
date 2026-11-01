@@ -1621,7 +1621,7 @@ namespace StockPool
         {
             private const int LeftPad = 54;
             private const int RightPad = 10;
-            private const int TopPad = 20;
+            private const int TopPad = 44;   // 顶部两行信息（图例 + 悬停 OHLC），把浮窗移到图外避免遮挡 K 线
             private const int BottomPad = 18;
             private const int VolRatio = 22;   // 成交量区占纵向比例（%）
 
@@ -1923,32 +1923,10 @@ namespace StockPool
                 if (OnHoverDate != null) OnHoverDate(_hoverDate);
             }
 
-            /// <summary>在光标处显示 OHLC 多行浮窗（含涨跌幅/振幅）。键盘调用时没有鼠标坐标，改用光标对应的 x。</summary>
+            /// <summary>悬停信息改为 OnPaint 顶部信息条绘制（避免浮窗遮挡 K 线），这里只清理旧浮窗。</summary>
             private void ShowHoverTip(int mouseX = -1, int mouseY = -1)
             {
-                var vis = VisibleBars();
-                int idx = _hoverIndex;
-                if (idx < 0 || idx >= vis.Count) { _tip.Hide(this); return; }
-                KBar b = vis[idx];
-                double chg = b.O != 0 ? (b.C - b.O) / b.O : 0;     // 当日涨跌幅（相对开盘）
-                double amp = b.O != 0 ? (b.H - b.L) / b.O : 0;     // 振幅（相对开盘）
-                var sb = new StringBuilder();
-                sb.AppendLine(b.Date);
-                sb.AppendLine(string.Format("开 {0:F2}  收 {1:F2}  高 {2:F2}  低 {3:F2}",
-                    b.O, b.C, b.H, b.L));
-                sb.AppendLine("量 " + VolumeText(b.V));
-                sb.AppendLine(string.Format("涨跌 {0}{1:0.00%}   振幅 {2:0.00%}",
-                    chg >= 0 ? "+" : "", chg, amp));
-                int n = VisibleCount();
-                int plotW = Math.Max(20, Width - LeftPad - RightPad);
-                int x = mouseX >= 0 ? mouseX
-                    : (int)(LeftPad + (double)plotW / Math.Max(1, n) * (idx + 0.5));
-                int y = mouseY >= 0 ? mouseY + 18 : TopPad + 4;
-                // 防止浮窗超出右/下边界（深色主题下白块很扎眼，越界更糟）
-                int tipW = 220;
-                if (x + tipW > Width) x = Math.Max(LeftPad, Width - tipW);
-                if (y + 72 > Height) y = Math.Max(TopPad, Height - 72);
-                _tip.Show(sb.ToString(), this, x, y);
+                _tip.Hide(this);
             }
 
             protected override void OnMouseWheel(MouseEventArgs e)
@@ -2438,19 +2416,24 @@ namespace StockPool
                 }
                 // 主图标记（入池/出池/事件的菱形、三角标注）已按需求移除
 
-                // 悬停竖线 + 水平十字线 + 左轴光标价格标签
+                // 悬停：十字线（竖线贯穿全图；水平线仅在主图价格区内）+ 左轴价格标签（带背景框）
                 if (_hoverIndex >= 0 && _hoverIndex < vis.Count)
                 {
                     int x = (int)xOf(_hoverIndex);
-                    using (var pen = new Pen(C.Flat))
+                    Color cross = dark ? Color.FromArgb(210, 215, 130) : Color.FromArgb(90, 95, 30);
+                    using (var pen = new Pen(cross, 1.2f))
                     {
                         g.DrawLine(pen, x, plotTop, x, bottomMost);
                         if (_hoverY >= plotTop && _hoverY <= plotBottom)
                         {
                             g.DrawLine(pen, LeftPad, _hoverY, LeftPad + plotW, _hoverY);
                             double price = pmin + (plotBottom - _hoverY) / (plotBottom - plotTop) * span;
-                            using (var bb = new SolidBrush(C.Flat))
-                                g.DrawString(PriceText(price), Font, bb,
+                            var tag = PriceText(price);
+                            var tsz = g.MeasureString(tag, Font);
+                            using (var bb = new SolidBrush(BackColor))
+                                g.FillRectangle(bb, 2, _hoverY - 7, (int)tsz.Width + 2, Font.Height + 2);
+                            using (var bb2 = new SolidBrush(cross))
+                                g.DrawString(tag, Font, bb2,
                                     new RectangleF(2, _hoverY - 7, LeftPad - 4, Font.Height + 2), FmtRight);
                         }
                     }
@@ -2479,7 +2462,23 @@ namespace StockPool
                     }
                 }
 
+                // 悬停时在下轴跟随光标显示该 K 线日期（联动坐标轴，独立于固定刻度，绘于最上层）
+                if (_hoverIndex >= 0 && _hoverIndex < vis.Count)
+                {
+                    string dd = vis[_hoverIndex].Date;
+                    var dsz = g.MeasureString(dd, Font);
+                    int x = (int)xOf(_hoverIndex);
+                    int dx = Math.Max(2, Math.Min(Width - (int)dsz.Width - 6, x - (int)dsz.Width / 2));
+                    int dy = bottomMost + 2;
+                    Color cross = dark ? Color.FromArgb(210, 215, 130) : Color.FromArgb(90, 95, 30);
+                    using (var bb = new SolidBrush(cross))
+                        g.FillRectangle(bb, dx, dy, (int)dsz.Width + 4, Font.Height + 2);
+                    using (var bb2 = new SolidBrush(dark ? Color.Black : Color.White))
+                        g.DrawString(dd, Font, bb2, dx + 2, dy);
+                }
+
                 DrawLegend(g, text, _hoverIndex);
+                DrawHoverInfo(g, text);
                 // 右下角的「滚轮缩放 · 拖动平移 · 前复权」提示已按需求移除；
                 // 周期 / 复权状态看工具栏按钮的高亮即可（图例里也标了 日K / 周K / 月K）。
             }
@@ -2522,6 +2521,22 @@ namespace StockPool
                         x += (int)(g.MeasureString(lbl, Font).Width) + 14;
                     }
                 }
+            }
+
+            /// <summary>顶部第二行：悬停时显示光标 K 线的 OHLC / 量 / 涨跌幅 / 振幅（不遮挡主图）。</summary>
+            private void DrawHoverInfo(Graphics g, Color text)
+            {
+                var vis = VisibleBars();
+                int idx = _hoverIndex;
+                if (idx < 0 || idx >= vis.Count) return;
+                KBar b = vis[idx];
+                double chg = b.O != 0 ? (b.C - b.O) / b.O : 0;
+                double amp = b.O != 0 ? (b.H - b.L) / b.O : 0;
+                string s = string.Format(
+                    "{0}   开 {1:F2}  收 {2:F2}  高 {3:F2}  低 {4:F2}   量 {5}   涨跌 {6}{7:0.00%}  振幅 {8:0.00%}",
+                    b.Date, b.O, b.C, b.H, b.L, VolumeText(b.V), chg >= 0 ? "+" : "", chg, amp);
+                using (var br = new SolidBrush(text))
+                    g.DrawString(s, Font, br, LeftPad + 4, 22);
             }
         }
     }
