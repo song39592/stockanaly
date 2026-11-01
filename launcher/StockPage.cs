@@ -1353,9 +1353,10 @@ namespace StockPool
                         if (hi <= lo) hi = lo + 1;
                         top = 20; bottom = Math.Max(30, Height - 18);
                     }
-                    // 纵向范围收紧到「有筹码」的区间（当前帧 pct/gray > 0），
-                    // 避免股价从未到过的低价区（如 12.2~14.4）在底部留出大片空白。
-                    if (_frames != null && _frames.Count > 0)
+                    // 仅在**无法与 K 线价格轴对齐**（K 线未绘制 / 已清空）时，才把纵向范围收紧到有筹码的区间；
+                    // 一旦对齐成功，必须沿用 K 线的 lo/hi —— 否则筹码会被纵向拉伸到整个面板高度，
+                    // 与 K 线价位严重错位（出现「筹码铺满整段价格、套牢蓝被顶到最高价」的假象）。
+                    if (!aligned && _frames != null && _frames.Count > 0)
                     {
                         int fi = (_frame >= 0 && _frame < _frames.Count) ? _frame : _frames.Count - 1;
                         double[] fp = _frames[fi];
@@ -1440,6 +1441,7 @@ namespace StockPool
                             grayWs.Add(gw);
                             int rw = (int)Math.Round((i < red.Length ? red[i] : 0) / maxPct * plotW);
                             if (rw < 0) rw = 0; if (rw > plotW) rw = plotW;
+                            if (rw > w) rw = w;   // 红是叠加在蓝上的叠层，绝不宽于蓝
                             redWs.Add(rw);
                         }
                         if (idxs.Count > 0)
