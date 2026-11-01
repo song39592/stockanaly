@@ -5,9 +5,9 @@
   · 蓝（base）：完全等同 tri_decay —— 存量筹码按「换手率 × 衰减系数 × 锁仓系数」衰减，
                 当日成交按三角形分布（峰值=均价 vwap）铺到 [low, high] 后注入。
                 即「蓝色 = TRI 的筹码峰」，外形与 tri_decay 完全一致。
-  · 灰（gray）：锁仓沉积。当日换手 ≤ M_low×B 的档位标记为沉淀态，该档位蓝的 R（默认 0.5）
-                染成灰（灰 = 蓝 × R，幂等不累积，恒 ≤ 蓝的一半）；
-                强换手（> M_high×B）冲刷解除沉淀。灰随蓝同一衰减系数同步衰减。
+  · 灰（gray）：锁仓染色。当日换手 ≤ M_low×B 的「当天成交价」按三角形分布染灰、独立累积
+                （只出现在锁仓日的成交价位，而非整片蓝底按比例染灰）；灰天然 ≤ 蓝。
+                强换手（> M_high×B）冲刷：该日不计入灰、灰照常衰减。
   · 红（red）：强换手叠加。当日换手 > M_high×B 时，把「超出自然换手的额外部分」(k−kB)
                 按当日三角分布注入为红；红同样按同一衰减系数衰减（与蓝同节奏）。
 
@@ -79,8 +79,8 @@ def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float,
 
     蓝（blue）  ：等同 tri_decay —— 存量按 k_t = 换手×decay×锁仓系数 衰减，当日成交按三角分布注入。
     红（red）   ：强换手日（to > M_high×B）把超出自然换手的额外量 (k−kB) 注入，同 k_t 衰减。
-    灰（gray）  ：锁仓档位（to ≤ M_low×B 覆盖）把蓝的 R 染灰（幂等，灰 = 蓝×R，恒 ≤ 蓝的一半）；
-                 强换手冲刷解除沉淀。灰随蓝同衰减（由蓝派生，蓝衰减则灰同衰减）。
+    灰（gray）  ：锁仓日（to ≤ M_low×B）当天的成交按 TRI 注入灰通道（独立累积、与蓝同衰减）；
+                 只出现在「锁仓日的成交价位」，不是整片蓝底按比例染灰，天然 ≤ 蓝。
     k 参数为历史 EMA 记忆长度，现已不参与计算（保留以兼容旧参数）。
     """
     n = ctx.days
@@ -95,7 +95,7 @@ def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float,
 
     chips_blue = np.zeros(bins, dtype=float)       # 蓝底：TRI 衰减堆积
     chips_red = np.zeros(bins, dtype=float)        # 红叠层：强换手叠加（同衰减）
-    gray_mask = np.zeros(bins, dtype=float)        # 1 = 该档当前沉淀态；0 = 已解除
+    chips_gray = np.zeros(bins, dtype=float)       # 灰：锁仓日成交独立累积（同衰减）
     blue_rel = np.zeros((n, bins), dtype=float)
     red_rel = np.zeros((n, bins), dtype=float)
     gray_rel = np.zeros((n, bins), dtype=float)
@@ -134,20 +134,20 @@ def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float,
             if extra > 0:
                 chips_red += extra * w
 
-        # ③ 灰折旧（幂等）：锁仓档位把蓝的 R 染灰，强换手冲刷解除沉淀
-        if to <= M_low * Bt:
-            gray_mask[w > 1e-12] = 1.0
-        elif to > M_high * Bt:
-            gray_mask[w > 1e-12] = 0.0
-        chips_gray = gray_mask * R * chips_blue
+        # ③ 灰折旧：锁仓日（to ≤ M_low×B）当天成交按 TRI 注入灰通道（独立累积、与蓝同衰减）；
+        #    灰只出现在「锁仓日成交价位」，强换手日不注入（灰照常衰减），故不会整片蓝染灰。
+        chips_gray *= (1.0 - k_t)
+        if to <= M_low * Bt and k_t > 0:
+            chips_gray += k_t * w * R
 
         blue_rel[t] = chips_blue
         red_rel[t] = chips_red
         gray_rel[t] = chips_gray
 
     # 蓝 / 红 / 灰 **同一尺度**归一化（都用蓝底的 rowsum）：
-    # 红、灰都是蓝底的子集（灰 = 蓝×R、红 ⊂ 蓝），同分母后 red_norm / gray_norm 都不会超过蓝，
-    # 在蓝底上染色才正确。蓝底本身归一化后即 TRI 标准筹码峰（外形与 tri_decay 一致）。
+    # 灰、红都是独立累积、且强度天然不超过蓝（灰只收锁仓日成交、红只收强换手额外量），
+    # 同分母后 gray_norm / red_norm 都不会超过蓝，在蓝底上染色才正确。
+    # 蓝底本身归一化后即 TRI 标准筹码峰（外形与 tri_decay 一致）。
     base_sum = blue_rel.sum(axis=1)
     safe = np.where(base_sum > 0, base_sum, 1.0)
     blue_norm = blue_rel / safe[:, None] * 100.0
@@ -170,12 +170,12 @@ def _compute(ctx: ChipContext, M_low: float, M_high: float, R: float, k: float,
     name="EMA换手峰·锁仓染色",
     index="EMLK",
     category="chip",
-    description="蓝=TRI(三角形分布+换手率衰减)标准筹码峰；低换手(≤M_low×B)把当前蓝的R染灰(锁仓)，"
+    description="蓝=TRI(三角形分布+换手率衰减)标准筹码峰；低换手(≤M_low×B)当天成交染灰(锁仓沉淀,只染该日价位)，"
                 "强换手(>M_high×B)把超出自然换手的额外量染红；灰/红与蓝共用同一衰减系数。",
     params=[
         ParamSpec("M_low", "float", 0.7, min=0.1, max=3.0, label="锁仓倍量阈值"),
         ParamSpec("M_high", "float", 2.0, min=0.5, max=5.0, label="强换手倍量阈值"),
-        ParamSpec("R", "float", 0.5, min=0.05, max=1.0, label="每次染灰比例"),
+        ParamSpec("R", "float", 0.5, min=0.05, max=1.0, label="锁仓灰浓度"),
         ParamSpec("decay", "float", 1.0, min=0.0, max=5.0, label="衰减系数(同TRI)"),
         ParamSpec("k", "float", 0.5, min=0.1, max=2.0, label="EMA记忆(已弃用,保留兼容)"),
     ],

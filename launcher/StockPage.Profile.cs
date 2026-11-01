@@ -358,9 +358,8 @@ bool ok = J.IsOk(j);
                     string note = "未做锁仓修正";
                     if (lockup)
                     {
-                        double lr = J.NumAt(j, "lockup_ratio");
                         double lf = J.NumAt(j, "lockup_factor");
-                        note = string.Format("已做锁仓修正（占流通股 {0:F1}%，系数 {1:F3}）", lr * 100.0, lf);
+                        note = string.Format("衰减系数 {0:F3}", lf);
                     }
                     Invoke((Action)delegate
                     {
