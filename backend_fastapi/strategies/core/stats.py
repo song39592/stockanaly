@@ -741,6 +741,9 @@ def _build_trades(codes, common, W, dw_all, nav, raw_by_code,
                 "buy_date": first.get("buy_date") if first else "",
                 "sell_date": first.get("sell_date") if first else "",
                 "ret": first_ret,
+                # 首笔买入时的策略因子（如 GRAYP），供前端结果表直接展示
+                "grayp": ((first.get("buy_meta") or {}).get("grayp")
+                          if first else None),
             })
         closed_all += n_closed
 

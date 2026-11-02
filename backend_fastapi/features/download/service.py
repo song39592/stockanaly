@@ -1147,6 +1147,11 @@ def freshness(codes: list[str] | None = None) -> dict[str, Any]:
         missing = []
     covered = sum(1 for c in checked if str(latest[c]) >= expected)
     stale_codes = sorted(c for c in checked if str(latest[c]) < expected)
+    # 全市场（策略页用法）时，少量停牌/退市股长期没有新 K 线，逐只都算缺口会让
+    # 每次运行策略前都被「数据不是最新」拦住（实测 5585 只里 15 只停牌就触发）。
+    # 缺票比例超过 1% 才提示；指定 codes（K 线页单只校验）仍逐只精确判定。
+    _need = (bool(stale_codes or missing) if wanted
+             else len(stale_codes) > max(5, int(len(checked) * 0.01)))
     return {
         "expected": expected,
         "total": len(wanted) if wanted else len(latest),
@@ -1155,7 +1160,7 @@ def freshness(codes: list[str] | None = None) -> dict[str, Any]:
         "stale": len(stale_codes),
         "missing": len(missing),
         "latest": max(str(d) for d in latest.values()),
-        "need_refresh": bool(stale_codes or missing),
+        "need_refresh": _need,
         "stale_examples": (stale_codes + missing)[:10],
         "market_closed": _market_has_closed_today(),
     }
