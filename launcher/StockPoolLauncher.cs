@@ -443,6 +443,9 @@ namespace StockPool
         private CheckBox _ckStopOnExit;
         private CheckBox _ckRunOnBoot;
         private Label _lbEnvState;
+        private Label _lbSecretState;
+        private System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<Button, string>> _appearanceSwatches
+            = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<Button, string>>();
         private Button _btnTheme;
         private bool _light;   // true = 浅色主题（网页 + 本窗口都跟着这个按钮走）
         private bool _envChecked;   // 本次运行是否已做过环境检查（自动只做一次，装失败也不重试）
@@ -594,6 +597,8 @@ namespace StockPool
             _timer.Tick += delegate { RefreshStatus(false); };
             _timer.Start();
 
+            UserSettings.Load();
+            ApplySavedWindow();
             LoadSettings();
             InitServices();
             InitTray();
@@ -1187,6 +1192,11 @@ namespace StockPool
                 }
                 OpenDir(f);
             }, 130), Mute(Lbl("红色小牛问答专用"))));
+            UserSettings.DetectSecretStatus(_root);
+            _lbSecretState = Lbl("数据加密密钥：-；LLM 密钥：-");
+            Mute(_lbSecretState);
+            AddRow(body2, Row(_lbSecretState,
+                Mute(Lbl("标记仅记录「是否已配置」；密钥明文始终只在 .env + DPAPI 通道，绝不写进 settings.json"))));
             AddRow(stack, gb2);
 
             TableLayoutPanel body3;
@@ -1201,6 +1211,24 @@ namespace StockPool
             AddRow(body3, Row(MiniBtn("保存运行环境与行为", delegate { SaveSettings(); }, 170),
                 Mute(Lbl("数据目录和通达信目录请使用各自的保存按钮"))));
             AddRow(stack, gb3);
+
+            // ---- 外观（配色自定义，存于 settings.json）----
+            TableLayoutPanel bodyApp;
+            var gbApp = Group("外观（配色自定义 · settings.json）", out bodyApp);
+            AddRow(bodyApp, Row(Mute(Lbl("语义色可按字段名覆盖（如 Up / Down / Accent），改完即时换肤、重启保持；"
+                + "删除 settings.json 回落默认配色。"))));
+            AddRow(bodyApp, Row(
+                ColorPickButton("Up", "涨色"),
+                ColorPickButton("Down", "跌色"),
+                ColorPickButton("Accent", "强调色"),
+                MiniBtn("恢复默认配色", delegate
+                {
+                    C.ClearOverrides();
+                    ApplyTheme();
+                    SyncUserSettings();
+                    RefreshAppearanceButtons();
+                }, 110)));
+            AddRow(stack, gbApp);
 
             p.Controls.Add(stack);
             return p;
@@ -1351,6 +1379,10 @@ namespace StockPool
                 }
             }
             catch { }
+            // settings.json 优先（统一的非机密偏好源）；旧 settings.ini 仅作回退
+            if (!string.IsNullOrEmpty(UserSettings.Current.EnvPython)) python = UserSettings.Current.EnvPython;
+            if (!string.IsNullOrEmpty(UserSettings.Current.EnvNode)) node = UserSettings.Current.EnvNode;
+            theme = UserSettings.Current.Theme;
             if (_tbPython != null) _tbPython.Text = python ?? "";
             if (_tbNode != null) _tbNode.Text = node ?? "";
             if (_ckAutoStart != null) _ckAutoStart.Checked = auto;
@@ -1391,6 +1423,7 @@ namespace StockPool
                 sb.AppendLine("sub_indicator=" + (_cfgSubIndicator ?? ""));
                 File.WriteAllText(_settingsPath, sb.ToString(), Encoding.UTF8);
                 ApplyRunOnBoot(_ckRunOnBoot.Checked);
+                SyncUserSettings();
                 Msg("运行环境与行为已保存；Python / Node 路径在重启对应服务后生效。");
             }
             catch (Exception ex)
@@ -1731,7 +1764,15 @@ namespace StockPool
                 int depCode;
                 var depOut = RunCapture(py, "-c \"import uvicorn, fastapi, akshare, pypdf, multipart\"", 180000, out depCode);
                 if (depCode != 0)
-                    r.Problems.Add("后端依赖不完整（requirements.txt 没装齐）" + Brief(depOut));
+                {
+                    // 依赖已装齐、只是 .pyd 被系统策略拦住时，报「依赖不完整」会把用户
+                    // 引向反复重装（越装越乱）。这类错误必须单独给可执行的处理办法。
+                    if (LooksLikeDllBlocked(depOut))
+                        r.Problems.Add("依赖已装好，但 Windows 拦住了 pandas 的 DLL 加载（应用程序控制策略）"
+                                     + "，需在本机关闭「智能应用控制」或把项目目录加入杀软信任区");
+                    else
+                        r.Problems.Add("后端依赖不完整（requirements.txt 没装齐）" + Brief(depOut));
+                }
             }
 
             string node = UiSync<string>(delegate
@@ -1906,6 +1947,15 @@ namespace StockPool
                     sb.AppendLine();
                     sb.AppendLine("完整日志：" + path);
                 }
+                if (LooksLikeDllBlocked(installLog))
+                {
+                    sb.AppendLine();
+                    sb.AppendLine("---- 这多半是本机安全策略拦了 pandas 的 DLL，不是依赖没装好 ----");
+                    sb.AppendLine("1) Win11 智能应用控制：设置 > 隐私和安全性 > Windows 安全中心 >");
+                    sb.AppendLine("   应用和浏览器控制 > 智能应用控制 > 关闭（需重启；关闭后不可再开）");
+                    sb.AppendLine("2) 杀毒 / 安全软件（360、火绒、电脑管家）：把项目目录加入信任区，或临时退出后重试");
+                    sb.AppendLine("3) 虚拟环境是从别的电脑拷来的：删除 backend_fastapi\\venv 与 .venv 后重跑安装");
+                }
                 sb.AppendLine();
                 sb.AppendLine("也可以手动运行 launcher\\install_env.bat 排查。");
                 MessageBox.Show(this, sb.ToString(), AppTitle + " - 环境错误",
@@ -1922,10 +1972,24 @@ namespace StockPool
                 case 2: return "本机没有可用的 Python 3，请先安装 3.9 及以上版本并勾选 Add to PATH";
                 case 3: return "创建虚拟环境 backend_fastapi\\.venv 失败，或里面没有 pip";
                 case 4: return "pip 安装依赖失败（默认源与清华镜像都失败，多为断网 / 代理 / 杀软拦截）";
-                case 5: return "依赖装完仍无法导入";
+                case 5: return "依赖装完仍无法导入（若日志出现「应用程序控制策略已阻止此文件」，是本机安全策略拦了 pandas 的 DLL）";
                 case -1: return "安装超时或无法启动安装进程";
                 default: return "未知错误";
             }
+        }
+
+        /// <summary>
+        /// 判断导入失败是不是「本机安全策略拦住了未签名的 .pyd」。
+        /// 典型文本：DLL load failed while importing _libs: 应用程序控制策略已阻止此文件 /
+        /// Application Control policy has blocked this file。这类问题重装依赖无效。
+        /// </summary>
+        private static bool LooksLikeDllBlocked(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+            if (text.IndexOf("应用程序控制策略", StringComparison.Ordinal) >= 0) return true;
+            if (text.IndexOf("DLL load failed", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (text.IndexOf("Application Control", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return false;
         }
 
         private static bool VersionAtLeast(string v, int major, int minor)
@@ -2270,6 +2334,8 @@ namespace StockPool
                     RefreshDataDir();
                     DlPickLatestTask();
                     DlRefreshTdx();
+                    // 后端就绪后恢复上次的个股 / 指标 / 筹码 / 周期（只做一次）
+                    StockRestoreSession();
                 }
                 var ver = JsonValue(body, "api_version");
                 var detail = JsonValue(body, "backend_detail");
@@ -2447,16 +2513,91 @@ namespace StockPool
         /// <summary>窗口最小化时按需隐藏到托盘（右上角 × 不在这里处理，它就是退出）。</summary>
         private void OnResize(object sender, EventArgs e)
         {
-            if (WindowState != FormWindowState.Minimized) return;
-            if (_ckMinimize == null || !_ckMinimize.Checked) return;
-            Hide();
-            if (_tray != null)
-                _tray.ShowBalloonTip(2500, AppTitle, "已隐藏到托盘，双击图标可重新打开", ToolTipIcon.Info);
+            if (WindowState == FormWindowState.Minimized)
+            {
+                if (_ckMinimize == null || !_ckMinimize.Checked) return;
+                Hide();
+                if (_tray != null)
+                    _tray.ShowBalloonTip(2500, AppTitle, "已隐藏到托盘，双击图标可重新打开", ToolTipIcon.Info);
+                return;
+            }
+            CaptureWindow();   // 仅内存记录，落盘在退出 / 保存时
+        }
+
+        /// <summary>把当前窗口大小 / 位置记进 settings.json（仅内存，不触发写盘）。</summary>
+        private void CaptureWindow()
+        {
+            if (WindowState != FormWindowState.Normal) return;
+            UserSettings.Current.Window = new WindowData
+            {
+                w = Width,
+                h = Height,
+                x = Location.X,
+                y = Location.Y
+            };
+        }
+
+        /// <summary>启动时按 settings.json 恢复窗口大小 / 位置（无记录则保留默认居中）。</summary>
+        private void ApplySavedWindow()
+        {
+            var w = UserSettings.Current.Window;
+            if (w != null && w.w.HasValue && w.h.HasValue)
+            {
+                Size = new Size(Math.Max(w.w.Value, MinimumSize.Width), Math.Max(w.h.Value, MinimumSize.Height));
+                if (w.x.HasValue && w.y.HasValue)
+                {
+                    StartPosition = FormStartPosition.Manual;
+                    Location = new Point(w.x.Value, w.y.Value);
+                }
+            }
+        }
+
+        /// <summary>生成一个「语义色」编辑按钮：点击打开取色器，确认后覆盖该色并即时换肤、落盘。</summary>
+        private Button ColorPickButton(string name, string label)
+        {
+            var btn = MiniBtn(label, delegate
+            {
+                using (var dlg = new ColorDialog())
+                {
+                    dlg.Color = C.Get(name, Color.Black);
+                    dlg.FullOpen = true;
+                    if (dlg.ShowDialog(this) == DialogResult.OK)
+                    {
+                        C.SetOverride(name, dlg.Color);
+                        ApplyTheme();
+                        SyncUserSettings();
+                        RefreshAppearanceButtons();
+                    }
+                }
+            }, 88);
+            try
+            {
+                btn.BackColor = C.Get(name, Color.Black);
+                btn.ForeColor = (btn.BackColor.GetBrightness() > 0.5f) ? Color.Black : Color.White;
+            }
+            catch { }
+            _appearanceSwatches.Add(new System.Collections.Generic.KeyValuePair<Button, string>(btn, name));
+            return btn;
+        }
+
+        private void RefreshAppearanceButtons()
+        {
+            foreach (var kv in _appearanceSwatches)
+            {
+                try
+                {
+                    kv.Key.BackColor = C.Get(kv.Value, Color.Black);
+                    kv.Key.ForeColor = (kv.Key.BackColor.GetBrightness() > 0.5f) ? Color.Black : Color.White;
+                }
+                catch { }
+            }
         }
 
         /// <summary>右上角 × / 托盘「退出」：保存设置 → 按设置停止服务 → 关掉网页窗口 → 退出进程。</summary>
         private void OnFormClosing(object sender, FormClosingEventArgs e)
         {
+            CaptureWindow();
+            StockSessionSave();   // 退出前兜底记一次界面状态（低频）
             SaveSettingsQuiet();
             if (_ckStopOnExit != null && _ckStopOnExit.Checked)
             {
@@ -2491,6 +2632,24 @@ namespace StockPool
                 sb.AppendLine("main_indicator=" + (_cfgMainIndicator ?? ""));
                 sb.AppendLine("sub_indicator=" + (_cfgSubIndicator ?? ""));
                 File.WriteAllText(_settingsPath, sb.ToString(), Encoding.UTF8);
+                SyncUserSettings();
+            }
+            catch { }
+        }
+
+        /// <summary>把主题 / 路径 / 窗口 / 配色 / 密钥标记同步进 settings.json（不写密钥明文）。</summary>
+        private void SyncUserSettings()
+        {
+            try
+            {
+                if (_tbPython != null) UserSettings.Current.EnvPython = _tbPython.Text ?? "";
+                if (_tbNode != null) UserSettings.Current.EnvNode = _tbNode.Text ?? "";
+                UserSettings.Current.Theme = _light ? "light" : "dark";
+                UserSettings.DetectSecretStatus(_root);
+                UserSettings.Save();
+                if (_lbSecretState != null)
+                    _lbSecretState.Text = "数据加密密钥：" + (UserSettings.Current.SecretStatus.data_secret ? "已配置" : "未配置")
+                        + "；LLM 密钥：" + (UserSettings.Current.SecretStatus.llm_key ? "已配置" : "未配置");
             }
             catch { }
         }
