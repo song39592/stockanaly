@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import os
 import sys
 from typing import Any
@@ -90,8 +91,31 @@ def _safe_name(text: Any) -> str:
 
 
 def _num(value: Any):
-    """指标可能是 None / 非数，统一成可 JSON 化的数字或 None。"""
-    return round(float(value), 6) if isinstance(value, (int, float)) else None
+    """指标可能是 None / 非数，统一成可 JSON 化的数字或 None。
+
+    ⚠️ NaN / ±Inf 必须收敛成 None：`round(float('nan'), 6)` 仍是 NaN，会被
+    `json.dumps` 写成字面量 `NaN`（Python 允许），但 FastAPI 的 JSONResponse
+    用 `allow_nan=False`，读回来序列化时直接抛 ValueError → 整个接口 500。
+    历史 MACD 报告的 annual_return 就是这么把「历史结果」页弄坏的。
+    """
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(out):
+        return None
+    return round(out, 6)
+
+
+def _json_safe(obj: Any):
+    """递归把 NaN / ±Inf 换成 None（出口消毒，兼容已落盘的坏数据）。"""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
 
 
 def _summarize(report: dict) -> dict:
@@ -284,9 +308,13 @@ def list_reports(limit: int = 50) -> dict:
         if not path.exists():
             return {"ok": True, "reports": [], "dir": str(config.REPORTS_DIR)}
         data = json.loads(path.read_text(encoding="utf-8"))
-        reports = data.get("reports") or []
-        return {"ok": True, "reports": reports[-int(limit or 50):][::-1],
-                "dir": str(config.REPORTS_DIR), "total": len(reports)}
+        # 过滤掉「索引里有、磁盘上文件已不在」的幽灵行（历史 _unique_path 丢过文件，
+        # 或用户手动删了 json 没走删除接口）——否则点开必然「报告不存在」。
+        reports = [r for r in (data.get("reports") or [])
+                   if isinstance(r, dict)
+                   and (config.REPORTS_DIR / str(r.get("file") or "")).is_file()]
+        return _json_safe({"ok": True, "reports": reports[-int(limit or 50):][::-1],
+                           "dir": str(config.REPORTS_DIR), "total": len(reports)})
     except Exception as exc:               # noqa: BLE001
         return {"ok": False, "reports": [], "error": str(exc)}
 
@@ -309,7 +337,7 @@ def load_report(name: str) -> dict:
         if not isinstance(data, dict):
             return {"ok": False, "error": "报告格式错误"}
         data["ok"] = True
-        return data
+        return _json_safe(data)          # 旧报告 metrics 里可能存着 NaN
     except Exception as exc:               # noqa: BLE001 - 读失败不拖垮接口
         return {"ok": False, "error": str(exc)}
 

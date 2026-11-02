@@ -613,6 +613,7 @@ private void StRefreshRecoTitle()
                 new GridColumn("买入日期", "buy_date"),
                 new GridColumn("卖出日期", "sell_date"),
                 new GridColumn("单笔收益", "ret", true),
+                new GridColumn("GRAYP", "grayp", true),
             });
             _stPerStockGrid.SetSortable(true);
             StPlaceGrid(_stPerStockGrid);
@@ -2008,10 +2009,12 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
                 string sellDate = J.StrOr(d.ContainsKey("sell_date") ? d["sell_date"] : null, "");
                 object retObj = d.ContainsKey("ret") ? d["ret"] : null;
                 string retTxt = (retObj != null) ? J.Pct100Plain(J.Num(retObj)) : "—";
+                string graypTxt = (d.ContainsKey("grayp") && d["grayp"] != null)
+                    ? J.Num(d["grayp"]).ToString("F2") : "—";
                 int ri = _stPerStockGrid.Rows.Add(
                     code, name,
                     J.Pct100Plain(J.Num(d["total_return"])), J.Int(d["trades"]).ToString(),
-                    buyDate, sellDate, retTxt);
+                    buyDate, sellDate, retTxt, graypTxt);
                 var row = _stPerStockGrid.Rows[ri];
                 row.Tag = "main:" + code;
                 row.DefaultCellStyle.SelectionBackColor = _cPanel;
