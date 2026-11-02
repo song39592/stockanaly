@@ -62,6 +62,8 @@ def init_db() -> None:
         ensure_column(conn, "download_codes", "phase", "INTEGER NOT NULL DEFAULT 1")
         # skipped：库里历史已足量、整只跳过没下载的股票数
         ensure_column(conn, "download_tasks", "skipped", "INTEGER NOT NULL DEFAULT 0")
+        # suspended：下载中判定为停牌 / 退市的股票数（不计入 completed / failed）
+        ensure_column(conn, "download_tasks", "suspended", "INTEGER NOT NULL DEFAULT 0")
         # origin 区分「谁发起的」：manual 手动 / auto 每日自动更新 / idle 后台闲时
         ensure_column(conn, "download_tasks", "origin", "TEXT NOT NULL DEFAULT 'manual'")
 
@@ -250,11 +252,14 @@ def claim_code(task_id: str) -> dict[str, Any] | None:
     return dict(row)
 
 
-def finish_code(task_id: str, seq: int, ok: bool, error: str = "") -> None:
+def finish_code(task_id: str, seq: int, ok: bool, error: str = "", suspended: bool = False) -> None:
     """一只股票的**某一个阶段**结束；顺带维护「按股票计」的完成 / 失败数。
 
     计数按股票、不按阶段：只有这只股票的**全部阶段都落定**后才计一次 completed / failed，
     否则一只股票排两行会让进度虚高一倍。
+
+    `suspended=True` 表示这只票判定为停牌 / 退市：计为 `suspended`（不计入 completed / failed），
+    进度与失败清单都不体现它，避免刷屏与误判自动更新资格。
     """
     with connect() as conn:
         row = conn.execute("SELECT code,phase FROM download_codes WHERE task_id=? AND seq=?",
@@ -262,7 +267,10 @@ def finish_code(task_id: str, seq: int, ok: bool, error: str = "") -> None:
         if row is None:
             return
         code, phase = row["code"], row["phase"]
-        if ok:
+        if suspended:
+            conn.execute("UPDATE download_codes SET status='suspended',error=? WHERE task_id=? AND seq=?",
+                         ((error or "")[:500], task_id, seq))
+        elif ok:
             conn.execute("UPDATE download_codes SET status='done',error='' WHERE task_id=? AND seq=?",
                          (task_id, seq))
             if phase == 1:
@@ -276,10 +284,16 @@ def finish_code(task_id: str, seq: int, ok: bool, error: str = "") -> None:
             "SELECT COUNT(*) AS n FROM download_codes "
             "WHERE task_id=? AND code=? AND status IN ('pending','running')", (task_id, code)).fetchone()["n"]
         if left == 0:
+            susp = conn.execute(
+                "SELECT COUNT(*) AS n FROM download_codes WHERE task_id=? AND code=? AND status='suspended'",
+                (task_id, code)).fetchone()["n"]
             broken = conn.execute(
                 "SELECT COUNT(*) AS n FROM download_codes WHERE task_id=? AND code=? AND status='failed'",
                 (task_id, code)).fetchone()["n"]
-            if broken:
+            if susp:
+                conn.execute("UPDATE download_tasks SET suspended=suspended+1, updated_at=? WHERE id=?",
+                             (now_iso(), task_id))
+            elif broken:
                 conn.execute("UPDATE download_tasks SET failed=failed+1, updated_at=? WHERE id=?",
                              (now_iso(), task_id))
             else:
