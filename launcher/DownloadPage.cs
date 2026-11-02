@@ -827,8 +827,10 @@ namespace StockPool
             _dlStatus.Text = "状态：" + DlStatusText(status, source, kind)
                 + (string.IsNullOrEmpty(_dlTaskId) ? "" : "　任务 " + _dlTaskId);
             int skipped = J.Int(J.GetFrom(task, "skipped"));
+            int suspended = J.Int(J.GetFrom(task, "suspended"));
             var extra = "";
             if (skipped > 0) extra += string.Format("　跳过 {0} 只（库里已足量）", skipped);
+            if (suspended > 0) extra += string.Format("　停牌/退市 {0} 只", suspended);
             _dlCount.Text = string.Format("已完成 {0} / 共 {1}　失败 {2}　剩余 {3}　进度 {4:0.0}%{5}",
                                           completed, total, failed, remaining, percent, extra);
             // 请求区间：后端按 mode 给出（增量模式不给下界，如实显示「仅补最近」）。

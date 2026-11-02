@@ -32,6 +32,7 @@ from features.download import store as download_store
 from features.history import store as history_store
 from core import price_service
 from core import price_store
+from core import stock_status
 from core import tdx_reader
 from core.fallback import first_ok      # bug-02：串行多源回退的总时间预算
 from features.market.service import _ak
@@ -122,6 +123,24 @@ class _Runtime:
         self.limiter = _RateLimiter(options.get("rate_limit") or DEFAULT_RATE_LIMIT)
         self.workers: list[threading.Thread] = []
         self.manager: threading.Thread | None = None
+        # 成功 / 失败落定计数：用于区分「个股停牌」与「数据源整体故障」
+        self.ok_count = 0
+        self.fail_count = 0
+        self._stat_lock = threading.Lock()
+
+    def note_ok(self) -> None:
+        with self._stat_lock:
+            self.ok_count += 1
+
+    def note_fail(self) -> None:
+        with self._stat_lock:
+            self.fail_count += 1
+
+    def error_rate(self) -> float:
+        """已落定项里的失败占比；整体偏高说明是数据源/网络全局故障，不能标个股停牌。"""
+        with self._stat_lock:
+            total = self.ok_count + self.fail_count
+            return (self.fail_count / total) if total else 0.0
 
 
 # 运行中的任务：task_id → 运行态
@@ -452,6 +471,22 @@ def _is_suspended(code: str, expected: dt.date | str | None, *,
     return (exp - first).days >= SUSPENDED_HISTORY_MIN_DAYS
 
 
+def _failed_like_suspended(runtime: "_Runtime", code: str, message: str) -> bool:
+    """取数彻底失败（已耗尽重试）时，用「失败模式」而非「时间落后」判定停牌 / 退市。
+
+    满足：①这只票**有正常历史**（排除新股，新股的失败由 `_no_older_history` 另处处理）；
+    ②**同期全局错误率正常**——若已落定项里失败占比偏高，说明是数据源 / 网络整体故障
+    （全体都取不到），此时不能把任何个股标成停牌（会掩盖真正的故障、还误放过了该重试的票）。
+    命中则视为该票自身停牌 / 退市，标记后不计入失败、不刷屏、后续也不再被当作需补。
+    """
+    earliest = price_store.earliest_bar_date(code, "raw")
+    if not earliest:
+        return False  # 新股：本就没有历史，不判停牌
+    if runtime.error_rate() >= GLOBAL_FAIL_RATE:
+        return False  # 全局故障：这次失败是数据源 / 网络问题，不能归咎个股
+    return True
+
+
 # --------------------------------------------------------------------------- #
 # worker
 # --------------------------------------------------------------------------- #
@@ -655,6 +690,8 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
         if runtime.stop.is_set():
             return
         if no_early_gap:
+            stock_status.clear_status(code)   # 自愈：能算完成说明不是停牌
+            runtime.note_ok()
             download_store.finish_code(task_id, seq, ok=True)   # 无更早缺口：算完成（不算失败）
             return
         # 库里已有足量历史 → 这只不动作（增量任务本身只拉最近几天，不需要这道判断）
@@ -667,6 +704,8 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
             expected = _expected_data_day()
             have_latest = price_store.latest_bar_date(code, "raw")
             if expected and have_latest and have_latest >= expected:
+                stock_status.clear_status(code)   # 自愈：已是最新，不是停牌
+                runtime.note_ok()
                 download_store.finish_code(task_id, seq, ok=True)
                 return
             # ⚠️ 这里**不能**按「最新日落后 expected 很多天」就当成停牌跳过。
@@ -730,14 +769,21 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
             download_store.requeue_code(task_id, seq, f"{message}（{backoff}s 后重试）")
             time.sleep(backoff)
             return
-        if _is_suspended(code, _expected_data_day()):
-            # 停牌 / 退市导致的失败：数据本来补不到，不计入失败、不刷屏。
-            download_store.finish_code(task_id, seq, ok=True)
+        # 取数彻底失败（已耗尽重试）：用「失败模式」判定停牌 / 退市——
+        # 该票有正常历史，且同期全局错误率正常（非数据源整体故障），才标为停牌 / 退市：
+        # 不计入失败、不刷屏、后续任务也不再把它计入需补。
+        if _failed_like_suspended(runtime, code, message):
+            stock_status.set_status(code, stock_status.STATUS_SUSPENDED, reason=message)
+            download_store.finish_code(task_id, seq, ok=True, suspended=True)
             return
+        runtime.note_fail()
         download_store.finish_code(task_id, seq, ok=False, error=message)
         download_store.record_error(task_id, code, message)
         return
 
+    # 成功落定：清掉停牌 / 退市标记（复牌 / 补数据后自愈），并计入成功计数
+    stock_status.clear_status(code)
+    runtime.note_ok()
     download_store.finish_code(task_id, seq, ok=True)
 
 
@@ -1032,6 +1078,12 @@ STALE_TOLERANCE_RATIO = 0.01
 # 用来避免把「补也补不到」的票记成失败（反复重试、刷屏、拖累自动更新资格）。
 SUSPENDED_GAP_DAYS = 30             # 真正停牌/退市通常已落后一个月以上；10 天太短，会把「两周没跑下载」误判成停牌
 SUSPENDED_HISTORY_MIN_DAYS = 60     # 且曾有至少这么长的交易历史（区别于上市不久的新股）
+# 取数失败兜底改用「失败模式」判定停牌/退市时的全局故障阈值：
+# 已落定项里失败占比 ≥ 此值，视为数据源/网络整体故障，不标任何个股停牌。
+GLOBAL_FAIL_RATE = 0.5
+# _stamp_span 并集起点粗筛：最新日落后 ≥ 此自然日（远超过「没跑下载」空窗）的票排除出起点，
+# 与运行时的「失败模式」标记互补——还没被标记的长期停牌股也不拖低显示区间。
+SUSPENDED_GAP_QUICK = 7
 
 
 def _auto_eligible(downloaded: int, stale: int) -> bool:
@@ -1532,15 +1584,29 @@ def _stamp_span(options: dict[str, Any], codes: list[str],
     if str(options.get("mode") or MODE_FULL) != MODE_INCREMENTAL:
         return
     overlap = int(options.get("overlap_days") or 0)
+    expected = _expected_data_day()
+    exp: dt.date | None = None
+    try:
+        exp = dt.date.fromisoformat(str(expected)[:10])
+    except (TypeError, ValueError):
+        exp = None
     days = latest if latest is not None else price_store.code_latest_dates()
     begin: dt.date | None = None
     for code in codes:
+        # 已标记为停牌 / 退市的票：排除出并集起点，避免被个别长期停牌股拖低显示区间
+        if stock_status.is_suspended_like(code):
+            continue
         day = str(days.get(code) or "")
         if not day:
             continue
         try:
             moment = dt.date.fromisoformat(day)
         except ValueError:
+            continue
+        # 粗筛：最新日落后 ≥ SUSPENDED_GAP_QUICK 自然日（远超过「没跑下载」的空窗），
+        # 视为长期停牌 / 退市，同样排除出起点——与运行时「失败模式」标记互补，
+        # 还没被标记过的长期停牌股也不再拖低显示。
+        if exp is not None and (exp - moment).days >= SUSPENDED_GAP_QUICK:
             continue
         # overlap>0（周度修订回收）：窗口是 [最新日-overlap, 今天]；
         # 否则（每日纯增量）：只拉新增 [最新日次日, 今天]。与 _download_one 口径一致。
