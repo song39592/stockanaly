@@ -13,6 +13,13 @@ namespace StockPool
 {
     internal sealed partial class MainForm
     {
+        private int _stockIndRound;              // 指标请求轮次：切股后旧结果作废
+
+        private static string _stamp()
+        {
+            return DateTime.Now.ToString("HH:mm:ss.fff");
+        }
+
         private string StockIndicatorNameOf(string id)
         {
             if (string.IsNullOrEmpty(id)) return null;
@@ -66,6 +73,8 @@ namespace StockPool
 
         private void StockLoadIndicators(string code)
         {
+            int round = ++_stockIndRound;   // 轮次守卫：切股 / 刷新后旧指标结果作废
+            Log("指标", string.Format("{0} [IND] 发起 code={1} round={2} cur={3}", _stamp(), code, round, _stockCurrent));
             // 主图（单选）+ 副图（固定 1 个）合并成一次批量请求；「ma」与主图其它指标走同一通道
             var ids = new List<string>();
             if (!string.IsNullOrEmpty(_stockMainIndicator))
@@ -117,6 +126,7 @@ namespace StockPool
                         return;
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body);
                     var itemsResp = J.Arr(J.Get(j, "items"));
+                    Log("指标", string.Format("{0} [IND] HTTP返回 round={1} items={2}", _stamp(), round, itemsResp == null ? 0 : itemsResp.Count));
                     var dates = (_stockKline != null) ? _stockKline.GetDates() : new List<string>();
                     var panels = new List<LowerPanel>();
                     var mainSeries = new List<ChartSeries>();
@@ -172,6 +182,13 @@ namespace StockPool
                     }
                     Invoke((Action)delegate
                     {
+                        // 期间又切了股票 / 又发起了一轮指标请求 → 旧结果作废，避免 MA 用旧日期对新 K 线
+                        if (round != _stockIndRound || _stockCurrent != code)
+                        {
+                            Log("指标", string.Format("{0} [IND] 丢弃 round={1} ind={2} code={3} cur={4}", _stamp(), round, _stockIndRound, code, _stockCurrent));
+                            return;
+                        }
+                        Log("指标", string.Format("{0} [IND] 应用 round={1} main={2} sub={3}", _stamp(), round, mainSeries.Count, panels.Count));
                         if (_stockKline != null)
                         {
                             _stockKline.SetIndicators(panels);

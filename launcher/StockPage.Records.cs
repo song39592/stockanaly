@@ -136,6 +136,7 @@ bool ok = J.IsOk(j);
             Skin(_stockChip);
             _stockKline.Period = _stockPeriod;      // 图例显示 日K / 周K / 月K
             _stockKline.SetData(bars, barsRaw, marks);
+            Log("指标", string.Format("{0} [KLINE] 渲染 code={1} stockRound={2}", _stamp(), _stockCurrent, _stockRound));
             // SetData 不重置可见根数，这里按当前选中的「范围」按钮同步一次：
             // 否则按钮高亮与图表实际根数会不一致，筹码帧窗口也会跟着对不上光标。
             _stockKline.SetRange(_stockRange);

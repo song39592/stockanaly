@@ -629,9 +629,10 @@ namespace StockPool
             StockRefreshIndicatorList();   // 每次打开同步后端指标清单（后端可能刚启动）
             StockAddHistory(code, null);   // 记录查看历史（名称稍后补全）
             StockLoadName(code);
-            // 第 24 项：**先确认这只票的数据是新的再拉 K 线**。库里陈旧时同步补齐
-            // （实测约 2 秒，页面等得起），补完再走下面那一串加载 —— 否则用户看到的
-            // K 线、筹码、估值可能整体停在几天前，而界面上毫无提示。
+            // 先用库里已有数据立即加载（秒出 K线 / 筹码 / 基本面），避免打开后白屏等补齐行情。
+            StockLoadRest(code);
+            // 第 24 项（改为后台补齐）：上面那串已先出图；这里后台确认 / 补齐最新行情
+            // （陈旧时 sync 约 2 秒），补齐完再走一遍 StockLoadRest 刷新到最新。
             StockEnsureFresh(code, delegate { StockLoadRest(code); });
         }
 
