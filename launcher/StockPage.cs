@@ -616,6 +616,15 @@ namespace StockPool
                 _stockHint.Text = "数据加载中…";
             }
             _stockCurrent = code;
+            // 切换股票：先把上一只的 K线 / 指标 / 筹码清掉，否则异步加载期间
+            // 旧图还停在屏幕上，看起来像「没切过来」（指标同理）。
+            if (_stockKline != null)
+            {
+                _stockKline.SetData(new List<KBar>(), new List<KBar>(), new List<KMark>());
+                _stockKline.SetIndicators(null);
+                _stockKline.SetMainIndicators(null);
+            }
+            if (_stockChip != null) _stockChip.SetStatus("筹码未加载", false);
             StockSessionSave();            // 记住上次打开的个股
             StockRefreshIndicatorList();   // 每次打开同步后端指标清单（后端可能刚启动）
             StockAddHistory(code, null);   // 记录查看历史（名称稍后补全）
@@ -2150,6 +2159,21 @@ namespace StockPool
 
             protected override void OnPaint(PaintEventArgs e)
             {
+                try { OnPaintCore(e); }
+                catch (Exception)
+                {
+                    // 绘制异常兜底：绝不显示系统红叉，用背景色覆盖
+                    try
+                    {
+                        using (var bg = new SolidBrush(BackColor))
+                            e.Graphics.FillRectangle(bg, 0, 0, Width, Height);
+                    }
+                    catch { }
+                }
+            }
+
+            private void OnPaintCore(PaintEventArgs e)
+            {
                 base.OnPaint(e);
                 var g = e.Graphics;
                 BeginPaint(g);                 // 抗锯齿统一由基类设置（第 07 项）
@@ -2168,7 +2192,7 @@ namespace StockPool
                     DrawLegend(g, text, -1);
                     using (var b = new SolidBrush(text))
                     {
-                        var area = new RectangleF(0, 24, Width, Height - 24);
+                        var area = new RectangleF(0, 24, Width, Math.Max(0, Height - 24));
                         g.DrawString("请输入股票代码开始分析", Font, b, area, FmtCenter);
                     }
                     return;
