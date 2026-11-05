@@ -116,4 +116,12 @@ def fetch_share_capital(code: str, errors: list | None = None) -> dict:
         result["source"] = "腾讯行情（流通/总市值 ÷ 现价 反推）"
     else:
         errors.append("腾讯行情未返回市值，无法反推股本")
+    # 名称优先用本地主数据（固定不变，避免每次走网络；取不到再回退腾讯）
+    try:
+        from core import price_store
+        local_name = price_store.get_stock_name(code)
+        if local_name:
+            result["name"] = local_name
+    except Exception:  # noqa: BLE001
+        pass
     return result

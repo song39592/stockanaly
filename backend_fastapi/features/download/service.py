@@ -1441,6 +1441,15 @@ def _scheduler_tick() -> None:
         return
     stored = download_store.settings_map()
     today = dt.date.today().isoformat()
+    # 股票基础主数据：表空则播种；否则每日增量刷新（有新股才动库，不每次重拉）
+    try:
+        from core import price_store as _ps
+        if _ps.stock_meta_count() == 0 or download_store.get_setting(
+                "stock_meta_refreshed_at", "") != today:
+            _ps.refresh_stock_meta()
+            download_store.set_setting("stock_meta_refreshed_at", today)
+    except Exception:                         # noqa: BLE001 - 主数据刷新失败不影响调度
+        pass
     if stored.get("auto_update") == "1":
         # 日线自动更新**全天都会尝试**：库里还落后于「应有交易日」就补，不限于
         # 收盘后。否则白天开机看到的永远是前一天；且盘中起的轮次会被 `_auto_due_today`

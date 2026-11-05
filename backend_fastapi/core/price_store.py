@@ -301,12 +301,152 @@ def _ensure_lockup_table(conn) -> None:
     conn.execute(_LOCKUP_TABLE)
 
 
+# 股票基础主数据（代码 / 名称 / 拼音 / 拼音首字母 / 市场）：固定不变，落盘一次、
+# 有新股才增量更新，避免每次取名称都走网络（quote / profile / 股东表等都依赖它）。
+# 与 lockup_cache / share_capital 同库（FACTORS_DB），但不混入按周期变化的表。
+_STOCK_META_TABLE = """
+CREATE TABLE IF NOT EXISTS stock_meta (
+  code TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  pinyin TEXT NOT NULL DEFAULT '',            -- 全拼，如 zhongguoyinhang
+  pinyin_initial TEXT NOT NULL DEFAULT '',    -- 首字母，如 zgyh
+  market TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+) WITHOUT ROWID;
+"""
+
+
+def _ensure_stock_meta_table(conn) -> None:
+    """幂等建股票主数据表（老库自愈）。"""
+    conn.execute(_STOCK_META_TABLE)
+
+
+def _market_of(code: str) -> str:
+    """代码前缀 → 交易所（仅用于展示，不影响取数）。"""
+    c = str(code).strip()
+    if c.startswith(("83", "87", "88", "43", "42", "92", "4", "8")):
+        return "bj"
+    if c.startswith(("60", "68", "69", "90", "58", "51", "11", "5", "9")):
+        return "sh"
+    return "sz"
+
+
+def _to_pinyin(name: str) -> tuple[str, str]:
+    """中文名 → (全拼, 首字母)；pypinyin 未装或异常时返回空串，不阻断主流程。"""
+    try:
+        from pypinyin import pinyin, Style
+    except Exception:  # noqa: BLE001 - 缺依赖则退化为「无拼音」，名称仍可用
+        return "", ""
+    try:
+        full = "".join(x[0] for x in pinyin(name, style=Style.NORMAL, strict=False))
+        initial = "".join(x[0] for x in pinyin(name, style=Style.FIRST_LETTER, strict=False))
+        return full, initial
+    except Exception:  # noqa: BLE001
+        return "", ""
+
+
+def get_stock_name(code: str) -> str:
+    """本地查股票名称（固定数据，不联网）；查不到返回空串（调用方回退实时）。"""
+    try:
+        with db.connect(db.FACTORS_DB) as conn:
+            row = conn.execute("SELECT name FROM stock_meta WHERE code=?",
+                               (str(code).strip(),)).fetchone()
+        return row["name"] if row else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def stock_meta_count() -> int:
+    """stock_meta 当前条数（调度器据此判断是否需要首次播种）。"""
+    try:
+        with db.connect(db.FACTORS_DB) as conn:
+            return conn.execute("SELECT COUNT(*) AS n FROM stock_meta").fetchone()["n"]
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def search_stocks(query: str, limit: int = 50) -> list[dict]:
+    """按代码 / 中文名 / 拼音全拼 / 拼音首字母检索（前端拼音首字母匹配预留接口）。"""
+    q = (query or "").strip().lower()
+    if not q:
+        return []
+    like, prefix = f"%{q}%", f"{q}%"
+    try:
+        with db.connect(db.FACTORS_DB) as conn:
+            rows = conn.execute(
+                "SELECT code,name,pinyin,pinyin_initial,market FROM stock_meta "
+                "WHERE code LIKE ? OR name LIKE ? OR pinyin LIKE ? OR pinyin_initial LIKE ? "
+                "ORDER BY (CASE WHEN code LIKE ? THEN 0 "
+                "WHEN pinyin_initial LIKE ? THEN 1 WHEN name LIKE ? THEN 2 ELSE 3 END), code "
+                "LIMIT ?",
+                (like, like, like, prefix, prefix, prefix, like, limit)).fetchall()
+        return [{"code": r["code"], "name": r["name"], "pinyin": r["pinyin"],
+                 "pinyin_initial": r["pinyin_initial"], "market": r["market"]} for r in rows]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def refresh_stock_meta() -> dict:
+    """全量拉一次 A 股列表（akshare），与本地 stock_meta 做差量：
+
+    - 新增的 INSERT、退市的 DELETE、名称变更（极少见）的 UPDATE；
+    - 固定数据只拉一次，之后只有「有新股」才动到库，不每次重拉。
+
+    返回统计 / 错误信息（任一来源失败只降级，不影响其它模块）。
+    """
+    result = {"fetched": 0, "inserted": 0, "deleted": 0, "updated": 0, "error": None}
+    try:
+        import akshare as ak
+    except Exception:  # noqa: BLE001
+        result["error"] = "akshare 未安装"
+        return result
+    try:
+        df = ak.stock_zh_a_spot_em()
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"拉取A股列表失败：{exc}"
+        return result
+    if df is None or getattr(df, "empty", True):
+        result["error"] = "A股列表为空"
+        return result
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    seen: dict[str, tuple] = {}
+    for _, row in df.iterrows():
+        code = str(row.get("代码") or "").strip()
+        name = str(row.get("名称") or "").strip().replace(" ", "")
+        if not code or not name:
+            continue
+        full, initial = _to_pinyin(name)
+        seen[code] = (name, full, initial, _market_of(code))
+    inserted = deleted = updated = 0
+    with db.connect(db.FACTORS_DB) as conn:
+        existing = {r["code"]: r["name"]
+                    for r in conn.execute("SELECT code, name FROM stock_meta").fetchall()}
+        for code, (name, full, initial, mkt) in seen.items():
+            if code not in existing:
+                conn.execute(
+                    "INSERT INTO stock_meta(code,name,pinyin,pinyin_initial,market,updated_at) "
+                    "VALUES(?,?,?,?,?,?)", (code, name, full, initial, mkt, now))
+                inserted += 1
+            elif existing[code] != name:
+                conn.execute(
+                    "UPDATE stock_meta SET name=?,pinyin=?,pinyin_initial=?,market=?,updated_at=? "
+                    "WHERE code=?", (name, full, initial, mkt, now, code))
+                updated += 1
+        gone = [c for c in existing if c not in seen]
+        if gone:
+            conn.executemany("DELETE FROM stock_meta WHERE code=?", [(c,) for c in gone])
+            deleted = len(gone)
+    result.update(fetched=len(seen), inserted=inserted, deleted=deleted, updated=updated)
+    return result
+
+
 def init_db() -> None:
     """建齐股价相关表：当前年份的日 K 分片 + 因子库。"""
     with db.connect(db.bars_db(dt.date.today().year)) as conn:
         _ensure_bars_table(conn)
     with db.connect(db.FACTORS_DB) as conn:
         _ensure_lockup_table(conn)
+        _ensure_stock_meta_table(conn)
         conn.executescript("""
         -- 复权因子：只存 hfq_factor（基准为「上市首日」，历史值不随新的除权变化）。
         -- qfq_factor 以「最新日」为基准、每天都在变，存下来等于又把会变的数据请回来，故不存。
