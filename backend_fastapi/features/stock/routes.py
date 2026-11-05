@@ -305,6 +305,23 @@ def stock_quote(code: str):
         raise HTTPException(status_code=500, detail=f"名称查询失败：{e}")
 
 
+@router.get("/search")
+def stock_search(q: str = "", limit: int = 50):
+    """按代码 / 中文名 / 拼音全拼 / 拼音首字母检索股票。
+
+    前端「键盘输入拼音首字母匹配股票名称」功能的后端接口（UI 后续再接）。
+    """
+    from core import price_store
+    return json_safe_deep(price_store.search_stocks(q, limit))
+
+
+@router.post("/meta/refresh")
+def stock_meta_refresh():
+    """手动触发股票基础主数据刷新（有新股才增量更新，不每次重拉）。"""
+    from core import price_store
+    return json_safe_deep(price_store.refresh_stock_meta())
+
+
 @router.get("/profile")
 def stock_profile_endpoint(code: str):
     """个股基本信息：行业 / 总市值 / 流通市值 / 前十大股东 / 上次涨停 / 历史最大连板。

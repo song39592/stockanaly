@@ -327,6 +327,14 @@ def quote_only(code: str) -> dict:
         return {"ok": False, "error": "股票代码必须是 6 位数字"}
     errors: list = []
     quote = fetch_quote(code, errors)
+    # 名称用本地主数据（固定不变，不再每次联网取）
+    try:
+        from core import price_store
+        local_name = price_store.get_stock_name(code)
+        if local_name:
+            quote["name"] = local_name
+    except Exception:  # noqa: BLE001
+        pass
     if not quote.get("name"):
         return {"ok": False, "code": code, "errors": errors,
                 "error": "未找到该代码对应的股票，请检查代码是否正确"}
