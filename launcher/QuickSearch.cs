@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Text.RegularExpressions;
+using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
 namespace StockPool
@@ -26,6 +27,7 @@ namespace StockPool
         // 输入联想下拉（主窗体内的子控件，不抢焦点）
         private SuggestionList _stockSugList;
         private readonly List<IndOpt> _stockSugMatches = new List<IndOpt>();   // 当前联想命中项（与列表行一一对应）
+        private Timer _stockSugTimer;                         // 股票联想防抖定时器（避免逐键重拉后端）
 
         /// <summary>构建右下角输入框与联想下拉（在 MainForm 构造函数里调用）。</summary>
         private void BuildQuickSearch()
@@ -85,6 +87,11 @@ namespace StockPool
             _stockSugList.Visible = false;
             _stockSugList.Click += delegate { StockSugPick(); };
             Controls.Add(_stockSugList);                     // 挂到主窗体，绝对定位，显示时 BringToFront
+
+            // 股票联想防抖：输入停顿 250ms 后才打后端 /api/stock/search
+            _stockSugTimer = new Timer();
+            _stockSugTimer.Interval = 250;
+            _stockSugTimer.Tick += delegate { StockSugSearch(); };
         }
 
         /// <summary>由 ProcessCmdKey 调用：焦点不在文本类控件、且本框未显示时，数字/字母键可唤出本框。</summary>
@@ -147,18 +154,17 @@ namespace StockPool
             if (_stockSugList != null) _stockSugList.Visible = false;
         }
 
-        /// <summary>随输入内容筛选主图 / 副图指标名，刷新下拉；无匹配则隐藏。仅在本框可见时生效。</summary>
+        /// <summary>随输入内容筛选指标 + 股票，刷新下拉；无匹配则隐藏。仅在本框可见时生效。
+        /// 指标部分同步即时过滤；股票部分走后端 /api/stock/search（异步、防抖），稍后补入下拉。</summary>
         private void StockSugUpdate()
         {
             if (_stockSugList == null) return;
             if (_quickSearch == null || !_quickSearch.Visible) { StockSugHide(); return; }
             string t = _quickSearch.Text.Trim();
+            if (t.Length == 0) { _stockSugMatches.Clear(); StockSugHide(); return; }
+
+            // 1) 本地指标匹配（同步、快）
             _stockSugMatches.Clear();
-            if ((_stockSubOpts.Count == 0 && _stockMainOpts.Count == 0) || t.Length == 0)
-            {
-                StockSugHide();
-                return;
-            }
             foreach (var o in _stockSubOpts)
                 if (o.Name.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0
                  || o.Id.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0) _stockSugMatches.Add(o);
@@ -169,14 +175,69 @@ namespace StockPool
             foreach (var o in _stockChipOpts)
                 if (o.Name.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0
                  || o.Id.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0) _stockSugMatches.Add(o);
-            if (_stockSugMatches.Count == 0) { StockSugHide(); return; }
+            if (_stockSugMatches.Count > 0) StockSugRender(); else StockSugHide();
 
+            // 2) 股票匹配（异步、防抖）：停顿 250ms 才打后端，避免逐键重拉
+            if (_stockSugTimer != null) { _stockSugTimer.Stop(); _stockSugTimer.Start(); }
+        }
+
+        /// <summary>异步拉取股票匹配（代码 / 中文名 / 拼音全拼 / 拼音首字母）并并入下拉，由防抖定时器触发。</summary>
+        private void StockSugSearch()
+        {
+            if (_stockSugTimer != null) _stockSugTimer.Stop();
+            if (_quickSearch == null || !_quickSearch.Visible) { StockSugHide(); return; }
+            string q = _quickSearch.Text.Trim();
+            if (q.Length == 0) { StockSugHide(); return; }
+            string qn = q;   // 守卫快照：回包时比对当前文本，避免竞态把旧结果覆盖到新输入
+            RunUi<List<Dictionary<string, object>>>(
+                delegate
+                {
+                    string url = "http://127.0.0.1:8000/api/stock/search?q=" + Uri.EscapeDataString(qn) + "&limit=20";
+                    string resp = VRequest(url, null, 8000);
+                    // 后端返回 JSON 数组（[{"code":...,"name":...}, ...]）。
+                    // 注意：不能用 DeserializeObject(resp) as List<object> —— 它对数组返回 System.Object[]，
+                    // 强转 List 恒为 null，会把结果静默丢光（本次「输入字母无联想」的根因）。
+                    var list = new JavaScriptSerializer()
+                        .Deserialize<List<Dictionary<string, object>>>(resp);
+                    return list ?? new List<Dictionary<string, object>>();
+                },
+                delegate(List<Dictionary<string, object>> arr)
+                {
+                    if (_quickSearch == null || !_quickSearch.Visible) return;
+                    if (_quickSearch.Text.Trim() != qn) return;   // 输入已变，丢弃过期结果
+                    bool added = false;
+                    foreach (var it in arr)
+                    {
+                        string code = J.Str(J.Get(it, "code"));
+                        string name = J.Str(J.Get(it, "name"));
+                        if (code.Length == 0) continue;
+                        // Raw="STOCK" 作为标记：下拉选中时走 OpenStock 打开个股，而非切换指标
+                        _stockSugMatches.Add(new IndOpt { Id = code, Name = name, Raw = "STOCK" });
+                        added = true;
+                    }
+                    if (added) StockSugRender();
+                },
+                delegate(Exception ex) { /* 静默：名称检索失败不阻断指标联想 */ },
+                null);
+        }
+
+        /// <summary>把当前 _stockSugMatches 渲染进下拉（指标 + 股票统一展示，按类型打标签）。</summary>
+        private void StockSugRender()
+        {
+            if (_stockSugList == null) return;
+            if (_stockSugMatches.Count == 0) { StockSugHide(); return; }
             _stockSugList.Items.Clear();
             foreach (var o in _stockSugMatches)
             {
-                bool isMain = false;
-                foreach (var m in _stockMainOpts) if (m.Id == o.Id) { isMain = true; break; }
-                string tag = (o.Raw != null) ? "（筹码）" : (isMain ? "（主图）" : "");
+                string tag;
+                if (o.Raw == "STOCK") tag = "（股票）";
+                else if (o.Raw != null) tag = "（筹码）";
+                else
+                {
+                    bool isMain = false;
+                    foreach (var m in _stockMainOpts) if (m.Id == o.Id) { isMain = true; break; }
+                    tag = isMain ? "（主图）" : "";
+                }
                 _stockSugList.Items.Add(o.Name + tag);
             }
             _stockSugList.SelectedIndex = 0;
@@ -199,12 +260,21 @@ namespace StockPool
             _stockSugList.SelectedIndex = i;
         }
 
-        /// <summary>从联想下拉选中一项 → 写入输入框并切换副图。</summary>
+        /// <summary>从联想下拉选中一项：股票 → 打开该股；指标 → 写入输入框并切换副图 / 主图。</summary>
         private void StockSugPick()
         {
             if (_stockSugList == null || _stockSugList.SelectedIndex < 0) return;
             if (_stockSugList.SelectedIndex >= _stockSugMatches.Count) return;
             IndOpt m = _stockSugMatches[_stockSugList.SelectedIndex];
+            if (m.Raw == "STOCK")
+            {
+                string code = m.Id;
+                StockSugHide();
+                OpenStock(code);                                // 统一打开个股（含切到个股页）
+                HideQuickSearch();
+                _stockStrip.Select(0);
+                return;
+            }
             _quickSearch.Text = m.Name;
             StockSugHide();
             StockOpen();                                // StockOpen 内按指标名解析并替换副图
