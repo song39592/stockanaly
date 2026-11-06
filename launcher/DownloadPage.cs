@@ -680,6 +680,11 @@ namespace StockPool
                     else
                     {
                         string origin = Convert.ToString(J.GetFrom(t, "origin") ?? "");
+                        // 主任务已在上方单独渲染进度；若它本身就是 auto/idle 任务，再当
+                        // 「后台任务」显示一遍，就会出现「主任务需等它结束」这种自己等自己的
+                        // 矛盾文案。挑 bgTask 时跳过当前主任务。
+                        string tid = Convert.ToString(J.GetFrom(t, "id") ?? "");
+                        if (!string.IsNullOrEmpty(_dlTaskId) && tid == _dlTaskId) continue;
                         if ((origin == "idle" || origin == "auto")
                             && (status == "running" || status == "queued"))
                         {
@@ -837,7 +842,14 @@ namespace StockPool
             int completed = J.Int(J.GetFrom(task, "completed"));
             int failed = J.Int(J.GetFrom(task, "failed"));
             int remaining = J.Int(J.GetFrom(task, "remaining"));
-            double percent = J.Num(J.GetFrom(task, "percent"));
+            // 进度口径：后端 percent 只算 completed+failed，而「停牌/退市」是独立计数、
+            // 不进分子，于是会出现「剩余 0、进度 81%」看起来像卡住。这里把停牌/退市
+            // 一并计入已处理，进度条与计数文案统一；skipped 已包含在 completed 里，不重复加。
+            int suspended = J.Int(J.GetFrom(task, "suspended"));
+            int handled = completed + failed + suspended;
+            double percent = total > 0
+                ? Math.Min(100.0, handled * 100.0 / total)
+                : J.Num(J.GetFrom(task, "percent"));
             _dlLastStatus = status;
             // 来源决定用词：本地通达信是「同步」（读本机文件、不联网），在线才是「下载」
             var source = Convert.ToString(J.GetFrom(J.GetFrom(task, "options"), "source") ?? "");
@@ -850,13 +862,12 @@ namespace StockPool
             _dlStatus.Text = "状态：" + DlStatusText(status, source, kind)
                 + (string.IsNullOrEmpty(_dlTaskId) ? "" : "　任务 " + _dlTaskId);
             int skipped = J.Int(J.GetFrom(task, "skipped"));
-            int suspended = J.Int(J.GetFrom(task, "suspended"));
             var extra = "";
             if (skipped > 0) extra += string.Format("　跳过 {0} 只（库里已足量）", skipped);
             if (suspended > 0) extra += string.Format("　停牌/退市 {0} 只", suspended);
             extra += DlElapsedText(task);
-            _dlCount.Text = string.Format("已完成 {0} / 共 {1}　失败 {2}　剩余 {3}　进度 {4:0.0}%{5}",
-                                          completed, total, failed, remaining, percent, extra);
+            _dlCount.Text = string.Format("已处理 {0} / 共 {1}　完成 {2}　失败 {3}　剩余 {4}　进度 {5:0.0}%{6}",
+                                          handled, total, completed, failed, remaining, percent, extra);
             // 请求区间：后端按 mode 给出（增量模式不给下界，如实显示「仅补最近」）。
             // 这是**用户请求的范围**，不是每只股票真正要下的区间：后端会按库内已有数据
             // 只补缺口（更早段补 [起始日, 库内最早-1]，近期段补 [库内最新-重叠, 今天]），
