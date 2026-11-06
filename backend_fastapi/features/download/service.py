@@ -46,7 +46,7 @@ FULL_HISTORY_START_DATE = dt.date(1990, 1, 1)
 
 MAX_CONCURRENCY = 8
 DEFAULT_CONCURRENCY = 4
-DEFAULT_RATE_LIMIT = 3.0        # 每秒最多发起多少次数据源请求
+DEFAULT_RATE_LIMIT = 4.0        # 每秒最多发起多少次数据源请求（原 3.0，配合 P2 小幅上调）
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = (2, 6, 15)
 IDLE_SLEEP = 0.4                # 暂停时空转的轮询间隔
@@ -76,7 +76,8 @@ AUTO_RETRY_MINUTES = 30        # 自动更新相邻两次尝试的最小间隔�
 FRESHNESS_DAYS = 10            # 「只缺最近 10 天」的判定窗口：超过即视为历史未补齐
 SCHEDULER_INTERVAL = 60        # 调度线程轮询间隔（秒）
 AUTO_STATE_TTL = 300           # 覆盖度检测结果的缓存时间（秒）：全库扫描不便宜
-IDLE_CONCURRENCY = 2           # 闲时并发默认值（只能 1 或 2）
+IDLE_CONCURRENCY = 4           # 每日自动/闲时任务并发默认值（上限见 MAX_IDLE_CONCURRENCY）
+MAX_IDLE_CONCURRENCY = 4       # 后台任务并发上限：原为 2，是每日更新提不上去的硬闸门
 WEEKLY_OVERLAP_DAYS = 10       # 周度修订回收重拉的窗口（≈上周 5 个交易日 + 缓冲）；每日纯增量不再回拉重叠
 
 ORIGIN_MANUAL = "manual"       # 任务来源：手动 / 每日自动更新 / 后台闲时
@@ -539,9 +540,13 @@ def _sync_reference(runtime: _Runtime, options: dict[str, Any], code: str,
     """
     if source == SOURCE_TDX and tdx_reader.read_xdxr(_tdx_root(options), code):
         return []                       # 本地除权可用，无需联网
+    force = bool(options.get("force_reference", False))
+    # 已有因子的票 sync_reference 会直接走缓存返回、一个网络请求都不发；
+    # 这类票不该占用限速令牌（原先每票无条件 acquire 一次，把额度白耗掉一半）。
+    if not force and price_store.list_factors(code):
+        return []
     runtime.limiter.acquire()
-    reference = price_service.sync_reference(
-        code, force=bool(options.get("force_reference", False)))
+    reference = price_service.sync_reference(code, force=force)
     return list(reference.get("errors") or [])
 
 
@@ -885,9 +890,9 @@ _auto_state_at = 0.0
 
 
 def _idle_concurrency() -> int:
-    """闲时并发档位，只允许 1 / 2（后台任务不与前台抢资源）。"""
+    """后台任务并发档位（1 ~ MAX_IDLE_CONCURRENCY），避免与前台抢资源。"""
     return _clamp_int(download_store.get_setting("idle_concurrency", IDLE_CONCURRENCY),
-                      IDLE_CONCURRENCY, 1, 2)
+                      IDLE_CONCURRENCY, 1, MAX_IDLE_CONCURRENCY)
 
 
 def _has_alive_task() -> bool:
@@ -1766,7 +1771,8 @@ def update_settings(*, auto_update: bool | None = None, idle_download: bool | No
             raise ValueError(f"该目录下没有通达信日线数据（vipdoc/*/lday）：{text}")
         values["tdx_path"] = text
     if idle_concurrency is not None:
-        values["idle_concurrency"] = str(_clamp_int(idle_concurrency, IDLE_CONCURRENCY, 1, 2))
+        values["idle_concurrency"] = str(_clamp_int(idle_concurrency, IDLE_CONCURRENCY,
+                                                    1, MAX_IDLE_CONCURRENCY))
     if idle_download is not None:
         values["idle_download"] = "1" if idle_download else "0"
     if auto_update is not None:

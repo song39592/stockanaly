@@ -29,7 +29,7 @@ class StartRequest(BaseModel):
     kind: str = Field(default="bars", pattern=r"^(bars|lockup)$")
     start_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     concurrency: int = Field(default=4, ge=1, le=8)
-    rate_limit: float = Field(default=3.0, gt=0, le=20)
+    rate_limit: float = Field(default=4.0, gt=0, le=20)
     with_reference: bool = True
     force_reference: bool = False
 
@@ -37,7 +37,7 @@ class StartRequest(BaseModel):
 class SettingsRequest(BaseModel):
     auto_update: bool | None = None
     idle_download: bool | None = None
-    idle_concurrency: int | None = Field(default=None, ge=1, le=2)
+    idle_concurrency: int | None = Field(default=None, ge=1, le=4)
     tdx_path: str | None = None
 
 

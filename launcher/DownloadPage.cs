@@ -270,7 +270,7 @@ namespace StockPool
                 Msg("已有任务正在下载，请先暂停");
                 return;
             }
-            // 范围 / 并发 / 限速都不再暴露给界面：范围固定全市场，并发与限速用后端默认值（4 / 3）。
+            // 范围 / 并发 / 限速都不再暴露给界面：范围固定全市场，并发与限速用后端默认值（4 / 4）。
             // 模式由「仅补最新」勾选框决定：勾选=增量（只补新增、不重下已有区间）；不勾=完整下载（补历史）。
             var body = new Dictionary<string, object>();
             body["scope"] = "all";
@@ -802,6 +802,29 @@ namespace StockPool
 
         // ---------------------------------------------------------------- 渲染
 
+        /// <summary>任务已执行时长（墙钟口径，仅供参考）：有 finished_at 就取它，否则取当前 UTC。
+        /// 与库里 finished_at-created_at 同口径，含排队/暂停/重启续跑，不是纯运行时长。</summary>
+        private static string DlElapsedText(Dictionary<string, object> task)
+        {
+            string begin = Convert.ToString(J.GetFrom(task, "created_at") ?? "");
+            DateTimeOffset start;
+            if (!DateTimeOffset.TryParse(begin, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out start))
+                return "";
+            string fin = Convert.ToString(J.GetFrom(task, "finished_at") ?? "");
+            DateTimeOffset end = DateTimeOffset.UtcNow;
+            DateTimeOffset parsedEnd;
+            bool finished = DateTimeOffset.TryParse(fin, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out parsedEnd);
+            if (finished) end = parsedEnd;
+            TimeSpan span = end - start;
+            if (span.TotalSeconds < 0 || span.TotalDays > 30) return "";
+            string text = span.TotalHours >= 1
+                ? string.Format("{0:0}:{1:00}:{2:00}", Math.Floor(span.TotalHours), span.Minutes, span.Seconds)
+                : string.Format("{0:00}:{1:00}", span.Minutes, span.Seconds);
+            return "　" + (finished ? "总耗时 " : "已用 ") + text;
+        }
+
         private void DlRenderTask(Dictionary<string, object> root)
         {
             var task = J.Map(J.GetFrom(root, "task"));
@@ -831,6 +854,7 @@ namespace StockPool
             var extra = "";
             if (skipped > 0) extra += string.Format("　跳过 {0} 只（库里已足量）", skipped);
             if (suspended > 0) extra += string.Format("　停牌/退市 {0} 只", suspended);
+            extra += DlElapsedText(task);
             _dlCount.Text = string.Format("已完成 {0} / 共 {1}　失败 {2}　剩余 {3}　进度 {4:0.0}%{5}",
                                           completed, total, failed, remaining, percent, extra);
             // 请求区间：后端按 mode 给出（增量模式不给下界，如实显示「仅补最近」）。
