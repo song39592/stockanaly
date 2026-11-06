@@ -197,6 +197,7 @@ def rps_pool(date: str | None = None):
       · 在池 = 所选交易日命中的全部强股（按 RPS120 降序）；
       · 入池 = 所选交易日有、上一交易日没有的强股；
       · 出池 = 上一交易日有、所选交易日没有的强股。
+      · 在池成员另带 score（0-100）与 signal（状态），公式见 service.score_rps_pool。
     """
     try:
         dates = history_store.rps_pool_dates()
@@ -223,10 +224,12 @@ def rps_pool(date: str | None = None):
     idx = dates.index(latest)
     prev = dates[idx + 1] if idx + 1 < len(dates) else None
     data = history_store.load_rps_pool()
-    in_codes = {x["code"] for x in data.get(latest, [])}
-    prev_map = {x["code"]: x for x in data.get(prev, [])} if prev else {}
-    entered = [x for x in data.get(latest, []) if x["code"] not in prev_map]
-    exited = [x for x in data.get(prev, []) if x["code"] not in in_codes]
+    in_pool = history_service.score_rps_pool(data, latest, prev)
+    in_codes = {x["code"] for x in in_pool}
+    prev_rows = data.get(prev, []) if prev else []
+    prev_map = {x["code"]: x for x in prev_rows}
+    entered = [x for x in in_pool if x["code"] not in prev_map]
+    exited = [x for x in prev_rows if x["code"] not in in_codes]
     is_latest = (latest == dates[0])
     return {
         "ok": True,
@@ -236,7 +239,7 @@ def rps_pool(date: str | None = None):
         "date_matched": date_matched,
         "dates": dates,
         "retention_days": len(dates),
-        "in_pool": data.get(latest, []),
+        "in_pool": in_pool,
         "entered": entered,
         "exited": exited,
         "note": ((("数据截至 " if is_latest else "查看历史 ") + latest)

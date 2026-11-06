@@ -88,7 +88,7 @@ namespace StockPool
 
             _rpsPoolInCap = Mute(Lbl("在池"));
             root.Controls.Add(_rpsPoolInCap);
-            _rpsPoolIn = RpsPoolGrid();
+            _rpsPoolIn = RpsPoolGrid(true);
             root.Controls.Add(_rpsPoolIn);
 
             _rpsPoolEnterCap = Mute(Lbl("入池（较上一快照新增）"));
@@ -104,20 +104,27 @@ namespace StockPool
             return p;
         }
 
-        /// <summary>三张表共用的列声明：序号 / 代码(可跳) / 名称(可跳) / 行业 / RPS50·120·250。</summary>
-        private StockGrid RpsPoolGrid()
+        /// <summary>三张表共用的列声明：序号 / 代码(可跳) / 名称(可跳) / 行业 / RPS50·120·250。
+        /// 「在池」表额外带 评分 / 状态 两列（后端 service.score_rps_pool 计算）。</summary>
+        private StockGrid RpsPoolGrid(bool withScore = false)
         {
-            var g = NewGrid(new List<GridColumn> {
+            var cols = new List<GridColumn> {
                 new GridColumn("#", "rank", true) { Ordinal = true },
                 new GridColumn("代码", "code") { IsCode = true, Jump = true },
                 NameColumn(),
                 new GridColumn("行业", "industry"),
-                new GridColumn("RPS50", "rps50", true),
-                new GridColumn("RPS120", "rps120", true),
-                new GridColumn("RPS250", "rps250", true),
-            });
+            };
+            if (withScore)
+            {
+                cols.Add(new GridColumn("评分", "score", true));
+                cols.Add(new GridColumn("状态", "signal"));
+            }
+            cols.Add(new GridColumn("RPS50", "rps50", true));
+            cols.Add(new GridColumn("RPS120", "rps120", true));
+            cols.Add(new GridColumn("RPS250", "rps250", true));
+            var g = NewGrid(cols);
             g.Dock = DockStyle.None;         // 本页是流式布局，宽度显式给
-            g.Width = 760;
+            g.Width = withScore ? 900 : 760;
             g.SetSortable(true);             // 任意列可排序（第 20 项）
             return g;
         }
@@ -161,7 +168,7 @@ namespace StockPool
                     var inArr = J.Arr(J.Get(j, "in_pool"));
                     var enArr = J.Arr(J.Get(j, "entered"));
                     var exArr = J.Arr(J.Get(j, "exited"));
-                    RpsPoolFill(_rpsPoolIn, inArr);
+                    RpsPoolFill(_rpsPoolIn, inArr, true);
                     RpsPoolFill(_rpsPoolEnter, enArr);
                     RpsPoolFill(_rpsPoolExit, exArr);
 
@@ -347,7 +354,7 @@ namespace StockPool
                 null);
         }
 
-        private static void RpsPoolFill(StockGrid g, ArrayList items)
+        private static void RpsPoolFill(StockGrid g, ArrayList items, bool withScore = false)
         {
             var data = new List<string[]>();
             int no = 0;
@@ -360,14 +367,20 @@ namespace StockPool
                     if (name.Length == 0) name = "—";
                     string ind = J.Str(J.Get(d, "industry"));
                     if (ind.Length == 0) ind = "—";
-                    data.Add(new[] {
-                        no.ToString(),
-                        J.Str(J.Get(d, "code")),
-                        name, ind,
-                        RpsCell(J.Get(d, "rps50")),
-                        RpsCell(J.Get(d, "rps120")),
-                        RpsCell(J.Get(d, "rps250")),
-                    });
+                    var row = new List<string> {
+                        no.ToString(), J.Str(J.Get(d, "code")), name, ind,
+                    };
+                    if (withScore)
+                    {
+                        string sc = J.Str(J.Get(d, "score"));
+                        string sig = J.Str(J.Get(d, "signal"));
+                        row.Add(sc.Length > 0 ? sc : "—");
+                        row.Add(sig.Length > 0 ? sig : "—");
+                    }
+                    row.Add(RpsCell(J.Get(d, "rps50")));
+                    row.Add(RpsCell(J.Get(d, "rps120")));
+                    row.Add(RpsCell(J.Get(d, "rps250")));
+                    data.Add(row.ToArray());
                 }
             }
             g.SetRows(data);
