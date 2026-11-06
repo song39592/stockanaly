@@ -138,6 +138,77 @@ def enqueue_snapshot_sync(snapshot_date: str, stocks: list[dict[str, Any]]) -> s
 # --------------------------------------------------------------------------- #
 # 每日 RPS 强势池（全市场 RPS≥阈值，按交易日落库；滚动窗口截断）
 # --------------------------------------------------------------------------- #
+# RPS 池评分：与 frontend/shared/analysis-engine.js（HTML 版评分表）及
+# strategies/rps_score.py 同一套 0-100 公式，区别只在输入 —— 这里用已落库的
+# rps_pool_daily 逐日强势池，策略版从全市场日线现算。
+RPS_POOL_WATCH_SCORE = 50
+RPS_POOL_FOCUS_SCORE = 70
+RPS_POOL_MIN_DAYS = 3
+RPS_POOL_SECTOR_TOP_N = 3
+
+
+def score_rps_pool(pool: dict[str, list[dict[str, Any]]], latest: str,
+                   prev: str | None = None) -> list[dict[str, Any]]:
+    """给 `latest` 当日 RPS 强势池的每只票算评分与状态（不改动入参）。
+
+    公式（阈值沿用 HTML 默认）：
+      连续在池 min(days,7)/7*35 + 行业入池数 min(n,8)/8*20 + 行业前列 +10
+      + 新入池 +5 / 老票 +10 + 当日涨幅（rps_pool_daily 未存该字段，按 HTML
+      的中性缺省 +4） - 连续不足 3 天 -10，最后 clamp 到 0..100。
+    行业为空的票不参与行业集中度计数、也不拿前列行业加分 —— 否则所有未知
+    行业会被合并成一个巨型「未分类」行业，拿满 20 分并自动进 Top-N。
+    状态：>=70 重点关注 / >=50 观察 / 其余 暂不关注。
+
+    `pool` 为 {trade_date: [item...]}（见 store.load_rps_pool）。返回顺序与输入
+    一致（页面原本按 rps120 降序），按评分排序交给表格点击「评分」列完成。
+    """
+    dates = sorted((d for d in pool if d <= latest), reverse=True)
+    if not dates or dates[0] != latest:
+        return []
+    today = pool.get(latest) or []
+    if not today:
+        return []
+
+    by_day = {d: {str(x["code"]) for x in (pool.get(d) or [])} for d in dates}
+    prev_codes = by_day.get(prev, set()) if prev else set()
+
+    sector: dict[str, int] = {}
+    for x in today:
+        ind = str(x.get("industry") or "").strip()
+        if not ind:
+            continue                    # 行业未知不参与集中度，避免都算成「未分类」
+        sector[ind] = sector.get(ind, 0) + 1
+    top_sectors = {ind for ind, _ in
+                   sorted(sector.items(), key=lambda kv: (-kv[1], kv[0]))[:RPS_POOL_SECTOR_TOP_N]}
+
+    out: list[dict[str, Any]] = []
+    for x in today:
+        code = str(x["code"])
+        days = 0
+        for d in dates:
+            if code not in by_day[d]:
+                break
+            days += 1
+        ind = str(x.get("industry") or "").strip()
+        is_new = code not in prev_codes
+        score = min(days, 7) / 7.0 * 35.0
+        if ind:                         # 行业缺失时不奖赏也不进 Top 行业
+            score += min(sector.get(ind, 0), 8) / 8.0 * 20.0
+            score += 10.0 if ind in top_sectors else 0.0
+        score += 5.0 if is_new else 10.0
+        score += 4.0        # 涨幅中性缺省：rps_pool_daily 没有涨跌幅字段
+        if days < RPS_POOL_MIN_DAYS:
+            score -= 10.0
+        score = max(0.0, min(100.0, round(score)))
+        label = ("重点关注" if score >= RPS_POOL_FOCUS_SCORE
+                 else ("观察" if score >= RPS_POOL_WATCH_SCORE else "暂不关注"))
+        item = dict(x)
+        item["score"] = int(score)
+        item["signal"] = label
+        out.append(item)
+    return out
+
+
 def enqueue_rps_pool_refresh(threshold: int = 90, window: int = 20,
                             max_days: int = 20) -> str:
     """启动后台计算：把最近 window 个交易日的全市场 RPS 强势池落库并截断到 max_days。
@@ -180,15 +251,21 @@ def _run_rps_pool_job(job_id: str, threshold: int, window: int, max_days: int) -
         r50, r120, r250 = rps[50], rps[120], rps[250]
 
         history_store.update_rps_pool_job(job_id, status="loading_names", progress=70,
-                                          note="获取股票名称（首次需联网，约数十秒）")
-        try:
-            from strategies.core.backtest import _load_names
-            name_map = _load_names(list(panel.columns))
-        except Exception:                       # noqa: BLE001 - 名称缺失不阻塞
-            name_map = {}
+                                          note="读取本地名称与行业索引")
+        # 名称 / 行业都走本地离线数据，不再联网、也不再依赖手工导入快照：
+        #   · 旧版 _load_names 走 akshare，失败会静默降级成 {code: ""}，
+        #     经 set_names 把空名称写进 stock_names 并落到 rps_pool_daily，
+        #     结果整列空白且 job 仍显示 done；
+        #   · 旧版 pool_industry_map 只读最新一期导入快照，快照停更后覆盖率极低。
+        # 读取侧 store.load_rps_pool 还会再兜底一次，这里保证新落库的数据也是对的。
+        name_map = history_store.stock_meta_names()
         if name_map:
-            history_store.set_names(name_map)
-        industry_map = history_store.pool_industry_map()
+            history_store.set_names(name_map)   # 顺带把被空值污染的 stock_names 修好
+        try:
+            from features.stock import board_index
+            industry_map = board_index.industries_of(list(panel.columns)) or {}
+        except Exception:                       # noqa: BLE001 - 行业缺失不阻塞
+            industry_map = {}
 
         import pandas as pd
         written = 0

@@ -328,10 +328,32 @@ def rps_pool_dates() -> list[str]:
     return [str(r["trade_date"]) for r in rows]
 
 
+def stock_meta_names() -> dict[str, str]:
+    """本地全市场名称表 {code: name}（factors.db / stock_meta，不依赖联网）。
+
+    RPS 池刷新原先靠 akshare 全市场表取名称，失败时 load_names 静默降级成
+    {code: ""}，写进 stock_names 又落到 rps_pool_daily，结果整列空白。
+    stock_meta 由行情链路维护，覆盖全市场且带更新时间，作为兜底更可靠。
+    """
+    try:
+        with db.connect(db.FACTORS_DB) as conn:
+            rows = conn.execute(
+                "SELECT code, name FROM stock_meta WHERE name IS NOT NULL AND name<>''"
+            ).fetchall()
+        return {str(r["code"]).zfill(6): str(r["name"]) for r in rows}
+    except Exception:                       # noqa: BLE001 - 名称是展示性字段
+        return {}
+
+
 def load_rps_pool() -> dict[str, list[dict[str, Any]]]:
-    """读全部 RPS 池，按交易日降序、当日按 rps120 降序；{trade_date: [item...]}。"""
-    with connect() as db:
-        rows = db.execute(
+    """读全部 RPS 池，按交易日降序、当日按 rps120 降序；{trade_date: [item...]}。
+
+    名称 / 行业是展示性字段：早期落库可能因联网失败或导入快照停更而为空，
+    这里用本地离线数据补齐空值（stock_meta 名称 + board_index 行业），
+    历史 20 天一并修好，不必重跑刷新任务。
+    """
+    with connect() as conn:
+        rows = conn.execute(
             "SELECT trade_date, code, name, industry, rps50, rps120, rps250 "
             "FROM rps_pool_daily ORDER BY trade_date DESC, rps120 DESC"
         ).fetchall()
@@ -341,6 +363,22 @@ def load_rps_pool() -> dict[str, list[dict[str, Any]]]:
             "code": r["code"], "name": r["name"], "industry": r["industry"],
             "rps50": r["rps50"], "rps120": r["rps120"], "rps250": r["rps250"],
         })
+    codes = sorted({str(it["code"]) for day in out.values() for it in day})
+    if not codes:
+        return out
+    names = stock_meta_names()
+    try:
+        from features.stock import board_index
+        industries = board_index.industries_of(codes) or {}
+    except Exception:                       # noqa: BLE001 - 行业缺失不阻塞
+        industries = {}
+    for day in out.values():
+        for it in day:
+            code = str(it["code"]).zfill(6)
+            if not str(it.get("name") or "").strip():
+                it["name"] = names.get(code, "")
+            if not str(it.get("industry") or "").strip():
+                it["industry"] = industries.get(code, "")
     return out
 
 
