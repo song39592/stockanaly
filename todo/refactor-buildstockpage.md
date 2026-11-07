@@ -1,4 +1,15 @@
-# 后期待办 1：把 `BuildStockPage()` 重构为子构建方法
+# 后期待办 1：把 `BuildStockPage()` 重构为子构建方法  ✅ 已实现（分支 refactor/stockpage-build）
+
+> 落地范围：`BuildStockPage()` 由约 459 行的单体总装，退化为约 90 行薄壳
+> （建 root / mainCol → 调用各子构建 → 组装接线 → 收尾初始化）；
+> 原内联分节抽为 **9 个子构建方法**，各自返回已构建好的控件 / Panel：
+> `BuildStockHead()`（标题）、`BuildStockQueryBar()`（查询工具区）、
+> `BuildStockKlinePanel()`（① K线）、`BuildStockBasicPanel()`（② 基本信息）、
+> `BuildStockRecordsPanel()`（③ 记录·消息）、`BuildStockValuationPanel()`（③ 估值）、
+> `BuildStockSaoleiPanel()`（③.5 扫雷）、`BuildStockAiPanel()`（④ AI 分析）、
+> `BuildStockAiPrefPanel()`（⑤ AI 偏好）。
+> 纯行为保持重构（控件字段仍为 `_stockXxx`，分节内局部变量收敛到各自方法内），
+> 编译零错误 + 前端冒烟通过；后续可再把它们挪到对应 partial 文件（见后期待办 2）。
 
 ## 背景
 在 `StockPage.cs` 的"整方法搬运"拆分之后，各二级页的 **Load / Render 逻辑**（`StockLoadXxx` / `StockRenderXxx` 等）

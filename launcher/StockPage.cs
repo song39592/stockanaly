@@ -138,6 +138,69 @@ namespace StockPool
             root.Controls.Add(BuildStockHistoryPanel(), 0, 0);
 
             // ---- 标题 ----
+            mainCol.Controls.Add(BuildStockHead(), 0, 0);
+
+            // ---- 查询工具区（始终可见，不随二级页滚动）----
+            mainCol.Controls.Add(BuildStockQueryBar(), 0, 1);
+
+            // ---- 二级标签栏（K 线页不滚动，图表撑满）----
+            _stockStrip = new SubTabStrip(this, mainCol, 2, 3, "stock-subtab");
+            _stockStrip.OnSelected = delegate(int index)
+            {
+                // 切到 K线 页就把焦点交给图表，↑↓ 缩放 / ←→ 移光标立刻可用
+                if (index == 0 && _stockKline != null) _stockKline.FocusForKeys();
+                // 切到指标索引页：首次自动拉取目录自检
+                if (index == _stockIndSubIndex) StockIndOnEnter();
+            };
+
+            // 主内容列挂到根布局的右列
+            root.Controls.Add(mainCol, 1, 0);
+
+            // ---- 二级页 ① K线：图表撑满、不滚动（滚轮只缩放，不与翻页冲突）----
+            _stockStrip.Add("K线", BuildStockKlinePanel());
+
+            // ---- 二级页 ② 基本信息：行业 / 市值 / 前十大股东 / 涨停与连板（/api/stock/profile）----
+            _stockStrip.Add("基本信息", BuildStockBasicPanel());
+
+            // ---- 二级页 ③ 记录 · 消息 ----
+            _stockStrip.Add("记录 · 消息", BuildStockRecordsPanel());
+
+            // ---- 二级页 ③ 估值（完整过程见估值计算标签页）----
+            _stockStrip.Add("估值", BuildStockValuationPanel());
+
+            // ---- 二级页 ③.5 扫雷（通达信「扫雷宝 · 个股亮点」，来自 /api/stock/saolei）----
+            _stockStrip.Add("扫雷", BuildStockSaoleiPanel());
+
+            // ---- 二级页 ④ AI 分析（调 /api/stock/research）----
+            _stockStrip.Add("AI 分析", BuildStockAiPanel());
+
+            // ---- 二级页 ⑤ AI 分析偏好（作为投喂变量，自动存本地）----
+            _stockStrip.Add("偏好设置", BuildStockAiPrefPanel());
+
+            // ---- 二级页 ⑥ 指标索引（目录自检：索引是否重复 + 输入输出数据是否正确）----
+            _stockStrip.Add("指标索引", BuildStockIndicatorIndexPage());
+            _stockIndSubIndex = _stockStrip.Count - 1;
+
+            _stockStrip.Select(0);
+
+
+            StockApplyRange();
+            StockSetAdjustActive();
+            StockSetPeriodActive();
+
+            // 历史查看记录：从 stockanaly-data 加载并渲染左侧导航
+            StockLoadHistoryFile();
+            StockRenderHistoryNav();
+            return p;
+        }
+
+        // ===== BuildStockPage 的子构建方法 =====
+        // 各方法返回「已构建好的控件 / Panel」，由 BuildStockPage() 负责组装与接线，
+        // 让总装方法退化为薄壳。后续可再把它们挪到对应的 partial 文件（按二级页分文件）。
+
+        /// <summary>标题行（图标 + 「个股分析」）。</summary>
+        private Control BuildStockHead()
+        {
             // 原先这里还有一行「前复权/不复权日K…｜K线页：滚轮缩放 · 拖动平移」的说明，
             // 已按需求移除：内容早已过时（现在有周/月周期与键盘操作），
             // 且省下的高度归 K 线（标题行是 AutoSize）。
@@ -146,9 +209,12 @@ namespace StockPool
             title.Font = new Font("Microsoft YaHei UI", 14f, FontStyle.Bold);
             title.Margin = new Padding(0, 0, 0, 2);
             AddRow(head, Row(title));
-            mainCol.Controls.Add(head, 0, 0);
+            return head;
+        }
 
-            // ---- 查询工具区（始终可见，不随二级页滚动）----
+        /// <summary>查询工具区：当前个股 / 提示行 / 范围·周期·复权·刷新（始终可见，不随二级页滚动）。</summary>
+        private Control BuildStockQueryBar()
+        {
             // 「代码 / 指标」输入入口已统一收敛到右下角隐藏输入框（见 QuickSearch.cs）：
             // 敲数字 → 打开个股；敲字母 → 输指标英文 id（macd/rsi/rps…）切换副图。本区只展示状态。
             TableLayoutPanel b0;
@@ -265,22 +331,12 @@ namespace StockPool
             rangeRow.Controls.Add(_stockIndStatus);
             rangeRow.Controls.Add(Mute(Lbl("  ↑↓ 缩放 · ←→ 移动光标")));
             AddRow(b0, rangeRow);
-            mainCol.Controls.Add(g0, 0, 1);
+            return g0;
+        }
 
-            // ---- 二级标签栏（K 线页不滚动，图表撑满）----
-            _stockStrip = new SubTabStrip(this, mainCol, 2, 3, "stock-subtab");
-            _stockStrip.OnSelected = delegate(int index)
-            {
-                // 切到 K线 页就把焦点交给图表，↑↓ 缩放 / ←→ 移光标立刻可用
-                if (index == 0 && _stockKline != null) _stockKline.FocusForKeys();
-                // 切到指标索引页：首次自动拉取目录自检
-                if (index == _stockIndSubIndex) StockIndOnEnter();
-            };
-
-            // 主内容列挂到根布局的右列
-            root.Controls.Add(mainCol, 1, 0);
-
-            // ---- 二级页 ① K线：图表撑满、不滚动（滚轮只缩放，不与翻页冲突）----
+        /// <summary>二级页 ① K线：图表撑满、不滚动（滚轮只缩放，不与翻页冲突）。</summary>
+        private Panel BuildStockKlinePanel()
+        {
             var klinePage = new Panel();
             klinePage.AutoScroll = false;
             var kLayout = new TableLayoutPanel();
@@ -340,9 +396,12 @@ namespace StockPool
             kLayout.Controls.Add(kTop, 0, 0);                  // 指标勾选
             kLayout.Controls.Add(_stockKline, 0, 1);       // 图表占满剩余高度
             kLayout.Controls.Add(_stockChip, 1, 1);        // 右侧筹码分布窗口
-            _stockStrip.Add("K线", klinePage);
+            return klinePage;
+        }
 
-            // ---- 二级页 ② 基本信息：行业 / 市值 / 前十大股东 / 涨停与连板（/api/stock/profile）----
+        /// <summary>二级页 ② 基本信息：行业 / 市值 / 前十大股东 / 涨停与连板（/api/stock/profile）。</summary>
+        private Panel BuildStockBasicPanel()
+        {
             var basicPage = new Panel();
             basicPage.AutoScroll = true;
             var basicStack = Stack();
@@ -392,9 +451,12 @@ namespace StockPool
             AddRow(basicStack, gh);
 
             basicPage.Controls.Add(basicStack);
-            _stockStrip.Add("基本信息", basicPage);
+            return basicPage;
+        }
 
-            // ---- 二级页 ③ 记录 · 消息 ----
+        /// <summary>二级页 ③ 记录 · 消息：入池/出池记录 + 消息面时间轴。</summary>
+        private Panel BuildStockRecordsPanel()
+        {
             var recPage = new Panel();
             recPage.AutoScroll = true;
             var recStack = Stack();
@@ -416,9 +478,12 @@ namespace StockPool
             AddRow(b4, _stockEvents);          // 全部消息直接展示，不再折叠
             AddRow(recStack, g4);
             recPage.Controls.Add(recStack);
-            _stockStrip.Add("记录 · 消息", recPage);
+            return recPage;
+        }
 
-            // ---- 二级页 ③ 估值（完整过程见估值计算标签页）----
+        /// <summary>二级页 ③ 估值：情景表（完整计算过程见估值计算标签页）。</summary>
+        private Panel BuildStockValuationPanel()
+        {
             var valPage = new Panel();
             valPage.AutoScroll = true;
             var valStack = Stack();
@@ -445,9 +510,12 @@ namespace StockPool
             }, 180)));
             AddRow(valStack, g5);
             valPage.Controls.Add(valStack);
-            _stockStrip.Add("估值", valPage);
+            return valPage;
+        }
 
-            // ---- 二级页 ③.5 扫雷（通达信「扫雷宝 · 个股亮点」，来自 /api/stock/saolei）----
+        /// <summary>二级页 ③.5 扫雷：通达信风险清单（来自 /api/stock/saolei）。</summary>
+        private Panel BuildStockSaoleiPanel()
+        {
             var slPage = new Panel();
             slPage.AutoScroll = true;
             var slStack = Stack();
@@ -462,9 +530,12 @@ namespace StockPool
             AddRow(bsl, _stockSaoleiList);
             AddRow(slStack, gsl);
             slPage.Controls.Add(slStack);
-            _stockStrip.Add("扫雷", slPage);
+            return slPage;
+        }
 
-            // ---- 二级页 ④ AI 分析（调 /api/stock/research）----
+        /// <summary>二级页 ④ AI 分析（调 /api/stock/research）。</summary>
+        private Panel BuildStockAiPanel()
+        {
             var aiPage = new Panel();
             aiPage.AutoScroll = true;
             var aiStack = Stack();
@@ -488,9 +559,12 @@ namespace StockPool
             AddRow(b6, _stockAiBox);
             AddRow(aiStack, g6);
             aiPage.Controls.Add(aiStack);
-            _stockStrip.Add("AI 分析", aiPage);
+            return aiPage;
+        }
 
-            // ---- 二级页 ⑤ AI 分析偏好（作为投喂变量，自动存本地）----
+        /// <summary>二级页 ⑤ AI 分析偏好（作为投喂变量，自动保存到本地）。</summary>
+        private Panel BuildStockAiPrefPanel()
+        {
             StockLoadAiPrefs();   // 先加载已保存偏好，供控件初始选中
             var prefPage = new Panel();
             prefPage.AutoScroll = true;
@@ -532,23 +606,7 @@ namespace StockPool
             AddRow(bp, gpf);
             AddRow(prefStack, gp);
             prefPage.Controls.Add(prefStack);
-            _stockStrip.Add("偏好设置", prefPage);
-
-            // ---- 二级页 ⑥ 指标索引（目录自检：索引是否重复 + 输入输出数据是否正确）----
-            _stockStrip.Add("指标索引", BuildStockIndicatorIndexPage());
-            _stockIndSubIndex = _stockStrip.Count - 1;
-
-            _stockStrip.Select(0);
-
-
-            StockApplyRange();
-            StockSetAdjustActive();
-            StockSetPeriodActive();
-
-            // 历史查看记录：从 stockanaly-data 加载并渲染左侧导航
-            StockLoadHistoryFile();
-            StockRenderHistoryNav();
-            return p;
+            return prefPage;
         }
 
         // ---- 打开（输入来自右下角隐藏输入框；见 QuickSearch.cs）----
