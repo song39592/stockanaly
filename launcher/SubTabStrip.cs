@@ -33,6 +33,7 @@ namespace StockPool
             private readonly FlowLayoutPanel _bar;
             private readonly Panel _body;
             private readonly List<Button> _btns = new List<Button>();
+            private readonly List<Button> _actions = new List<Button>();   // 页签栏里的动作按钮（非页签，不参与选中态）
             private readonly List<Panel> _pages = new List<Panel>();
             private readonly string _buttonTag;
             private int _index = -1;
@@ -125,6 +126,28 @@ namespace StockPool
                 _pages.Add(page);
             }
 
+            /// <summary>在第 tabIndex 个页签按钮**后面**插入一个动作按钮（如「开始回测」）。
+            ///
+            /// 用途：主操作入口不该埋在内容区深处 —— 用户在「回测范围」改完参数，
+            /// 却要翻到「回测结果」页底才找得到「开始回测」。把入口提到页签栏、
+            /// 紧挨它依赖的那一页，点完还能顺势切到结果页看进度。
+            ///
+            /// 外观**与页签按钮完全一致**（同底色 / 同字号 / 同边框）：动作按钮只是
+            /// 「点了执行一件事」，不是一页 —— 做成主色高亮会让人误以为它是当前页。
+            ///
+            /// ⚠️ **必须在所有 Add(...) 之后再调用**：页签栏的显示顺序 = Controls 集合顺序，
+            /// 中途插入动作按钮会把**之后**才 Add 的页签挤到它后面（FlowLayoutPanel 按集合序排布）。
+            /// </summary>
+            public void InsertActionAfter(int tabIndex, string text, EventHandler click)
+            {
+                if (tabIndex < 0 || tabIndex >= _btns.Count) return;
+                var b = NewBarButton(text);
+                if (click != null) b.Click += click;
+                _actions.Add(b);
+                _bar.Controls.Add(b);
+                _bar.Controls.SetChildIndex(b, tabIndex + 1);
+            }
+
             /// <summary>切到第 index 个二级页。越界（含 -1）直接返回，行为与原三处一致。</summary>
             public void Select(int index)
             {
@@ -157,13 +180,21 @@ namespace StockPool
                     _btns[i].ForeColor = sel ? _app._cText : _app._cSub;
                     _btns[i].Invalidate();
                 }
+                // 动作按钮：与**未选中**页签同色。它不是页签，没有选中态，
+                // 刷成主色（Accent）会让人误以为它是当前所在页。
+                for (int i = 0; i < _actions.Count; i++)
+                {
+                    _actions[i].BackColor = _app._cBg;
+                    _actions[i].ForeColor = _app._cSub;
+                    _actions[i].Invalidate();
+                }
             }
 
-            /// <summary>建标签按钮并登记。尺寸三处原本略有差异，见 <see cref="FixedButtonSize"/>。</summary>
-            private Button NewTabButton(string title, int idx)
+            /// <summary>建页签栏上的按钮（页签按钮与动作按钮共用的外观）。尺寸两处原本略有差异，见 <see cref="FixedButtonSize"/>。</summary>
+            private Button NewBarButton(string text)
             {
                 var b = new Button();
-                b.Text = title;
+                b.Text = text;
                 b.Tag = _buttonTag;
                 b.FlatStyle = FlatStyle.Flat;
                 b.FlatAppearance.BorderSize = 0;
@@ -174,8 +205,15 @@ namespace StockPool
                 {
                     b.AutoSize = false;
                     b.Height = 28;
-                    b.Width = Math.Max(96, TextRenderer.MeasureText(title, _app.Font).Width + 24);
+                    b.Width = Math.Max(96, TextRenderer.MeasureText(text, _app.Font).Width + 24);
                 }
+                return b;
+            }
+
+            /// <summary>建标签按钮并登记。尺寸三处原本略有差异，见 <see cref="FixedButtonSize"/>。</summary>
+            private Button NewTabButton(string title, int idx)
+            {
+                var b = NewBarButton(title);
                 b.Click += delegate { Select(idx); };
                 _btns.Add(b);
                 return b;

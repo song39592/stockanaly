@@ -897,6 +897,13 @@ namespace StockPool
             {
                 // 标签按钮的配色由 SkinTabs 统一处理
             }
+            else if (tag != null && tag.EndsWith("-subtab"))
+            {
+                // 二级页签栏的按钮（各 SubTabStrip 的 buttonTag 都以 "-subtab" 结尾，
+                // 含页签栏里插入的动作按钮）：配色由该 strip 的 SkinTabs 统一处理。
+                // 这里必须**跳过**默认按钮上色 —— 否则会先被刷成主色 Accent，
+                // 动作按钮（如「开始回测」）就会变成蓝底白字，和旁边灰字页签不是一个样。
+            }
             else if (tag == "tabpage")
             {
                 c.BackColor = _cBg;
