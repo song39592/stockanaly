@@ -13,6 +13,82 @@ namespace StockPool
 {
     internal sealed partial class MainForm
     {
+        /// <summary>二级页 ④ AI 分析（调 /api/stock/research）。</summary>
+        private Panel BuildStockAiPanel()
+        {
+            var aiPage = new Panel();
+            aiPage.AutoScroll = true;
+            var aiStack = Stack();
+            TableLayoutPanel b6;
+            var g6 = Group("AI 个股分析（来自 /api/stock/research，需配置 LLM_API_KEY）", out b6);
+            _stockAiStatus = Mute(Lbl("打开个股后自动分析"));
+            AddRow(b6, Row(_stockAiStatus, MiniBtn("↻ 重新分析", delegate
+            {
+                if (_stockCurrent != null) StockLoadAi(_stockCurrent, true);
+            }, 120)));
+            _stockAiBox = new RichTextBox();
+            _stockAiBox.Tag = "doc-ai";
+            _stockAiBox.ReadOnly = true;
+            _stockAiBox.BorderStyle = BorderStyle.None;
+            _stockAiBox.Height = 460;
+            _stockAiBox.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
+            _stockAiBox.ScrollBars = RichTextBoxScrollBars.Vertical;
+            _stockAiBox.Font = new Font("Microsoft YaHei UI", 9.5f);
+            _stockAiBox.BackColor = _cPanel;
+            _stockAiBox.ForeColor = _cText;
+            AddRow(b6, _stockAiBox);
+            AddRow(aiStack, g6);
+            aiPage.Controls.Add(aiStack);
+            return aiPage;
+        }
+
+        /// <summary>二级页 ⑤ AI 分析偏好（作为投喂变量，自动保存到本地）。</summary>
+        private Panel BuildStockAiPrefPanel()
+        {
+            StockLoadAiPrefs();   // 先加载已保存偏好，供控件初始选中
+            var prefPage = new Panel();
+            prefPage.AutoScroll = true;
+            var prefStack = Stack();
+            TableLayoutPanel bp;
+            var gp = Group("AI 分析偏好（作为投喂变量，自动保存到本地）", out bp);
+            // ① 详细程度
+            TableLayoutPanel bpd;
+            var gpd = Group("① 详细程度（AI 反馈字数）", out bpd);
+            StockRadioGroup(bpd, new[] { "精简", "适中", "详细" }, new[] { "concise", "normal", "detailed" }, _aiDepth,
+                v => { _aiDepth = v; StockSaveAiPrefs(); StockAiPrefChanged(); });
+            AddRow(bp, gpd);
+            // ② 时间范围
+            TableLayoutPanel bph;
+            var gph = Group("② 时间范围（投喂新闻窗口与条数）", out bph);
+            StockRadioGroup(bph, new[] { "短期", "中期", "长期" }, new[] { "short", "mid", "long" }, _aiHorizon,
+                v => { _aiHorizon = v; StockSaveAiPrefs(); StockAiPrefChanged(); });
+            AddRow(bp, gph);
+            // ③ 关注点（可多选）
+            TableLayoutPanel bpf;
+            var gpf = Group("③ 关注点（可多选，作为额外关注维度）", out bpf);
+            foreach (var f in new[] { "板块", "估值", "走势", "大盘" })
+            {
+                var cb = new CheckBox();
+                cb.Text = f;
+                cb.AutoSize = true;
+                cb.Checked = _aiFocus.Contains(f);
+                _aiFocusCbs.Add(cb);
+                cb.CheckedChanged += delegate
+                {
+                    var lst = new List<string>();
+                    foreach (var c in _aiFocusCbs) if (c.Checked) lst.Add(c.Text);
+                    _aiFocus = lst;
+                    StockSaveAiPrefs();
+                    StockAiPrefChanged();
+                };
+                AddRow(bpf, cb);
+            }
+            AddRow(bp, gpf);
+            AddRow(prefStack, gp);
+            prefPage.Controls.Add(prefStack);
+            return prefPage;
+        }
+
         private void StockLoadAi(string code, bool force = false)
         {
             if (_stockAiStatus != null)

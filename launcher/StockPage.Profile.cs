@@ -13,6 +13,61 @@ namespace StockPool
 {
     internal sealed partial class MainForm
     {
+        /// <summary>二级页 ② 基本信息：行业 / 市值 / 前十大股东 / 涨停与连板（/api/stock/profile）。</summary>
+        private Panel BuildStockBasicPanel()
+        {
+            var basicPage = new Panel();
+            basicPage.AutoScroll = true;
+            var basicStack = Stack();
+
+            TableLayoutPanel bb;
+            var gb = Group("公司概况", out bb);
+            _stockBasicStatus = Mute(Lbl("打开个股后自动加载"));
+            _stockBasicKpi = VKpiRow();
+            _stockBasicBus = Mute(Lbl(""));
+            AddRow(bb, Row(_stockBasicStatus));
+            AddRow(bb, _stockBasicKpi);
+            AddRow(bb, _stockBasicBus);
+            AddRow(basicStack, gb);
+
+            // 所属板块（通达信 HYBLOCK/GNBLOCK/DYBLOCK 风格）：行业黄 / 概念绿 / 地域青，
+            // 每类第一个（成分股最少的「最相关」板块）加 ★。数据来自 /api/stock/boards。
+            TableLayoutPanel bk;
+            var gbk = Group("所属板块（行业 / 概念 / 地域）", out bk);
+            _stockBlocks = BoardLine(C.Flat);
+            _stockBlocks.Text = "板块标注加载中…";
+            _stockCptBlocks = BoardLine(C.UpSoft);
+            _stockRgnBlocks = BoardLine(C.LineCyan);
+            AddRow(bk, _stockBlocks);
+            AddRow(bk, _stockCptBlocks);
+            AddRow(bk, _stockRgnBlocks);
+            AddRow(basicStack, gbk);
+
+            TableLayoutPanel bl;
+            var gl = Group("涨停与连板（本地日线现算）", out bl);
+            _stockBasicLimitKpi = VKpiRow();
+            AddRow(bl, _stockBasicLimitKpi);
+            AddRow(basicStack, gl);
+
+            TableLayoutPanel bh;
+            var gh = Group("前十大股东", out bh);
+            _stockBasicHolders = NewGrid(new List<GridColumn> {
+                new GridColumn("名次", "rank", true) { Ordinal = true },
+                new GridColumn("股东名称"),
+                new GridColumn("股份类型"),
+                new GridColumn("持股数", "shares", true),
+                new GridColumn("占总股本", "pct", true),
+                new GridColumn("增减", "change", true),
+                new GridColumn("变动", "change_ratio", true),
+            });
+            _stockBasicHolders.SetSortable(true);   // 第 20 项：按持股数/增减等排序
+            AddRow(bh, _stockBasicHolders);
+            AddRow(basicStack, gh);
+
+            basicPage.Controls.Add(basicStack);
+            return basicPage;
+        }
+
         private Label BoardLine(Color color)
         {
             var l = new Label();

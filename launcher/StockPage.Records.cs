@@ -13,6 +13,33 @@ namespace StockPool
 {
     internal sealed partial class MainForm
     {
+        /// <summary>二级页 ③ 记录 · 消息：入池/出池记录 + 消息面时间轴。</summary>
+        private Panel BuildStockRecordsPanel()
+        {
+            var recPage = new Panel();
+            recPage.AutoScroll = true;
+            var recStack = Stack();
+            TableLayoutPanel b3;
+            var g3 = Group("入池 / 出池记录", out b3);
+            _stockTimeline = NewGrid(new List<GridColumn> {
+                new GridColumn("入池日期", "start"),
+                new GridColumn("出池日期", "end"),
+                new GridColumn("在榜天数", "days", true),
+                new GridColumn("状态", "state"),
+            });
+            _stockTimeline.SetSortable(true);       // 该表保留排序（按日期/天数排）
+            AddRow(b3, _stockTimeline);
+            AddRow(recStack, g3);
+
+            TableLayoutPanel b4;
+            var g4 = Group("消息面时间轴", out b4);
+            _stockEvents = Stack();
+            AddRow(b4, _stockEvents);          // 全部消息直接展示，不再折叠
+            AddRow(recStack, g4);
+            recPage.Controls.Add(recStack);
+            return recPage;
+        }
+
         private void StockLoadHistory(string code, bool refresh)
         {
             int round = ++_stockRound;

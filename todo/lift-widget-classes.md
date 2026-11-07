@@ -5,7 +5,7 @@
 - `KLineChart`（约 850 行）—— K 线图表控件；
 - `ChipPanel`（约 970 行，含 `StockHistoryItem` 等小嵌套类）—— 筹码分布控件。
 
-二者合计约 1800 行，占 `StockPage.cs` 当前体量（约 2143 行）的绝大部分。
+二者合计约 1340 行，占 `StockPage.cs` 当前体量（2429 行）的绝大部分。
 它们是独立控件，理论上可以整体搬到各自文件，让 `StockPage.cs` 进一步瘦身到约 300 行级别。
 
 ## 目标
@@ -16,7 +16,7 @@
 ## 前置验证（必须，做完才能动手）
 确认这两个类**不访问 `MainForm` 的私有成员**。
 - 当前证据（指向自包含）：
-  - `KLineChart` 由 `BuildStockPage()` 用 `new KLineChart()` 创建；
+  - `KLineChart` 由 `BuildStockKlinePanel()`（`StockPage.Kline.cs`）用 `new KLineChart()` 创建；
   - 数据通过 `SetData` / `SetCursorDate` / `SetStatus` / `SetAdjust` 等方法**注入**；
   - 交互通过 `OnRangeChanged` / `FocusForKeys` 等**回调 / 公开方法**暴露回 `MainForm`。
   - `ChipPanel` 同理，靠 `SetData` 注入、公开方法对外。
