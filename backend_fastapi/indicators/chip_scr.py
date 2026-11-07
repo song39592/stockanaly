@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from .base import ParamSpec, indicator, series_line
-from .data import chip_rows_of
+from .data import chip_rows_of, code_of
 from chipformulas.core import scr
 
 
@@ -26,8 +26,8 @@ from chipformulas.core import scr
         ParamSpec("formula", "choice", "tri_decay", label="筹码公式"),
     ],
 )
-def chip_scr(df: pd.DataFrame, formula: str = "tri_decay") -> dict:
-    rows, frames = chip_rows_of(df, formula_id=formula)
+def chip_scr(df: pd.DataFrame, *, ctx=None, formula: str = "tri_decay") -> dict:
+    rows, frames = chip_rows_of(df, formula_id=formula, code=code_of(ctx))
     centers = frames.centers
     # 第 10 项：SCR90 / SCR70 都走统一内核（NaN 语义），本地 _percentile / _scr 已删。
     # 口径不变：仍是 chip_rows_of 的**带锁仓修正**数据，与周榜/策略的 offline 口径不同。

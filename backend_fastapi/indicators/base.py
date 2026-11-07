@@ -29,14 +29,18 @@ panel 只会为了统一而扭曲其中一个（前端要为 right 单独写一�
 若将来真有需要独立纵轴的**序列**指标，请复用 "lower"（它本就支持多序列堆叠）。
 
 指标函数约定：
-  def my_indicator(df: pd.DataFrame, **params) -> dict:
+  def my_indicator(df: pd.DataFrame, *, ctx=None, **params) -> dict:
       # df 由 data.get_ohlcv 提供，索引为 date，列含 close/open/high/low/volume
+      # ctx 由 compute() 注入（见 context.CalcContext）：只有「需要按代码 / 周期
+      # 再取一份数」的指标才声明它 —— 依赖什么就写出来，别再从 df.attrs 里挖。
       return {"series": [series_line("MA5", df["close"].rolling(5).mean()),
                          series_bar("VOL", df["volume"])]}
   * 每个序列用 series_line / series_bar 构造；kind 缺省 "line"。
   * 每个 Series 必须以 df 的 date 索引对齐（直接基于 df 计算即可）；
   * 前段不足周期的位点用 NaN 表示（pandas 滚动/移位自然产生），不要裁掉索引；
   * 数值为 float，NaN 会被序列化为 null，前端按 date 对齐叠加。
+  * `ctx` 是**注入参数**（关键字参数、默认值 None）：由 compute() 传入，用户调不了
+    （不进 ParamSpec），但**必须写进签名** —— 契约要一眼可见。
 """
 from __future__ import annotations
 
@@ -45,16 +49,24 @@ import inspect
 from typing import Callable
 
 import pandas as pd
+from periods import normalize
 
 from core.jsonutil import json_safe          # 第 09 项：出口清洗
 from core.paramspec import ParamSpec         # 第 13 项：定义收敛到 core/paramspec.py
 
 from . import data
+from .context import CalcContext
 
 REGISTRY: dict[str, "IndicatorMeta"] = {}
 
 VALID_PANELS = ("main", "lower", "none")      # 无 "right"，理由见模块 docstring
 VALID_KINDS = ("line", "bar", "dist", "marker")  # dist=分发布局；marker=主图箭头信号（+1/-1/0）
+
+# 注入参数：由 compute() 传给指标函数，**不是用户可调参数**，故不进 ParamSpec。
+# 目前只有 `ctx`（计算上下文，见 context.CalcContext）。
+# 为什么要有它：原先 code / period 靠 `df.attrs` 传递 —— 签名里看不见，
+# 契约是假的（详见 context.py 顶部的说明与 ARCHITECTURE.md §5）。
+INJECTED_PARAMS = frozenset({"ctx"})
 
 
 @dc.dataclass
@@ -134,6 +146,10 @@ def signature_problems(meta: "IndicatorMeta") -> list[str]:
 
     与筹码公式的同名函数同义（都是「声明与实现对不上就拦下」），只是首参名从
     `ctx` 换成 `df`。
+
+    **注入参数例外**：`INJECTED_PARAMS`（目前只有 `ctx`）由 `compute()` 传入，
+    不是用户可调参数，故**不进 ParamSpec**；但它必须是**关键字参数**且有默认值
+    （`*, ctx=None`）—— 这样「用户参数」与「框架注入」在签名上一眼分得开。
     """
     problems: list[str] = []
     try:
@@ -150,12 +166,38 @@ def signature_problems(meta: "IndicatorMeta") -> list[str]:
         param = sig.parameters[name]
         if param.default is inspect.Parameter.empty:
             problems.append(f"参数 {name} 缺少默认值")
+        if name in INJECTED_PARAMS:
+            if param.kind is not param.KEYWORD_ONLY:
+                problems.append(f"注入参数 {name} 必须是关键字参数（*, {name}=...）")
+            continue
         if name not in declared:
             problems.append(f"参数 {name} 未在 ParamSpec 中声明")
     for spec in meta.params:
         if spec.name not in names:
             problems.append(f"ParamSpec 声明的 {spec.name} 不是函数参数")
     return problems
+
+
+_WANTS_CTX: dict[Callable, bool] = {}
+
+
+def _wants_ctx(func: Callable) -> bool:
+    """指标函数是否声明了 `ctx` 注入参数（决定 compute 要不要传）。
+
+    结果按函数缓存（注册表里的函数生命周期与进程一致）。
+    """
+    hit = _WANTS_CTX.get(func)
+    if hit is None:
+        try:
+            sig = inspect.signature(func)
+        except (TypeError, ValueError):
+            hit = False
+        else:
+            hit = any(p.name == "ctx"
+                      and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+                      for p in sig.parameters.values())
+        _WANTS_CTX[func] = hit
+    return hit
 
 
 def _normalize_series(result: dict, df: pd.DataFrame) -> list[dict]:
@@ -231,14 +273,18 @@ def compute(code: str, indicator_id: str, params: dict | None = None,
     df = data.get_ohlcv(code, period=period)   # 唯一取数点
     if df is None or df.empty:
         raise RuntimeError(f"无行情数据: {code}")
-    # 指标函数只收 df，拿不到代码；这里挂在 df.attrs 上供需要按代码再取数的
-    # 指标使用（如筹码类指标要经 data.get_chip_frames(code) 拿分布矩阵）。
-    df.attrs["code"] = code
-    # 周期也挂上：横截面类指标（如 RPS）要按同一周期取「全市场」数据，
-    # 否则周线蜡烛会配上日线的 RPS（详见 data.period_of）。
-    df.attrs["period"] = period
+    # 计算上下文**显式**传给指标函数：需要「按代码 / 周期再取一份数」的指标
+    # 在签名里声明 `*, ctx=None`，再用 data.code_of(ctx) / data.period_of(ctx) 取。
+    # （原先靠 `df.attrs["code"] / ["period"]` 传递 —— 签名里看不见，契约是假的；
+    #   详见 context.py 顶部的说明与 ARCHITECTURE.md §5。）
+    ctx = CalcContext(code=str(code or "").strip(), period=normalize(period))
 
-    result = meta.func(df, **(params or {}))
+    # 只有**声明了 ctx 的**指标才注入：不需要上下文的指标（绝大多数）在签名里
+    # 干干净净只有 df + 自己的参数 —— 「依赖什么就写什么」是这次改造的目的。
+    if _wants_ctx(meta.func):
+        result = meta.func(df, ctx=ctx, **(params or {}))
+    else:
+        result = meta.func(df, **(params or {}))
     dates = [str(d)[:10] for d in df.index]
     series_out = _normalize_series(result, df)
 

@@ -20,7 +20,7 @@ import pandas as pd
 
 from .base import indicator, ParamSpec, series_line
 from . import data
-from .rps_data import get_rps, period_of
+from .rps_data import get_rps
 
 _DEFAULT_PERIODS = [120, 250, 50, 20, 10]
 
@@ -34,8 +34,8 @@ _DEFAULT_PERIODS = [120, 250, 50, 20, 10]
         ParamSpec("periods", "choice", _DEFAULT_PERIODS, label="周期(交易日)"),
     ],
 )
-def rps(df: pd.DataFrame, periods=None) -> dict:
+def rps(df: pd.DataFrame, *, ctx=None, periods=None) -> dict:
     ps = [int(p) for p in (periods or _DEFAULT_PERIODS) if int(p) > 0]
-    code = data.code_of(df)
-    values = get_rps(code, ps, list(df.index), period=period_of(df))
+    code = data.code_of(ctx)
+    values = get_rps(code, ps, list(df.index), period=data.period_of(ctx))
     return {"series": [series_line(f"RPS{p}", values[p]) for p in ps if p in values]}

@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from .base import ParamSpec, indicator, series_line
-from .data import chip_rows_of
+from .data import chip_rows_of, code_of
 from chipformulas.core.peak import peak_band_series
 
 
@@ -33,11 +33,11 @@ from chipformulas.core.peak import peak_band_series
         ParamSpec("tol", "float", 0.5, min=0.0, max=5.0, label="衰减容差%"),
     ],
 )
-def chip_peak_band(df: pd.DataFrame, formula: str = "tri_decay",
+def chip_peak_band(df: pd.DataFrame, *, ctx=None, formula: str = "tri_decay",
                    band_pct: float = 20.0, tol: float = 0.5) -> dict:
     # 计算层（峰簇占比）在 chipformulas.core.peak，与策略共用同一份实现；
     # 本函数只负责把结果包装成副图展示 —— 指标与策略数值天然一致，不必手动两边同步。
-    rows, frames = chip_rows_of(df, formula_id=formula)
+    rows, frames = chip_rows_of(df, formula_id=formula, code=code_of(ctx))
     centers = np.asarray(frames.centers, dtype=float)
     out = peak_band_series(rows, centers, band_pct, tol)
     return {"series": [series_line("峰簇占比%", pd.Series(out, index=df.index))]}

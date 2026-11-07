@@ -24,8 +24,8 @@ from .data import get_turnover
     panel="none",                    # 能枚举、能算、不显示（供导出 / 内部复用）
     params=[],
 )
-def turnover(df: pd.DataFrame) -> dict:
-    code = str(df.attrs.get("code") or "").strip()
+def turnover(df: pd.DataFrame, *, ctx=None) -> dict:
+    code = str(getattr(ctx, "code", "") or "").strip()
     if not code:
         series = pd.Series([float("nan")] * len(df), index=df.index)
     else:

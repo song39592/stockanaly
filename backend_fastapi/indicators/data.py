@@ -173,12 +173,34 @@ class ChipFrames:
     gray: np.ndarray | None = None   # 锁仓/折旧分布（与 pct 同尺度，分母=全部筹码100%）；三态公式(如 ema_lock)非空，其余为 None
 
 
-def code_of(df: pd.DataFrame) -> str:
-    """取 DataFrame 对应的股票代码（由 base.compute 挂在 df.attrs 上）。"""
-    code = str(df.attrs.get("code") or "").strip()
+def _require_code(code: str) -> str:
+    """校验股票代码非空；空则抛「取不到股票代码」。
+
+    该串命中 `scan.DATA_DEP_MARKERS`，于是合成数据自检判为「需外部数据，跳过」，
+    不算失败（见 scan.py 的说明）。
+    """
+    code = str(code or "").strip()
     if not code:
         raise RuntimeError("取不到股票代码：指标只能在 compute() 调用链中使用")
     return code
+
+
+def code_of(ctx) -> str:
+    """取**计算上下文**里的股票代码（由 base.compute 注入，见 context.CalcContext）。
+
+    拿不到代码说明**不是**在 compute() 调用链里跑的（合成数据自检 / 直接调函数），
+    此时抛「取不到股票代码」→ 被 scan 判为「需外部数据，跳过」，不算失败。
+    """
+    return _require_code(getattr(ctx, "code", ""))
+
+
+def period_of(ctx) -> str:
+    """取**计算上下文**里的 K 线周期（由 base.compute 注入），归一化后返回。
+
+    横截面类指标（如 RPS）要按**同一周期**取全市场数据，否则周线蜡烛会配上
+    日线的 RPS（口径错的，详见 rps_data.py）。
+    """
+    return normalize(str(getattr(ctx, "period", "") or "day"))
 
 
 def _chip_frames(code: str, formula_id: str | None, days: int | None,
@@ -230,13 +252,16 @@ def chip_rows_for(dates: list[str], frames: ChipFrames, field: str = "pct") -> n
 
 
 def chip_rows_of(df: pd.DataFrame, formula_id: str | None = None,
-                 bins: int = 80) -> tuple[np.ndarray, ChipFrames]:
+                 bins: int = 80, code: str = "") -> tuple[np.ndarray, ChipFrames]:
     """指标侧一步到位：取本票的筹码矩阵，并按 `df` 的日期对齐。
+
+    `code` 由调用方从**计算上下文**取（`code_of(ctx)`）—— 筹码矩阵必须按代码取，
+    这条依赖现在是**显式**的（原先靠 `df.attrs["code"]` 隐式传递）。
 
     返回 (rows, frames)；rows 形状 (len(df), 分箱数)，缺失日期为 NaN 行。
     三个筹码类指标（获利比例 / 平均成本 / 集中度）共用同一份缓存，只算一次。
     """
-    frames = get_chip_frames(code_of(df), formula_id=formula_id, bins=bins)
+    frames = get_chip_frames(_require_code(code), formula_id=formula_id, bins=bins)
     rows = chip_rows_for([str(d)[:10] for d in df.index], frames)
     return rows, frames
 
@@ -245,7 +270,7 @@ def chip_rows_of(df: pd.DataFrame, formula_id: str | None = None,
 # RPS 横截面（全市场收盘价面板）已抽到 indicators/rps_data.py：
 #   该面板的构建 / 复权 / 缓存是 RPS 相对强度指标的中间变量，放在通用 data 入口
 #   里既模糊分层也让 data.py 膨胀；现由 rps_data 自行 import price_store。
-# 指标层请 `from .rps_data import get_rps, warm, period_of`。
+# 指标层请 `from .rps_data import get_rps, warm`；周期从本模块的 `period_of(ctx)` 取。
 # --------------------------------------------------------------------------- #
 
 

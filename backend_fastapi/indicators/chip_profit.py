@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from .base import ParamSpec, indicator, series_line
-from .data import chip_rows_of
+from .data import chip_rows_of, code_of
 
 
 @indicator(
@@ -24,8 +24,8 @@ from .data import chip_rows_of
         ParamSpec("formula", "choice", "tri_decay", label="筹码公式"),
     ],
 )
-def chip_profit(df: pd.DataFrame, formula: str = "tri_decay") -> dict:
-    rows, frames = chip_rows_of(df, formula_id=formula)
+def chip_profit(df: pd.DataFrame, *, ctx=None, formula: str = "tri_decay") -> dict:
+    rows, frames = chip_rows_of(df, formula_id=formula, code=code_of(ctx))
     centers = frames.centers
     close = df["close"].astype(float).to_numpy()
     out = []
