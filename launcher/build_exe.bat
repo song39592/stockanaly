@@ -49,6 +49,8 @@ echo 正在编译原生窗口程序...
   "%~dp0StockPage.AI.cs" ^
   "%~dp0StockPage.Overlays.cs" ^
   "%~dp0StockPage.Kline.cs" ^
+  "%~dp0ChipPanel.cs" ^
+  "%~dp0KLineChart.cs" ^
   "%~dp0GridKit.cs" ^
   "%~dp0UserSettings.cs" ^
   "%~dp0ChipRankPage.cs" ^
