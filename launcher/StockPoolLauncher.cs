@@ -418,6 +418,11 @@ namespace StockPool
         private readonly Label _lbApiVer;
         private readonly Label _lbBackendDetail;
 
+        // ---- 启动遮罩（后端拉起前的加载界面）----
+        private BootOverlay _bootOverlay;
+        private volatile bool _bootRunning;              // 启动流程是否还在跑
+        private int _logTabIndex = -1;                   // 运行日志页的页签下标
+
 
         private RichTextBox _logBox;
         private ComboBox _logSource;
@@ -490,6 +495,15 @@ namespace StockPool
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
             root.BackColor = Color.FromArgb(245, 246, 248);
             Controls.Add(root);
+
+            // ---- 启动遮罩：后端拉起前的加载界面 ----
+            // 全屏 Panel 盖在 root 之上（后加 + BringToFront）：不抢焦点、不多一个任务栏按钮，
+            // 天然跟着主题换肤。启动就绪后隐藏。
+            _bootOverlay = new BootOverlay(AppTitle);
+            _bootOverlay.Retry += BootRetry;
+            _bootOverlay.ViewLog += BootViewLog;
+            Controls.Add(_bootOverlay);
+            _bootOverlay.BringToFront();
 
             // ---- 顶部状态条：标题 + 服务状态灯（横向流式布局）----
             var head = new Panel();
@@ -906,6 +920,30 @@ namespace StockPool
                 // 周期按钮（日 / 周 / 月）的配色由 StockSetPeriodActive 控制当前周期高亮，
                 // 跳过默认按钮上色 —— 否则每次 Skin（切页/换肤）会把三个按钮全刷成 Accent，多按钮同时"高亮"。
             }
+            else if (tag == "boot-overlay")
+            {
+                // 启动遮罩：整块按主题底色，卡片 / 跑马灯由遮罩自己画
+                var ov = c as BootOverlay;
+                if (ov != null)
+                    ov.ApplyTheme(_cBg, _cPanel, _cText, _cSub,
+                        _light ? Color.FromArgb(232, 235, 240) : Color.FromArgb(56, 60, 68));
+            }
+            else if (tag == "boot-card")
+            {
+                c.BackColor = _cPanel;
+            }
+            else if (tag == "boot-bar")
+            {
+                var bar = c as BootMarquee;
+                if (bar != null)
+                    bar.ApplyTheme(_light ? Color.FromArgb(232, 235, 240) : Color.FromArgb(56, 60, 68), C.Accent);
+            }
+            else if (tag == "boot-err")
+            {
+                // 遮罩里的错误文案（换肤后仍要保持红色）
+                c.ForeColor = C.UpErr;
+                c.BackColor = Color.Transparent;
+            }
             else if (c is Button)
             {
                 c.BackColor = C.Accent;
@@ -1027,6 +1065,7 @@ namespace StockPool
         private Panel BuildLogPage()
         {
             var p = NewPage("运行日志");
+            _logTabIndex = _tabPages.Count - 1;   // 记下页签下标：启动遮罩的「查看日志」要用
 
             _logBox = new RichTextBox();
             _logBox.Dock = DockStyle.Fill;
@@ -1682,9 +1721,19 @@ namespace StockPool
         /// <param name="manual">true = 设置页手动点的「检查 / 修复环境」，允许再跑一次。</param>
         private bool PrepareEnv(bool manual)
         {
+            return PrepareEnv(manual, null);
+        }
+
+        /// <summary>
+        /// 同 <see cref="PrepareEnv(bool)"/>，但会把阶段回报出去（<paramref name="stage"/> 可为 null）。
+        /// 装依赖可能跑好几分钟，遮罩要能显示「正在安装依赖」而不是让人以为卡死。
+        /// </summary>
+        private bool PrepareEnv(bool manual, Action<string> stage)
+        {
             if (_envChecked && !manual) return true;
             _envChecked = true;
 
+            if (stage != null) stage("检查运行环境…");
             var r = CheckEnv();
             if (r.Ok)
             {
@@ -1697,6 +1746,7 @@ namespace StockPool
                 foreach (var w in r.Warnings) Log("环境", "提示：" + w);
             });
 
+            if (stage != null) stage("环境不完整，等待确认是否自动安装…");
             bool go = UiSync<bool>(delegate
             {
                 return MessageBox.Show(this,
@@ -1709,6 +1759,7 @@ namespace StockPool
             var bat = Path.Combine(_root, "launcher", "install_env.bat");
             if (!File.Exists(bat)) { EnvFail("找不到安装脚本：" + bat, null); return false; }
 
+            if (stage != null) stage("正在安装依赖（首次安装可能需要几分钟）…");
             Ui(delegate { Log("环境", "开始安装环境（launcher\\install_env.bat）…"); });
             int code;
             var output = RunInstaller(bat, out code);
@@ -1929,7 +1980,7 @@ namespace StockPool
                     _logSource.SelectedItem = "环境";
                     RenderLog();
                 }
-                SelectTab(3);   // 运行日志页：让日志留在屏幕上
+                if (_logTabIndex >= 0) SelectTab(_logTabIndex);   // 运行日志页（页签下标随页面增删会变，别写死）
 
                 var sb = new StringBuilder();
                 sb.AppendLine("环境检查 / 安装未通过，程序将退出。");
@@ -2064,61 +2115,165 @@ namespace StockPool
             _dsh.HealthUrl = "http://127.0.0.1:3080/";
         }
 
+        /// <summary>
+        /// 启动主流程（**在后台线程上跑**）：环境检查 → 拉起后端（必须）→ 拉起 AI 服务（可选）。
+        ///
+        /// 界面反馈一律经 <see cref="BootStage"/> 报给启动遮罩：主窗体已经显示，
+        /// 这段时间只有顶部状态灯在变，用户看着像「双击没反应」（待办：后端拉起前显示加载界面）。
+        /// </summary>
         private void Boot()
         {
             RefreshStatus(true);
-            var th = new Thread(delegate()
-            {
-                try
-                {
-                    // 先把环境跑通：缺依赖就装一次，装不上直接退出（不做第二次尝试）
-                    if (!PrepareEnv(false)) return;
+            _bootRunning = true;
+            if (_bootOverlay != null) _bootOverlay.BeginLoading();
 
-                    if (!UiSync<bool>(delegate { return _ckAutoStart != null && _ckAutoStart.Checked; }))
-                    {
-                        Ui(delegate { RefreshStatus(false); });
-                        return;
-                    }
-
-                    if (!Probe(_backend.HealthUrl, 1500))
-                    {
-                        Ui(delegate { Log("系统", "正在启动后端…"); });
-                        Ui(delegate { StartBackend(false); });
-                        WaitHealth(_backend, 45);
-                    }
-                    else
-                    {
-                        Ui(delegate { Log("系统", "检测到后端已在运行（由其他进程启动，本程序不抢占）"); });
-                    }
-
-                    if (!Probe(_dsh.HealthUrl, 1500))
-                    {
-                        Ui(delegate { Log("系统", "正在启动 AI 服务…"); });
-                        Ui(delegate { StartDsh(false); });
-                        WaitHealth(_dsh, 30);
-                    }
-                    else
-                    {
-                        Ui(delegate { Log("系统", "检测到 AI 服务已在运行"); });
-                    }
-                    Ui(delegate { RefreshStatus(false); });
-                }
-                catch (Exception ex)
-                {
-                    Ui(delegate { Log("系统", "启动流程异常：" + ex.Message); });
-                }
-            });
+            var th = new Thread(delegate() { BootCore(); });
             th.IsBackground = true;
             th.Start();
         }
 
-        private static void WaitHealth(ServiceItem svc, int seconds)
+        /// <summary>启动主流程本体（后台线程）。阶段通过 <see cref="BootStage"/> 报给遮罩。</summary>
+        private void BootCore()
+        {
+            try
+            {
+                bool autoStart = UiSync<bool>(delegate { return _ckAutoStart != null && _ckAutoStart.Checked; });
+
+                // ⭐ 先探一次后端：**已经在跑就不要用遮罩挡住界面** —— 用户能立刻开始用，
+                // 遮罩只在「真要等后端」时才出现（验收：后端已运行 → 遮罩不明显闪烁）。
+                bool backendAlive = Probe(_backend.HealthUrl, 800);
+                if (autoStart && !backendAlive) BootShowOverlay("检查运行环境…", 0);
+
+                // 先把环境跑通：缺依赖就装一次，装不上直接退出（不做第二次尝试）
+                if (!PrepareEnv(false, BootStage)) { BootFailed("环境检查未通过，详见运行日志", false); return; }
+
+                if (!autoStart)
+                {
+                    Ui(delegate { RefreshStatus(false); });
+                    BootFinish();
+                    return;
+                }
+
+                if (!Probe(_backend.HealthUrl, 1500))
+                {
+                    Ui(delegate { Log("系统", "正在启动后端…"); });
+                    Ui(delegate { StartBackend(false); });
+                    BootStage("等待后端服务就绪…", 45);
+                    if (!WaitHealth(_backend, 45))
+                    {
+                        BootFailed("后端服务在 45 秒内没有就绪（健康检查未通过）", true);
+                        return;
+                    }
+                }
+                else
+                {
+                    Ui(delegate { Log("系统", "检测到后端已在运行（由其他进程启动，本程序不抢占）"); });
+                }
+
+                // 后端就绪 → 放行。AI 服务不是必需项（缺了只影响 AI 问答），
+                // 继续在后台起，不占着遮罩不让用户进主界面。
+                BootFinish();
+
+                if (!Probe(_dsh.HealthUrl, 1500))
+                {
+                    Ui(delegate { Log("系统", "正在启动 AI 服务…"); });
+                    Ui(delegate { StartDsh(false); });
+                    WaitHealth(_dsh, 30);
+                }
+                else
+                {
+                    Ui(delegate { Log("系统", "检测到 AI 服务已在运行"); });
+                }
+                Ui(delegate { RefreshStatus(false); });
+            }
+            catch (Exception ex)
+            {
+                Ui(delegate { Log("系统", "启动流程异常：" + ex.Message); });
+                BootFailed("启动流程异常：" + ex.Message, true);
+            }
+        }
+
+        /// <summary>显示遮罩并设定初始阶段（UI 线程执行）。</summary>
+        private void BootShowOverlay(string stage, int limit)
+        {
+            Ui(delegate
+            {
+                if (_bootOverlay == null) return;
+                _bootOverlay.SetStage(stage, limit);
+                _bootOverlay.ShowOverlay();
+            });
+        }
+
+        /// <summary>报当前阶段给启动遮罩（后台线程调用，内部切回 UI 线程）。</summary>
+        private void BootStage(string text)
+        {
+            BootStage(text, 0);
+        }
+
+        /// <summary>报当前阶段 + 该阶段上限秒数（0 = 未知，遮罩据此显示倒计时）。</summary>
+        private void BootStage(string text, int limit)
+        {
+            Ui(delegate { if (_bootOverlay != null) _bootOverlay.SetStage(text, limit); });
+        }
+
+        /// <summary>启动完成：收掉遮罩，界面放行。</summary>
+        private void BootFinish()
+        {
+            _bootRunning = false;
+            Ui(delegate
+            {
+                if (_bootOverlay != null) _bootOverlay.HideOverlay();
+            });
+        }
+
+        /// <summary>启动失败：遮罩切错误态（可重试）或直接收起（环境失败会弹窗并退出程序）。</summary>
+        private void BootFailed(string reason, bool retryable)
+        {
+            _bootRunning = false;
+            Ui(delegate
+            {
+                Log("系统", "启动未完成：" + reason);
+                if (_bootOverlay == null) return;
+                if (!retryable) { _bootOverlay.HideOverlay(); return; }
+                _bootOverlay.ShowError(reason);
+                _bootOverlay.ShowOverlay();
+            });
+        }
+
+        /// <summary>遮罩上的「重试」：重跑一遍启动流程（环境已检过，不会重复安装）。</summary>
+        private void BootRetry()
+        {
+            if (_bootRunning) return;   // 已经在跑，别再起一条启动线程
+            Log("系统", "手动重试启动…");
+            _bootRunning = true;
+            if (_bootOverlay != null)
+            {
+                _bootOverlay.BeginLoading();
+                _bootOverlay.SetStage("检查运行环境…", 0);
+                _bootOverlay.ShowOverlay();
+            }
+            var th = new Thread(delegate() { BootCore(); });
+            th.IsBackground = true;
+            th.Start();
+        }
+
+        /// <summary>遮罩上的「查看日志」：收起遮罩并跳到运行日志页。</summary>
+        private void BootViewLog()
+        {
+            if (_bootOverlay != null) _bootOverlay.HideOverlay();
+            if (_logTabIndex >= 0) SelectTab(_logTabIndex);
+            RenderLog();
+        }
+
+        /// <summary>轮询健康检查直到就绪或超时；返回是否就绪。</summary>
+        private static bool WaitHealth(ServiceItem svc, int seconds)
         {
             for (int i = 0; i < seconds * 2; i++)
             {
-                if (Probe(svc.HealthUrl, 1500)) return;
+                if (Probe(svc.HealthUrl, 1500)) return true;
                 Thread.Sleep(500);
             }
+            return false;
         }
 
         private static int PortOf(ServiceItem svc)
