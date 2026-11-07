@@ -177,6 +177,11 @@ namespace StockPool
             _stStrip.Add("当前策略推荐", StBuildReco);
             _stStrip.Add("历史结果", StBuildHistory);
 
+            // 「开始回测」提到页签栏，挂在「回测范围」后面（页签下标 1）：
+            // 改完范围顺手就能跑，不用翻到「回测结果」页底去找埋在下面的按钮。
+            // 点击 = 先跳到「回测结果」页（进度条 / 指标卡在那儿），再发起回测 —— 行为与原按钮一致。
+            _stStrip.InsertActionAfter(1, "开始回测", delegate { StStartBacktestFromBar(); });
+
             _stStrip.Select(0);
             return p;
         }
@@ -564,7 +569,8 @@ private void StRefreshRecoTitle()
             AddRow(stack, _stResultHeader);
 
             AddRow(stack, Row(
-                MiniBtn("开始回测", delegate { StRunBacktest(); }, 100),
+                // 「开始回测」已提到页签栏「回测范围」后面（见 StBuild 里的 InsertActionAfter），
+                // 这里只留跑起来之后的控制键。
                 // 暂停 / 继续 / 停止：全市场一次实测约 13 分钟（5578 只 × 3 年），
                 // 而并发上限是 1 —— 没有这三个按钮，用户改完策略想重跑就只能干等。
                 // 原来后端提示「请先点『停止』」而界面上根本没有这个按钮，属于死路。
@@ -678,6 +684,15 @@ private void StRefreshRecoTitle()
         private void StBuildHistory(TableLayoutPanel stack)
         {
             AddRow(stack, Mute(Lbl("已保存的回测报告（每次回测自动落盘）。选中一份后点「加载所选」，按回测结果的样式展示指标卡 / 净值曲线 / 个股明细。")));
+
+            // 操作按钮放在列表**上方**：入口紧挨着要操作的表格，不用鼠标往下拖到页面底部
+            _stHistStatus = Mute(Lbl("尚未加载"));
+            AddRow(stack, Row(
+                MiniBtn("刷新列表", delegate { StHistRefresh(); }, 90),
+                MiniBtn("加载所选", delegate { StHistLoad(); }, 90),
+                MiniBtn("删除所选", delegate { StHistDelete(); }, 90),
+                _stHistStatus));
+
             _stHistList = new ListView();
             _stHistList.View = View.Details;
             _stHistList.FullRowSelect = true;
@@ -696,12 +711,6 @@ private void StRefreshRecoTitle()
             var g = Group("历史报告", out bg);
             AddRow(bg, _stHistList);
             AddRow(stack, g);
-            _stHistStatus = Mute(Lbl("尚未加载"));
-            AddRow(stack, Row(
-                MiniBtn("刷新列表", delegate { StHistRefresh(); }, 90),
-                MiniBtn("加载所选", delegate { StHistLoad(); }, 90),
-                MiniBtn("删除所选", delegate { StHistDelete(); }, 90),
-                _stHistStatus));
             StHistRefresh();
         }
 
@@ -1465,6 +1474,18 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
                         covered, total, latest));
                 });
             });
+        }
+
+        /// <summary>页签栏「开始回测」按钮的入口：先切到「回测结果」页，再发起回测。
+        ///
+        /// 切页在前、发起在后：回测的进度条 / 指标卡 / 状态文案都在「回测结果」页里，
+        /// 不切过去用户点了按钮只看到屏幕没变化，还以为没点上。
+        /// 回测逻辑本身仍走 <see cref="StRunBacktest"/>，与原按钮完全一致。
+        /// </summary>
+        private void StStartBacktestFromBar()
+        {
+            _stStrip.Select(2);        // 2 = 「回测结果」
+            StRunBacktest();
         }
 
         private void StRunBacktest()

@@ -23,8 +23,8 @@ from .base import indicator, series_line
     panel="none",                    # 能枚举、能算、不显示（供指标 / 策略复用）
     params=[],
 )
-def chip_lockup(df: pd.DataFrame) -> dict:
-    code = str(df.attrs.get("code") or "").strip()
+def chip_lockup(df: pd.DataFrame, *, ctx=None) -> dict:
+    code = str(getattr(ctx, "code", "") or "").strip()
     if not code:
         # 合成数据自检（scan 用、无 code）走这里：不触发任何外部 import，避免与
         # indicators.data ↔ chipformulas.core.data 的循环依赖在导入期互锁。

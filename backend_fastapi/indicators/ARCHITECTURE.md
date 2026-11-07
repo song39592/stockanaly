@@ -122,8 +122,21 @@ def ma(df: pd.DataFrame, periods=None) -> dict:
 
 ### 指标函数约定
 - 入参 `df` 由 `compute()` 经 `data.get_ohlcv` 提供（绝不自行取数）。
-- `df.attrs["code"]` 带当前股票代码（由 `compute()` 挂上）。需要「按代码再取一份数据」
-  的指标（如筹码类）用 `data.code_of(df)` 取，**不得**为此改函数签名。
+- 需要「按代码 / 周期再取一份数据」的指标（如筹码类、RPS）**在签名里显式声明**
+  注入参数 `ctx`（关键字参数、默认值 `None`），用 `data.code_of(ctx)` /
+  `data.period_of(ctx)` 取值：
+
+  ```python
+  def chip_cost(df: pd.DataFrame, *, ctx=None, formula: str = "tri_decay") -> dict:
+      rows, frames = chip_rows_of(df, formula_id=formula, code=code_of(ctx))
+  ```
+
+  `ctx` 由 `compute()` 构造并注入（见 `context.CalcContext`）：**不是**用户可调参数，
+  故不进 `ParamSpec`（用户在前端调不到它），但**必须写进签名** —— 契约要一眼可见。
+  ⚠️ 不要再用 `df.attrs["code"] / ["period"]` 传这类信息：签名里看不见，
+  单元测试还要伪造 attrs 才能跑（改造经过见 `context.py` 顶部说明）。
+  `ctx=None` 表示「没有上下文」（合成数据自检 / 直接调函数），需要 code 的指标据此
+  抛「取不到股票代码」，被 `scan` 判为「需外部数据，跳过」，不算失败。
 - 返回 `dict`：`{"series": [series_line(...), series_bar(...), ...]}`。
 - 每条 Series **必须沿用 `df` 的 date 索引**（直接基于 `df` 计算即可），
   **不得裁掉前段索引**；不足周期的位点用 `NaN` 表示（pandas 滚动/移位自然产生）。

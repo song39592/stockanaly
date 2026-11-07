@@ -75,7 +75,7 @@ stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
 ├── 股票池追踪系统.exe            # 原生 Windows 窗口程序（由 launcher\build_exe.bat 编译，自带窗口、不加载 HTML）
 ├── launcher/                     # 上述 EXE 的源码：主窗体 StockPoolLauncher.cs + 各业务标签页
 │                                 #   （MarketPage / StockPage / ValuationPage / DownloadPage.cs）、
-│                                 #   构建脚本 build_exe.bat、环境安装脚本 install_env.bat
+│                                 #   构建脚本 build_exe.bat、环境安装脚本 install_env.ps1
 ├── frontend/                     # 按页面分目录：home/（股票池）、mentor-lab/（大佬策略实验室）、
 │                                 # chip-scr/（SCR 选股），每个目录下都是 index.html；shared/ 放共享 js
 ├── backend_fastapi/              # FastAPI 后端（业务模块化：*_routes.py 管 HTTP、*_service.py 管逻辑）
@@ -111,8 +111,8 @@ stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
      **自带 WinForms 窗口**（服务控制台 / 个股查询 / 运行日志 / 设置），内嵌拉起两个服务、
      状态灯实时显示、托盘常驻、退出自动收尾子进程；业务页面仍由「打开完整网页版」按钮唤起浏览器。
    - **启动即检查环境**：检查 Python 与后端依赖（`requirements.txt`）是否齐全，缺了会询问并拉起
-     `launcher\install_env.bat` 装一次（复用已有虚拟环境，没有才新建 `.venv` 并装依赖，pip 默认源失败才换镜像）；
-     装不上就弹出错误日志并退出，不会反复重试。设置页也有「检查 / 修复环境」可手动触发。
+     `launcher\install_env.ps1` 装一次（复用已有虚拟环境，没有才新建 `.venv` 并装依赖，pip 默认源失败才换镜像）；
+     装不上就弹出错误日志（开头 + 关键错误行 + 末尾三段）并退出，不会反复重试。设置页也有「检查 / 修复环境」可手动触发。
      Node 缺失只提示（AI 服务 :3080 起不来，后端与网页不受影响）。
 3. **单独启动 / 调试**：
    - 后端：手动 `D:/ai/backend_fastapi/venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000`；

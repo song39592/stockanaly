@@ -7,7 +7,7 @@ data 入口里既模糊了分层，也让 data.py 膨胀。现独立到此文件
 import price_store（与 indicators.data 同样的「指标侧唯一取数」职责），
 indicators.data 只保留通用 OHLCV 入口。
 
-指标层用法：`from .rps_data import get_rps, warm, period_of`。
+指标层用法：`from .rps_data import get_rps, warm`；K 线周期从 `indicators.data.period_of(ctx)` 取。
 """
 from __future__ import annotations
 
@@ -32,11 +32,6 @@ _RPS_PANEL_YEARS = 6          # 面板回看年数：限制内存；RPS 排名�
 _MARKET_LOCK = threading.RLock()
 _MARKET_PANEL: dict[str, pd.DataFrame] = {}      # period -> 宽表
 _MARKET_WARMING: set[str] = set()
-
-
-def period_of(df: pd.DataFrame) -> str:
-    """取 df 对应的 K 线周期（由 base.compute 挂在 df.attrs 上）。"""
-    return normalize(str(df.attrs.get("period") or "day"))
 
 
 def _apply_hfq(panel: pd.DataFrame) -> pd.DataFrame:

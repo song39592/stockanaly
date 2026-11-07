@@ -418,6 +418,11 @@ namespace StockPool
         private readonly Label _lbApiVer;
         private readonly Label _lbBackendDetail;
 
+        // ---- 启动遮罩（后端拉起前的加载界面）----
+        private BootOverlay _bootOverlay;
+        private volatile bool _bootRunning;              // 启动流程是否还在跑
+        private int _logTabIndex = -1;                   // 运行日志页的页签下标
+
 
         private RichTextBox _logBox;
         private ComboBox _logSource;
@@ -490,6 +495,15 @@ namespace StockPool
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
             root.BackColor = Color.FromArgb(245, 246, 248);
             Controls.Add(root);
+
+            // ---- 启动遮罩：后端拉起前的加载界面 ----
+            // 全屏 Panel 盖在 root 之上（后加 + BringToFront）：不抢焦点、不多一个任务栏按钮，
+            // 天然跟着主题换肤。启动就绪后隐藏。
+            _bootOverlay = new BootOverlay(AppTitle);
+            _bootOverlay.Retry += BootRetry;
+            _bootOverlay.ViewLog += BootViewLog;
+            Controls.Add(_bootOverlay);
+            _bootOverlay.BringToFront();
 
             // ---- 顶部状态条：标题 + 服务状态灯（横向流式布局）----
             var head = new Panel();
@@ -883,6 +897,13 @@ namespace StockPool
             {
                 // 标签按钮的配色由 SkinTabs 统一处理
             }
+            else if (tag != null && tag.EndsWith("-subtab"))
+            {
+                // 二级页签栏的按钮（各 SubTabStrip 的 buttonTag 都以 "-subtab" 结尾，
+                // 含页签栏里插入的动作按钮）：配色由该 strip 的 SkinTabs 统一处理。
+                // 这里必须**跳过**默认按钮上色 —— 否则会先被刷成主色 Accent，
+                // 动作按钮（如「开始回测」）就会变成蓝底白字，和旁边灰字页签不是一个样。
+            }
             else if (tag == "tabpage")
             {
                 c.BackColor = _cBg;
@@ -905,6 +926,30 @@ namespace StockPool
             {
                 // 周期按钮（日 / 周 / 月）的配色由 StockSetPeriodActive 控制当前周期高亮，
                 // 跳过默认按钮上色 —— 否则每次 Skin（切页/换肤）会把三个按钮全刷成 Accent，多按钮同时"高亮"。
+            }
+            else if (tag == "boot-overlay")
+            {
+                // 启动遮罩：整块按主题底色，卡片 / 跑马灯由遮罩自己画
+                var ov = c as BootOverlay;
+                if (ov != null)
+                    ov.ApplyTheme(_cBg, _cPanel, _cText, _cSub,
+                        _light ? Color.FromArgb(232, 235, 240) : Color.FromArgb(56, 60, 68));
+            }
+            else if (tag == "boot-card")
+            {
+                c.BackColor = _cPanel;
+            }
+            else if (tag == "boot-bar")
+            {
+                var bar = c as BootMarquee;
+                if (bar != null)
+                    bar.ApplyTheme(_light ? Color.FromArgb(232, 235, 240) : Color.FromArgb(56, 60, 68), C.Accent);
+            }
+            else if (tag == "boot-err")
+            {
+                // 遮罩里的错误文案（换肤后仍要保持红色）
+                c.ForeColor = C.UpErr;
+                c.BackColor = Color.Transparent;
             }
             else if (c is Button)
             {
@@ -1027,6 +1072,7 @@ namespace StockPool
         private Panel BuildLogPage()
         {
             var p = NewPage("运行日志");
+            _logTabIndex = _tabPages.Count - 1;   // 记下页签下标：启动遮罩的「查看日志」要用
 
             _logBox = new RichTextBox();
             _logBox.Dock = DockStyle.Fill;
@@ -1147,7 +1193,7 @@ namespace StockPool
 
             RefreshTdx();
 
-            var lbEnvTip = Lbl("启动时自动检查环境：Python + 后端依赖（requirements.txt）是硬要求，缺了会拉起 launcher\\install_env.bat 装一次，装不上就退出并给出错误日志。");
+            var lbEnvTip = Lbl("启动时自动检查环境：Python + 后端依赖（requirements.txt）是硬要求，缺了会拉起 launcher\\install_env.ps1 装一次，装不上就退出并给出错误日志。");
             Mute(lbEnvTip);
             AddRow(body, Row(lbEnvTip, MiniBtn("检查 / 修复环境", delegate
             {
@@ -1676,15 +1722,25 @@ namespace StockPool
         }
 
         /// <summary>
-        /// 启动前检查环境：Python + 后端依赖是硬要求，缺了就拉起 launcher\install_env.bat 装一次；
+        /// 启动前检查环境：Python + 后端依赖是硬要求，缺了就拉起 launcher\install_env.ps1 装一次；
         /// 装完复检，还不行就把安装日志显示出来并退出。整个过程只尝试一次，不反复重试。
         /// </summary>
         /// <param name="manual">true = 设置页手动点的「检查 / 修复环境」，允许再跑一次。</param>
         private bool PrepareEnv(bool manual)
         {
+            return PrepareEnv(manual, null);
+        }
+
+        /// <summary>
+        /// 同 <see cref="PrepareEnv(bool)"/>，但会把阶段回报出去（<paramref name="stage"/> 可为 null）。
+        /// 装依赖可能跑好几分钟，遮罩要能显示「正在安装依赖」而不是让人以为卡死。
+        /// </summary>
+        private bool PrepareEnv(bool manual, Action<string> stage)
+        {
             if (_envChecked && !manual) return true;
             _envChecked = true;
 
+            if (stage != null) stage("检查运行环境…");
             var r = CheckEnv();
             if (r.Ok)
             {
@@ -1697,6 +1753,7 @@ namespace StockPool
                 foreach (var w in r.Warnings) Log("环境", "提示：" + w);
             });
 
+            if (stage != null) stage("环境不完整，等待确认是否自动安装…");
             bool go = UiSync<bool>(delegate
             {
                 return MessageBox.Show(this,
@@ -1706,12 +1763,22 @@ namespace StockPool
             });
             if (!go) { EnvFail("环境不完整，且未执行安装（在提示框里选了「否」）", null); return false; }
 
-            var bat = Path.Combine(_root, "launcher", "install_env.bat");
-            if (!File.Exists(bat)) { EnvFail("找不到安装脚本：" + bat, null); return false; }
+            var ps1 = Path.Combine(_root, "launcher", "install_env.ps1");
+            if (!File.Exists(ps1))
+            {
+                EnvFail("找不到安装脚本：" + ps1 + "\n项目目录可能没拷全（launcher / backend_fastapi / agent_dsh 都要有）。", null);
+                return false;
+            }
+            // 脚本可能被拷贝 / 网盘 / 压缩搞坏（截断、改写、编码不对）：先校验完整性标记，
+            // 并统一补上 UTF-8 BOM（Windows PowerShell 5.1 没 BOM 会按系统 ANSI 代码页读 .ps1）。
+            string scriptProblem;
+            var runnable = PrepareEnvScript(ps1, out scriptProblem);
+            if (runnable == null) { EnvFail(scriptProblem, null); return false; }
 
-            Ui(delegate { Log("环境", "开始安装环境（launcher\\install_env.bat）…"); });
+            if (stage != null) stage("正在安装依赖（首次安装可能需要几分钟）…");
+            Ui(delegate { Log("环境", "开始安装环境（launcher\\install_env.ps1）…"); });
             int code;
-            var output = RunInstaller(bat, out code);
+            var output = RunInstaller(runnable, out code);
             if (code != 0) { EnvFail("安装脚本退出码 " + code + "：" + ExitReason(code), output); return false; }
 
             var r2 = CheckEnv();
@@ -1787,16 +1854,20 @@ namespace StockPool
             return r;
         }
 
-        /// <summary>跑一次环境安装脚本，输出实时进日志框，同时收集全文（失败时落盘 + 弹窗展示）。</summary>
-        private string RunInstaller(string bat, out int exitCode)
+        /// <summary>跑一次环境安装脚本（PowerShell），输出实时进日志框，同时收集全文（失败时落盘 + 弹窗展示）。</summary>
+        /// <remarks>
+        /// 用 PowerShell 而不是 .bat：cmd 解析 .bat 有三个跨设备必踩的坑 ——
+        /// 行尾被拷贝成 LF 会让 if/else 块整体错位、cmd 按控制台代码页读 UTF-8 中文会打乱字节对齐、
+        /// 块里任何特殊字符都可能让整块语法崩掉。PowerShell 三样都不吃。
+        /// </remarks>
+        private string RunInstaller(string ps1, out int exitCode)
         {
-            // bat 可能因拷贝 / 压缩 / 网盘传输变成 LF-only 行尾，导致 cmd 解析错位、报「不是内部或外部命令」。
-            // 执行前先把行尾规范化为 CRLF（写到临时副本），彻底免疫传输导致的行尾问题（.gitattributes 只保 Git 通道）。
-            string runnable = NormalizeBatLineEndings(bat);
             var sb = new StringBuilder();
             var psi = new ProcessStartInfo();
-            psi.FileName = "cmd.exe";
-            psi.Arguments = "/c chcp 65001 >nul && \"" + runnable + "\" \"" + _root + "\" silent";
+            psi.FileName = "powershell.exe";
+            // -Root 去掉结尾反斜杠：powershell 的参数解析里 "C:\路径\" 结尾的 \ 会把引号吃掉
+            psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + ps1 + "\" -Root \"" +
+                            _root.TrimEnd('\\') + "\" -Silent";
             psi.WorkingDirectory = _root;
             psi.UseShellExecute = false;
             psi.CreateNoWindow = true;
@@ -1804,6 +1875,8 @@ namespace StockPool
             psi.RedirectStandardError = true;
             psi.StandardOutputEncoding = Encoding.UTF8;
             psi.StandardErrorEncoding = Encoding.UTF8;
+            // pip 读 -r 的 requirements.txt 用的是 locale 编码：中文 Windows（GBK）上
+            // 会直接 UnicodeDecodeError 崩掉，必须让子进程走 UTF-8。
             psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
             psi.EnvironmentVariables["PYTHONUTF8"] = "1";
 
@@ -1813,35 +1886,41 @@ namespace StockPool
             return sb.ToString();
         }
 
-        /// <summary>把 bat 文件行尾规范化为 CRLF（补 CR），写到临时文件返回路径；失败则原样返回。</summary>
-        /// <remarks>cmd.exe 无法可靠解析 LF-only 的 .bat（会错位、乱码、报「不是内部或外部命令」）。
-        /// 拷贝 / 压缩包 / 网盘传输不会帮我们转 CRLF（只有 Git 检出会，见 .gitattributes），所以这里兜底。</remarks>
-        private static string NormalizeBatLineEndings(string batPath)
+        /// <summary>环境安装脚本的完整性标记（与 launcher\install_env.ps1 的 INTEGRITY 行一致）。</summary>
+        private const string EnvScriptMarker = "STOCKPOOL_ENV_INSTALL_V2";
+
+        /// <summary>
+        /// 准备环境安装脚本：校验完整性标记 + 统一补 UTF-8 BOM，写到临时副本返回路径；
+        /// 校验失败返回 null（problem 里说明原因）。
+        /// </summary>
+        /// <remarks>
+        /// 校验完整性：脚本被拷贝 / 网盘 / 压缩搞坏（截断、改写、编码转换）时，
+        /// 直接跑只会得到一堆看不懂的报错；先看标记能立刻指出「文件坏了，重新拷一份」。
+        /// 补 BOM：Windows PowerShell 5.1 没有 BOM 就按系统 ANSI 代码页读 .ps1，
+        /// 中文全乱码，甚至因乱码把语法拆坏。
+        /// </remarks>
+        private static string PrepareEnvScript(string ps1Path, out string problem)
         {
+            problem = null;
             try
             {
-                byte[] bytes = File.ReadAllBytes(batPath);
-                var outBuf = new System.Collections.Generic.List<byte>(bytes.Length + 256);
-                for (int i = 0; i < bytes.Length; i++)
+                var bytes = File.ReadAllBytes(ps1Path);
+                var text = new UTF8Encoding(false).GetString(bytes);
+                if (text.Length > 0 && text[0] == '\uFEFF') text = text.Substring(1);
+                if (text.IndexOf(EnvScriptMarker, StringComparison.Ordinal) < 0)
                 {
-                    byte b = bytes[i];
-                    if (b == 0x0A)                       // LF
-                    {
-                        if (i == 0 || bytes[i - 1] != 0x0D) outBuf.Add(0x0D);  // 不是 CRLF 的一部分才补 CR
-                        outBuf.Add(0x0A);
-                    }
-                    else
-                    {
-                        outBuf.Add(b);
-                    }
+                    problem = "安装脚本 " + ps1Path + " 已损坏或被改写（缺少完整性标记 " + EnvScriptMarker + "）。\n"
+                              + "请把整个项目目录重新拷贝一份（launcher / backend_fastapi / agent_dsh 都要有）。";
+                    return null;
                 }
-                string tmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "StockPool_" + System.IO.Path.GetFileName(batPath));
-                File.WriteAllBytes(tmp, outBuf.ToArray());
+                var tmp = Path.Combine(Path.GetTempPath(), "StockPool_install_env.ps1");
+                File.WriteAllText(tmp, text, new UTF8Encoding(true));   // 带 BOM
                 return tmp;
             }
-            catch
+            catch (Exception ex)
             {
-                return batPath;
+                problem = "安装脚本读取失败：" + ex.Message;
+                return null;
             }
         }
 
@@ -1929,13 +2008,29 @@ namespace StockPool
                     _logSource.SelectedItem = "环境";
                     RenderLog();
                 }
-                SelectTab(3);   // 运行日志页：让日志留在屏幕上
+                if (_logTabIndex >= 0) SelectTab(_logTabIndex);   // 运行日志页（页签下标随页面增删会变，别写死）
 
                 var sb = new StringBuilder();
                 sb.AppendLine("环境检查 / 安装未通过，程序将退出。");
                 sb.AppendLine();
                 sb.AppendLine("原因：" + reason);
+                // 日志要「开头 + 关键错误行 + 末尾」三段：根因常在最前面
+                // （脚本一启动就炸时，尾部只剩善后信息），只给尾部会把真正的第一条报错截掉。
+                var head = Head(installLog, 6);
+                var keys = KeyLines(installLog, 8);
                 var tail = Tail(installLog, 20);
+                if (!string.IsNullOrEmpty(head))
+                {
+                    sb.AppendLine();
+                    sb.AppendLine("---- 安装日志开头 ----");
+                    sb.AppendLine(head);
+                }
+                if (!string.IsNullOrEmpty(keys))
+                {
+                    sb.AppendLine();
+                    sb.AppendLine("---- 关键错误行 ----");
+                    sb.AppendLine(keys);
+                }
                 if (!string.IsNullOrEmpty(tail))
                 {
                     sb.AppendLine();
@@ -1957,7 +2052,9 @@ namespace StockPool
                     sb.AppendLine("3) 虚拟环境是从别的电脑拷来的：删除 backend_fastapi\\venv 与 .venv 后重跑安装");
                 }
                 sb.AppendLine();
-                sb.AppendLine("也可以手动运行 launcher\\install_env.bat 排查。");
+                sb.AppendLine("也可以手动运行下面这条命令排查（PowerShell）：");
+                sb.AppendLine("  powershell -NoProfile -ExecutionPolicy Bypass -File \"" +
+                              Path.Combine(_root, "launcher", "install_env.ps1") + "\" -Root \"" + _root.TrimEnd('\\') + "\"");
                 MessageBox.Show(this, sb.ToString(), AppTitle + " - 环境错误",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 Application.Exit();
@@ -2033,6 +2130,50 @@ namespace StockPool
             return sb.ToString();
         }
 
+        /// <summary>取日志开头若干行（根因常在最前面：脚本一启动就炸时，尾部只剩善后信息）。</summary>
+        private static string Head(string text, int lines)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            var all = text.Replace("\r", "").Split('\n');
+            var sb = new StringBuilder();
+            for (int i = 0; i < all.Length && i < lines; i++)
+            {
+                var t = all[i];
+                if (t.Length > 200) t = t.Substring(0, 200) + "…";
+                sb.AppendLine(t);
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>从日志里挑出「关键错误行」——含报错关键字的那些行（跨设备排查最有用的一段）。</summary>
+        private static string KeyLines(string text, int max)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            string[] keys = {
+                "FATAL", "ERROR", "err]", "Traceback", "Exception",
+                "不是内部或外部命令", "unexpected at this time",
+                "失败", "错误", "找不到", "损坏"
+            };
+            var all = text.Replace("\r", "").Split('\n');
+            var sb = new StringBuilder();
+            int n = 0;
+            for (int i = 0; i < all.Length && n < max; i++)
+            {
+                var t = all[i];
+                if (t.Length == 0) continue;
+                bool hit = false;
+                foreach (var k in keys)
+                {
+                    if (t.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0) { hit = true; break; }
+                }
+                if (!hit) continue;
+                if (t.Length > 200) t = t.Substring(0, 200) + "…";
+                sb.AppendLine(t);
+                n++;
+            }
+            return sb.ToString();
+        }
+
         #endregion
 
         #region 服务管控
@@ -2064,61 +2205,165 @@ namespace StockPool
             _dsh.HealthUrl = "http://127.0.0.1:3080/";
         }
 
+        /// <summary>
+        /// 启动主流程（**在后台线程上跑**）：环境检查 → 拉起后端（必须）→ 拉起 AI 服务（可选）。
+        ///
+        /// 界面反馈一律经 <see cref="BootStage"/> 报给启动遮罩：主窗体已经显示，
+        /// 这段时间只有顶部状态灯在变，用户看着像「双击没反应」（待办：后端拉起前显示加载界面）。
+        /// </summary>
         private void Boot()
         {
             RefreshStatus(true);
-            var th = new Thread(delegate()
-            {
-                try
-                {
-                    // 先把环境跑通：缺依赖就装一次，装不上直接退出（不做第二次尝试）
-                    if (!PrepareEnv(false)) return;
+            _bootRunning = true;
+            if (_bootOverlay != null) _bootOverlay.BeginLoading();
 
-                    if (!UiSync<bool>(delegate { return _ckAutoStart != null && _ckAutoStart.Checked; }))
-                    {
-                        Ui(delegate { RefreshStatus(false); });
-                        return;
-                    }
-
-                    if (!Probe(_backend.HealthUrl, 1500))
-                    {
-                        Ui(delegate { Log("系统", "正在启动后端…"); });
-                        Ui(delegate { StartBackend(false); });
-                        WaitHealth(_backend, 45);
-                    }
-                    else
-                    {
-                        Ui(delegate { Log("系统", "检测到后端已在运行（由其他进程启动，本程序不抢占）"); });
-                    }
-
-                    if (!Probe(_dsh.HealthUrl, 1500))
-                    {
-                        Ui(delegate { Log("系统", "正在启动 AI 服务…"); });
-                        Ui(delegate { StartDsh(false); });
-                        WaitHealth(_dsh, 30);
-                    }
-                    else
-                    {
-                        Ui(delegate { Log("系统", "检测到 AI 服务已在运行"); });
-                    }
-                    Ui(delegate { RefreshStatus(false); });
-                }
-                catch (Exception ex)
-                {
-                    Ui(delegate { Log("系统", "启动流程异常：" + ex.Message); });
-                }
-            });
+            var th = new Thread(delegate() { BootCore(); });
             th.IsBackground = true;
             th.Start();
         }
 
-        private static void WaitHealth(ServiceItem svc, int seconds)
+        /// <summary>启动主流程本体（后台线程）。阶段通过 <see cref="BootStage"/> 报给遮罩。</summary>
+        private void BootCore()
+        {
+            try
+            {
+                bool autoStart = UiSync<bool>(delegate { return _ckAutoStart != null && _ckAutoStart.Checked; });
+
+                // ⭐ 先探一次后端：**已经在跑就不要用遮罩挡住界面** —— 用户能立刻开始用，
+                // 遮罩只在「真要等后端」时才出现（验收：后端已运行 → 遮罩不明显闪烁）。
+                bool backendAlive = Probe(_backend.HealthUrl, 800);
+                if (autoStart && !backendAlive) BootShowOverlay("检查运行环境…", 0);
+
+                // 先把环境跑通：缺依赖就装一次，装不上直接退出（不做第二次尝试）
+                if (!PrepareEnv(false, BootStage)) { BootFailed("环境检查未通过，详见运行日志", false); return; }
+
+                if (!autoStart)
+                {
+                    Ui(delegate { RefreshStatus(false); });
+                    BootFinish();
+                    return;
+                }
+
+                if (!Probe(_backend.HealthUrl, 1500))
+                {
+                    Ui(delegate { Log("系统", "正在启动后端…"); });
+                    Ui(delegate { StartBackend(false); });
+                    BootStage("等待后端服务就绪…", 45);
+                    if (!WaitHealth(_backend, 45))
+                    {
+                        BootFailed("后端服务在 45 秒内没有就绪（健康检查未通过）", true);
+                        return;
+                    }
+                }
+                else
+                {
+                    Ui(delegate { Log("系统", "检测到后端已在运行（由其他进程启动，本程序不抢占）"); });
+                }
+
+                // 后端就绪 → 放行。AI 服务不是必需项（缺了只影响 AI 问答），
+                // 继续在后台起，不占着遮罩不让用户进主界面。
+                BootFinish();
+
+                if (!Probe(_dsh.HealthUrl, 1500))
+                {
+                    Ui(delegate { Log("系统", "正在启动 AI 服务…"); });
+                    Ui(delegate { StartDsh(false); });
+                    WaitHealth(_dsh, 30);
+                }
+                else
+                {
+                    Ui(delegate { Log("系统", "检测到 AI 服务已在运行"); });
+                }
+                Ui(delegate { RefreshStatus(false); });
+            }
+            catch (Exception ex)
+            {
+                Ui(delegate { Log("系统", "启动流程异常：" + ex.Message); });
+                BootFailed("启动流程异常：" + ex.Message, true);
+            }
+        }
+
+        /// <summary>显示遮罩并设定初始阶段（UI 线程执行）。</summary>
+        private void BootShowOverlay(string stage, int limit)
+        {
+            Ui(delegate
+            {
+                if (_bootOverlay == null) return;
+                _bootOverlay.SetStage(stage, limit);
+                _bootOverlay.ShowOverlay();
+            });
+        }
+
+        /// <summary>报当前阶段给启动遮罩（后台线程调用，内部切回 UI 线程）。</summary>
+        private void BootStage(string text)
+        {
+            BootStage(text, 0);
+        }
+
+        /// <summary>报当前阶段 + 该阶段上限秒数（0 = 未知，遮罩据此显示倒计时）。</summary>
+        private void BootStage(string text, int limit)
+        {
+            Ui(delegate { if (_bootOverlay != null) _bootOverlay.SetStage(text, limit); });
+        }
+
+        /// <summary>启动完成：收掉遮罩，界面放行。</summary>
+        private void BootFinish()
+        {
+            _bootRunning = false;
+            Ui(delegate
+            {
+                if (_bootOverlay != null) _bootOverlay.HideOverlay();
+            });
+        }
+
+        /// <summary>启动失败：遮罩切错误态（可重试）或直接收起（环境失败会弹窗并退出程序）。</summary>
+        private void BootFailed(string reason, bool retryable)
+        {
+            _bootRunning = false;
+            Ui(delegate
+            {
+                Log("系统", "启动未完成：" + reason);
+                if (_bootOverlay == null) return;
+                if (!retryable) { _bootOverlay.HideOverlay(); return; }
+                _bootOverlay.ShowError(reason);
+                _bootOverlay.ShowOverlay();
+            });
+        }
+
+        /// <summary>遮罩上的「重试」：重跑一遍启动流程（环境已检过，不会重复安装）。</summary>
+        private void BootRetry()
+        {
+            if (_bootRunning) return;   // 已经在跑，别再起一条启动线程
+            Log("系统", "手动重试启动…");
+            _bootRunning = true;
+            if (_bootOverlay != null)
+            {
+                _bootOverlay.BeginLoading();
+                _bootOverlay.SetStage("检查运行环境…", 0);
+                _bootOverlay.ShowOverlay();
+            }
+            var th = new Thread(delegate() { BootCore(); });
+            th.IsBackground = true;
+            th.Start();
+        }
+
+        /// <summary>遮罩上的「查看日志」：收起遮罩并跳到运行日志页。</summary>
+        private void BootViewLog()
+        {
+            if (_bootOverlay != null) _bootOverlay.HideOverlay();
+            if (_logTabIndex >= 0) SelectTab(_logTabIndex);
+            RenderLog();
+        }
+
+        /// <summary>轮询健康检查直到就绪或超时；返回是否就绪。</summary>
+        private static bool WaitHealth(ServiceItem svc, int seconds)
         {
             for (int i = 0; i < seconds * 2; i++)
             {
-                if (Probe(svc.HealthUrl, 1500)) return;
+                if (Probe(svc.HealthUrl, 1500)) return true;
                 Thread.Sleep(500);
             }
+            return false;
         }
 
         private static int PortOf(ServiceItem svc)

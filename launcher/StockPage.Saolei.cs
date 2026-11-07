@@ -13,6 +13,26 @@ namespace StockPool
 {
     internal sealed partial class MainForm
     {
+        /// <summary>二级页 ③.5 扫雷：通达信风险清单（来自 /api/stock/saolei）。</summary>
+        private Panel BuildStockSaoleiPanel()
+        {
+            var slPage = new Panel();
+            slPage.AutoScroll = true;
+            var slStack = Stack();
+            TableLayoutPanel bsl;
+            var gsl = Group("扫雷 · 通达信风险清单（来自 /api/stock/saolei）", out bsl);
+            _stockSaoleiStatus = Mute(Lbl("打开个股后自动获取"));
+            AddRow(bsl, Row(_stockSaoleiStatus, MiniBtn("↻ 刷新", delegate
+            {
+                if (_stockCurrent != null) StockLoadSaolei(_stockCurrent);
+            }, 90)));
+            _stockSaoleiList = Stack();
+            AddRow(bsl, _stockSaoleiList);
+            AddRow(slStack, gsl);
+            slPage.Controls.Add(slStack);
+            return slPage;
+        }
+
         private void StockLoadSaolei(string code)
         {
             _stockSaoleiStatus.Text = "获取中…";

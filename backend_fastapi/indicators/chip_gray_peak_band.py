@@ -29,11 +29,11 @@ from chipformulas.core.peak import peak_band_series
         ParamSpec("tol", "float", 0.5, min=0.0, max=5.0, label="衰减容差%"),
     ],
 )
-def chip_gray_peak_band(df: pd.DataFrame, formula: str = "ema_lock",
+def chip_gray_peak_band(df: pd.DataFrame, *, ctx=None, formula: str = "ema_lock",
                         band_pct: float = 20.0, tol: float = 0.5) -> dict:
     # 计算层（峰簇占比）在 chipformulas.core.peak，与 PEAKB 共用同一份实现；
     # 本函数只负责取灰色通道矩阵并包装成副图展示。
-    frames = get_chip_frames(code_of(df), formula_id=formula, bins=80)
+    frames = get_chip_frames(code_of(ctx), formula_id=formula, bins=80)
     if frames.gray is None:
         out = np.full(len(df), np.nan)
         return {"series": [series_line("灰色峰簇占比%", pd.Series(out, index=df.index))]}

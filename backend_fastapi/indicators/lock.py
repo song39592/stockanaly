@@ -44,9 +44,10 @@ def _turnover_to_n(turnover: np.ndarray) -> np.ndarray:
         ParamSpec("M_high", "float", 2.0, min=0.5, max=5.0, label="锁仓解除阈值(×B)"),
     ],
 )
-def lock(df: pd.DataFrame, M_low: float = 0.5, M_high: float = 2.0) -> dict:
-    code = data.code_of(df)
-    period = str(df.attrs.get("period") or "day")
+def lock(df: pd.DataFrame, *, ctx=None, M_low: float = 0.5,
+           M_high: float = 2.0) -> dict:
+    code = data.code_of(ctx)
+    period = data.period_of(ctx)
     turnover = data.get_turnover(code, period=period)
     aligned = turnover.reindex(df.index)
     to = np.asarray(aligned.values, dtype=float)

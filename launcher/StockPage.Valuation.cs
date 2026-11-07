@@ -13,6 +13,38 @@ namespace StockPool
 {
     internal sealed partial class MainForm
     {
+        /// <summary>二级页 ③ 估值：情景表（完整计算过程见估值计算标签页）。</summary>
+        private Panel BuildStockValuationPanel()
+        {
+            var valPage = new Panel();
+            valPage.AutoScroll = true;
+            var valStack = Stack();
+            TableLayoutPanel b5;
+            var g5 = Group("估值计算（结果来自 /api/stock/valuation）", out b5);
+            _stockValStatus = Mute(Lbl("打开个股后自动计算"));
+            _stockValKpi = VKpiRow();
+            AddRow(b5, Row(_stockValStatus));
+            AddRow(b5, _stockValKpi);
+            _stockValGrid = NewGrid(new List<GridColumn> {
+                new GridColumn("情景", "label"),
+                new GridColumn("增长率", "growth", true),
+                new GridColumn("每股价值", "value_per_share", true),
+                new GridColumn("股价/价值", "undervalued_ratio", true),
+                new GridColumn("判断", "verdict"),
+                new GridColumn("预测价", "target_price", true),
+                new GridColumn("收益率", "return_rate", true),
+            });
+            _stockValGrid.SetSortable(true);        // 第 20 项：情景表按增长率/收益率排序
+            AddRow(b5, _stockValGrid);
+            AddRow(b5, Row(MiniBtn("在估值页打开完整计算", delegate
+            {
+                if (_stockCurrent != null) StockJumpValuation(_stockCurrent);
+            }, 180)));
+            AddRow(valStack, g5);
+            valPage.Controls.Add(valStack);
+            return valPage;
+        }
+
         private void StockLoadValuation(string code)
         {
             _stockValStatus.Text = "计算中…";
