@@ -1186,7 +1186,7 @@ namespace StockPool
 
             RefreshTdx();
 
-            var lbEnvTip = Lbl("启动时自动检查环境：Python + 后端依赖（requirements.txt）是硬要求，缺了会拉起 launcher\\install_env.bat 装一次，装不上就退出并给出错误日志。");
+            var lbEnvTip = Lbl("启动时自动检查环境：Python + 后端依赖（requirements.txt）是硬要求，缺了会拉起 launcher\\install_env.ps1 装一次，装不上就退出并给出错误日志。");
             Mute(lbEnvTip);
             AddRow(body, Row(lbEnvTip, MiniBtn("检查 / 修复环境", delegate
             {
@@ -1715,7 +1715,7 @@ namespace StockPool
         }
 
         /// <summary>
-        /// 启动前检查环境：Python + 后端依赖是硬要求，缺了就拉起 launcher\install_env.bat 装一次；
+        /// 启动前检查环境：Python + 后端依赖是硬要求，缺了就拉起 launcher\install_env.ps1 装一次；
         /// 装完复检，还不行就把安装日志显示出来并退出。整个过程只尝试一次，不反复重试。
         /// </summary>
         /// <param name="manual">true = 设置页手动点的「检查 / 修复环境」，允许再跑一次。</param>
@@ -1756,13 +1756,22 @@ namespace StockPool
             });
             if (!go) { EnvFail("环境不完整，且未执行安装（在提示框里选了「否」）", null); return false; }
 
-            var bat = Path.Combine(_root, "launcher", "install_env.bat");
-            if (!File.Exists(bat)) { EnvFail("找不到安装脚本：" + bat, null); return false; }
+            var ps1 = Path.Combine(_root, "launcher", "install_env.ps1");
+            if (!File.Exists(ps1))
+            {
+                EnvFail("找不到安装脚本：" + ps1 + "\n项目目录可能没拷全（launcher / backend_fastapi / agent_dsh 都要有）。", null);
+                return false;
+            }
+            // 脚本可能被拷贝 / 网盘 / 压缩搞坏（截断、改写、编码不对）：先校验完整性标记，
+            // 并统一补上 UTF-8 BOM（Windows PowerShell 5.1 没 BOM 会按系统 ANSI 代码页读 .ps1）。
+            string scriptProblem;
+            var runnable = PrepareEnvScript(ps1, out scriptProblem);
+            if (runnable == null) { EnvFail(scriptProblem, null); return false; }
 
             if (stage != null) stage("正在安装依赖（首次安装可能需要几分钟）…");
-            Ui(delegate { Log("环境", "开始安装环境（launcher\\install_env.bat）…"); });
+            Ui(delegate { Log("环境", "开始安装环境（launcher\\install_env.ps1）…"); });
             int code;
-            var output = RunInstaller(bat, out code);
+            var output = RunInstaller(runnable, out code);
             if (code != 0) { EnvFail("安装脚本退出码 " + code + "：" + ExitReason(code), output); return false; }
 
             var r2 = CheckEnv();
@@ -1838,16 +1847,20 @@ namespace StockPool
             return r;
         }
 
-        /// <summary>跑一次环境安装脚本，输出实时进日志框，同时收集全文（失败时落盘 + 弹窗展示）。</summary>
-        private string RunInstaller(string bat, out int exitCode)
+        /// <summary>跑一次环境安装脚本（PowerShell），输出实时进日志框，同时收集全文（失败时落盘 + 弹窗展示）。</summary>
+        /// <remarks>
+        /// 用 PowerShell 而不是 .bat：cmd 解析 .bat 有三个跨设备必踩的坑 ——
+        /// 行尾被拷贝成 LF 会让 if/else 块整体错位、cmd 按控制台代码页读 UTF-8 中文会打乱字节对齐、
+        /// 块里任何特殊字符都可能让整块语法崩掉。PowerShell 三样都不吃。
+        /// </remarks>
+        private string RunInstaller(string ps1, out int exitCode)
         {
-            // bat 可能因拷贝 / 压缩 / 网盘传输变成 LF-only 行尾，导致 cmd 解析错位、报「不是内部或外部命令」。
-            // 执行前先把行尾规范化为 CRLF（写到临时副本），彻底免疫传输导致的行尾问题（.gitattributes 只保 Git 通道）。
-            string runnable = NormalizeBatLineEndings(bat);
             var sb = new StringBuilder();
             var psi = new ProcessStartInfo();
-            psi.FileName = "cmd.exe";
-            psi.Arguments = "/c chcp 65001 >nul && \"" + runnable + "\" \"" + _root + "\" silent";
+            psi.FileName = "powershell.exe";
+            // -Root 去掉结尾反斜杠：powershell 的参数解析里 "C:\路径\" 结尾的 \ 会把引号吃掉
+            psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + ps1 + "\" -Root \"" +
+                            _root.TrimEnd('\\') + "\" -Silent";
             psi.WorkingDirectory = _root;
             psi.UseShellExecute = false;
             psi.CreateNoWindow = true;
@@ -1855,6 +1868,8 @@ namespace StockPool
             psi.RedirectStandardError = true;
             psi.StandardOutputEncoding = Encoding.UTF8;
             psi.StandardErrorEncoding = Encoding.UTF8;
+            // pip 读 -r 的 requirements.txt 用的是 locale 编码：中文 Windows（GBK）上
+            // 会直接 UnicodeDecodeError 崩掉，必须让子进程走 UTF-8。
             psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
             psi.EnvironmentVariables["PYTHONUTF8"] = "1";
 
@@ -1864,35 +1879,41 @@ namespace StockPool
             return sb.ToString();
         }
 
-        /// <summary>把 bat 文件行尾规范化为 CRLF（补 CR），写到临时文件返回路径；失败则原样返回。</summary>
-        /// <remarks>cmd.exe 无法可靠解析 LF-only 的 .bat（会错位、乱码、报「不是内部或外部命令」）。
-        /// 拷贝 / 压缩包 / 网盘传输不会帮我们转 CRLF（只有 Git 检出会，见 .gitattributes），所以这里兜底。</remarks>
-        private static string NormalizeBatLineEndings(string batPath)
+        /// <summary>环境安装脚本的完整性标记（与 launcher\install_env.ps1 的 INTEGRITY 行一致）。</summary>
+        private const string EnvScriptMarker = "STOCKPOOL_ENV_INSTALL_V2";
+
+        /// <summary>
+        /// 准备环境安装脚本：校验完整性标记 + 统一补 UTF-8 BOM，写到临时副本返回路径；
+        /// 校验失败返回 null（problem 里说明原因）。
+        /// </summary>
+        /// <remarks>
+        /// 校验完整性：脚本被拷贝 / 网盘 / 压缩搞坏（截断、改写、编码转换）时，
+        /// 直接跑只会得到一堆看不懂的报错；先看标记能立刻指出「文件坏了，重新拷一份」。
+        /// 补 BOM：Windows PowerShell 5.1 没有 BOM 就按系统 ANSI 代码页读 .ps1，
+        /// 中文全乱码，甚至因乱码把语法拆坏。
+        /// </remarks>
+        private static string PrepareEnvScript(string ps1Path, out string problem)
         {
+            problem = null;
             try
             {
-                byte[] bytes = File.ReadAllBytes(batPath);
-                var outBuf = new System.Collections.Generic.List<byte>(bytes.Length + 256);
-                for (int i = 0; i < bytes.Length; i++)
+                var bytes = File.ReadAllBytes(ps1Path);
+                var text = new UTF8Encoding(false).GetString(bytes);
+                if (text.Length > 0 && text[0] == '\uFEFF') text = text.Substring(1);
+                if (text.IndexOf(EnvScriptMarker, StringComparison.Ordinal) < 0)
                 {
-                    byte b = bytes[i];
-                    if (b == 0x0A)                       // LF
-                    {
-                        if (i == 0 || bytes[i - 1] != 0x0D) outBuf.Add(0x0D);  // 不是 CRLF 的一部分才补 CR
-                        outBuf.Add(0x0A);
-                    }
-                    else
-                    {
-                        outBuf.Add(b);
-                    }
+                    problem = "安装脚本 " + ps1Path + " 已损坏或被改写（缺少完整性标记 " + EnvScriptMarker + "）。\n"
+                              + "请把整个项目目录重新拷贝一份（launcher / backend_fastapi / agent_dsh 都要有）。";
+                    return null;
                 }
-                string tmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "StockPool_" + System.IO.Path.GetFileName(batPath));
-                File.WriteAllBytes(tmp, outBuf.ToArray());
+                var tmp = Path.Combine(Path.GetTempPath(), "StockPool_install_env.ps1");
+                File.WriteAllText(tmp, text, new UTF8Encoding(true));   // 带 BOM
                 return tmp;
             }
-            catch
+            catch (Exception ex)
             {
-                return batPath;
+                problem = "安装脚本读取失败：" + ex.Message;
+                return null;
             }
         }
 
@@ -1986,7 +2007,23 @@ namespace StockPool
                 sb.AppendLine("环境检查 / 安装未通过，程序将退出。");
                 sb.AppendLine();
                 sb.AppendLine("原因：" + reason);
+                // 日志要「开头 + 关键错误行 + 末尾」三段：根因常在最前面
+                // （脚本一启动就炸时，尾部只剩善后信息），只给尾部会把真正的第一条报错截掉。
+                var head = Head(installLog, 6);
+                var keys = KeyLines(installLog, 8);
                 var tail = Tail(installLog, 20);
+                if (!string.IsNullOrEmpty(head))
+                {
+                    sb.AppendLine();
+                    sb.AppendLine("---- 安装日志开头 ----");
+                    sb.AppendLine(head);
+                }
+                if (!string.IsNullOrEmpty(keys))
+                {
+                    sb.AppendLine();
+                    sb.AppendLine("---- 关键错误行 ----");
+                    sb.AppendLine(keys);
+                }
                 if (!string.IsNullOrEmpty(tail))
                 {
                     sb.AppendLine();
@@ -2008,7 +2045,9 @@ namespace StockPool
                     sb.AppendLine("3) 虚拟环境是从别的电脑拷来的：删除 backend_fastapi\\venv 与 .venv 后重跑安装");
                 }
                 sb.AppendLine();
-                sb.AppendLine("也可以手动运行 launcher\\install_env.bat 排查。");
+                sb.AppendLine("也可以手动运行下面这条命令排查（PowerShell）：");
+                sb.AppendLine("  powershell -NoProfile -ExecutionPolicy Bypass -File \"" +
+                              Path.Combine(_root, "launcher", "install_env.ps1") + "\" -Root \"" + _root.TrimEnd('\\') + "\"");
                 MessageBox.Show(this, sb.ToString(), AppTitle + " - 环境错误",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 Application.Exit();
@@ -2080,6 +2119,50 @@ namespace StockPool
                 var t = all[i];
                 if (t.Length > 200) t = t.Substring(0, 200) + "…";
                 sb.AppendLine(t);
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>取日志开头若干行（根因常在最前面：脚本一启动就炸时，尾部只剩善后信息）。</summary>
+        private static string Head(string text, int lines)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            var all = text.Replace("\r", "").Split('\n');
+            var sb = new StringBuilder();
+            for (int i = 0; i < all.Length && i < lines; i++)
+            {
+                var t = all[i];
+                if (t.Length > 200) t = t.Substring(0, 200) + "…";
+                sb.AppendLine(t);
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>从日志里挑出「关键错误行」——含报错关键字的那些行（跨设备排查最有用的一段）。</summary>
+        private static string KeyLines(string text, int max)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            string[] keys = {
+                "FATAL", "ERROR", "err]", "Traceback", "Exception",
+                "不是内部或外部命令", "unexpected at this time",
+                "失败", "错误", "找不到", "损坏"
+            };
+            var all = text.Replace("\r", "").Split('\n');
+            var sb = new StringBuilder();
+            int n = 0;
+            for (int i = 0; i < all.Length && n < max; i++)
+            {
+                var t = all[i];
+                if (t.Length == 0) continue;
+                bool hit = false;
+                foreach (var k in keys)
+                {
+                    if (t.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0) { hit = true; break; }
+                }
+                if (!hit) continue;
+                if (t.Length > 200) t = t.Substring(0, 200) + "…";
+                sb.AppendLine(t);
+                n++;
             }
             return sb.ToString();
         }
