@@ -15,7 +15,7 @@ import pandas as pd
 
 from .base import ParamSpec, indicator, series_line
 from .data import get_chip_frames, chip_rows_for, code_of
-from chipformulas.core.peak import peak_band_series
+from formulas.peak import peak_band_series
 
 
 @indicator(
@@ -31,7 +31,7 @@ from chipformulas.core.peak import peak_band_series
 )
 def chip_gray_peak_band(df: pd.DataFrame, *, ctx=None, formula: str = "ema_lock",
                         band_pct: float = 20.0, tol: float = 0.5) -> dict:
-    # 计算层（峰簇占比）在 chipformulas.core.peak，与 PEAKB 共用同一份实现；
+    # 计算层（峰簇占比）在 formulas.peak，与 PEAKB 共用同一份实现；
     # 本函数只负责取灰色通道矩阵并包装成副图展示。
     frames = get_chip_frames(code_of(ctx), formula_id=formula, bins=80)
     if frames.gray is None:

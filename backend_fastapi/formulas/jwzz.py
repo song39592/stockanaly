@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """价量偏离度（JWZZ）与其成本线（X_3）的**计算层** —— 指标与策略共用的单一来源。
 
-与 `core/peak.py`（筹码峰簇占比）同理：指标侧只做展示包装、策略侧直接复用，
+位于**中立内核包** `formulas/`（见该包 `__init__.py`）：它既不是指标、也不是策略、
+更不是筹码 —— 只是「一段被两处复用的纯计算」，所以住在中立的地方。
+
+与 `formulas` 下其它内核同理：指标侧只做展示包装、策略侧直接复用，
 两边数值天然一致，不会因为各写一遍而漂移。
 
     X_3  := 0.01 * EMA(AMOUNT, 13) / EMA(VOL, 13);
@@ -17,8 +20,9 @@
     （与本项目 RSI / KDJ 的 1/N 平滑同口径）。
 
 ⚠️ **成交额必须与 close 同口径**：复权（qfq / hfq）只缩放 open/high/low/close，
-成交额与成交量不变；数据层（indicators/data.py、strategies/core/data.py）负责把
-成交额乘上同一个复权因子，本模块拿到的 amount 与 close 已是同口径。
+成交额与成交量不变；数据层（`indicators/data.py`、`strategies/core/data.py`，
+规则见 `core/bars_schema.py`）负责把成交额乘上同一个复权因子，
+本模块拿到的 amount 与 close 已是同口径。
 否则除权除息日两者错位，偏离度会跳出**假信号**。
 """
 from __future__ import annotations

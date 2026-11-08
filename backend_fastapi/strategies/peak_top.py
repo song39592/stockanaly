@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 import chipformulas as chip_formulas
-from chipformulas.core.peak import peak_band_series
+from formulas.peak import peak_band_series
 from .core.base import strategy, ParamSpec, Signal, checkpoint, Cancelled
 
 # 锁仓系数公式下拉：中文标签 → 实际筹码公式 id（"全部用1" = 锁仓系数强制为 1，不修正）
@@ -60,7 +60,7 @@ def _peak_series(code: str, fetch_start, end, bins: int, formula: str,
             adjust="qfq", bins=bins, offline=False)
     except Exception:                        # noqa: BLE001 - 单只失败不拖垮整批
         return None, 1.0
-    # 计算层（峰簇占比）在 chipformulas.core.peak，与 PEAKB 副图指标同一份实现，
+    # 计算层（峰簇占比）在 formulas.peak，与 PEAKB 副图指标同一份实现，
     # 这里直接用矩阵结果逐帧算，无需再走指标展示层。
     s = pd.Series(peak_band_series(res.pct, res.centers, band_pct, tol),
                   index=list(res.dates))

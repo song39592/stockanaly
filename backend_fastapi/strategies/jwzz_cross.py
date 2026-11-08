@@ -28,7 +28,7 @@ JWZZ = 收盘价相对「N 日资金成本线」的偏离度（‰），+95 表�
 
 ## 与指标同源
 
-计算层在 `chipformulas/core/jwzz.py`，与副图指标 JWZZ / 主图 ECOST 共用同一份
+计算层在 `formulas/jwzz.py`（中立内核包），与副图指标 JWZZ / 主图 ECOST 共用同一份
 实现（strategies/ARCHITECTURE.md 硬要求）：策略选股与副图显示逐日可对照。
 成交额由数据层按复权因子同步缩放（与 close 同口径），除权除息日不出假信号。
 
@@ -48,7 +48,7 @@ import numpy as np
 
 from .core.base import strategy, ParamSpec, Signal
 from .core import data
-from chipformulas.core.jwzz import DEFAULT_PERIOD, jwzz_series, sma1_series
+from formulas.jwzz import DEFAULT_PERIOD, jwzz_series, sma1_series
 
 
 @strategy(
@@ -106,7 +106,7 @@ def jwzz_cross(ctx, cost_period: int = DEFAULT_PERIOD, threshold: float = 95.0,
     for code, df in bars.items():
         if len(df) < need:
             continue
-        # 计算层与指标同源（chipformulas.core.jwzz）
+        # 计算层与指标同源（formulas.jwzz）
         dev = jwzz_series(df, period)
         raw = dev.to_numpy(dtype="float64")
         finite = np.isfinite(raw)

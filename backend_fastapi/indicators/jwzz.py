@@ -20,7 +20,7 @@
     下方 15% 以上（套牢盘压力大）；站上强势 = 高于成本线 9.5% 以上。
 
 与主图成本线（cost_ema.py 的 ECOST）**共用同一条成本线**
-（chipformulas.core.jwzz.ema_cost_line）：两边周期参数必须一致，否则副图的偏离度
+（formulas.jwzz.ema_cost_line）：两边周期参数必须一致，否则副图的偏离度
 对不上主图那条线，用户会以为算错了。
 
 ⚠️ 偏离度是**相对量纲（‰）**，与价格不同量纲，故 panel="lower"（副图），
@@ -33,9 +33,9 @@ from __future__ import annotations
 import pandas as pd
 
 from .base import indicator, ParamSpec, series_line
-# 计算层在 chipformulas.core.jwzz：与策略（strategies/jwzz_cross.py）共用同一份，
+# 计算层在中立内核包 formulas：与策略（strategies/jwzz_cross.py）共用同一份，
 # 本文件只负责把结果包装成副图展示 —— 指标与策略数值天然一致。
-from chipformulas.core.jwzz import DEFAULT_PERIOD, jwzz_series, sma1_series
+from formulas.jwzz import DEFAULT_PERIOD, jwzz_series, sma1_series
 
 # 原公式里的两条固定阈值（‰）：极弱 -150、强势 95
 WEAK_LEVEL = -150
