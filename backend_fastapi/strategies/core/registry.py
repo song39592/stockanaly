@@ -41,7 +41,10 @@ _STRATEGY_DIR = os.path.dirname(_HERE)                       # 上一层：具�
 _STRATEGY_PACKAGE = "strategies"                             # 具体策略模块名空间
 _CACHE_FILE = os.path.join(_STRATEGY_DIR, "_validated.json")
 _EXCLUDE = {"__init__", "core", "report"}   # 排除包入口、框架子目录与报告落盘模块
-_FAKE_COLS = ["open", "high", "low", "close", "volume"]
+# 冒烟假行情的列集合：覆盖常见字段，inputs 任意子集都能取到。
+# 含 amount（成交额）：「价量类」策略（如 JWZZ 成本线）没有它就算不出任何东西，
+# 冒烟会退化成「无信号早退」——契约校验形同虚设。
+_FAKE_COLS = ["open", "high", "low", "close", "volume", "amount"]
 
 
 def _load_cache() -> dict:

@@ -10,8 +10,8 @@
 为什么要单独画一条：价量偏离度（JWZZ，副图）就是拿收盘价和这条线比出来的，
 偏离度能画在副图，这条线本身却是**价格量纲**，必须留在主图与 K 线同轴 ——
 一个指标只能声明一个 panel（见 ARCHITECTURE.md §5），故拆成两个指标：
-本文件画主图成本线，`jwzz.py` 画副图偏离度，两者共用 `cost_core.ema_cost_line`
-（周期一致才对得上账）。
+本文件画主图成本线，`jwzz.py` 画副图偏离度，两者共用
+`chipformulas.core.jwzz.ema_cost_line`（周期一致才对得上账）。
 
 数据只通过 data.get_ohlcv 获取，本文件不直接碰存储层（见 ARCHITECTURE.md §3）。
 """
@@ -20,7 +20,9 @@ from __future__ import annotations
 import pandas as pd
 
 from .base import indicator, ParamSpec, series_line
-from .cost_core import DEFAULT_PERIOD, ema_cost_line
+# 计算层在 chipformulas.core.jwzz：与策略（strategies/jwzz_cross.py）共用同一份，
+# 本文件只负责把结果包装成主图展示 —— 指标与策略数值天然一致。
+from chipformulas.core.jwzz import DEFAULT_PERIOD, ema_cost_line
 
 
 @indicator(

@@ -20,7 +20,7 @@
     下方 15% 以上（套牢盘压力大）；站上强势 = 高于成本线 9.5% 以上。
 
 与主图成本线（cost_ema.py 的 ECOST）**共用同一条成本线**
-（cost_core.ema_cost_line）：两边周期参数必须一致，否则副图的偏离度
+（chipformulas.core.jwzz.ema_cost_line）：两边周期参数必须一致，否则副图的偏离度
 对不上主图那条线，用户会以为算错了。
 
 ⚠️ 偏离度是**相对量纲（‰）**，与价格不同量纲，故 panel="lower"（副图），
@@ -33,7 +33,9 @@ from __future__ import annotations
 import pandas as pd
 
 from .base import indicator, ParamSpec, series_line
-from .cost_core import DEFAULT_PERIOD, ema_cost_line
+# 计算层在 chipformulas.core.jwzz：与策略（strategies/jwzz_cross.py）共用同一份，
+# 本文件只负责把结果包装成副图展示 —— 指标与策略数值天然一致。
+from chipformulas.core.jwzz import DEFAULT_PERIOD, jwzz_series, sma1_series
 
 # 原公式里的两条固定阈值（‰）：极弱 -150、强势 95
 WEAK_LEVEL = -150
@@ -60,13 +62,8 @@ def jwzz(df: pd.DataFrame, *, cost_period: int = DEFAULT_PERIOD,
          smooth_period: int = DEFAULT_PERIOD,
          weak_level: int = WEAK_LEVEL,
          strong_level: int = STRONG_LEVEL) -> dict:
-    cost = ema_cost_line(df, cost_period)
-    close = pd.to_numeric(df["close"], errors="coerce")
-    # 偏离度（‰）：成本线为 0 / 缺失时留空，不产生 inf
-    dev = (close - cost) / cost.where(cost.abs() > 0) * 1000.0
-    n = max(2, int(smooth_period))
-    # SMA(JWZZ, n, 1)：递推平滑（alpha = 1/n，adjust=False 等价于通达信递推式）
-    smooth = dev.ewm(alpha=1.0 / n, adjust=False).mean()
+    dev = jwzz_series(df, cost_period)
+    smooth = sma1_series(dev, smooth_period)
     index = df.index
     return {"series": [
         series_line("JWZZ", dev),
