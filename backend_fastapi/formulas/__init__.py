@@ -22,7 +22,7 @@
 
 ## 放什么 / 不放什么
 
-**放**：纯计算。输入是 DataFrame / Series，输出是同序 Series。
+**放**：纯计算。输入是 DataFrame / Series / ndarray，输出是同序的 Series 或 ndarray。
       无副作用、不取数、不读库、不调网络 —— 所以指标与策略都能安全复用。
 
 **不放**：取数（各包自己的 `data.py`）、注册装饰器、任何有状态的缓存。

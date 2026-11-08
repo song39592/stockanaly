@@ -8,11 +8,11 @@
 """
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 from .base import ParamSpec, indicator, series_line
 from .data import chip_rows_of, code_of
+from formulas.winner import winner_series
 
 
 @indicator(
@@ -28,11 +28,7 @@ def chip_profit(df: pd.DataFrame, *, ctx=None, formula: str = "tri_decay") -> di
     rows, frames = chip_rows_of(df, formula_id=formula, code=code_of(ctx))
     centers = frames.centers
     close = df["close"].astype(float).to_numpy()
-    out = []
-    for i in range(len(rows)):
-        row = rows[i]
-        if np.all(np.isnan(row)):
-            out.append(float("nan"))
-            continue
-        out.append(float(row[centers < close[i]].sum()))     # 每行合计已是 100
+    # 获利盘比例（通达信 WINNER(CLOSE)）走统一内核：与指标 `KL`（筹码博弈）
+    # 同一份分界口径，两边的数才对得上号。
+    out = winner_series(rows, centers, close)
     return {"series": [series_line("获利比例%", pd.Series(out, index=df.index))]}

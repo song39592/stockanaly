@@ -544,6 +544,11 @@
    ],
    "status": "ok"
   },
+  "KL": {
+   "note": "RuntimeError: 取不到股票代码：指标只能在 compute() 调用链中使用",
+   "panel": "lower",
+   "status": "skipped"
+  },
   "LOCK": {
    "note": "RuntimeError: 取不到股票代码：指标只能在 compute() 调用链中使用",
    "panel": "main",
