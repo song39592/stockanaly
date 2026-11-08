@@ -15,13 +15,17 @@ from . import data, base, registry, scan
 
 # 自动发现并注册所有指标模块：新增一个 <id>.py 指标文件即被自动枚举，
 # 无需在本文件手动 import（每个指标文件用 @indicator 在导入时登记）。
+#
+# ⚠️ `_EXCLUDE` 里除框架模块外还有**非指标模块**：`golden` 是数值基准自检，
+#    不是指标（没有 @indicator 装饰器）—— 但本目录下的 .py 都会被自动 import，
+#    不排除它就会在包加载时顺手执行一遍（纯浪费，且 `python -m indicators.golden`
+#    会报 "found in sys.modules" 警告）。
 import importlib
-import pkgutil
 
-_EXCLUDE = {"__init__", "base", "registry", "data", "scan"}
-for _finder, _name, _ispkg in pkgutil.iter_modules(__path__):
-    if _ispkg or _name in _EXCLUDE:
-        continue
+from core.registry_scan import iter_module_names
+
+_EXCLUDE = {"__init__", "base", "registry", "data", "scan", "golden"}
+for _name in iter_module_names(__path__[0], _EXCLUDE):
     try:
         importlib.import_module(f"{__name__}.{_name}")
     except Exception as _exc:  # 单个指标文件异常不应拖垮整个包
