@@ -24,10 +24,14 @@ backend_fastapi/indicators/
     ma.py            均线 MA（主图叠加）            ← 每个指标一个文件
     macd.py          MACD（下方副图）              ← 每个指标一个文件
     rsi.py           RSI（下方副图）               ← 每个指标一个文件
-    cost_core.py     辅助模块（不算指标）：成本线计算内核，供 cost_ema / jwzz 共用
     cost_ema.py      EMA 成交均价成本线（主图叠加，id=ECOST）
     jwzz.py          价量偏离度（下方副图，id=JWZZ）
 ```
+
+> 价量类指标（成本线 / 偏离度）的**计算层**放在 `chipformulas/core/jwzz.py`：
+> 它同时被指标与策略复用（`strategies/ARCHITECTURE.md` 的硬要求 —— 指标与策略
+> 必须共用同一份计算，不得各写一遍），故不放本包，避免出现「策略 → 指标包」
+> 的反向依赖。
 
 > 本期**每个指标独立成文件**。文件名用**语义名**（snake_case，如 `macd.py` / `chip_cost.py`），
 > `@indicator(id=...)` 用**大写缩写**（`MACD` / `COST` / `ECOST`）——
@@ -35,8 +39,10 @@ backend_fastapi/indicators/
 > 新增指标时**只需新建一个文件**，`__init__.py` 会在包加载时**自动扫描目录**并 import 触发注册，
 > 无需手动在 `__init__.py` 里 `from . import <id>`；`category` 仅作为注册元数据（前端分组用），不再是文件边界。
 >
-> 允许有**不含 `@indicator` 的辅助模块**（如 `cost_core.py` / `rps_data.py`）：
+> 允许有**不含 `@indicator` 的辅助模块**（如 `rps_data.py`）：
 > 放多个指标共用的计算内核，指标索引页会把它显示成灰字「辅助模块」。
+> （若这份内核**同时**要被策略复用，应放到 `chipformulas/core/` 下 ——
+> 见 `strategies/ARCHITECTURE.md` 的「与指标共用同一份计算」硬要求。）
 
 ---
 
@@ -252,6 +258,11 @@ lowerPanels: Series[][]          // 每个 lower 指标一组，纵向堆叠成�
 
 - 技术指标默认 **前复权（qfq）**，由 `get_ohlcv` 默认口径保证，全包统一。
 - 成交量不受复权影响（已在 `price_store.load_bars` 处理）；指标如需成交量直接用 `df["volume"]`。
+- 🔴 **成交额（`amount`）已按复权因子同步缩放**（`get_ohlcv` 内做，与 `close` 同口径）：
+  复权只缩放价格列（`price_store.load_bars` 不动 volume / amount），若直接用未复权成交额
+  算「成交额 ÷ 成交量」得到的均价，会与复权后的 `close` **不同口径** —— 除权除息日两者
+  错位，`(close - cost) / cost` 会凭空跳出**假信号**。同理 `strategies/core/data.py` 也做
+  了同样的缩放，策略与指标才真正同源。
 - 北交所（920/8/4 段）行情经新浪源入库，`get_ohlcv` 透明取用，指标无需特殊处理。
 
 ---
@@ -262,7 +273,8 @@ lowerPanels: Series[][]          // 每个 lower 指标一组，纵向堆叠成�
    `from .base import indicator, ParamSpec, series_line, series_bar`。
    一个文件只放一个指标；`category` 仅作为注册元数据（前端分组用），不再是文件边界。
    （需要多个指标共用同一份计算时，把内核放进一个**不含 `@indicator` 的辅助模块**，
-   如 `cost_core.py`，两个指标各自 import 它 —— 不要让指标文件互相 import。）
+   两个指标各自 import 它 —— 不要让指标文件互相 import。若该内核**同时**要被策略
+   复用，放到 `chipformulas/core/` 下，见 `strategies/ARCHITECTURE.md` 的硬要求。）
 2. **写指标函数**：入参 `df`，返回 `{"series": [series_line(...), ...]}`，见 §5 示例。
 3. **加 `@indicator` 注册**：填唯一 `id`、中文 `name`、`category`、**`panel`**（main/lower/right）、以及 `params` 规格。
 4. **（若是新文件）无需手动登记**：`__init__.py` 会在包加载时自动扫描本目录并 import 新文件，
