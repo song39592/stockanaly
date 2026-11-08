@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 import chipformulas as chip_formulas
-from chipformulas.core.peak import peak_band_series
+from formulas.peak import peak_band_series
 from .core.base import strategy, ParamSpec, Signal, checkpoint, Cancelled
 
 

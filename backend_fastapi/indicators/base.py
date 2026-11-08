@@ -78,6 +78,9 @@ class IndicatorMeta:
     params: list[ParamSpec]
     func: Callable
     file: str = ""            # 定义该指标的源文件绝对路径（由装饰器经 inspect 取得）
+    # 序列样式：{序列名: {"color": "#RRGGBB", "width": 1.4}}，按**序列名**匹配。
+    # 声明了它，新增指标就不必再改前端那套「按序列名 switch 的配色表」。
+    styles: dict = dc.field(default_factory=dict)
 
 
 def series_line(name: str, data) -> dict:
@@ -114,11 +117,15 @@ def series_dist(name: str, axis, data, side: str = "right") -> dict:
 
 
 def indicator(id: str, name: str, category: str, panel: str,
-              params: list[ParamSpec]):
+              params: list[ParamSpec], styles: dict | None = None):
     """装饰器：把指标函数登记进 REGISTRY。
 
     panel 必须是 "main" / "lower" / "none" 之一，否则在模块导入时即报错，
     便于尽早发现错误的面板声明（"right" 已刻意收回，理由见模块 docstring）。
+
+    `styles`（可选）：{序列名: {"color": "#RRGGBB", "width": 1.4}}，
+    声明该指标各条序列的**颜色与线宽**，由 `compute()` 随序列一起下发，
+    前端据此渲染 —— 新增指标因此**不必改前端**（前端保留硬编码规则作兼容回退）。
 
     启动时还会经 `scan.scan()` 做元数据 + 签名 + 合成数据自检，不过关的会被移出
     `REGISTRY`（详见 scan.py）。**不需要**在这里声明"要不要参与自检"—— 依赖
@@ -136,6 +143,7 @@ def indicator(id: str, name: str, category: str, panel: str,
         REGISTRY[id] = IndicatorMeta(
             id=id, name=name, category=category,
             panel=panel, params=params, func=func, file=src,
+            styles=dict(styles or {}),
         )
         return func
     return deco
@@ -244,6 +252,21 @@ def _normalize_series(result: dict, df: pd.DataFrame) -> list[dict]:
     return out
 
 
+def _attach_styles(series: list[dict], styles: dict | None) -> None:
+    """把元数据里声明的**样式**（颜色 / 线宽）挂到对应序列上。
+
+    按**序列名**匹配（如 `{"JW_M": {"color": "#F0C83C", "width": 1.4}}`）：
+    声明了它，新增指标就不必再改前端那套「按序列名 switch 的配色表」。
+    没有声明的序列**不带 style 字段** —— 前端据此回退到自己的既有规则。
+    """
+    if not styles:
+        return
+    for s in series:
+        st = styles.get(s.get("name"))
+        if st:
+            s["style"] = dict(st)
+
+
 def compute(code: str, indicator_id: str, params: dict | None = None,
             period: str = "day") -> dict:
     """计算单个指标，返回**标准化输出**。
@@ -261,6 +284,9 @@ def compute(code: str, indicator_id: str, params: dict | None = None,
           {"name": "MA5", "kind": "line", "data": [..]},
           {"name": "MACD", "kind": "bar",  "data": [..]}
         ]                                            # data 中 NaN -> null
+        # 序列若在元数据里声明了样式，会带一个 "style" 字段：
+        #   {"name":"JW_M","kind":"line","style":{"color":"#F0C83C","width":1.4},"data":[..]}
+        # 没有声明的序列**不带** style —— 前端据此回退到自己的既有配色规则。
         # 分发布局（kind="dist"）示例（筹码双分布，共用价格轴的热力图）：
         #   {"name":"固定筹码","kind":"dist","axis":[价格中心...],"side":"left","data":[[...]...]}
         #   {"name":"强换手","kind":"dist","axis":[价格中心...],"side":"right","data":[[...]...]}
@@ -287,6 +313,7 @@ def compute(code: str, indicator_id: str, params: dict | None = None,
         result = meta.func(df, **(params or {}))
     dates = [str(d)[:10] for d in df.index]
     series_out = _normalize_series(result, df)
+    _attach_styles(series_out, meta.styles)
 
     return {
         "id": indicator_id,

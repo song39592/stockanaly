@@ -21,6 +21,23 @@ enabled: true
   否则新类不会进 exe（表现为「改了没生效」）。
 - 改完清单要重跑 `build_exe.bat` 重新生成 `stockpool.exe`；**发布版 exe 要入库**（见 git-safety 规则）。
 
+## backend_fastapi\：几个「单一来源」模块
+- `core/bars_schema.py` —— **日线标准列集合 + 复权缩放规则**的唯一来源。
+  指标侧（`indicators/data.py`）与策略侧（`strategies/core/data.py`）都从这里取，
+  改一处两处生效；历史上两侧各写一份，漏一处就静默失真（两边算出两个数、两边都不报错）。
+  ⚠️ 新增量纲为「价」的列（如成交额）时，必须同时加进 `PRICE_SCALED_COLUMNS`。
+- `core/registry_scan.py` —— 指标 / 策略 / 筹码公式三套注册机制的**公共骨架**
+  （遍历目录 / 强制重导入 / 单注册校验 / 报告组装 / mtime 缓存）。
+  **判据各包自理**（指标的 id 与文件名无关、策略与公式必须相同），机械动作共用这一份。
+  新增第四套注册机制时复用它，不要照抄。
+- `formulas/` —— **中立计算内核包**：指标与策略共用的纯计算放这里。
+  依赖方向恒为「指标 → formulas ← 策略」，**不存在反向依赖**。
+  ⚠️ 不要把共用内核塞进 `chipformulas/core/`（那是筹码语义）—— 那会让「非筹码的东西住在筹码包里」
+  变成默认惯例，下一个新增的人照抄。
+- `indicators/golden.py` + `indicators/_golden.json` —— **数值基准**（每个指标在确定性合成行情上的
+  输出快照）。改了指标计算逻辑或新增指标后**必须** `python -m indicators.golden --update`，
+  否则 `test_indicators_golden` 失败。基准文件入库。
+
 ## backend_fastapi\indicators\：跨层上下文必须显式
 - 指标函数只允许从**签名**拿到「按代码 / 周期再取数」这类上下文：
   `def xxx(df, *, ctx=None, ...)`，框架经 `context.CalcContext` 注入。
@@ -30,6 +47,10 @@ enabled: true
   不进用户参数表（ParamSpec）；`ctx=None` 表示「没有上下文」（合成数据自检），需要 code 的指标据此
   抛「取不到股票代码」，由 `scan` 判为需外部数据跳过。
 - 详见 `backend_fastapi\indicators\ARCHITECTURE.md` §5。
+- 指标的颜色 / 线宽由 `@indicator(styles=...)` 声明并随计算结果下发（`series[].style`），
+  **新增指标不必改前端**；前端保留硬编码规则作兼容回退，且用户覆盖过的调色板语义色优先。
+- ⚠️ `indicators/` 目录下的 .py 会被 `__init__.py` **自动 import**：
+  非指标模块（如 `golden.py`）必须列进 `_EXCLUDE`，否则会在包加载时顺手执行一遍。
 
 ## 分发单元：目标设备要能直接跑，缺一不可
 - `stockpool.exe`（发布版）

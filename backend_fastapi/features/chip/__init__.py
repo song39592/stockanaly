@@ -36,5 +36,5 @@
 5. **筹码矩阵的缓存唯一入口是 `formulas.core.base.compute_matrix`**（第 04 项）。
    指标侧的 `indicators/data._chip_frames` **不再自带 `lru_cache`** —— 否则「右侧筹码峰
    窗口 + COST/SCR/WIN 三个指标」会把同一只票的矩阵独立算两遍。缓存键里**必须**含
-   `offline`：它决定要不要做锁仓修正，是业务口径差异（见 `core/scr.py` 顶部说明）。
+   `offline`：它决定要不要做锁仓修正，是业务口径差异（见 `formulas/scr.py` 顶部说明）。
 """

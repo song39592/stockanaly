@@ -32,7 +32,7 @@ import datetime as dt
 import pandas as pd
 
 import chipformulas as chip_formulas
-from chipformulas.core import scr
+from formulas import scr
 from .core.base import strategy, ParamSpec, Signal, checkpoint
 
 

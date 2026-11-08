@@ -1,5 +1,5 @@
 # 一键跑全部后端单元测试（仅标准库 unittest，零新依赖）。
-# 显式列出 9 个测试模块，避免 `unittest discover` 递归进 venv / 第三方包目录。
+# 显式列出 10 个测试模块，避免 `unittest discover` 递归进 venv / 第三方包目录。
 # 用法：在 backend_fastapi 目录下执行  .\run_tests.ps1
 $root = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Set-Location $root
@@ -13,7 +13,8 @@ $modules = @(
     'test_mentor_store',
     'test_market_symbol',
     'test_main',
-    'test_settings_download'
+    'test_settings_download',
+    'test_indicators_golden'
 )
 
 # 直接调用可执行字面路径（不绕 & 变量），PowerShell 原生执行、退出码可靠。

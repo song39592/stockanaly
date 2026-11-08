@@ -27,7 +27,7 @@ import numpy as np
 from core.paramspec import ParamSpec         # 第 13 项：定义收敛到 core/paramspec.py
 
 from . import data
-from . import scr
+from formulas import scr
 from . import matrix_cache
 from . import chip_matrix_store
 

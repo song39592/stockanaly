@@ -31,13 +31,20 @@ import pandas as pd
 import kline_service
 import price_store
 from core import db as _core_db
+from core.bars_schema import STANDARD_BAR_COLUMNS, adjust_price_scaled_columns
 
 # 只取异常类型（运行控制住在独立模块，避免数据层反向依赖契约层 base）
 from .runcontrol import Cancelled
 
-# 对外只暴露 OHLCV：保持与原先（经 indicators.data.get_ohlcv）一致的列集合，
-# 避免 amount / turnover 等列混进策略的 DataFrame 改变既有行为。
-_BAR_COLUMNS = ("open", "high", "low", "close", "volume")
+# 对外只暴露 OHLCV + 成交额：保持与原先（经 indicators.data.get_ohlcv）一致的列集合，
+# 避免 turnover 等列混进策略的 DataFrame 改变既有行为。
+# amount（成交额，元）是「价量类」策略的必需输入（如 JWZZ 成本线），故在列集合内；
+# 它在复权口径下会被同步缩放（见 _fetch），与 close 同口径。
+#
+# ⚠️ 列集合与缩放规则的**单一来源**是 `core/bars_schema.py`（指标包也用它）——
+# 历史上这里是手抄的一份，加列要改两处、漏一处就静默失真（策略与指标算出两个数，
+# 两边都不报错）。现在改一处两处生效。
+_BAR_COLUMNS = STANDARD_BAR_COLUMNS
 _MIN_ROWS = 2          # 少于 2 根无法算信号 / 回测，视为数据不足
 
 
@@ -84,6 +91,14 @@ def load_bars(codes, start: str | None = None, end: str | None = None,
                                        period="day", fields=cols or None)
             if d is None or d.empty:
                 return None
+            # 🔴 成交额按复权因子同步缩放，与 close 同口径。
+            # `price_store.load_bars` 的复权只缩放 open/high/low/close（volume / amount 不动），
+            # 于是「成交额 ÷ 成交量」得到的均价是未复权价，而 close 是复权价 ——
+            # 除权除息日两者错位，(close-cost)/cost 会跳出**假信号**（策略据此买卖 → 真亏）。
+            # 均价_adj = 均价_raw × factor（factor 由 price_store 随每根 bar 给出）。
+            # raw 口径没有 factor 列 → 原样不动，本来就自洽。
+            # 规则本体见 core/bars_schema.py（指标包共用同一份）。
+            d = adjust_price_scaled_columns(d)
             keep = [c for c in _BAR_COLUMNS if c in d.columns]
             if keep and list(d.columns) != keep:
                 d = d[keep]

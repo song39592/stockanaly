@@ -49,7 +49,7 @@ import pandas as pd
 
 import apiutil
 import chipformulas as chip_formulas
-from chipformulas.core import scr
+from formulas import scr
 from features.chip import scr_service as chip_service
 from strategies.core.data import list_universe_codes
 

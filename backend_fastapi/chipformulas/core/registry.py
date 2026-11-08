@@ -19,13 +19,12 @@
 """
 from __future__ import annotations
 
-import importlib
 import os
-import pkgutil
-import sys
 import traceback
 
 import numpy as np
+
+from core.registry_scan import force_import, scan_modules, single_registration
 
 from . import base
 
@@ -73,16 +72,11 @@ def _stub_context() -> base.ChipContext:
 
 
 def _force_import(mod_name: str) -> set[str]:
-    """强制重新执行某公式模块（清掉上次登记 + 从 sys.modules 移除后重导）。"""
-    full = f"{_FORMULA_PACKAGE}.{mod_name}"
-    if full in sys.modules:
-        for fid in [k for k, v in base.FORMULAS.items()
-                    if getattr(v.func, "__module__", None) == full]:
-            base.FORMULAS.pop(fid, None)
-        del sys.modules[full]
-    before = set(base.FORMULAS.keys())
-    importlib.import_module(full)
-    return set(base.FORMULAS.keys()) - before
+    """强制重新执行某公式模块（清掉上次登记 + 从 sys.modules 移除后重导）。
+
+    机械动作在公共骨架 `core/registry_scan.py`（与策略包共用同一份）。
+    """
+    return force_import(_FORMULA_PACKAGE, mod_name, base.FORMULAS)
 
 
 def _validate_module(mod_name: str, filename: str) -> dict:
@@ -96,17 +90,12 @@ def _validate_module(mod_name: str, filename: str) -> dict:
         rec["error"] = f"导入失败：{exc}\n{traceback.format_exc()}"
         return rec
 
-    # 2) 恰好注册 1 个，且 id == 文件名
-    if len(new_ids) != 1:
-        for i in new_ids:
-            base.FORMULAS.pop(i, None)
-        rec["error"] = f"必须用 @chip_formula 恰好注册 1 个公式（实际 {len(new_ids)} 个）"
-        return rec
-    fid = next(iter(new_ids))
-    expected = filename[:-3]
-    if fid != expected:
-        base.FORMULAS.pop(fid, None)
-        rec["error"] = f"公式 id('{fid}') 必须等于文件名('{expected}')"
+    # 2) 恰好注册 1 个，且 id == 文件名（判据在公共骨架里，文案保持原样）
+    fid, err = single_registration(new_ids, base.FORMULAS, filename[:-3],
+                                    decorator="chip_formula", kind="公式",
+                                    id_label="公式")
+    if err:
+        rec["error"] = err
         return rec
 
     meta = base.FORMULAS[fid]
@@ -165,13 +154,19 @@ def scan() -> dict:
     """扫描并校验全部公式文件，返回 {filename: 校验结果}。
 
     通过校验的公式保留在 base.FORMULAS；未通过的被移除，不会出现在可选列表。
+
+    遍历编排走公共骨架 `core/registry_scan.py`（与策略包共用同一份）；
+    「什么算合法公式」的判据仍在本文件。
+    ⚠️ 本包**不做 mtime 缓存**（公式数量少、冒烟成本仅毫秒级，
+    每次启动全量校验可保证「改了算法文件立刻生效」，省掉一份需要维护的状态）。
     """
-    results: dict[str, dict] = {}
-    for _finder, name, ispkg in pkgutil.iter_modules([_FORMULA_DIR]):
-        if ispkg or name in _EXCLUDE:
-            continue
-        results[name + ".py"] = _validate_module(name, name + ".py")
-    return results
+    return scan_modules(
+        package=_FORMULA_PACKAGE,
+        directory=_FORMULA_DIR,
+        exclude=_EXCLUDE,
+        registry=base.FORMULAS,
+        validate=_validate_module,
+    )
 
 
 def validation_report() -> dict:

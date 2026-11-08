@@ -24,15 +24,14 @@
 from __future__ import annotations
 
 import dataclasses as _dc
-import importlib
 import inspect
-import json
 import os
-import pkgutil
-import sys
 import traceback
 
 import pandas as pd
+
+from core.registry_scan import (ModuleCache, force_import, scan_modules,
+                                 single_registration)
 
 from . import base, data
 
@@ -40,28 +39,20 @@ _HERE = os.path.dirname(os.path.abspath(__file__))          # core 框架目录
 _STRATEGY_DIR = os.path.dirname(_HERE)                       # 上一层：具体策略所在目录
 _STRATEGY_PACKAGE = "strategies"                             # 具体策略模块名空间
 _CACHE_FILE = os.path.join(_STRATEGY_DIR, "_validated.json")
+_CACHE = ModuleCache(_CACHE_FILE)     # 校验结果缓存（mtime 未变则跳过冒烟）
 _EXCLUDE = {"__init__", "core", "report"}   # 排除包入口、框架子目录与报告落盘模块
-_FAKE_COLS = ["open", "high", "low", "close", "volume"]
+# 冒烟假行情的列集合：覆盖常见字段，inputs 任意子集都能取到。
+# 含 amount（成交额）：「价量类」策略（如 JWZZ 成本线）没有它就算不出任何东西，
+# 冒烟会退化成「无信号早退」——契约校验形同虚设。
+_FAKE_COLS = ["open", "high", "low", "close", "volume", "amount"]
 
 
 def _load_cache() -> dict:
-    try:
-        with open(_CACHE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    return _CACHE.load()
 
 
 def _save_cache(cache: dict) -> None:
-    try:
-        with open(_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-
-def _snapshot_ids() -> set:
-    return set(base.REGISTRY.keys())
+    _CACHE.save(cache)
 
 
 def _stub_load_bars(codes, start=None, end=None, fields=None, adjust="hfq"):
@@ -97,16 +88,11 @@ _SMOKE_CODES = ["TEST", "TEST2", "TEST3", "TEST4", "TEST5"]
 
 def _force_import(mod_name: str):
     """强制重新执行某策略模块（清掉上一次登记 + 从 sys.modules 移除后重导），
-    返回新登记到 REGISTRY 的 id 集合；导入异常原样抛出由调用方捕获。"""
-    full = f"{_STRATEGY_PACKAGE}.{mod_name}"
-    if full in sys.modules:
-        for sid in [k for k, v in base.REGISTRY.items()
-                    if getattr(v.func, "__module__", None) == full]:
-            base.REGISTRY.pop(sid, None)
-        del sys.modules[full]
-    before = _snapshot_ids()
-    importlib.import_module(full)
-    return base.REGISTRY.keys() - before
+    返回新登记到 REGISTRY 的 id 集合；导入异常原样抛出由调用方捕获。
+
+    机械动作在公共骨架 `core/registry_scan.py`（与筹码公式包共用同一份）。
+    """
+    return force_import(_STRATEGY_PACKAGE, mod_name, base.REGISTRY)
 
 
 def _validate_module(mod_name: str, filename: str) -> dict:
@@ -125,17 +111,12 @@ def _validate_module(mod_name: str, filename: str) -> dict:
         rec["error"] = f"导入失败：{exc}\n{traceback.format_exc()}"
         return rec
 
-    # 2) 恰好注册 1 个，且 id == 文件名
-    if len(new_ids) != 1:
-        for i in new_ids:
-            base.REGISTRY.pop(i, None)
-        rec["error"] = f"必须用 @strategy 恰好注册 1 个策略（实际 {len(new_ids)} 个）"
-        return rec
-    sid = next(iter(new_ids))
-    expected = filename[:-3]
-    if sid != expected:
-        base.REGISTRY.pop(sid, None)
-        rec["error"] = f"strategy id('{sid}') 必须等于文件名('{expected}')"
+    # 2) 恰好注册 1 个，且 id == 文件名（判据在公共骨架里，文案保持原样）
+    sid, err = single_registration(new_ids, base.REGISTRY, filename[:-3],
+                                    decorator="strategy", kind="策略",
+                                    id_label="strategy")
+    if err:
+        rec["error"] = err
         return rec
 
     meta = base.REGISTRY[sid]
@@ -233,15 +214,11 @@ def _light_check(mod_name: str, filename: str, cached: dict) -> dict:
     except Exception as exc:
         rec["error"] = f"导入失败：{exc}"
         return rec
-    if len(new_ids) != 1:
-        for i in new_ids:
-            base.REGISTRY.pop(i, None)
-        rec["error"] = f"必须用 @strategy 恰好注册 1 个策略（实际 {len(new_ids)} 个）"
-        return rec
-    sid = next(iter(new_ids))
-    if sid != filename[:-3]:
-        base.REGISTRY.pop(sid, None)
-        rec["error"] = f"strategy id('{sid}') 必须等于文件名('{filename[:-3]}')"
+    sid, err = single_registration(new_ids, base.REGISTRY, filename[:-3],
+                                    decorator="strategy", kind="策略",
+                                    id_label="strategy")
+    if err:
+        rec["error"] = err
         return rec
     for k in ("strategy_id", "name", "category", "description", "inputs", "outputs", "params"):
         rec[k] = cached.get(k)
@@ -256,38 +233,20 @@ def scan(force: bool = False) -> dict:
 
     force=True 时忽略缓存、对所有文件执行完整校验（用于「刷新」接口）。
     通过校验的策略保留在 base.REGISTRY；未通过的被移除，不会出现在可选列表。
+
+    遍历 / 缓存 / 短路编排走公共骨架 `core/registry_scan.py`
+    （与筹码公式包共用同一份）；「什么算合法策略」的判据仍在本文件。
     """
-    cache = _load_cache()
-    results: dict[str, dict] = {}
-    seen: set[str] = set()
-
-    for _finder, name, ispkg in pkgutil.iter_modules([_STRATEGY_DIR]):
-        if ispkg or name in _EXCLUDE:
-            continue
-        filename = name + ".py"
-        seen.add(filename)
-        try:
-            mtime = os.path.getmtime(os.path.join(_STRATEGY_DIR, filename))
-        except Exception:
-            mtime = None
-
-        cached = cache.get(filename)
-        cached_ok = (cached is not None and cached.get("status") == "ok"
-                     and cached.get("mtime") == mtime)
-
-        if (not force) and cached_ok:
-            rec = _light_check(name, filename, cached)   # 轻量复检，跳过冒烟
-        else:
-            rec = _validate_module(name, filename)        # 完整校验
-        results[filename] = rec
-        cache[filename] = rec
-
-    for fn in list(cache.keys()):          # 清理已删除文件的缓存
-        if fn not in seen:
-            cache.pop(fn, None)
-
-    _save_cache(cache)
-    return results
+    return scan_modules(
+        package=_STRATEGY_PACKAGE,
+        directory=_STRATEGY_DIR,
+        exclude=_EXCLUDE,
+        registry=base.REGISTRY,
+        validate=_validate_module,
+        light_check=_light_check,
+        cache=_CACHE,
+        force=force,
+    )
 
 
 def validation_report() -> dict:

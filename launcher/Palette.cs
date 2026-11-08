@@ -123,5 +123,11 @@ namespace StockPool
             Color v;
             return _overrides.TryGetValue(name, out v) ? v : def;
         }
+
+        /// <summary>某个语义色是否被用户覆盖过（覆盖优先于后端下发的样式）。</summary>
+        internal static bool IsOverridden(string name)
+        {
+            return !string.IsNullOrEmpty(name) && _overrides.ContainsKey(name);
+        }
     }
 }

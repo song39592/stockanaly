@@ -15,6 +15,13 @@ namespace StockPool
         public List<double> Data;    // 与 K 线等长（按日期对齐），NaN 表示缺失
         public Color Color;
         public float Width = 1.4f;   // 线宽（通达信 LINETHICK2 → 2f）
+        /// <summary>
+        /// 本序列颜色取自**调色板语义名**（如 "RpsYellow" / "LineGoldDeep"）。
+        /// 作用：让「用户在 settings.json 里覆盖了某个语义色」这件事在
+        /// 后端下发样式时仍然生效 —— 覆盖优先于后端下发的 hex。
+        /// 没有对应语义名时为 null（此时后端下发的颜色直接生效）。
+        /// </summary>
+        public string PaletteKey;
         // 「阈值以上转红」高亮：对齐通达信 RPS 副图里的
         // IF(RPS>=M, RPS, DRAWNULL), COLORRED；只在相邻两点都 ≥ 阈值时整段画红。
         public bool HasHi;
