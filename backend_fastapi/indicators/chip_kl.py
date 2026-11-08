@@ -6,17 +6,22 @@
     博弈H:80;
     博弈L:-80;
 
-读法：`WINNER(价)` = 筹码分布里「成本低于该价」的占比（获利盘比例，0~100%）。
+读法：`WINNER(价)` = 筹码分布里「成本低于该价」的占比（获利盘比例）。
 于是 KL 看的是**同一天内**，以开盘价和收盘价两个分界切出来的获利盘比例差：
 
-  * KL > 0：收盘时的获利盘比开盘时更多 -> 当日**买盘占优**（筹码整体上移）
+  * KL > 0：收盘时的获利盘比开盘时多 -> 当日**买盘占优**（筹码整体上移）
   * KL < 0：收盘时的获利盘比开盘时更少 -> 当日**卖压占优**
   * |KL| 越过 +-80：**博弈剧烈**（多空分歧大 / 方向选择强烈）
 
-⚠️ **量纲别改错**：WINNER 返回 0~100 的**百分比**，故 `WINNER(C)-WINNER(O)` 的单位是
-**百分点**；原式再乘 100，所以「日内获利盘比例变动 1 个百分点」= KL 100，
-阈值 +-80 对应的是 **+-0.8 个百分点**的日内变动。
-（若把乘 100 去掉，KL 会缩到 +-1 量级，+-80 的阈值线永远碰不到 —— 那是把原式写错了。）
+⚠️ **量纲（别改错，这里踩过坑）**：通达信的 `WINNER` 返回 **0~1 的小数**，
+所以原式 `KL = 100*(WINNER(C)-WINNER(O))` 的量程是 **±100**，
+阈值 +-80 落在量程 80% 的位置 = 「接近极端」才有意义。
+而本项目的筹码矩阵每行合计 100（**百分数**），直接拿它当小数用会把 KL
+放大 100 倍（实测能到几千）—— 阈值线会被压到 0 附近，整张图没法看。
+所以这里取 `winner_fraction`（通达信的小数口径），不是 `winner_series`。
+
+换句话说：**KL 的单位是「获利盘比例变动了多少个百分点」**——
+获利盘比例当天从 40% 变到 52%，KL 就是 +12。
 
 口径要点：
   * 筹码矩阵与价格**同复权口径**（都是前复权 qfq），由数据层保证；
@@ -30,7 +35,7 @@ import pandas as pd
 
 from .base import ParamSpec, indicator, series_line
 from .data import chip_rows_of, code_of
-from formulas.winner import winner_series
+from formulas.winner import winner_fraction
 
 # 通达信原式里写死的两条阈值线
 BOJIE_HIGH = 80.0
@@ -58,9 +63,9 @@ def chip_kl(df: pd.DataFrame, *, ctx=None, formula: str = "tri_decay") -> dict:
     centers = frames.centers
     close = df["close"].astype(float).to_numpy()
     open_ = df["open"].astype(float).to_numpy()
-    # 两个分界各算一次获利盘比例，再取差（通达信 WINNER(C) - WINNER(O)）
-    w_close = winner_series(rows, centers, close)
-    w_open = winner_series(rows, centers, open_)
+    # 两个分界各算一次获利盘比例（通达信口径：小数 0~1），再按原式取差乘 100
+    w_close = winner_fraction(rows, centers, close)
+    w_open = winner_fraction(rows, centers, open_)
     kl = 100.0 * (w_close - w_open)
     index = df.index
     return {"series": [
