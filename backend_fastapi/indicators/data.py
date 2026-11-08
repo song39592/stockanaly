@@ -5,8 +5,11 @@
   * 本文件是指标包内**唯一**允许 `import price_store`（以及将来可能的外部源）的地方。
   * 指标实现文件（trend / oscillator / volatility 等）只能 `from .data import get_ohlcv`，
     不得自行读取数据库、文件或调用 akshare / 网络。
-  * 取数结果统一为 pandas.DataFrame，索引为日期字符串（YYYY-MM-DD），列固定为
-    open / high / low / close / volume / amount，按日期升序排列，前段缺失保留 NaN。
+  * 取数结果统一为 pandas.DataFrame，索引为日期字符串（YYYY-MM-DD），
+    列集合固定为 open / high / low / close / volume / amount
+    （**单一来源**：`core/bars_schema.py` 的 `STANDARD_BAR_COLUMNS`，
+    策略侧 `strategies/core/data.py` 用同一份 —— 加列要改一处、不会漏成两个口径），
+    按日期升序排列，前段缺失保留 NaN。
 
 技术面指标当前只需要 OHLCV + 成交额（amount）；若后续需要换手率等，在本文件扩展即可，
 指标实现文件无需改动。
@@ -33,10 +36,11 @@ import kline_service
 import numpy as np
 import pandas as pd
 import price_store          # 仅用于读股本（share_capital），K 线本身走 kline_service
+from core.bars_schema import STANDARD_BAR_COLUMNS, adjust_price_scaled_columns
 from periods import normalize
 
 _MIN_ROWS = 2  # 少于此行数视为数据不足，技术指标无法计算
-_OHLCV = ("open", "high", "low", "close", "volume", "amount")
+_OHLCV = STANDARD_BAR_COLUMNS      # 单一来源：core/bars_schema.py（指标与策略共用同一份列集合）
 
 
 def _norm_date(d) -> str | None:
@@ -66,14 +70,10 @@ def _load(code: str, start: str | None, end: str | None, adjust: str,
     # `price_store.load_bars` 的复权只缩放 open/high/low/close（volume / amount 不动），
     # 于是「成交额 ÷ 成交量」得到的均价是**未复权**价，而 close 是复权价 ——
     # 除权除息日两者错位，偏离度 (close-cost)/cost 会凭空跳出假信号。
-    # 正确做法：均价 = 成交额 ÷ 成交量 是「当日真实均价」，把它乘上同一个因子，
-    # 就与复权后的 close 同口径（均价_adj = 均价_raw × factor）。
-    # raw 口径没有 factor 列（price_store 直接返回原始 bar）→ 原样不动，本来就自洽。
-    if "amount" in df.columns and "factor" in df.columns:
-        df = df.assign(amount=pd.to_numeric(df["amount"], errors="coerce")
-                       * pd.to_numeric(df["factor"], errors="coerce"))
+    # 口径与缩放规则见 core/bars_schema.py（指标与策略共用同一份，改一处两处生效）。
+    df = adjust_price_scaled_columns(df)
     # amount 一并带出：get_vwap（成交均价）与「EMA 成交均价成本线」需要它。
-    cols = [c for c in ("open", "high", "low", "close", "volume", "amount") if c in df.columns]
+    cols = [c for c in _OHLCV if c in df.columns]
     return df[cols]
 
 
