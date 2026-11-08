@@ -16,22 +16,35 @@
 
 ```
 backend_fastapi/indicators/
-    __init__.py      包入口：暴露 compute() / list_indicators()
+    __init__.py      包入口：暴露 compute() / list_indicators()，并自动扫描本目录完成注册
     ARCHITECTURE.md  本文件（新增指标前必读）
-    data.py          【唯一数据入口】封装 price_store 取数，指标只能从这里取行情
+    data.py          【唯一数据入口】封装取数，指标只能从这里取行情
     base.py          指标注册机制（@indicator 装饰器）+ 统一计算入口 compute() + 标准化输出
     registry.py      把 REGISTRY 转成前端清单 list_indicators()
-    ma.py            均线 MA（主图叠加）            ← 每个指标一个文件
-    macd.py          MACD（下方副图）              ← 每个指标一个文件
-    rsi.py           RSI（下方副图）               ← 每个指标一个文件
-    cost_ema.py      EMA 成交均价成本线（主图叠加，id=ECOST）
-    jwzz.py          价量偏离度（下方副图，id=JWZZ）
+    scan.py          LOAD 校验（元数据 + 签名 + 合成数据自检）
+    golden.py        【数值基准】自检：把每个指标的输出拍成快照，防数值回归
+    _golden.json     数值基准快照（自动生成，纳入版本控制）
+    <语义名>.py      指标实现文件 —— **一个指标一个文件**
 ```
 
-> 价量类指标（成本线 / 偏离度）的**计算层**放在 `chipformulas/core/jwzz.py`：
-> 它同时被指标与策略复用（`strategies/ARCHITECTURE.md` 的硬要求 —— 指标与策略
-> 必须共用同一份计算，不得各写一遍），故不放本包，避免出现「策略 → 指标包」
-> 的反向依赖。
+> ⚠️ 本文件**不枚举具体指标**。有哪些指标、分别在哪个面板，以**运行时注册表**为准：
+> ```python
+> import indicators
+> print([(i["id"], i["name"], i["panel"]) for i in indicators.list_indicators()])
+> ```
+> 文档里写死指标清单只会**过期**（加了指标忘了改文档，或改了文档忘了加指标），
+> 而读代码的人未必分得出「文档没写」和「指标不存在」。规则写死、清单运行时查。
+
+> 🆕 **指标与策略共用的计算内核**放在**中立包** `backend_fastapi/formulas/`：
+> 它既不是指标、也不是策略、更不是筹码 —— 只是「一段被两处复用的纯计算」。
+> 指标 import 它做**展示包装**，策略 import 它做**横截面选股**，
+> 两边数值天然一致（`strategies/ARCHITECTURE.md` 的硬要求 —— 不得各写一遍）。
+> 依赖方向恒为「指标 → formulas ← 策略」，**不存在反向依赖**。
+> 详见 `formulas/__init__.py` 的「为什么要有这个包」。
+
+> 🆕 **日线的标准列集合与复权缩放规则**由 `backend_fastapi/core/bars_schema.py` 统一定义
+> （`STANDARD_BAR_COLUMNS` / `adjust_price_scaled_columns()`），指标与策略两侧共用同一份 ——
+> 历史上各写一份，加一列要改两处、漏一处就静默失真（两边算出两个数，两边都不报错）。
 
 > 本期**每个指标独立成文件**。文件名用**语义名**（snake_case，如 `macd.py` / `chip_cost.py`），
 > `@indicator(id=...)` 用**大写缩写**（`MACD` / `COST` / `ECOST`）——
@@ -41,8 +54,7 @@ backend_fastapi/indicators/
 >
 > 允许有**不含 `@indicator` 的辅助模块**（如 `rps_data.py`）：
 > 放多个指标共用的计算内核，指标索引页会把它显示成灰字「辅助模块」。
-> （若这份内核**同时**要被策略复用，应放到 `chipformulas/core/` 下 ——
-> 见 `strategies/ARCHITECTURE.md` 的「与指标共用同一份计算」硬要求。）
+> （若这份内核**同时**要被策略复用，放到中立包 `formulas/` 下 —— 见上。）
 
 ---
 
@@ -132,7 +144,9 @@ def ma(df: pd.DataFrame, periods=None) -> dict:
 ```
 
 - `REGISTRY`：id → `IndicatorMeta`（含函数与参数规格）。id **必须唯一**，重复会抛 `ValueError`。
-- `IndicatorMeta`：id / name / category / panel / params / func。
+- `IndicatorMeta`：id / name / category / panel / params / func / styles。
+- `styles`（可选，声明在 `@indicator(styles=...)`）：`{序列名: {"color": "#RRGGBB", "width": 1.4}}`。
+  由 `compute()` 随序列一起下发（§6.1(e)），前端据此渲染 —— **新增指标不必改前端**。
 - `series_line(name, data)` / `series_bar(name, data)`：构造标准化序列单元，`kind` 分别为 `"line"` / `"bar"`。
 - `ParamSpec`：参数规格（见 §9），供前端渲染与后端校验。
 
@@ -157,6 +171,39 @@ def ma(df: pd.DataFrame, periods=None) -> dict:
 - 每条 Series **必须沿用 `df` 的 date 索引**（直接基于 `df` 计算即可），
   **不得裁掉前段索引**；不足周期的位点用 `NaN` 表示（pandas 滚动/移位自然产生）。
 - 数值为 float；`NaN` 由 `compute()` 序列化为 `null`，前端按 date 对齐叠加。
+
+### 两道自检：能不能跑通 ≠ 算得对不对
+
+| | `scan.py` | `golden.py` |
+|---|---|---|
+| 验什么 | 元数据完整、签名对得上、**能不能跑通** | **算出来的数对不对** |
+| 失败后果 | 指标被移出 `REGISTRY`（不可用） | 单测失败（数值回归） |
+| 改不改状态 | 是（剔除指标） | 否（只读） |
+
+两道都跑、都用同一份**确定性**合成行情（`scan.stub_df()`，300 根、正弦扰动、无随机），
+但**互不替代**：前者抓「写错了」，后者抓「算错了」。
+
+为什么必须有第二道：`scan` 只看「跑得通、结构没变」，
+于是**改一处共享内核 → 若干指标数值全变 → scan 照样全绿** ——
+「改一个、坏一片且无声」是最难查的一类回归。
+
+`golden.py` 的做法：把每个指标在合成行情上的输出拍成快照 `_golden.json`
+（每条序列存**全量数值的 sha1** + 一份**抽样**用于人眼定位差异），
+新增指标或改动计算逻辑后必须重新生成：
+
+```powershell
+.\venv\Scripts\python.exe -m indicators.golden --update
+```
+
+单测 `test_indicators_golden` 每次跑测试都会比对 —— 数值一变就红。
+
+### 三套注册的公共骨架
+
+指标 / 策略 / 筹码公式三处都是「扫目录 → 导入即注册 → 校验 → 出报告」，
+但**形态**不同（指标的 id 与文件名无关、策略与公式必须相同；策略有 mtime 缓存、另两处没有）。
+**判据各包自理**，机械动作（遍历 / 强制重导入 / 单注册校验 / 报告组装 / 缓存）统一在
+`core/registry_scan.py`，三处共用一份 —— 免得「加一种可注册的东西」要照抄一遍再改一遍，
+抄错的地方不会报错，只会给出前后矛盾的报告。
 
 ---
 
@@ -212,24 +259,28 @@ def ma(df: pd.DataFrame, periods=None) -> dict:
 | `series[].name` | string | 序列名（如图例 MA5） |
 | `series[].kind` | "line"\|"bar"\|"dist" | 线 / 柱 / 分发布局（前端据此选渲染方式） |
 | `series[].data` | number[]\|null | `line`/`bar`：与 `dates` 等长，NaN→null |
+| `series[].style` | object | **可选**：该序列的颜色 / 线宽（`{"color":"#RRGGBB","width":1.4}`）；<br>**没有这个字段**表示该指标未声明样式，前端回退到自己的既有规则 |
 | `series[].axis` | number[] | **仅 `dist`**：价格分箱中心（长度=bins），与日期无关 |
 | `series[].side` | "left"\|"right" | **仅 `dist`**：镜像方向（固定筹码负侧 / 强换手正侧） |
 | `series[].data`(dist) | number[][] | **仅 `dist`**：(days, bins)，每行=当日价格直方图，不按行归一 |
 
-### 6.2 三个 panel 的常用数据需求
+### 6.2 panel 与序列形态的对应规则
 
-| panel | 典型指标 | series 构成（name / kind） |
+| panel | 放什么（**按量纲选，不按指标名选**） | series 构成 |
 |---|---|---|
-| **main** 主图叠加 | MA | MA5/MA10/MA20/MA60，均为 `line` |
-| | EMA | EMA12/EMA26，`line` |
-| | BOLL | 中轨/上轨/下轨，均为 `line` |
-| **lower** 下方副图 | MACD | DIF `line`、DEA `line`、MACD柱 `bar` |
-| | RSI | RSI(14) `line`（0–100） |
-| | KDJ | K/D/J 三条 `line` |
-| **main** 分发布局 | 筹码双分布(`dist`) | `panel="main"` 仅表示「共用 K 线价格轴」；`kind="dist"` 的 series 由**专用热力图渲染器**绘制（时间×价格色温），永不进通用 line/bar 面板，替代原被删的 `right` 独立纵轴面板 |
+| **main** 主图叠加 | 与价格**同量纲**的序列（均线 / 通道 / 成本线…）—— 只有同量纲才能与 K 线共用价格轴 | 多条 `line` |
+| **lower** 下方副图 | 与价格**不同量纲**的序列（比率 / 摆动 / 偏离度…）—— 相对量纲绝不能上主图 | 可混合 `line` 与 `bar`（柱状信号用 `bar`） |
+| **none** | 能算、能枚举、**不显示**（供导出 / 内部复用 / 暂不开放） | 任意 |
+| **main** 分发布局 | 「按**价格**分箱的直方图」类 | `kind="dist"`，由**专用热力图渲染器**绘制（时间×价格色温），永不进通用 line/bar 面板 |
 
-> 设计要点：MACD 同时含 `line`（DIF/DEA）与 `bar`（柱），靠 `kind` 区分，前端无需特判指标算法。
-> 一条指标可输出多条 series，且分属不同 kind，全部由 §6.1(e) 统一承载。
+> 量纲是判 panel 的**唯一**依据：把相对量纲（如 ‰ 偏离度）画到主图，
+> 数值与价格差几个数量级，曲线会贴着 0 或顶到天际 —— 这类错只有肉眼能发现，
+> 而 `panel` 声明错了**不会报错**，所以要按上表的量纲规则选，别照抄别的指标。
+
+> 设计要点：一条指标可输出多条 series，且可分属不同 kind（如「两条线 + 一根柱」），
+> 全部由 §6.1(e) 统一承载，前端按 `kind` 选渲染图元，**无需特判指标算法**。
+>
+> 具体某个指标落在哪个 panel、有几条序列，以**运行时注册表**为准（见 §2）。
 
 ### 6.3 前端输出方式（前端向图表层暴露的标准结构）
 
@@ -261,8 +312,9 @@ lowerPanels: Series[][]          // 每个 lower 指标一组，纵向堆叠成�
 - 🔴 **成交额（`amount`）已按复权因子同步缩放**（`get_ohlcv` 内做，与 `close` 同口径）：
   复权只缩放价格列（`price_store.load_bars` 不动 volume / amount），若直接用未复权成交额
   算「成交额 ÷ 成交量」得到的均价，会与复权后的 `close` **不同口径** —— 除权除息日两者
-  错位，`(close - cost) / cost` 会凭空跳出**假信号**。同理 `strategies/core/data.py` 也做
-  了同样的缩放，策略与指标才真正同源。
+  错位，`(close - cost) / cost` 会凭空跳出**假信号**。
+  缩放规则与标准列集合由 `core/bars_schema.py` **统一定义**，指标侧与策略侧共用同一份 ——
+  改一处两处生效，不会出现「一边缩了另一边没缩」的静默失真。
 - 北交所（920/8/4 段）行情经新浪源入库，`get_ohlcv` 透明取用，指标无需特殊处理。
 
 ---
@@ -274,13 +326,18 @@ lowerPanels: Series[][]          // 每个 lower 指标一组，纵向堆叠成�
    一个文件只放一个指标；`category` 仅作为注册元数据（前端分组用），不再是文件边界。
    （需要多个指标共用同一份计算时，把内核放进一个**不含 `@indicator` 的辅助模块**，
    两个指标各自 import 它 —— 不要让指标文件互相 import。若该内核**同时**要被策略
-   复用，放到 `chipformulas/core/` 下，见 `strategies/ARCHITECTURE.md` 的硬要求。）
+   复用，放到中立包 `formulas/` 下，见 §2。）
 2. **写指标函数**：入参 `df`，返回 `{"series": [series_line(...), ...]}`，见 §5 示例。
-3. **加 `@indicator` 注册**：填唯一 `id`、中文 `name`、`category`、**`panel`**（main/lower/right）、以及 `params` 规格。
-4. **（若是新文件）无需手动登记**：`__init__.py` 会在包加载时自动扫描本目录并 import 新文件，
+3. **加 `@indicator` 注册**：填唯一 `id`、中文 `name`、`category`、**`panel`**（按 §6.2 的**量纲**规则选）、以及 `params` 规格。
+4. **（可选）声明样式**：在 `@indicator(styles=...)` 里写各条序列的颜色与线宽，
+   如 `styles={"JW_M": {"color": "#F0C83C", "width": 1.4}}`。
+   这样**前端不必再改**（前端保留硬编码规则作兼容回退；后端下发的值优先，
+   但用户在 `settings.json` 里覆盖过的调色板语义色仍然优先）。
+   颜色只接受 `#RRGGBB`（写成通达信色名会在前端静默变黑，扫描期即报错拦住）。
+5. **（若是新文件）无需手动登记**：`__init__.py` 会在包加载时自动扫描本目录并 import 新文件，
    触发 `@indicator` 装饰器完成注册——直接跳过本步即可（请勿再手动在 `__init__.py` 里 `from . import <id>`，
    否则重复导入无害但多余）。
-5. **本地验证**：
+6. **本地验证**：
    ```python
    import indicators
    print(indicators.list_indicators())                 # 应出现新指标，含 panel 字段
@@ -288,6 +345,13 @@ lowerPanels: Series[][]          // 每个 lower 指标一组，纵向堆叠成�
    print(r["panel"], r["series"])                      # series 含 name/kind/data
    ```
    确认 `panel` 正确、`dates` 与行情一致、前段为 `null`、结构符合 §6.1(e) 后再联调前端。
+7. **更新数值基准**（新增指标、或改了任何指标的计算逻辑后**必做**）：
+   ```powershell
+   .\venv\Scripts\python.exe -m indicators.golden --update
+   ```
+   基准文件 `_golden.json` 纳入版本控制；`test_indicators_golden` 会比对现算值与基准，
+   **任何指标数值变化都会让测试失败**（这是防止「改一个、坏一片且无声」的唯一手段）。
+   测试报「新增指标 xxx：未登记数值基准」就说明这一步漏了。
 
 ---
 
@@ -319,14 +383,18 @@ lowerPanels: Series[][]          // 每个 lower 指标一组，纵向堆叠成�
 
 筹码分布本身**不是指标**：它输出「按**价格**分箱的直方图」，横轴不是时间，
 与 §6 的日期序列契约不通用，故单独成包（见 `chip_formulas/ARCHITECTURE.md`）。
-但它派生出的**按日期的延伸量**是指标，放在本目录：
+但它派生出的**按日期的延伸量**是指标，放在本目录（具体清单以运行时注册表为准）：
 
-| 指标文件 | panel | 说明 |
+**判据（按量纲选 panel，与 §6.2 同一条规则）**：
+
+| 延伸量的性质 | panel | 说明 |
 |---|---|---|
-| `chip_cost.py` | `main` | 平均成本 + 峰位价（价格量纲，叠加主图） |
-| `chip_profit.py` | `lower` | 获利比例%（以**当日**收盘为界，不含未来信息） |
-| `chip_scr.py` | `lower` | 集中度 90 / 70（越小越集中） |
-| `turnover.py` | `none` | 换手率%：能算、能枚举、**不显示**（供导出 / 内部复用） |
+| **价格量纲**（平均成本、峰位价…） | `main` | 能与 K 线共用价格轴 |
+| **比率 / 占比**（获利比例、集中度…） | `lower` | 相对量纲，独立 y 轴 |
+| **纯中间量**（换手率等） | `none` | 能算、能枚举、**不显示**（供导出 / 内部复用） |
+
+⚠️ 派生延伸量时**不得含未来信息**：分界必须用**当日**收盘价，
+不能用区间最高 / 最低价去切「获利盘」—— 那会把未来信息泄进历史。
 
 矩阵 / 价格轴 / 流通股本是**非序列**的中间量，留在该包，**不进指标体系**。
 
@@ -340,11 +408,12 @@ lowerPanels: Series[][]          // 每个 lower 指标一组，纵向堆叠成�
 
 > ⚠️ **指标与策略必须复用同一份计算，不得各写一遍**：若一个延伸量同时被「副图指标」
 > 与「策略选股」使用（如 PEAKB：副图 `chip_peak_band` 与 `strategies/peak_top.py`、
-> `peak_thresh.py` 都消费它），其**纯计算**必须抽成 `chip_formulas/core/` 下的内核模块
-> （`core/peak.py` 的 `peak_band` / `peak_band_series`、`core/scr.py` 的 `scr_series`）：
+> `peak_thresh.py` 都消费它），其**纯计算**必须抽到**中立内核包** `backend_fastapi/formulas/`
+> 下的内核模块（`formulas/peak.py` 的 `peak_band` / `peak_band_series`、
+> `formulas/scr.py` 的 `scr_series`）：
 > 指标 import 它只做**展示包装**，策略 import 它做**横截面选股**。这样「副图显示」与
 > 「策略选股」同源、可逐日直接对照，不会因两处各实现一遍而悄悄漂移。受禁的仍是指标
-> 文件 import 那个包的**取数 / 矩阵构造**模块（防循环依赖）；纯 numpy 的计算内核无副作用，
+> 文件 import 筹码包的**取数 / 矩阵构造**模块（防循环依赖）；纯 numpy 的计算内核无副作用，
 > 可安全双向引用。
 
 ## 12. 与现有架构的关系

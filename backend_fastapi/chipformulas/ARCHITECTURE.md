@@ -139,12 +139,18 @@ def tri_decay(ctx: ChipContext, decay: float = 1.0) -> np.ndarray:
 以打断 `indicators.data ↔ chipformulas.core.data` 的循环依赖；指标实现文件本身
 不得 import 本包的**取数 / 矩阵构造**模块（保持 §2 的单向依赖）。
 
-> ⚠️ 延伸量的**纯计算**（不取数、不碰矩阵构造）应抽成本包 `core/` 下的**计算内核**
-> 模块（`core/scr.py` 的 `scr_series` / `scr_frame`、`core/peak.py` 的 `peak_band` /
-> `peak_band_series`）：指标文件 import 它们只做**展示包装**，策略（如 `strategies/peak_top.py`、
-> `peak_thresh.py`）也直接 import 它们做**横截面选股**。这样「副图显示」与「策略选股」
-> 同源、可逐日直接对照，不再手动两边同步。计算内核只依赖 numpy、无副作用，可安全双向引用；
+> ⚠️ 延伸量的**纯计算**（不取数、不碰矩阵构造）应抽到**中立内核包** `backend_fastapi/formulas/`
+> 下的内核模块（`formulas/scr.py` 的 `scr_series` / `scr_frame`、`formulas/peak.py` 的
+> `peak_band` / `peak_band_series`）：指标文件 import 它们只做**展示包装**，策略（如
+> `strategies/peak_top.py`、`peak_thresh.py`）也直接 import 它们做**横截面选股**。
+> 这样「副图显示」与「策略选股」同源、可逐日直接对照，不再手动两边同步。
+> 计算内核只依赖 numpy、无副作用，可安全双向引用；
 > 受禁的仍是指标 import 本包的取数 / 矩阵构造模块（避免循环依赖）。
+>
+> 🆕 **为什么不在本包 `core/` 下**：本包是「筹码」语义 —— 筹码分布。
+> 而「峰簇占比」「集中度」这类纯计算与筹码毫无关系，只是**被多处复用的算法**。
+> 放在筹码包里会让「非筹码的东西住在筹码包里」变成默认惯例（下一个新增的人照抄），
+> 所以统一挪到中立的 `formulas/` 包，依赖方向恒为「指标 → formulas ← 策略」。
 
 ---
 
