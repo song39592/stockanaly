@@ -580,38 +580,82 @@ bool ok = J.IsOk(j);
             return data;
         }
 
+        /// <summary>
+        /// 序列配色 / 线宽的**兼容回退**规则（按序列名 switch）。
+        ///
+        /// 新增指标时**不必**再改这里：后端可在 <c>@indicator(styles=...)</c> 里
+        /// 声明各条序列的颜色与线宽，随计算结果一起下发（见 ApplyBackendStyle）。
+        /// 本方法只在后端**没有**声明时生效。
+        ///
+        /// 顺带记下每个颜色取自哪个**调色板语义名**（PaletteKey）：
+        /// 用户在 settings.json 里覆盖了某个语义色时，那个覆盖仍然算数
+        /// —— 后端下发的颜色不覆盖用户的选择。
+        /// </summary>
         private static void ApplySeriesStyle(ChartSeries s)
         {
             switch (s.Name)
             {
-                case "RPS120": s.Color = C.Down;   break;   // COLORGREEN
-                case "RPS250": s.Color = C.RpsWhite; break;   // COLORWHITE
-                case "RPS50": s.Color = C.RpsYellow;  break;    // COLORYELLOW
-                case "RPS20": s.Color = C.Flat; break;    // COLORGRAY
-                case "RPS10": s.Color = C.RpsCyan; break;    // COLORLICYAN
-                case "锁仓": s.Color = C.Up; break;           // 锁仓箭头（图例红三角）
+                case "RPS120": s.Color = C.Down;   s.PaletteKey = "Down";   break;   // COLORGREEN
+                case "RPS250": s.Color = C.RpsWhite; s.PaletteKey = "RpsWhite"; break;   // COLORWHITE
+                case "RPS50": s.Color = C.RpsYellow;  s.PaletteKey = "RpsYellow"; break;    // COLORYELLOW
+                case "RPS20": s.Color = C.Flat; s.PaletteKey = "Flat"; break;    // COLORGRAY
+                case "RPS10": s.Color = C.RpsCyan; s.PaletteKey = "RpsCyan"; break;    // COLORLICYAN
+                case "锁仓": s.Color = C.Up; s.PaletteKey = "Up"; break;           // 锁仓箭头（图例红三角）
                 // 价量偏离度（JWZZ 副图）：黄线 + 标准线宽（COLORYELLOW / LINETHICK1）
                 case "JW_M":
                     s.Color = C.RpsYellow;
+                    s.PaletteKey = "RpsYellow";
                     s.Width = 1.4f;
                     return;
                 // 极弱 / 强势 两条阈值线：灰色细线，别与走势线抢眼
                 case "极弱":
                 case "强势":
                     s.Color = C.Flat;
+                    s.PaletteKey = "Flat";
                     s.Width = 1f;
                     return;
                 // 成本线 X_3（主图）：金色粗线，与 K 线价格同轴
                 case "X_3":
                     s.Color = C.LineGoldDeep;
+                    s.PaletteKey = "LineGoldDeep";
                     s.Width = 2f;
                     return;
-                default: s.Color = LineColor(s.Name); return;
+                default:
+                    s.Color = LineColor(s.Name);
+                    s.PaletteKey = LinePaletteKey(s.Name);
+                    return;
             }
             s.Width = 2f;                       // LINETHICK2
             s.HasHi = true;
             s.HiThreshold = RpsHiThreshold;
             s.HiColor = RpsHiRed;
+        }
+
+        /// <summary>
+        /// 应用**后端下发**的序列样式（颜色 / 线宽）。
+        ///
+        /// 后端在 <c>@indicator(styles=...)</c> 里声明，随计算结果一起下发
+        /// （"style": {"color": "#RRGGBB", "width": 1.4}）——
+        /// 于是「新增指标」不再需要改前端代码。
+        ///
+        /// 两条约束：
+        ///  1. 后端**没声明**的序列保持前端回退规则的样式（老指标零变化）；
+        ///  2. 用户在 settings.json 里**覆盖过**对应语义色时，以用户为准
+        ///     （否则「可自定义配色」这个功能会被后端下发悄悄顶掉）。
+        /// </summary>
+        private static void ApplyBackendStyle(ChartSeries s, Dictionary<string, object> seriesJson)
+        {
+            if (s == null || seriesJson == null) return;
+            var st = J.Get(seriesJson, "style") as Dictionary<string, object>;
+            if (st == null) return;
+
+            string hex = J.Str(J.Get(st, "color"));
+            if (!string.IsNullOrEmpty(hex) && !C.IsOverridden(s.PaletteKey))
+            {
+                try { s.Color = ColorTranslator.FromHtml(hex); } catch { }
+            }
+            double? w = J.NumOrNull(J.Get(st, "width"));
+            if (w.HasValue && w.Value > 0) s.Width = (float)w.Value;
         }
 
 
@@ -623,6 +667,17 @@ bool ok = J.IsOk(j);
                 if (name.Contains("DEA")) return C.LineDea;
             }
             return C.LineViolet;
+        }
+
+        /// <summary>LineColor 的语义名对应版本（用于尊重用户覆盖）。</summary>
+        private static string LinePaletteKey(string name)
+        {
+            if (name != null)
+            {
+                if (name.Contains("DIF")) return "LineDif";
+                if (name.Contains("DEA")) return "LineDea";
+            }
+            return "LineViolet";
         }
     }
 }

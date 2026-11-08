@@ -159,6 +159,9 @@ namespace StockPool
                                         cs.Color = mac[maIdx % mac.Length];
                                         maIdx++;
                                     }
+                                    // 后端下发的样式（颜色 / 线宽）：新增指标在此生效，无需改前端；
+                                    // 用户覆盖过的调色板语义色仍以用户为准。
+                                    ApplyBackendStyle(cs, s);
                                     mainSeries.Add(cs);
                                 }
                             }
@@ -174,6 +177,7 @@ namespace StockPool
                                     var data = AlignSeries(dates, J.Get(s, "dates"), dArr);
                                     var cs = new ChartSeries { Name = sname, Kind = kind, Data = data };
                                     ApplySeriesStyle(cs);
+                                    ApplyBackendStyle(cs, s);
                                     lp.Series.Add(cs);
                                 }
                                 panels.Add(lp);

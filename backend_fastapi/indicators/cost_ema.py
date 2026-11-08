@@ -32,6 +32,10 @@ from formulas.jwzz import DEFAULT_PERIOD, ema_cost_line
     panel="main",                 # 价格量纲，与 K 线共用价格轴
     params=[ParamSpec("period", "int", DEFAULT_PERIOD, min=2, max=250,
                        label="EMA周期")],
+    # 序列样式（颜色 / 线宽）：随计算结果一起下发，前端据此渲染，
+    # 新增指标就不必再改前端那套按序列名 switch 的配色表。
+    # 金色粗线：与 K 线价格同轴，是主图上的一条成本线。
+    styles={"X_3": {"color": "#F0A028", "width": 2.0}},
 )
 def cost_ema(df: pd.DataFrame, period: int = DEFAULT_PERIOD) -> dict:
     cost = ema_cost_line(df, period)

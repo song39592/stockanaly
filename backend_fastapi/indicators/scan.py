@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import re
 
 from core.paramspec import ParamSpec
 
@@ -119,6 +120,37 @@ def _meta_problems(meta: base.IndicatorMeta) -> list[str]:
             problems.append("ParamSpec.name 不能为空")
         if p.type not in _VALID_PARAM_TYPES:
             problems.append(f"ParamSpec.type 非法：{p.type!r}")
+    problems.extend(_style_problems(meta.styles))
+    return problems
+
+
+# 样式里的颜色只接受 #RRGGBB（前端按 hex 解析；通达信色名一律不认）。
+_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def _style_problems(styles) -> list[str]:
+    """校验 `styles`（序列名 → {color, width}）。
+
+    颜色必须是 `#RRGGBB` —— 写成 "red" / "COLORYELLOW" 这类**通达信色名**
+    会在前端静默变成黑色（解析失败被吞掉），所以宁可在这里报错。
+    """
+    problems: list[str] = []
+    if not styles:
+        return problems
+    if not isinstance(styles, dict):
+        return ["styles 必须是 dict"]
+    for sname, st in styles.items():
+        if not isinstance(st, dict):
+            problems.append(f"styles['{sname}'] 必须是 dict")
+            continue
+        color = st.get("color")
+        if color is not None and not _COLOR_RE.match(str(color)):
+            problems.append(f"styles['{sname}'].color 必须是 #RRGGBB，实际 {color!r}")
+        width = st.get("width")
+        if width is not None and not isinstance(width, (int, float)):
+            problems.append(f"styles['{sname}'].width 必须是数字，实际 {width!r}")
+        if "color" not in st and "width" not in st:
+            problems.append(f"styles['{sname}'] 至少要声明 color 或 width 之一")
     return problems
 
 

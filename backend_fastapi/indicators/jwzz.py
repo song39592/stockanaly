@@ -57,6 +57,15 @@ STRONG_LEVEL = 95
         ParamSpec("strong_level", "int", STRONG_LEVEL, min=0, max=2000,
                    label="强势线"),
     ],
+    # 序列样式（颜色 / 线宽）：随计算结果一起下发，前端据此渲染。
+    # 新增指标时在这里声明，就**不必再改前端**那套按序列名 switch 的配色表。
+    # 取值与前端调色板的默认色逐值一致（前端保留硬编码规则作兼容回退）。
+    styles={
+        "JWZZ": {"color": "#9085E9", "width": 1.4},   # 紫：偏离度主曲线
+        "JW_M": {"color": "#F0C83C", "width": 1.4},    # 黄：13 期平滑线
+        "极弱": {"color": "#969EAC", "width": 1.0},    # 灰：阈值线，细一点不抢眼
+        "强势": {"color": "#969EAC", "width": 1.0},
+    },
 )
 def jwzz(df: pd.DataFrame, *, cost_period: int = DEFAULT_PERIOD,
          smooth_period: int = DEFAULT_PERIOD,

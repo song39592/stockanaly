@@ -38,6 +38,8 @@ def list_indicators() -> list[dict]:
             "panel": meta.panel,
             "file": meta.file,            # 定义该指标的源文件绝对路径（指标索引页点击跳转用）
             "params": [asdict(p) for p in meta.params],
+            # 序列样式（颜色 / 线宽）：前端据此渲染，新增指标不必改前端
+            "styles": dict(meta.styles or {}),
         })
     # `formula` 参数（筹码类指标）的选项来自筹码公式包的注册表，运行时填充
     for item in out:
