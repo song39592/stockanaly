@@ -6,10 +6,15 @@
   * 指标实现文件（trend / oscillator / volatility 等）只能 `from .data import get_ohlcv`，
     不得自行读取数据库、文件或调用 akshare / 网络。
   * 取数结果统一为 pandas.DataFrame，索引为日期字符串（YYYY-MM-DD），列固定为
-    open / high / low / close / volume，按日期升序排列，前段缺失保留 NaN。
+    open / high / low / close / volume / amount，按日期升序排列，前段缺失保留 NaN。
 
-技术面指标当前只需要 OHLCV；若后续需要成交额、换手率等，在本文件扩展即可，
+技术面指标当前只需要 OHLCV + 成交额（amount）；若后续需要换手率等，在本文件扩展即可，
 指标实现文件无需改动。
+
+**amount（成交额，元）已并入指标输入列**：原先只暴露 OHLCV 五列，需要成交额的
+指标（如「EMA 成交均价成本线」X_3 = 0.01×EMA(AMOUNT,13)/EMA(VOL,13)）只能绕开本文件
+这个唯一出口自己去取数。现已把 amount 一并带出，指标直接用 `df["amount"]`；
+个别数据源缺该列时用 `df.get("amount")` 兜底为 NaN。
 
 已扩展（筹码分布用）：
   * `get_float_shares(code, date)`  流通股本（股）——来自 share_service 采集、price_store 落盘；
@@ -31,7 +36,7 @@ import price_store          # 仅用于读股本（share_capital），K 线本�
 from periods import normalize
 
 _MIN_ROWS = 2  # 少于此行数视为数据不足，技术指标无法计算
-_OHLCV = ("open", "high", "low", "close", "volume")
+_OHLCV = ("open", "high", "low", "close", "volume", "amount")
 
 
 def _norm_date(d) -> str | None:
@@ -57,7 +62,7 @@ def _load(code: str, start: str | None, end: str | None, adjust: str,
                                 period=period)
     if df is None or df.empty:
         return None
-    # amount 一并带出：get_vwap（成交均价）需要它；get_ohlcv 仍只暴露 OHLCV 五列。
+    # amount 一并带出：get_vwap（成交均价）与「EMA 成交均价成本线」需要它。
     cols = [c for c in ("open", "high", "low", "close", "volume", "amount") if c in df.columns]
     return df[cols]
 
@@ -78,7 +83,8 @@ def get_ohlcv(code: str, start: str | dt.date | None = None,
     拿日线指标去对齐周线日期是错的。
 
     返回：
-      DataFrame，索引为日期字符串，列 open/high/low/close/volume，升序。
+      DataFrame，索引为日期字符串，列 open/high/low/close/volume/amount，升序。
+      （amount = 成交额，元；数据源缺该列时该列不出现，指标需自行兜底。）
 
     异常：
       RuntimeError  数据不足或无数据时抛出，由调用方（compute）转成接口错误。

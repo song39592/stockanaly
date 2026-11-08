@@ -590,6 +590,22 @@ bool ok = J.IsOk(j);
                 case "RPS20": s.Color = C.Flat; break;    // COLORGRAY
                 case "RPS10": s.Color = C.RpsCyan; break;    // COLORLICYAN
                 case "锁仓": s.Color = C.Up; break;           // 锁仓箭头（图例红三角）
+                // 价量偏离度（JWZZ 副图）：黄线 + 标准线宽（COLORYELLOW / LINETHICK1）
+                case "JW_M":
+                    s.Color = C.RpsYellow;
+                    s.Width = 1.4f;
+                    return;
+                // 极弱 / 强势 两条阈值线：灰色细线，别与走势线抢眼
+                case "极弱":
+                case "强势":
+                    s.Color = C.Flat;
+                    s.Width = 1f;
+                    return;
+                // 成本线 X_3（主图）：金色粗线，与 K 线价格同轴
+                case "X_3":
+                    s.Color = C.LineGoldDeep;
+                    s.Width = 2f;
+                    return;
                 default: s.Color = LineColor(s.Name); return;
             }
             s.Width = 2f;                       // LINETHICK2

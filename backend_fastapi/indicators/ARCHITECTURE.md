@@ -21,14 +21,22 @@ backend_fastapi/indicators/
     data.py          【唯一数据入口】封装 price_store 取数，指标只能从这里取行情
     base.py          指标注册机制（@indicator 装饰器）+ 统一计算入口 compute() + 标准化输出
     registry.py      把 REGISTRY 转成前端清单 list_indicators()
-    ma.py            均线 MA（主图叠加）            ← 每个指标一个文件，文件名即 id
-    macd.py          MACD（下方副图）              ← 每个指标一个文件，文件名即 id
-    rsi.py           RSI（下方副图）               ← 每个指标一个文件，文件名即 id
+    ma.py            均线 MA（主图叠加）            ← 每个指标一个文件
+    macd.py          MACD（下方副图）              ← 每个指标一个文件
+    rsi.py           RSI（下方副图）               ← 每个指标一个文件
+    cost_core.py     辅助模块（不算指标）：成本线计算内核，供 cost_ema / jwzz 共用
+    cost_ema.py      EMA 成交均价成本线（主图叠加，id=ECOST）
+    jwzz.py          价量偏离度（下方副图，id=JWZZ）
 ```
 
-> 本期**每个指标独立成文件，文件名即指标 id**（如 `ma.py` / `macd.py` / `rsi.py`）。
-> 新增指标时**只需新建 `<id>.py`**，`__init__.py` 会在包加载时**自动扫描目录**并 import 触发注册，
+> 本期**每个指标独立成文件**。文件名用**语义名**（snake_case，如 `macd.py` / `chip_cost.py`），
+> `@indicator(id=...)` 用**大写缩写**（`MACD` / `COST` / `ECOST`）——
+> **两者不必同名**（`macd.py` → `MACD` 早就是既有事实，`scan.py` 也明确写了这一点）。
+> 新增指标时**只需新建一个文件**，`__init__.py` 会在包加载时**自动扫描目录**并 import 触发注册，
 > 无需手动在 `__init__.py` 里 `from . import <id>`；`category` 仅作为注册元数据（前端分组用），不再是文件边界。
+>
+> 允许有**不含 `@indicator` 的辅助模块**（如 `cost_core.py` / `rps_data.py`）：
+> 放多个指标共用的计算内核，指标索引页会把它显示成灰字「辅助模块」。
 
 ---
 
@@ -37,7 +45,7 @@ backend_fastapi/indicators/
 1. **唯一数据入口**：`data.py` 是指标包内**唯一**允许 `import price_store`（以及将来任何外部源/akshare/网络）的文件。
    K 线本身不经它直连存储，而是调用 **`kline_service.get_bars()`**——
    全项目唯一的「取数 + 周期合样」出口，保证指标的输入与用户看到的 K 线是**同一个序列**。
-2. **指标文件禁止直连外部**：`ma.py / macd.py / rsi.py` 等「**每个指标一个文件、文件名即指标 id**」的实现文件**只能**
+2. **指标文件禁止直连外部**：`ma.py / macd.py / rsi.py` 等「**每个指标一个文件**」的实现文件**只能**
    `from .data import get_ohlcv`，不得 `import price_store`、`import akshare`、读取文件或发起请求。
    所有取数、复权、缺失处理、口径对齐都在 `data.py` 一次性解决。
 3. **为什么这样设计**：取数与算数解耦 → 口径统一（复权/对齐/缺失）、便于测试（mock `get_ohlcv`）、
@@ -51,13 +59,15 @@ backend_fastapi/indicators/
 ## 4. 数据入口 `data.py`
 
 - `get_ohlcv(code, start=None, end=None, adjust="qfq") -> pd.DataFrame`
-  - 返回 DataFrame：**索引为日期字符串 `YYYY-MM-DD`**，列固定 `open/high/low/close/volume`，按日期升序。
+  - 返回 DataFrame：**索引为日期字符串 `YYYY-MM-DD`**，列固定 `open/high/low/close/volume/amount`，按日期升序。
+  - `amount` = **成交额（元）**；个别数据源缺该列时该列不出现，需要它的指标用 `df.get("amount")` 兜底为 NaN。
   - `adjust` 默认 `"qfq"`（前复权，用于展示型技术指标）；回测用途调用方应显式传 `"hfq"`。
   - 数据不足（< 2 行）或无数据时抛 `RuntimeError`。
 - 内部 `_load(...)` 带 `lru_cache`，同一 `(code, 区间, 口径)` 只解析一次，指标常反复取同一段数据时可显著提速。
 - **取数与周期合样都不在本文件实现**：统一走 `kline_service.get_bars(code, ..., period=)`，
   本文件只做列裁剪与缓存。指标不再自己 resample，避免出现「蜡烛是周线、指标按日线算」的错位。
-- 若指标需要成交额/换手率等额外列，只在 `data.py` 扩展，实现文件无需改动。
+- 若指标需要换手率等额外列，只在 `data.py` 扩展，实现文件无需改动。
+  （**成交额 `amount` 已并入标准列**，见上。）
 
 **已扩展的三项（筹码分布用，非指标序列）**：
 
@@ -248,9 +258,11 @@ lowerPanels: Series[][]          // 每个 lower 指标一组，纵向堆叠成�
 
 ## 8. 新增指标步骤（清单）
 
-1. **新建一个文件，文件名即指标 id**（如 `ma.py`、`rsi.py`），顶部
+1. **新建一个文件**（文件名用语义名，如 `ma.py`、`rsi.py`、`jwzz.py`），顶部
    `from .base import indicator, ParamSpec, series_line, series_bar`。
    一个文件只放一个指标；`category` 仅作为注册元数据（前端分组用），不再是文件边界。
+   （需要多个指标共用同一份计算时，把内核放进一个**不含 `@indicator` 的辅助模块**，
+   如 `cost_core.py`，两个指标各自 import 它 —— 不要让指标文件互相 import。）
 2. **写指标函数**：入参 `df`，返回 `{"series": [series_line(...), ...]}`，见 §5 示例。
 3. **加 `@indicator` 注册**：填唯一 `id`、中文 `name`、`category`、**`panel`**（main/lower/right）、以及 `params` 规格。
 4. **（若是新文件）无需手动登记**：`__init__.py` 会在包加载时自动扫描本目录并 import 新文件，
@@ -260,7 +272,7 @@ lowerPanels: Series[][]          // 每个 lower 指标一组，纵向堆叠成�
    ```python
    import indicators
    print(indicators.list_indicators())                 # 应出现新指标，含 panel 字段
-   r = indicators.compute("600000", "ma", {"periods": [5, 20]})
+   r = indicators.compute("600000", "MA", {"periods": [5, 20]})
    print(r["panel"], r["series"])                      # series 含 name/kind/data
    ```
    确认 `panel` 正确、`dates` 与行情一致、前段为 `null`、结构符合 §6.1(e) 后再联调前端。
@@ -285,7 +297,7 @@ lowerPanels: Series[][]          // 每个 lower 指标一组，纵向堆叠成�
 - ❌ 指标实现文件 `import price_store` / `import akshare` / 读文件 / 发网络请求。
 - ❌ 指标函数内自行连接数据库或缓存数据库写入。
 - ❌ 在 `series` 里裁掉前段索引（导致与 K 线错位）。
-- ❌ 重复 `id`、或把多个指标塞进一个文件；每个指标必须独立成文件且**文件名即其 id**（如 `ma.py`）。
+- ❌ 重复 `id`、或把多个指标塞进一个文件；每个指标必须**独立成文件**（文件名语义名 + `id` 大写缩写）。
 - ❌ 用错 `panel`（主图指标误标 lower/right，或反之）导致前端渲染错位。
 - ❌ 破坏 §6.1(e) 的标准化输出结构（前端只认该结构）。
 

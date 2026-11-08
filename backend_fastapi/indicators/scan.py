@@ -83,6 +83,10 @@ def stub_df(days: int = SMOKE_DAYS) -> pd.DataFrame:
         "low": close - 0.12,
         "close": close,
         "volume": 100000.0 + 1000.0 * np.sin(i / 5.0),
+        # 成交额（元）= 收盘价 × 成交量(手) × 100：与真实数据同量纲，
+        # 让「EMA 成交均价成本线」这类用到 amount 的指标能在合成数据下真跑通
+        #（缺这一列 → 指标 KeyError → 启动自检判为失败并剔除）。
+        "amount": close * (100000.0 + 1000.0 * np.sin(i / 5.0)) * 100.0,
     }, index=pd.date_range("2023-01-02", periods=n, freq="D"))
     # ⚠️ **合成数据不带计算上下文**（`ctx=None`；`/diagnose` 的合成数据同样不带，保持一致）。
     # 筹码类指标经 `data.code_of(ctx)` 反查代码、拿不到就抛「取不到股票代码」——
