@@ -48,14 +48,28 @@ namespace StockPool
 
         // ③ 回测结果
         private Label _stResultHeader, _stResultStatus;
-        // 回测进度（第 18 项）：全市场回测要几分钟，改后台任务 + 轮询，
-        // 进度条显示「已测只数 / 总数」。_stPollRunId 用来丢弃**旧任务**的轮询响应
-        // （用户可能在跑的过程中又点了一次「运行」，否则旧任务的进度会盖掉新的）。
+
+        // ---------------- 统一任务区（第 27 项）----------------
+        // 完整回测 / 近期回测 / 当日策略**共用一套进度显示**：原来三条流程各有一套
+        // timer / runId / busy / 状态标签，后果是：
+        //   ① 进度条只挂在「回测结果」页 —— 另两条流程跑全市场（实测 761s / 419s）
+        //      时用户完全看不到进度，也**没有暂停/停止可点**（后端其实早就支持）；
+        //   ② 三套 timer 各自轮询同一个 /backtest/progress，逻辑重复三遍。
+        // 现在收敛成「一个任务槽」：同一时刻只允许一个任务（互斥闸门 _stJobBusy），
+        // 进度条 + 暂停/继续/停止 + 文案统一挂在**顶部「操作」框**里，六个子页都看得见。
+        private const int ST_JOB_NONE = 0;
+        private const int ST_JOB_FULL = 1;      // 完整回测
+        private const int ST_JOB_RECENT = 2;    // 近期回测
+        private const int ST_JOB_RECO = 3;      // 当日策略（推荐）
+        private int _stJobKind = ST_JOB_NONE;  // 当前占用任务区的流程
+        private int _stJobRunId;                // 任务代号：旧任务的响应据此丢弃
+        private bool _stJobBusy;                // 有任务在跑（互斥闸门）
+        private bool _stJobPollBusy;            // 有一次轮询请求在飞（防tick 重叠）
+        private Timer _stJobTimer;              // 唯一的进度轮询表
+        private int _stJobTotal;                // 本次任务总只数（完成文案用）
+        private double _stJobElapsed;           // 本次任务耗时秒（完成文案用）
         private ProgressBar _stProgress;
         private Label _stProgressText;
-        private Timer _stPollTimer;
-        private int _stPollRunId;
-        private bool _stPollBusy;      // 上一次轮询没回来就不发下一次
         private FlowLayoutPanel _stMetricCards;
         private PictureBox _stEquityBox;
         private StockGrid _stPerStockGrid;
@@ -83,19 +97,8 @@ namespace StockPool
         private List<string> _stEqDates;
         private List<double?> _stEq;
         private List<double?> _stEqBench;
-        // 全市场推荐要跑好几分钟（实测 5585 只需 418.7s），已改为后端异步任务，
-        // 这里用轮询跟进进度。⚠️ _stRecoBusy 是**必需**的：原来完全没有守卫，
-        // 用户等不及再点一次就会叠加多个全市场计算互相拖慢。
-        private Timer _stRecoTimer;
-        private bool _stRecoBusy;
-        private bool _stRecoPollBusy;      // 有一次轮询请求在飞（防tick 重叠）
-        private int _stRecoRunId;          // 每次启动 +1：陈旧响应据此丢弃（同回测 _stPollRunId）
-        // 近期回测（最近 N 个交易日）也改走异步任务：全市场 3 年实测 761s，
-        // 同步接口固定 600s 必然超时（旧实现就死在这），故与推荐页同一套轮询模式。
-        private Timer _stRecentTimer;
-        private bool _stRecentBusy;
-        private bool _stRecentPollBusy;
-        private int _stRecentRunId;
+        // 全市场推荐 / 近期回测都是长任务（全市场实测 419s / 761s），已改为后端异步任务，
+        // 进度统一由上面的「统一任务区」跟进（_stJobTimer / _stJobKind）。
         private CheckBox _stRecentRuinChk;       // 近期回测：「破产截断」开关
         private NumericUpDown _stRecentRuinPct;  // 破产阈值（%，0=净值归零）
         // 当前选中的策略名（第 23 项）。放在**顶部操作区**而不是「策略选择与编辑」
@@ -157,7 +160,34 @@ namespace StockPool
             _stCurStrategy.Font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold);
             AddRow(b0, Row(Lbl("当前策略"), _stCurStrategy));
             _stResultStatus = Mute(Lbl("进入本页自动加载策略清单"));
-            AddRow(b0, Row(Lbl("策略回测"), MiniBtn("刷新清单", delegate { StLoadStrategies(); }, 90), _stResultStatus));
+            // ⚠️ _stResultStatus **不**挂在这里。它是「回测结果」页的状态行，
+            //   而 WinForms 一个控件只能有一个父容器：下面 StBuildResult 会把它
+            //   Add 到结果页的容器里 —— 同一个控件被二次 Add 会从**原父容器**里
+            //   悄悄消失，操作框这行的状态文字于是凭空不见了（顶部看不到任务的
+            //   老毛病之一）。这里只留「刷新清单」。
+            AddRow(b0, Row(Lbl("策略回测"), MiniBtn("刷新清单", delegate { StLoadStrategies(); }, 90)));
+
+            // ---- 统一任务区（第 27 项）：进度条 + 暂停/继续/停止 + 状态文案 ----
+            // 放在**顶部「操作」框**里（而不是某个子页）：策略页六个子页共用这一块，
+            // 跑完整回测 / 近期回测 / 当日策略时，切到别的子页也照样看得见进度。
+            // 第 1 行：进度条（Dock=Top 在 TableLayoutPanel 里会铺满分组框宽度）。
+            _stProgress = new ProgressBar();
+            _stProgress.Height = 14;
+            _stProgress.Dock = DockStyle.Top;
+            _stProgress.Minimum = 0;
+            _stProgress.Maximum = 1;
+            _stProgress.Value = 0;
+            AddRow(b0, _stProgress);
+            // 第 2 行：控制键 + 文案。文案限宽 560，超长自动换行 —— FlowLayoutPanel
+            // 不换行，文案过长会把右边的控件顶出可视区。
+            _stProgressText = Mute(Lbl("空闲 · 尚无运行中的任务"));
+            _stProgressText.MaximumSize = new Size(560, 0);
+            _stBtnPause = MiniBtn("暂停", delegate { StControlTask("pause"); }, 64);
+            _stBtnResume = MiniBtn("继续", delegate { StControlTask("resume"); }, 64);
+            _stBtnStop = MiniBtn("停止", delegate { StControlTask("cancel"); }, 64);
+            AddRow(b0, Row(_stBtnPause, _stBtnResume, _stBtnStop, _stProgressText));
+            StSetControlButtons(false, false);      // 空闲时三个控制键全隐
+
             AddRow(head, g0);
             g0.Margin = new Padding(0, 0, 0, 4);
             root.Controls.Add(head, 0, 0);
@@ -569,27 +599,14 @@ private void StRefreshRecoTitle()
             _stResultHeader.Margin = new Padding(0, 0, 0, 8);
             AddRow(stack, _stResultHeader);
 
-            AddRow(stack, Row(
-                // 「开始回测」已提到页签栏「回测范围」后面（见 StBuild 里的 InsertActionAfter），
-                // 这里只留跑起来之后的控制键。
-                // 暂停 / 继续 / 停止：全市场一次实测约 13 分钟（5578 只 × 3 年），
-                // 而并发上限是 1 —— 没有这三个按钮，用户改完策略想重跑就只能干等。
-                // 原来后端提示「请先点『停止』」而界面上根本没有这个按钮，属于死路。
-                _stBtnPause = MiniBtn("暂停", delegate { StControlTask("pause"); }, 64),
-                _stBtnResume = MiniBtn("继续", delegate { StControlTask("resume"); }, 64),
-                _stBtnStop = MiniBtn("停止", delegate { StControlTask("cancel"); }, 64),
-                _stResultStatus = Mute(Lbl("尚未回测"))));
-            StSetControlButtons(false, false);
-
-            // 进度条：默认隐藏，跑起来才显示（_stProgress.Visible 控制）
-            _stProgress = new ProgressBar();
-            _stProgress.Height = 14;
-            _stProgress.Dock = DockStyle.Top;
-            _stProgress.Visible = false;
-            _stProgressText = Mute(Lbl(""));
-            _stProgressText.Visible = false;
-            AddRow(stack, _stProgress);
-            AddRow(stack, _stProgressText);
+            // 进度条与暂停 / 继续 / 停止已移到**顶部「操作」框**（统一任务区）：
+            // 三条流程共用一套，且任何子页都看得见（原来只有完整回测在「回测结果」页
+            // 里有进度条，近年回测与当日策略全程没有任何进度显示）。
+            // 这里只保留本页自己的状态行（跑完写「回测完成（参与统计 N 只）」等）。
+            // ⚠️ 复用 BuildStrategyPage 里已经建好的那个控件，不要在这里重新 new ——
+            //   两个同名控件会让「顶部操作框」那个永远显示不出东西。
+            _stResultStatus.Text = "尚未回测";
+            AddRow(stack, Row(_stResultStatus));
 
             _stMetricCards = new FlowLayoutPanel();
             _stMetricCards.FlowDirection = FlowDirection.LeftToRight;
@@ -717,20 +734,22 @@ private void StRefreshRecoTitle()
 
         private void StRunRecent()
         {
-            if (_stRecentBusy) return;      // 防叠加：全市场一次只能算一个
+            if (!StJobGuard()) return;      // 互斥：顶部任务区只显示一个任务
             var meta = StSelectedMeta();
             if (meta == null)
             {
+                StJobText("请先在「策略选择与编辑」里选一个策略", true);
                 SetErr(_stRecentStatus, "请先在「策略选择与编辑」里选一个策略");
                 return;
             }
             int days = (int)_stRecentDays.Value;
             double? ruin = (_stRecentRuinChk != null && _stRecentRuinChk.Checked)
                 ? (double?)_stRecentRuinPct.Value / 100.0 : null;
-            _stRecentBusy = true;
-            int myRun = ++_stRecentRunId;
+            // 先占位再提交：启动请求在飞的那几十秒里也不许再点（否则会起两个全市场任务）
+            StJobReserve(ST_JOB_RECENT);
             var req = StRequest(meta, days, ruin);
-            SetErr(_stRecentStatus, "提交中…");
+            _stRecentStatus.Text = "提交中…";
+            _stRecentStatus.ForeColor = _cSub;
             string body = new JavaScriptSerializer().Serialize(req);
             System.Threading.Tasks.Task.Run(delegate
             {
@@ -742,18 +761,13 @@ private void StRefreshRecoTitle()
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
                     Invoke((Action)(() =>
                     {
-                        if (myRun != _stRecentRunId) return;
                         if (J.IsFailed(j))
                         {
-                            _stRecentBusy = false;
+                            StJobAbort("近期回测 · 启动失败：" + StErrMsg(j), true);
                             SetErr(_stRecentStatus, "无法启动：" + StErrMsg(j));
                             return;
                         }
-                        var st = (Dictionary<string, object>)J.Get(j, "state");
-                        int tot = st == null ? 0 : J.Int(st["total"]);
-                        SetErr(_stRecentStatus, string.Format(
-                            "回测中 0/{0}（0.0%）…", tot <= 0 ? "?" : tot.ToString()));
-                        StartRecentPoll();
+                        StJobBegin(ST_JOB_RECENT);
                     }));
                 }
                 catch (Exception ex)
@@ -773,9 +787,8 @@ private void StRefreshRecoTitle()
                             adopted = true;
                             Invoke((Action)(() =>
                             {
-                                if (myRun != _stRecentRunId) return;
-                                SetErr(_stRecentStatus, "已接管后台任务，读取进度…");
-                                StartRecentPoll();
+                                StJobBegin(ST_JOB_RECENT);
+                                StJobText("近期回测 · 已接管后台任务，读取进度…", false);
                             }));
                         }
                     }
@@ -783,118 +796,17 @@ private void StRefreshRecoTitle()
                     if (adopted) return;
                     Invoke((Action)(() =>
                     {
-                        if (myRun != _stRecentRunId) return;
-                        _stRecentBusy = false;
+                        StJobAbort("近期回测 · 无法启动：" + msg, true);
                         SetErr(_stRecentStatus, "无法启动：" + msg);
                     }));
                 }
             });
         }
 
-        /// <summary>启动 2 秒一次的近期回测进度轮询（幂等，重复调用只是重新 Start）。</summary>
-        private void StartRecentPoll()
-        {
-            if (_stRecentTimer == null)
-            {
-                _stRecentTimer = new Timer();
-                _stRecentTimer.Interval = 2000;
-                _stRecentTimer.Tick += delegate { StRecentPoll(); };
-            }
-            _stRecentTimer.Start();
-        }
-
-        /// <summary>轮询近期回测进度；ready 后停表取结果。</summary>
-        private void StRecentPoll()
-        {
-            if (_stRecentPollBusy) return;
-            _stRecentPollBusy = true;
-            int myRun = _stRecentRunId;
-            System.Threading.Tasks.Task.Run(delegate
-            {
-                try
-                {
-                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/progress", null, 15000);
-                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    Invoke((Action)(() =>
-                    {
-                        _stRecentPollBusy = false;
-                        if (myRun != _stRecentRunId) return;
-                        var st = (Dictionary<string, object>)J.Get(j, "state");
-                        string state = st == null ? "" : J.StrAt(st, "state");
-                        string phase = st == null ? "" : J.StrAt(st, "phase");
-                        int done = st == null ? 0 : J.Int(st["done"]);
-                        int tot = st == null ? 0 : J.Int(st["total"]);
-                        double sec = st == null ? 0 : J.Num(st["elapsed"]);
-
-                        if (state == "error")
-                        {
-                            if (_stRecentTimer != null) _stRecentTimer.Stop();
-                            _stRecentBusy = false;
-                            SetErr(_stRecentStatus, "回测失败：" + J.StrAt(st, "error"));
-                            return;
-                        }
-                        if (state == "cancelled")
-                        {
-                            if (_stRecentTimer != null) _stRecentTimer.Stop();
-                            _stRecentBusy = false;
-                            SetErr(_stRecentStatus, "已被用户停止");
-                            return;
-                        }
-                        if (state == "running")
-                        {
-                            if (phase == "running")
-                                SetErr(_stRecentStatus, string.Format(
-                                    "回测中（{0}/{1}，正在算策略信号，已用 {2:F0} 秒）…", done, tot, sec));
-                            else
-                                SetErr(_stRecentStatus, string.Format(
-                                    "读取数据中 {0}/{1}（{2:F1}%），已用 {3:F0} 秒…",
-                                    done, tot, tot > 0 ? done * 100.0 / tot : 0, sec));
-                            return;
-                        }
-
-                        // ready：停表，取结果
-                        if (_stRecentTimer != null) _stRecentTimer.Stop();
-                        StRecentFetchResult(myRun);
-                    }));
-                }
-                catch (Exception ex)
-                {
-                    string msg = ex.Message;
-                    Invoke((Action)(() =>
-                    {
-                        _stRecentPollBusy = false;
-                        if (myRun != _stRecentRunId) return;
-                        if (_stRecentTimer != null) _stRecentTimer.Stop();
-                        _stRecentBusy = false;
-                        SetErr(_stRecentStatus, "读取进度失败：" + msg);
-                    }));
-                }
-            });
-        }
-
-        private void StRecentFetchResult(int myRun)
-        {
-            System.Threading.Tasks.Task.Run(delegate
-            {
-                string resp = null, emsg = "";
-                Dictionary<string, object> j = null;
-                try
-                {
-                    resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/result", null, 60000);
-                    j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                }
-                catch (Exception ex) { emsg = ex.Message; }
-                var jj = j;
-                var ee = emsg;
-                Invoke((Action)(() =>
-                {
-                    if (myRun != _stRecentRunId) return;
-                    _stRecentBusy = false;
-                    if (jj == null) { SetErr(_stRecentStatus, "读取结果失败：" + ee); return; }
-                    StRenderRecent(jj);
-                }));
-            });
-        }
+        // ⚠️ 近期回测**不再有自己的轮询表**：进度统一由「统一任务区」跟进
+        //   （StJobTick → /backtest/progress）。它与完整回测共用同一个后端任务槽
+        //   与同一个结果端点，只是请求里多带一个 window，所以 URL 完全相同。
+        //   原来这里另起一套 2 秒轮询 + 自己的 runId/busy，是同一份逻辑的第三份拷贝。
 
         private void StRenderRecent(Dictionary<string, object> j)
         {
@@ -1019,24 +931,31 @@ private void StRefreshRecoTitle()
         {
             // ⚠️ 守卫必需：原来这里完全没有，用户等不及再点一次就会叠加多个
             // 全市场计算（后端并发上限 1，第二个会被拒，但两个都得等）。
-            if (_stRecoBusy) return;
+            // 现在统一成「互斥闸门」：完整回测 / 近期回测 / 当日策略三者共用
+            // 顶部那一个任务区，同时只允许一个在跑（进度条只显示一个任务）。
+            if (!StJobGuard()) return;
             var meta = StSelectedMeta();
             if (meta == null)
             {
+                StJobText("请先在「策略选择与编辑」里选一个策略", true);
                 SetErr(_stRecoStatus, "请先在「策略选择与编辑」里选一个策略");
                 return;
             }
+            // 占位（含等待补齐数据的整段时间）：否则用户在新鲜度检查期间
+            // 再点一次，就会起两个全市场推荐。
+            StJobReserve(ST_JOB_RECO);
             // 第 24 项：与回测共用同一个数据新鲜度守卫；策略用点击时的快照。
             // hard=true：当前策略推荐在数据不齐时禁止运算（不再给「用现有数据继续」）。
-            StEnsureFresh(meta, delegate { StRunRecoInner(meta); }, true);
+            // abort：用户放弃（弹窗取消 / 数据不齐禁跑）时释放任务槽，别把闸门卡死。
+            StEnsureFresh(meta, delegate { StRunRecoInner(meta); }, true,
+                delegate { StJobRelease(); });
         }
 
         private void StRunRecoInner(Dictionary<string, object> meta)
         {
-            _stRecoBusy = true;
-            int myRun = ++_stRecoRunId;
             var req = StRequest(meta, 0);
-            SetErr(_stRecoStatus, "正在提交…（全市场约 7~10 分钟，可随时切走）");
+            _stRecoStatus.Text = "正在提交…（全市场约 7~10 分钟，可随时切走）";
+            _stRecoStatus.ForeColor = _cSub;
             string body = new JavaScriptSerializer().Serialize(req);
             System.Threading.Tasks.Task.Run(delegate
             {
@@ -1047,24 +966,13 @@ private void StRefreshRecoTitle()
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
                     Invoke((Action)(() =>
                     {
-                        if (myRun != _stRecoRunId) return;      // 已被新一轮取代
                         if (J.IsFailed(j))
                         {
-                            _stRecoBusy = false;
+                            StJobAbort("当日策略 · 启动失败：" + StErrMsg(j), true);
                             SetErr(_stRecoStatus, "无法启动：" + StErrMsg(j));
                             return;
                         }
-                        var st = (Dictionary<string, object>)J.Get(j, "state");
-                        int tot = st == null ? 0 : J.Int(st["total"]);
-                        SetErr(_stRecoStatus, string.Format(
-                            "计算中 0/{0}（0.0%）…", tot <= 0 ? "?" : tot.ToString()));
-                        if (_stRecoTimer == null)
-                        {
-                            _stRecoTimer = new Timer();
-                            _stRecoTimer.Interval = 2000;
-                            _stRecoTimer.Tick += delegate { StRecoPoll(); };
-                        }
-                        _stRecoTimer.Start();
+                        StJobBegin(ST_JOB_RECO);
                     }));
                 }
                 catch (Exception ex)
@@ -1072,107 +980,18 @@ private void StRefreshRecoTitle()
                     string msg = ex.Message;
                     Invoke((Action)(() =>
                     {
-                        if (myRun != _stRecoRunId) return;
-                        // ⚠️ 失败路径也必须复位，否则按钮点一次之后永久卡死
-                        _stRecoBusy = false;
+                        // ⚠️ 失败路径也必须释放闸门，否则按钮点一次之后永久卡死
+                        StJobAbort("当日策略 · 无法启动：" + msg, true);
                         SetErr(_stRecoStatus, "无法启动：" + msg);
                     }));
                 }
             });
         }
 
-        /// <summary>轮询推荐进度；完成后停表并取结果。</summary>
-        private void StRecoPoll()
-        {
-            // ⚠️ 这里**不能**拿 _stRecoBusy 做防重入：它是「整个流程在跑」的标志。
-            // 若在此清掉，下一个 tick 会被 if(!_stRecoBusy) return 挡掉，轮询就自停了
-            //（单次请求一旦超过 Interval 2 秒就必然发生）。
-            // 正确分工：_stRecoPollBusy 管「本次请求在飞」，_stRecoBusy 全程保持 true
-            //——它必须一直为 true，用户才点不动第二次。
-            if (_stRecoPollBusy) return;
-            _stRecoPollBusy = true;
-            int myRun = _stRecoRunId;
-            System.Threading.Tasks.Task.Run(delegate
-            {
-                try
-                {
-                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/recommend/progress", null, 15000);
-                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                    Invoke((Action)(() =>
-                    {
-                        _stRecoPollBusy = false;
-                        if (myRun != _stRecoRunId) return;      // 已被新一轮取代
-                        var st = (Dictionary<string, object>)J.Get(j, "state");
-                        string state = st == null ? "" : J.StrAt(st, "state");
-                        string phase = st == null ? "" : J.StrAt(st, "phase");
-                        int done = st == null ? 0 : J.Int(st["done"]);
-                        int tot = st == null ? 0 : J.Int(st["total"]);
-                        double sec = st == null ? 0 : J.Num(st["elapsed"]);
-
-                        if (state == "error")
-                        {
-                            if (_stRecoTimer != null) _stRecoTimer.Stop();
-                            _stRecoBusy = false;
-                            SetErr(_stRecoStatus, "计算失败：" + J.StrAt(st, "error"));
-                            return;
-                        }
-                        if (state == "running")
-                        {
-                            if (phase == "running")
-                                // 策略计算阶段外部无法细分（done 已置满），别编百分比
-                                SetErr(_stRecoStatus, string.Format(
-                                    "计算中（{0}/{1}，正在算策略信号，已用 {2:F0} 秒）…",
-                                    done, tot, sec));
-                            else
-                                SetErr(_stRecoStatus, string.Format(
-                                    "读取数据中 {0}/{1}（{2:F1}%），已用 {3:F0} 秒…",
-                                    done, tot, tot > 0 ? done * 100.0 / tot : 0, sec));
-                            return;
-                        }
-
-                        // ready：停表，取结果（_stRecoBusy 保持 true 直到渲染完）
-                        if (_stRecoTimer != null) _stRecoTimer.Stop();
-                        StRecoFetchResult(myRun);
-                    }));
-                }
-                catch (Exception ex)
-                {
-                    string msg = ex.Message;
-                    Invoke((Action)(() =>
-                    {
-                        _stRecoPollBusy = false;
-                        if (myRun != _stRecoRunId) return;
-                        if (_stRecoTimer != null) _stRecoTimer.Stop();
-                        _stRecoBusy = false;
-                        SetErr(_stRecoStatus, "读取进度失败：" + msg);
-                    }));
-                }
-            });
-        }
-
-        private void StRecoFetchResult(int myRun)
-        {
-            System.Threading.Tasks.Task.Run(delegate
-            {
-                string resp = null, emsg = "";
-                Dictionary<string, object> j = null;
-                try
-                {
-                    resp = VRequest("http://127.0.0.1:8000/api/strategies/recommend/result", null, 60000);
-                    j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
-                }
-                catch (Exception ex) { emsg = ex.Message; }
-                var jj = j;
-                var ee = emsg;
-                Invoke((Action)(() =>
-                {
-                    if (myRun != _stRecoRunId) return;
-                    _stRecoBusy = false;
-                    if (jj == null) { SetErr(_stRecoStatus, "读取结果失败：" + ee); return; }
-                    StRenderReco(jj);
-                }));
-            });
-        }
+        // ⚠️ 当日策略**不再有自己的轮询表**：进度统一由「统一任务区」跟进
+        //   （StJobTick → /recommend/progress）。后端的 task_state() 与
+        //   reco_task_state() 字段完全同构，pause/resume/cancel 也同时覆盖两类任务，
+        //   所以前端没必要分成两套 —— 原来那套是同一份逻辑的第二份拷贝。
 
         private void StRenderReco(Dictionary<string, object> j)
         {
@@ -1361,25 +1180,35 @@ private void StRefreshRecoTitle()
         }
 
         /// <summary>
-/// 第 24 项：运行策略前的**数据新鲜度守卫**。
-///
-/// 策略固定跑全市场（筛选发生在策略内部），所以「补数据」必然是补全市场
-/// 5585 只 —— 实测吞吐 1.2~1.4 只/秒，一轮 60~80 分钟。因此这里**不做同步补齐**
-/// （那等于让用户对着界面等一小时），只做：
-///   1. 检查新鲜度（基准是**交易日**，收盘前不期望今天）；
-///   2. 陈旧则弹窗把话说清楚，让用户选「等它补完 / 用现有数据继续 / 取消」；
-///   3. 选「等」就阻塞在此轮询进度，补齐完成后自动继续原本的操作。
-///
-/// 选「等」而不是直接开跑，是因为数据停在几天前时，选股结果本身就不可信；
-/// 但把选择权交给用户，因为补齐可能要一小时。
-/// </summary>
-private void StEnsureFresh(Dictionary<string, object> meta, Action then, bool hard = false)
+        /// 第 24 项：运行策略前的**数据新鲜度守卫**。
+        ///
+        /// 策略固定跑全市场（筛选发生在策略内部），所以「补数据」必然是补全市场
+        /// 5585 只 —— 实测吞吐 1.2~1.4 只/秒，一轮 60~80 分钟。因此这里**不做同步补齐**
+        /// （那等于让用户对着界面等一小时），只做：
+        ///   1. 检查新鲜度（基准是**交易日**，收盘前不期望今天）；
+        ///   2. 陈旧则弹窗把话说清楚，让用户选「等它补完 / 用现有数据继续 / 取消」；
+        ///   3. 选「等」就阻塞在此轮询进度，补齐完成后自动继续原本的操作。
+        ///
+        /// 选「等」而不是直接开跑，是因为数据停在几天前时，选股结果本身就不可信；
+        /// 但把选择权交给用户，因为补齐可能要一小时。
+        ///
+        /// ⚠️ 所有提示都写到**顶部任务区**（不是「回测结果」页）：
+        ///   新鲜度检查是三条流程共用的前置步骤，可能在「近期成果」「当前策略推荐」
+        ///   页发起 —— 写死到结果页的话，用户在别的子页根本看不到提示（老毛病）。
+        ///
+        /// `abort`：用户放弃（弹窗取消 / 数据不齐禁跑）时的收尾回调 —— 必须释放
+        ///   统一任务区的互斥闸门，否则用户取消一次之后再也点不动任何运行按钮。
+        /// </summary>
+        private void StEnsureFresh(Dictionary<string, object> meta, Action then, bool hard = false, Action abort = null)
         {
             if (_stFreshBusy)
             {
                 // ⚠️ 不能静默 return：上一次点击的检查还在飞时用户又选了个策略再点，
                 // 这一下被吞掉，用户会以为「已按新选的策略重跑」，其实后台跑的还是上一次那个。
+                StJobText("正在检查行情数据是否最新，请稍候…", true);
                 SetErr(_stResultStatus, "正在检查行情数据是否最新，请稍候再点「运行回测」…");
+                // 释放本次占位：否则这次点击会把互斥闸门锁死（检查还在飞、任务又没起来）
+                if (abort != null) abort();
                 return;
             }
             _stFreshBusy = true;
@@ -1391,6 +1220,13 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then, bool ha
                 _stFreshBusy = false;
                 if (_stFreshTimer != null) { _stFreshTimer.Stop(); _stFreshTimer = null; }
                 then();
+            };
+            Action giveup = delegate
+            {
+                _stFreshBusy = false;
+                if (_stFreshTimer != null) { _stFreshTimer.Stop(); _stFreshTimer = null; }
+                StJobText(StJobName(_stJobKind) + " · 已取消运行", false);
+                if (abort != null) abort();
             };
             System.Threading.Tasks.Task.Run(delegate
             {
@@ -1406,6 +1242,7 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then, bool ha
                     Ui(delegate
                     {
                         _stFreshBusy = false;
+                        StJobText(msg + "（将按现有数据继续）", true);
                         SetErr(_stResultStatus, msg + "（将按现有数据继续）");
                         then();
                     });
@@ -1441,14 +1278,16 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then, bool ha
                         hard ? MessageBoxButtons.YesNo : MessageBoxButtons.YesNoCancel,
                         MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
                 });
-                if (dr == DialogResult.Cancel) { Ui(delegate { _stFreshBusy = false; }); return; }
+                if (dr == DialogResult.Cancel) { Ui(giveup); return; }
                 // hard 模式：不齐禁止运算（不再提供「用现有数据继续」）
                 if (hard && dr != DialogResult.Yes)
                 {
                     Ui(delegate
                     {
                         _stFreshBusy = false;
+                        StJobText("数据不齐，已禁止运行；请先在「数据下载」补齐或开启自动更新。", true);
                         SetErr(_stResultStatus, "数据不齐，已禁止运行；请先在「数据下载」补齐或开启自动更新。");
+                        if (abort != null) abort();
                     });
                     return;
                 }
@@ -1466,6 +1305,9 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then, bool ha
                 _stFreshTimer.Interval = 5000;
                 _stFreshTimer.Tick += delegate { StPollFresh(then, sid); };
             }
+            // 等待补齐可能长达一小时，提示必须写在**顶部任务区**（常驻可见），
+            // 写在结果页的话用户在别的子页根本不知道后台在等什么。
+            StJobText("正在等待行情数据补齐…（" + sid + "）", false);
             SetErr(_stResultStatus, "正在等待行情数据补齐…（" + sid + "）");
             _stFreshTimer.Start();
             StPollFresh(then, sid);
@@ -1491,23 +1333,29 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then, bool ha
                 {
                     if (!need)
                     {
+                        StJobText("数据已补齐（至" + latest + "），继续运行…", false);
                         SetErr(_stResultStatus, "数据已补齐（至" + latest + "），继续运行…");
                         _stFreshTimer.Stop();
                         then();
                         return;
                     }
-                    SetErr(_stResultStatus, string.Format(
+                    string w = string.Format(
                         "等待补齐中 {0}/{1}（数据至 {2}）…可切到别的页签，补齐在后台继续",
-                        covered, total, latest));
+                        covered, total, latest);
+                    StJobText(w, false);
+                    SetErr(_stResultStatus, w);
                 });
             });
         }
 
         /// <summary>页签栏「开始回测」按钮的入口：先切到「回测结果」页，再发起回测。
         ///
-        /// 切页在前、发起在后：回测的进度条 / 指标卡 / 状态文案都在「回测结果」页里，
+        /// 切页在前、发起在后：**结果**（指标卡 / 净值曲线 / 个股明细）在「回测结果」页，
         /// 不切过去用户点了按钮只看到屏幕没变化，还以为没点上。
         /// 回测逻辑本身仍走 <see cref="StRunBacktest"/>，与原按钮完全一致。
+        ///
+        /// ⚠️ 进度条与暂停/停止**不在**这一页，而在顶部「操作」框（统一任务区）——
+        ///   切不切页都看得见，这里切页只是为了让结果卡片露出来。
         /// </summary>
         private void StStartBacktestFromBar()
         {
@@ -1517,19 +1365,25 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then, bool ha
 
         private void StRunBacktest()
         {
+            // 互斥：顶部任务区只显示一个任务，已有任务在跑时挡住新的运行。
+            if (!StJobGuard()) return;
             // 点击时取一次快照：后面弹窗、等待补齐、真正提交统一用这一份。
             // 不能各步各读一次列表选中项 —— 中途清单被刷新 / 用户改了选中，
             // 就会出现「弹窗说筹码、实际跑 RPS」这类对不上的情况。
             var meta = StSelectedMeta();
             if (meta == null)
             {
+                StJobText("请先在「策略选择与编辑」里选一个策略", true);
                 SetErr(_stResultStatus, "请先在「策略选择与编辑」里选一个策略");
                 return;
             }
+            // 占位（含等待补齐数据的整段时间）：等待期间再点一次就会起两个全市场任务。
+            StJobReserve(ST_JOB_FULL);
             // 第 24 项：数据新鲜度守卫在真正发起回测之前（数据陈旧时的弹窗与等待
             // 都在 `StEnsureFresh` 里）。用守卫包一层而不是就地判断，是为了让
             // 回测与「生成当前推荐」两条入口共用同一套逻辑与同一个弹窗。
-            StEnsureFresh(meta, delegate { StRunBacktestInner(meta); });
+            StEnsureFresh(meta, delegate { StRunBacktestInner(meta); }, false,
+                delegate { StJobRelease(); });
         }
 
         private void StRunBacktestInner(Dictionary<string, object> meta)
@@ -1560,16 +1414,14 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then, bool ha
                 + start + "~" + end + " · 初始 " + (cap / 10000).ToString("F1") + "万 · 佣金 "
                 + J.NumOr(_stComm.Text, 0.0003).ToString("P4").Replace(" ", "");
 
-            _stResultStatus.Text = "回测中：" + J.StrOr(meta["name"], sid) + "…";
+            _stResultStatus.Text = "回测中：" + J.StrOr(meta["name"], sid) + "…（进度见顶部任务区）";
             _stResultStatus.ForeColor = _cSub;
             string body = new JavaScriptSerializer().Serialize(req);
-            int myRun = ++_stPollRunId;      // 本次运行的编号：用来丢弃旧轮询响应
-            StShowProgress(0, 0, "正在启动…");
 
             // 第 18 项：改**后台任务 + 轮询**。原来是一次同步请求 + 10 分钟超时，
             // 全市场（5000+ 只）冷缓存实测要 7 分钟以上，结构上仍会超时，
             // 而且中途白屏、看不到任何进展。现在启动接口 2 秒内返回，
-            // 进度由 /backtest/progress 逐票汇报。
+            // 进度由统一任务区轮询 /backtest/progress 逐票汇报。
             System.Threading.Tasks.Task.Run(delegate
             {
                 try
@@ -1579,98 +1431,179 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then, bool ha
                     var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
                     Invoke((Action)(() =>
                     {
-                        if (myRun != _stPollRunId) return;      // 已被新一轮取代
                         if (J.IsFailed(j))                       // 例如「已有回测在运行」
                         {
-                            StStopProgress();
+                            StJobAbort("完整回测 · 启动失败：" + J.ErrMsg(j), true);
                             SetErr(_stResultStatus, "回测失败：" + J.ErrMsg(j));
                             return;
                         }
-                        StPollResult(myRun);
+                        StJobBegin(ST_JOB_FULL);
                     }));
                 }
                 catch (Exception ex)
                 {
                     Invoke((Action)(() =>
                     {
-                        if (myRun != _stPollRunId) return;
-                        StStopProgress();
+                        StJobAbort("完整回测 · 启动失败：" + ex.Message, true);
                         SetErr(_stResultStatus, "回测失败：" + ex.Message);
                     }));
                 }
             });
         }
 
-        /// <summary>进度条 / 进度文字的显示与更新。</summary>
-        private void StShowProgress(int done, int total, string text)
+        // ================ 统一任务区（完整回测 / 近期回测 / 当日策略共用）================
+        // 一套进度条 + 一套暂停/继续/停止 + 一段文案，挂在顶部「操作」框里。
+        // 三条流程的差别只有两处：**打哪个进度端点**、**结果渲染到哪个页面**。
+
+        /// <summary>任务名（按类型）。</summary>
+        private static string StJobName(int kind)
+        {
+            if (kind == ST_JOB_FULL) return "完整回测";
+            if (kind == ST_JOB_RECENT) return "近期回测";
+            if (kind == ST_JOB_RECO) return "当日策略";
+            return "任务";
+        }
+
+        /// <summary>互斥闸门：已有任务在跑时挡住新任务，并说明当前在跑什么。</summary>
+        private bool StJobGuard()
+        {
+            if (!_stJobBusy) return true;
+            StJobText("已有任务在跑（" + StJobName(_stJobKind) + "）· 请等它结束，或点「停止」后再运行", true);
+            return false;
+        }
+
+        /// <summary>占位：登记任务类型并锁住闸门（启动请求在飞的那几十秒也算占用）。</summary>
+        private void StJobReserve(int kind)
+        {
+            _stJobKind = kind;
+            _stJobBusy = true;
+            _stJobRunId++;              // 换代号：上一个任务的迟到响应就此失效
+            _stJobTotal = 0;
+            _stJobElapsed = 0;
+            if (_stProgress != null) { _stProgress.Maximum = 1; _stProgress.Value = 0; }
+            StJobText(StJobName(kind) + " · 正在提交…", false);
+        }
+
+        /// <summary>任务已启动：开始统一轮询。</summary>
+        private void StJobBegin(int kind)
+        {
+            _stJobKind = kind;
+            _stJobBusy = true;
+            StJobProgress(0, 1, StJobName(kind) + " · 正在启动…");
+            StSetControlButtons(true, false);
+            if (_stJobTimer == null)
+            {
+                _stJobTimer = new Timer();
+                _stJobTimer.Interval = 1000;
+                _stJobTimer.Tick += delegate { StJobTick(); };
+            }
+            _stJobTimer.Stop();
+            _stJobTimer.Start();
+            StJobTick();               // 立刻打一次，别等第一个周期
+        }
+
+        /// <summary>释放闸门（启动失败 / 用户取消 / 任务结束）：停表、隐藏控制键。</summary>
+        private void StJobRelease()
+        {
+            if (_stJobTimer != null) _stJobTimer.Stop();
+            _stJobBusy = false;
+            StSetControlButtons(false, false);
+        }
+
+        /// <summary>放弃本次运行（启动失败 / 用户取消）：释放闸门并留下原因。</summary>
+        private void StJobAbort(string text, bool err)
+        {
+            StJobRelease();
+            StJobText(text, err);
+        }
+
+        /// <summary>写任务区文案。err=true 才标红 —— 进度用红字看着像报错。</summary>
+        private void StJobText(string text, bool err)
+        {
+            if (_stProgressText == null) return;
+            _stProgressText.Text = text;
+            _stProgressText.ForeColor = err ? C.UpErr : _cSub;
+        }
+
+        /// <summary>更新进度条 + 文案。</summary>
+        private void StJobProgress(int done, int total, string text)
         {
             if (_stProgress == null) return;
-            _stProgress.Visible = true;
-            _stProgressText.Visible = true;
             _stProgress.Maximum = Math.Max(1, total);
             _stProgress.Value = Math.Min(Math.Max(0, done), Math.Max(1, total));
-            _stProgressText.Text = text;
+            StJobText(text, false);
         }
 
-        private void StStopProgress()
+        /// <summary>把提示写到**当前任务所属页面**的状态行（各页仍保留自己的结果摘要）。</summary>
+        private void StJobSetPageStatus(string text, bool err)
         {
-            if (_stPollTimer != null)
+            if (_stJobKind == ST_JOB_RECO)
             {
-                _stPollTimer.Stop();
-                _stPollTimer.Dispose();
-                _stPollTimer = null;
+                if (err) SetErr(_stRecoStatus, text);
+                else { _stRecoStatus.Text = text; _stRecoStatus.ForeColor = _cSub; }
             }
-            if (_stProgress != null) _stProgress.Visible = false;
-            if (_stProgressText != null)
+            else if (_stJobKind == ST_JOB_RECENT)
             {
-                _stProgressText.Visible = false;
-                _stProgressText.Text = "";
+                if (err) SetErr(_stRecentStatus, text);
+                else { _stRecentStatus.Text = text; _stRecentStatus.ForeColor = _cSub; }
+            }
+            else
+            {
+                if (err) SetErr(_stResultStatus, text);
+                else { _stResultStatus.Text = text; _stResultStatus.ForeColor = _cSub; }
             }
         }
 
-        /// <summary>轮询一次进度；state 变成ready/error 时取结果（或报错）并停表。</summary>
-        private void StPollResult(int myRun)
+        /// <summary>进度端点：完整 / 近期都走 /backtest/progress，当日策略走 /recommend/progress。</summary>
+        private string StJobProgressUrl()
         {
-            StStopProgress();                        // 先清掉旧的（可能还在跑）
-            _stPollTimer = new Timer();
-            _stPollTimer.Interval = 900;
-            _stPollTimer.Tick += delegate { StPollTick(myRun); };
-            _stPollTimer.Start();
-            StPollTick(myRun);                       // 立刻打一次，别等第一个周期
+            return _stJobKind == ST_JOB_RECO
+                ? "http://127.0.0.1:8000/api/strategies/recommend/progress"
+                : "http://127.0.0.1:8000/api/strategies/backtest/progress";
         }
 
-        private void StPollTick(int myRun)
+        /// <summary>结果端点（与进度端点同族）。</summary>
+        private string StJobResultUrl()
         {
-            if (myRun != _stPollRunId) return;       // 旧任务，直接不响应
-            if (_stPollBusy) return;                 // 上一次还没回来
-            _stPollBusy = true;
+            return _stJobKind == ST_JOB_RECO
+                ? "http://127.0.0.1:8000/api/strategies/recommend/result"
+                : "http://127.0.0.1:8000/api/strategies/backtest/result";
+        }
+
+        /// <summary>轮询一次进度。</summary>
+        private void StJobTick()
+        {
+            int myRun = _stJobRunId;
+            if (myRun == 0) return;
+            if (_stJobPollBusy) return;                 // 上一次还没回来
+            _stJobPollBusy = true;
+            string url = StJobProgressUrl();
             RunUi<Dictionary<string, object>>(
                 delegate
                 {
-                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/progress", null, 30000);
+                    string resp = VRequest(url, null, 30000);
                     return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
                 },
                 delegate(Dictionary<string, object> j)
                 {
-                    _stPollBusy = false;
-                    if (myRun != _stPollRunId) return;
-                    StApplyProgress(j, myRun);
+                    _stJobPollBusy = false;
+                    if (myRun != _stJobRunId) return;       // 旧任务，直接不响应
+                    StJobApply(j, myRun);
                 },
                 delegate(Exception ex)
                 {
-                    _stPollBusy = false;
-                    if (myRun != _stPollRunId) return;
+                    _stJobPollBusy = false;
+                    if (myRun != _stJobRunId) return;
                     // 单次轮询失败（后端忙）不致命：让表继续打，下一次再说
-                    if (_stProgressText != null)
-                        _stProgressText.Text = "进度查询失败，正在重试…" + ex.Message;
+                    StJobText("进度查询失败，正在重试…" + ex.Message, false);
                 },
                 null);
         }
 
-        /// <summary>把 /backtest/progress 的状态画到进度条上；完成则取结果。</summary>
-        private void StApplyProgress(Dictionary<string, object> j, int myRun)
+        /// <summary>把进度状态画到任务区；ready 则取结果。</summary>
+        private void StJobApply(Dictionary<string, object> j, int myRun)
         {
-            if (J.IsFailed(j)) { StStopProgress(); return; }
+            if (J.IsFailed(j)) { StJobAbort("任务状态读取失败：" + J.ErrMsg(j), true); return; }
             var st = J.Get(j, "state") as Dictionary<string, object>;
             if (st == null) return;
             string state = J.Str(J.Get(st, "state"));
@@ -1679,6 +1612,9 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then, bool ha
             int total = (int)J.NumAt(st, "total");
             double elapsed = J.NumAt(st, "elapsed");
             string err = J.Str(J.Get(st, "error"));
+            string name = StJobName(_stJobKind);
+            _stJobTotal = total;
+            _stJobElapsed = elapsed;
 
             if (state == "running")
             {
@@ -1692,53 +1628,81 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then, bool ha
                 StSetControlButtons(true, paused);
                 string text;
                 if (phase == "loading")
-                    text = "加载数据 " + done + " / " + total + "只（已用 "
-                           + ((int)elapsed) + " 秒）";
+                    text = name + " · 读取数据中 " + done + " / " + total + " 只（"
+                           + (total > 0 ? (done * 100.0 / total).ToString("F1") : "0.0")
+                           + "%）· 已用 " + ((int)elapsed) + " 秒";
                 else
-                    text = "计算信号中…" + done + " / " + total + "只（已用 "
-                           + ((int)elapsed) + " 秒）";
+                    // 策略计算阶段外部无法细分（done 保持 total），别编百分比
+                    text = name + " · 计算信号中 " + done + " / " + total + " 只 · 已用 "
+                           + ((int)elapsed) + " 秒";
                 if (paused) text = "⏸ 已暂停 · " + text + " · 可点「继续」或「停止」";
-                StShowProgress(total > 0 ? done : 0, total, text);
+                StJobProgress(total > 0 ? done : 0, total, text);
                 return;
             }
 
-            // ready / error / cancelled：停表，取结果
-            StStopProgress();
-            StSetControlButtons(false, false);
+            // ready / error / cancelled
             if (state == "cancelled")
             {
                 // 用户主动停止：**中性提示**，不用错误态的红色。
                 // 中途的结果不保留（后端已清空），所以不能接着去取结果。
-                _stResultStatus.Text = "已停止（已完成的回测结果不保留，可改参数后重跑）";
-                _stResultStatus.ForeColor = _cSub;
+                StJobRelease();
+                StJobText(name + " · 已停止（结果不保留，可改参数后重跑）", false);
+                StJobSetPageStatus("已停止（结果不保留，可改参数后重跑）", false);
                 return;
             }
             if (state == "error")
             {
-                SetErr(_stResultStatus, "回测失败：" + (string.IsNullOrEmpty(err) ? "未知错误" : err));
+                string msg = string.IsNullOrEmpty(err) ? "未知错误" : err;
+                StJobRelease();
+                StJobText(name + " · 失败：" + msg, true);
+                StJobSetPageStatus("失败：" + msg, true);
                 return;
             }
-            StFetchResult(myRun);
+            // ready：停表取结果（进度条先满格，取到结果后再定稿文案）
+            if (_stJobTimer != null) _stJobTimer.Stop();
+            StSetControlButtons(false, false);
+            int n = total > 0 ? total : 1;
+            StJobProgress(n, n, name + " · 计算完成，正在取结果…");
+            StJobFetchResult(myRun);
         }
 
-        private void StFetchResult(int myRun)
+        /// <summary>取结果并渲染到各自的页面；任务区保留「已完成」标志。</summary>
+        private void StJobFetchResult(int myRun)
         {
+            string url = StJobResultUrl();
+            int kind = _stJobKind;
             RunUi<Dictionary<string, object>>(
                 delegate
                 {
-                    string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/result", null, 120000);
+                    string resp = VRequest(url, null, 120000);
                     return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
                 },
                 delegate(Dictionary<string, object> j)
                 {
-                    if (myRun != _stPollRunId) return;
-                    if (J.IsFailed(j)) { SetErr(_stResultStatus, "取结果失败：" + J.ErrMsg(j)); return; }
-                    StRenderResult(j);
+                    if (myRun != _stJobRunId) return;
+                    if (J.IsFailed(j))
+                    {
+                        StJobRelease();
+                        StJobText(StJobName(kind) + " · 取结果失败：" + J.ErrMsg(j), true);
+                        StJobSetPageStatus("取结果失败：" + J.ErrMsg(j), true);
+                        return;
+                    }
+                    // 各流程各自渲染到自己的页面，任务区只负责「已完成」标志
+                    if (kind == ST_JOB_RECO) StRenderReco(j);
+                    else if (kind == ST_JOB_RECENT) StRenderRecent(j);
+                    else StRenderResult(j);
+                    int n = _stJobTotal > 0 ? _stJobTotal : 1;
+                    StJobProgress(n, n, string.Format(
+                        "{0} · ✅ 已完成 · {1}/{2} 只 · 耗时 {3:F0} 秒",
+                        StJobName(kind), n, n, _stJobElapsed));
+                    StJobRelease();
                 },
                 delegate(Exception ex)
                 {
-                    if (myRun != _stPollRunId) return;
-                    SetErr(_stResultStatus, "取结果失败：" + ex.Message);
+                    if (myRun != _stJobRunId) return;
+                    StJobRelease();
+                    StJobText(StJobName(kind) + " · 取结果失败：" + ex.Message, true);
+                    StJobSetPageStatus("取结果失败：" + ex.Message, true);
                 },
                 null);
         }
@@ -2381,19 +2345,26 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then, bool ha
                 },
                 delegate(Dictionary<string, object> j)
                 {
-                    if (J.IsFailed(j)) { SetErr(_stResultStatus, "操作失败：" + J.ErrMsg(j)); return; }
+                    if (J.IsFailed(j))
+                    {
+                        StJobText("操作失败：" + J.ErrMsg(j), true);
+                        StJobSetPageStatus("操作失败：" + J.ErrMsg(j), true);
+                        return;
+                    }
                     object pv;
                     bool paused = j.TryGetValue("paused", out pv) && pv is bool && (bool)pv;
                     // 非错误态：用普通子色写，别用 SetErr（那是红色错误态）。
                     // 暂停/继续是**正常操作**，标红会让人以为出错了。
-                    _stResultStatus.Text = J.StrOr(J.Get(j, "message"), "已处理");
-                    _stResultStatus.ForeColor = _cSub;
+                    string msg = J.StrOr(J.Get(j, "message"), "已处理");
+                    StJobText(msg, false);
+                    StJobSetPageStatus(msg, false);
                     StSetControlButtons(true, paused);
                 },
                 delegate(Exception ex)
                 {
                     // 后端没起来是最常见的原因，给一句能照做的提示
-                    SetErr(_stResultStatus, "操作失败（确认后端已启动）：" + ex.Message);
+                    StJobText("操作失败（确认后端已启动）：" + ex.Message, true);
+                    StJobSetPageStatus("操作失败（确认后端已启动）：" + ex.Message, true);
                     StSetControlButtons(true, false);
                 },
                 null);
