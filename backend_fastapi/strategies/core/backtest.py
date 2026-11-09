@@ -236,6 +236,10 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
     _BT_TRADES = trades
 
     warnings = list(flags)
+    # 成交模型：涨停买不进已顺延至次日开盘价买入（覆盖所有策略）；
+    # 其余成本/整手/停牌/跌停卖不出约束见 feasibility 字段，不在此重复。
+    warnings.append("成交模型：涨停买不进已顺延至次日开盘价买入（覆盖所有策略）；"
+                    "整手/停牌/跌停卖不出仍只影响明细可行性")
     # 幸存者偏差：任何模式都必须显式声明，**不允许静默**（偏差消不掉，但必须让人看见）
     warnings.append(data.survivorship_note(universe_mode, len(usable)))
     if window:
@@ -302,7 +306,8 @@ def _feasibility_summary(trades: list[dict], n_checked: int) -> dict:
         "trades": n,
         "tradable_ratio": round(ok_n / n, 4) if n else None,
         "blocked_counts": blocked,
-        "note": "可行性口径独立于 equity（净值不含整手/涨跌停/停牌）",
+        "note": "净值已对涨停买不进做次日开盘顺延（equity 含该修正）；"
+                "整手/停牌/跌停卖不出约束仍只影响明细可行性",
     }
 
 
@@ -324,6 +329,33 @@ class _IdxOnly:
 
     def __init__(self, idx):
         self.index = idx
+
+
+def next_trading_day(date_str: str) -> str:
+    """`date_str` 之后的第一个交易日（含未来日），作为推荐的**执行日**。
+
+    推荐信号基于「最新已下载交易日」，但收盘后已无法在当天交易，
+    真正能下单的是下一个交易日。日历优先用 A 股交易日历，取不到退化为工作日。
+    """
+    try:
+        base = dt.date.fromisoformat(str(date_str)[:10])
+    except (ValueError, TypeError):
+        base = dt.date.today()
+    try:
+        from features.market.service import _a_share_trade_days
+        days = _a_share_trade_days()
+    except Exception:                       # noqa: BLE001 - 日历不可用退化为星期
+        days = set()
+    if days:
+        cand = [d for d in days if d > base.isoformat()]
+        if cand:
+            return min(cand)
+    cur = base
+    for _ in range(14):                     # 退化：逐日找下一个周一~周五
+        cur += dt.timedelta(days=1)
+        if cur.weekday() < 5:
+            return cur.isoformat()
+    return base.isoformat()
 
 
 def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
@@ -489,6 +521,7 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
             "params": params or {},
         },
         "date": date or end,
+        "execution_date": next_trading_day(date or end),
         "target_capital": round(target_capital, 2),
         "buy": buy,
         "sell": sell,

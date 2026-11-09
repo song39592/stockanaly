@@ -312,8 +312,11 @@ def load_bars_raw_for(codes, start: str | None = None,
     **只对权重变动过的 code 调**（见 backtest.run_backtest）：全市场日频换手下
     变动过的票通常只有百量级，全取会把内存重新推向 2GB 的老问题。
     """
+    # open 是「涨停买不进 → 次日开盘价买入」净值修正所需的成交价（见 stats.compute
+    # 的涨停顺延段）；high/low/close/volume 供整手/涨跌停/停牌可行性判定。
+    # raw 与 hfq 在无除权日比值相同，故用 raw 的 open→close 收益与 hfq 口径等价。
     return load_bars(codes, start, end,
-                     fields=["high", "low", "close", "volume"], adjust="raw")
+                     fields=["open", "high", "low", "close", "volume"], adjust="raw")
 
 
 def load_pool_members(start: str | None = None,

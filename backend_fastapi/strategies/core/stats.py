@@ -20,7 +20,8 @@
         佣金 commission / 印花税 stamp_duty（卖出单边）/ 滑点 slippage
         最低佣金 min_commission = max(notional × rate, 5.0)  ← 不需要股数
     只进 trades 明细（需要股数与价格粒度）
-        整手 lot_size / 涨跌停 / 停牌 → 只产出「可行性」指标，不改净值
+        整手 lot_size / 停牌 / 跌停卖不出 → 只产出「可行性」指标，不改净值；
+        涨停买不进已由净值层顺延至次日开盘价（见 compute 的「涨停顺延」段）
 
 为什么这样分：本引擎的主要用途是**横向比较多策略的信号质量**，`equity` 需要一个
 干净、与执行细节无关的口径；但把成本整体赶出净值会让成本模型退化成摆设，
@@ -295,6 +296,59 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
             bad_codes.add(code)
             r = r.mask(bad, 0.0)      # 判为数据错误，当日按 0 收益，并计入 flags
         R[:, j] = r.to_numpy(dtype=np.float32)
+
+    # ---- 涨停买不进 → 次日开盘价买入（修复理想成交虚高）----
+    # 权重模型：t_b 日发出的权重 w 在 t_b+1 日才作为持仓产生收益（wp=W[t_b]）。
+    # 若 t_b 日该票**一字涨停**（实盘买不进），真实成交价为 t_b+1 日开盘价；
+    # 故把 t_b+1 日的收益口径从 close-to-close 改为「开盘→收盘」(close/open-1)，
+    # 即「次日开盘买入、当日收盘」的真实收益。W 本身不动（信号日仍记为建仓，
+    # 逐笔明细保留「涨停买不进」标记，与净值分层），仅修正次日收益；
+    # 仅作用于「建仓首日」(W 从 0 跳升)，不影响已有持仓。
+    if raw_by_code:
+        for j, code in enumerate(codes):
+            raw = raw_by_code.get(code)
+            if raw is None or "open" not in getattr(raw, "columns", []) \
+               or "close" not in getattr(raw, "columns", []):
+                continue
+            rcols = {str(d)[:10]: i for i, d in enumerate(raw.index)}
+            rclose = raw["close"]
+            ropen = raw["open"]
+            rhi = raw["high"] if "high" in getattr(raw, "columns", []) else None
+            rlo = raw["low"] if "low" in getattr(raw, "columns", []) else None
+            thr = _limit_pct(code)
+            w = W[:, j]
+            prev = np.concatenate(([0.0], w[:-1]))
+            for t_b in np.flatnonzero((w > _EPS) & (prev <= _EPS)).tolist():
+                d = common[t_b]
+                i = rcols.get(d)
+                if i is None or i == 0:
+                    continue
+                pc = float(rclose.iloc[i - 1])
+                cc = float(rclose.iloc[i])
+                if pc <= 0:
+                    continue
+                chg = abs(cc / pc - 1.0)
+                hi = float(rhi.iloc[i]) if rhi is not None else cc
+                lo = float(rlo.iloc[i]) if rlo is not None else cc
+                if not (hi == lo and chg >= thr):
+                    continue                       # 非一字涨停 → 当日可正常买入
+                t_act = t_b + 1
+                if t_act >= T:
+                    continue                       # 末日涨停无法顺延
+                i2 = rcols.get(common[t_act])
+                if i2 is None:
+                    continue
+                o2 = float(ropen.iloc[i2])
+                c2 = float(rclose.iloc[i2])
+                if o2 <= 0 or c2 <= 0:
+                    continue
+                r_open = c2 / o2 - 1.0
+                if abs(r_open) > _IMPOSSIBLE_RET:
+                    continue                       # 防御除权日异常
+                # 保持 W 不变（信号日仍记为建仓、逐笔明细保留「涨停买不进」标记），
+                # 仅把次日（t_act=t_b+1）的收益口径从 close-to-close 改为
+                # 开盘→收盘（close/open-1），即「次日开盘买入、当日收盘」的真实收益。
+                R[t_act, j] = float(r_open)
 
     rate = commission + slippage
 
