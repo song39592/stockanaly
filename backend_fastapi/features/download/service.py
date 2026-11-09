@@ -44,9 +44,19 @@ from features.stock import profile as stock_profile
 DEFAULT_HISTORY_YEARS = 5
 FULL_HISTORY_START_DATE = dt.date(1990, 1, 1)
 
-MAX_CONCURRENCY = 8
-DEFAULT_CONCURRENCY = 4
-DEFAULT_RATE_LIMIT = 4.0        # 每秒最多发起多少次数据源请求（原 3.0，配合 P2 小幅上调）
+# 并发 / 限速档位（2026-11-09 实测校准）。
+#
+# 实测（东财，2026-11-09）：单票增量抓取 0.42~1.71s（均值 0.91s），
+# 并发 1 / 4 / 8 的吞吐分别是 0.48 / 2.51 / 5.36 只/秒 —— **线性放大**，
+# 说明瓶颈不在本地（SQLite 单次写事务仅 10ms，队列有索引），
+# 而是「5596 只 × 每只 1 次外网往返」的总往返次数。
+# 复权因子已有缓存（list_factors 非空即零请求），不是额外开销。
+MAX_CONCURRENCY = 16
+DEFAULT_CONCURRENCY = 8
+# 每秒最多发起多少次数据源请求。原 4.0：单票 0.91s 时 4 并发只能跑出 1 只/秒
+# （限速没到顶、并发也没到顶，纯粹是并发被压在 2），5596 只要 91 分钟。
+# 8.0 与并发 8 匹配 —— 5596 只约 12~15 分钟。
+DEFAULT_RATE_LIMIT = 8.0
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = (2, 6, 15)
 IDLE_SLEEP = 0.4                # 暂停时空转的轮询间隔
@@ -76,8 +86,10 @@ AUTO_RETRY_MINUTES = 30        # 自动更新相邻两次尝试的最小间隔�
 FRESHNESS_DAYS = 10            # 「只缺最近 10 天」的判定窗口：超过即视为历史未补齐
 SCHEDULER_INTERVAL = 60        # 调度线程轮询间隔（秒）
 AUTO_STATE_TTL = 300           # 覆盖度检测结果的缓存时间（秒）：全库扫描不便宜
-IDLE_CONCURRENCY = 4           # 每日自动/闲时任务并发默认值（上限见 MAX_IDLE_CONCURRENCY）
-MAX_IDLE_CONCURRENCY = 4       # 后台任务并发上限：原为 2，是每日更新提不上去的硬闸门
+IDLE_CONCURRENCY = 8           # 每日自动/闲时任务并发默认值（上限见 MAX_IDLE_CONCURRENCY）
+MAX_IDLE_CONCURRENCY = 12      # 后台任务并发上限：原为 2，是每日更新提不上去的硬闸门
+IDLE_RATE_LIMIT = 8.0          # 后台任务限速（与手动同档；4.0 时 5596 只需 91 分钟）
+LOCKUP_RATE_LIMIT = 3.0        # 锁仓系数走东财「十大流通股东」接口，限流更严，保持低档
 WEEKLY_OVERLAP_DAYS = 10       # 周度修订回收重拉的窗口（≈上周 5 个交易日 + 缓冲）；每日纯增量不再回拉重叠
 
 ORIGIN_MANUAL = "manual"       # 任务来源：手动 / 每日自动更新 / 后台闲时
@@ -764,6 +776,24 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
 
         if errors:
             raise RuntimeError("；".join(errors))
+    except price_service.NoDataError as exc:
+        # 所有数据源都没有这只票的日 K —— 退市 / 长期停牌。
+        # **不重试**：重试变不出数据来，而每只退市票 3 源串行 6~11 秒 ×3 次重试
+        # + 2/6/15 秒退避 = 单只 20~40 秒；几百只就是几十分钟的长尾
+        # （实测 2026-11-09：前 1876 只正常票 5.3 只/秒跑完，剩下 300 只退市股
+        #   只有 0.12 只/秒，尾部自己就吃掉半小时）。
+        # 新股例外：它本来就还没数据 → 落到下面的通用重试路径（下次可能就有了）。
+        if runtime.stop.is_set():
+            return
+        message = f"{type(exc).__name__}: {exc}"
+        if _failed_like_suspended(runtime, code, message):
+            stock_status.set_status(code, stock_status.STATUS_SUSPENDED, reason=message)
+            download_store.finish_code(task_id, seq, ok=True, suspended=True)
+            return
+        runtime.note_fail()
+        download_store.finish_code(task_id, seq, ok=False, error=message)
+        download_store.record_error(task_id, code, message)
+        return
     except Exception as exc:                      # noqa: BLE001 - 单只失败不影响整个任务
         if runtime.stop.is_set():
             return
@@ -890,9 +920,29 @@ _auto_state_at = 0.0
 
 
 def _idle_concurrency() -> int:
-    """后台任务并发档位（1 ~ MAX_IDLE_CONCURRENCY），避免与前台抢资源。"""
-    return _clamp_int(download_store.get_setting("idle_concurrency", IDLE_CONCURRENCY),
-                      IDLE_CONCURRENCY, 1, MAX_IDLE_CONCURRENCY)
+    """后台任务并发档位（1 ~ MAX_IDLE_CONCURRENCY），避免与前台抢资源。
+
+    ⚠️ **遗留值自愈（A 档）**：2026-09 前后本函数把「2」写进了 settings 表
+    （`download_settings.idle_concurrency`），那是**当时的默认值**，不是用户的选择。
+    上限提到 12 之后若还沿用它，「每日自动更新」仍被压在 2 并发 —— 实测 1.02 只/秒，
+    5596 只要 91 分钟，正是用户看到的「一天的数据下载要一个多小时」。
+    因此读到 **< 4** 的遗留值时按新默认处理，并**写回**（否则每次读都要判断）；
+    用户显式设过的 4~12 会被如实尊重。
+
+    ⚠️ 这里读到的值会直接进 `_options_for(concurrency=...)`，而那里按
+    `MAX_CONCURRENCY` 钳制 —— 后台上限必须 ≤ 总上限，否则后台任务会被悄悄削回 8。
+    """
+    raw = download_store.get_setting("idle_concurrency", "")
+    if not raw:
+        return IDLE_CONCURRENCY
+    value = _clamp_int(raw, IDLE_CONCURRENCY, 1, MAX_IDLE_CONCURRENCY)
+    if value < 4:
+        value = IDLE_CONCURRENCY
+        try:
+            download_store.set_setting("idle_concurrency", str(value))
+        except Exception:       # noqa: BLE001 - 写回失败只影响"每次都判断"，不影响功能
+            pass
+    return value
 
 
 def _has_alive_task() -> bool:
@@ -1066,9 +1116,20 @@ def _downloaded_staleness() -> tuple[int, int, list[str], str | None]:
     expected_date = dt.date.fromisoformat(expected) if expected else None
     earliest = _span_dates("earliest", price_store.code_earliest_dates)
     # 停牌 / 退市票长期落后是「补也补不到」，不计入陈旧，避免拖垮自动更新资格。
+    #
+    # ⚠️ 两套判定都要看（2026-11-09 实测）：
+    #   ① `stock_status` 的运行期标记：取数彻底失败且被判定为停牌/退市时打上的
+    #      —— 这是**权威口径**，几百只退市股全在这里；
+    #   ② `_is_suspended` 的时间落后口径（落后 > 30 天且曾有 ≥ 60 天历史）——
+    #      覆盖还没被标记过的长期停牌股。
+    # 之前**只有 ②**：退市股库内最新日停在退市前（实测落后 7~28 天，够不到 30 天门槛），
+    # 于是它们天天算「陈旧」→ 每天晚上重排重试（每只 20~40 秒）→ 陈旧数永远降不下来
+    # →「自动更新」开关被永久判为不可开启（截图里那句「先补齐过期历史」）。
+    suspended = stock_status.suspended_like_codes()
     stale = sorted(
         code for code, day in latest.items()
         if str(day) < expected
+        and code not in suspended
         and not _is_suspended(code, expected_date, latest=str(day), earliest=earliest.get(code))
     )
     return len(latest), len(stale), stale[:10], max(str(day) for day in latest.values())
@@ -1295,11 +1356,15 @@ def _kick_weekly_refresh() -> str | None:
     if _has_alive_task():
         return None
     latest = price_store.code_latest_dates()
-    codes = sorted(c for c, d in latest.items() if d)      # 只排确有数据的
+    # 同样排除已判定停牌 / 退市的票：周度回收是「重拉最近 N 天」，而退市票
+    # 重拉必然失败（3 源全空 + 3 次重试），几百只就能吃掉半小时。
+    suspended = stock_status.suspended_like_codes()
+    codes = sorted(c for c, d in latest.items() if d and c not in suspended)
     if not codes:
         download_store.set_setting("weekly_refresh_last_iso", _iso_week())
         return None
     options = _options_for(MODE_INCREMENTAL, concurrency=_idle_concurrency(),
+                           rate_limit=IDLE_RATE_LIMIT,
                            overlap_days=WEEKLY_OVERLAP_DAYS, weekly_refresh=True)
     # 展示窗口反映 overlap：起点=最早那只的 [最新日-N]；终点=今天
     _stamp_span(options, codes, latest)
@@ -1321,12 +1386,20 @@ def _kick_auto_update() -> str | None:
     if not latest or _has_alive_task():
         return None
     expected = _expected_data_day()
+    # ⚠️ 排除**已被判定为停牌 / 退市**的票（2026-11-09 实测）。
+    # 这些票库内最新日停在退市前（落后 7~28 天），够不到 `_is_suspended` 的 30 天门槛，
+    # 于是天天被排进队列；而它们取数必然失败（3 源各超时一轮），每只 20~40 秒
+    # → 每晚自动更新的尾部要磨掉半小时，且陈旧数永远降不下来。
+    # 它们的标记来自运行期的取数失败判定（`stock_status`），成功取到数据时会自愈清除；
+    # 万一误判，手动「全市场」任务不走这个过滤，仍能把它们救回来。
+    suspended = stock_status.suspended_like_codes()
     codes = sorted(code for code, day in latest.items()
-                   if not expected or str(day) < expected)
+                   if (not expected or str(day) < expected) and code not in suspended)
     if not codes:
         return None
     _ensure_disk_space(len(codes), MODE_INCREMENTAL)
-    options = _options_for(MODE_INCREMENTAL, concurrency=_idle_concurrency())
+    options = _options_for(MODE_INCREMENTAL, concurrency=_idle_concurrency(),
+                           rate_limit=IDLE_RATE_LIMIT)
     # 增量窗口：每只从库内最新日 -14 天补到今天，这里记下并集供下载页展示
     _stamp_span(options, codes, latest)
     task_id = "dl-" + uuid.uuid4().hex
@@ -1354,6 +1427,7 @@ def _kick_lockup_update() -> str | None:
         download_store.set_setting("lockup_last_run", dt.date.today().isoformat())
         return None
     options = _options_for(MODE_INCREMENTAL, concurrency=_idle_concurrency(),
+                           rate_limit=LOCKUP_RATE_LIMIT,
                            with_reference=False, kind=KIND_LOCKUP)
     task_id = "lk-" + uuid.uuid4().hex
     download_store.create_task(task_id, "downloaded", options, pending, 1, origin=ORIGIN_AUTO)
@@ -1365,6 +1439,11 @@ def _resume_idle(task_id: str, task: dict[str, Any]) -> None:
     """把闲时任务拉起来，并把并发降到闲时档位。"""
     options = dict(task.get("options") or {})
     options["concurrency"] = _idle_concurrency()
+    # 限速按**任务类型**给，不能一刀切：锁仓任务走东财「十大流通股东」接口，
+    # 限流比日 K 严得多（要低档），被覆盖成 8.0 的话很容易整片取不到。
+    options["rate_limit"] = (LOCKUP_RATE_LIMIT
+                             if options.get("kind") == KIND_LOCKUP
+                             else IDLE_RATE_LIMIT)
     download_store.update_options(task_id, options)
     with _runtimes_lock:
         runtime = _runtimes.get(task_id)
@@ -1413,7 +1492,8 @@ def _ensure_idle_task() -> str | None:
         download_store.set_setting("idle_refreshed_at", today)
         return None
     _ensure_disk_space(len(missing), MODE_FULL)
-    options = _options_for(MODE_FULL, concurrency=_idle_concurrency())
+    options = _options_for(MODE_FULL, concurrency=_idle_concurrency(),
+                           rate_limit=IDLE_RATE_LIMIT)
     task_id = "dl-" + uuid.uuid4().hex
     download_store.create_task(task_id, "all", options, missing,
                                options["phases"], origin=ORIGIN_IDLE)
@@ -1539,8 +1619,11 @@ def start_task(*, scope: str = "all", source: str = SOURCE_ONLINE,
         raise ValueError(f"未知的任务类型：{kind}")
 
     if kind == KIND_LOCKUP:
+        # 锁仓走东财「十大流通股东」接口，限流比日 K 严得多 → 强制低档，
+        # 不管调用方传了多高（前端手动锁仓本来就固定传 3.0）。
         return _start_lockup_task(
-            scope=scope, concurrency=concurrency, rate_limit=rate_limit,
+            scope=scope, concurrency=concurrency,
+            rate_limit=min(float(rate_limit or DEFAULT_RATE_LIMIT), LOCKUP_RATE_LIMIT),
             force_reference=force_reference)
 
     if source == SOURCE_TDX:

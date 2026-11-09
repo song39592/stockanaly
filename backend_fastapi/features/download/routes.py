@@ -28,8 +28,10 @@ class StartRequest(BaseModel):
     source: str = Field(default="online", pattern=r"^(online|tdx)$")
     kind: str = Field(default="bars", pattern=r"^(bars|lockup)$")
     start_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
-    concurrency: int = Field(default=4, ge=1, le=8)
-    rate_limit: float = Field(default=4.0, gt=0, le=20)
+    # 并发 / 限速：2026-11-09 实测校准（单票 0.91s，8 并发 5.36 只/秒）。
+    # 上限从 8 放到 16 —— 后台任务要用 8~12 档，路由层先拒掉的话改了解释器。
+    concurrency: int = Field(default=8, ge=1, le=16)
+    rate_limit: float = Field(default=8.0, gt=0, le=20)
     with_reference: bool = True
     force_reference: bool = False
 
@@ -37,7 +39,7 @@ class StartRequest(BaseModel):
 class SettingsRequest(BaseModel):
     auto_update: bool | None = None
     idle_download: bool | None = None
-    idle_concurrency: int | None = Field(default=None, ge=1, le=4)
+    idle_concurrency: int | None = Field(default=None, ge=1, le=12)
     tdx_path: str | None = None
 
 
