@@ -75,6 +75,7 @@ namespace StockPool
         private Label _stRecoStatus;
         private FlowLayoutPanel _stRecoCards;
         private StockGrid _stBuyGrid, _stSellGrid, _stHoldGrid;
+        private GroupBox _stBuyGroup, _stSellGroup;   // 标题含「执行日」，渲染时改写
 
         // ⑥ 历史结果（已保存回测报告的独立页签）
         private ListView _stHistList;
@@ -969,7 +970,8 @@ private void StRefreshRecoTitle()
             AddRow(stack, _stRecoCards);
 
             TableLayoutPanel b1;
-            var g1 = Group("买入（今日建仓）", out b1);
+            var g1 = Group("买入（执行日建仓）", out b1);
+            _stBuyGroup = g1;
             _stBuyGrid = NewGrid(new List<GridColumn> {
                 new GridColumn("代码", "code") { IsCode = true, Jump = true },
                 NameColumn(),
@@ -982,7 +984,8 @@ private void StRefreshRecoTitle()
             AddRow(stack, g1);
 
             TableLayoutPanel b2;
-            var g2 = Group("卖出（今日清仓）", out b2);
+            var g2 = Group("卖出（执行日清仓）", out b2);
+            _stSellGroup = g2;
             _stSellGrid = NewGrid(new List<GridColumn> {
                 new GridColumn("代码", "code") { IsCode = true, Jump = true },
                 NameColumn(),
@@ -1024,7 +1027,8 @@ private void StRefreshRecoTitle()
                 return;
             }
             // 第 24 项：与回测共用同一个数据新鲜度守卫；策略用点击时的快照。
-            StEnsureFresh(meta, delegate { StRunRecoInner(meta); });
+            // hard=true：当前策略推荐在数据不齐时禁止运算（不再给「用现有数据继续」）。
+            StEnsureFresh(meta, delegate { StRunRecoInner(meta); }, true);
         }
 
         private void StRunRecoInner(Dictionary<string, object> meta)
@@ -1192,7 +1196,14 @@ private void StRefreshRecoTitle()
             StFillRecoGrid(_stSellGrid, j["sell"], false);
             StFillRecoGrid(_stHoldGrid, j["hold"], true);
 
-            _stRecoStatus.Text = "策略：" + StCurStrategyName() + " · 截至 " + J.StrOr(j["date"], "")
+            // 信号日 = 推荐所基于的行情日；执行日 = 收盘后真正能下单的下一交易日。
+            // 收盘后算出来的「今日建仓/清仓」语义是错的，这里全部改写为执行日。
+            string sigDate = J.StrOr(j["date"], "");
+            string execDate = J.StrOr(j["execution_date"], sigDate);
+            if (_stBuyGroup != null) _stBuyGroup.Text = "买入（" + execDate + " 建仓）";
+            if (_stSellGroup != null) _stSellGroup.Text = "卖出（" + execDate + " 清仓）";
+            _stRecoStatus.Text = "策略：" + StCurStrategyName() + " · 信号日 " + sigDate
+                    + " · 执行日 " + execDate
                     + " · 目标资金 " + J.Money(StM(j as Dictionary<string, object>, "target_capital"));
             _stRecoStatus.ForeColor = C.DownSoft;
         }
@@ -1362,7 +1373,7 @@ private void StRefreshRecoTitle()
 /// 选「等」而不是直接开跑，是因为数据停在几天前时，选股结果本身就不可信；
 /// 但把选择权交给用户，因为补齐可能要一小时。
 /// </summary>
-private void StEnsureFresh(Dictionary<string, object> meta, Action then)
+private void StEnsureFresh(Dictionary<string, object> meta, Action then, bool hard = false)
         {
             if (_stFreshBusy)
             {
@@ -1410,6 +1421,12 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
                 DialogResult dr = DialogResult.None;
                 Ui(delegate
                 {
+                    // hard=true（当前策略推荐）：不齐禁止运算，只给「补齐 / 取消」，
+                    // 不再提供「用现有数据继续」的退路（后端此时也会直接拒算）。
+                    string tail = hard
+                        ? "· 必须先补齐数据才能运行（不齐时运算结果不可信，已禁止运行）"
+                        : "· 现在补齐：预计 60~80 分钟（可随时关窗，断了也能从断点续上）\r\n"
+                          + "· 用现有数据继续：结果基于各票现有数据（未补齐），可能不是最新行情";
                     dr = MessageBox.Show(this,
                         "「" + sid + "」要用全市场 " + checkedCount + " 只股票做筛选，\r\n"
                         // ⚠️ 新鲜度是**逐票**判定的：covered = 已更新到 expected 的只数，
@@ -1419,12 +1436,22 @@ private void StEnsureFresh(Dictionary<string, object> meta, Action then)
                         // 完全看不出「其实 5573 只还停在更早」。这里改成按只数说。
                         + "但其中只有 " + covered + " 只的行情更新到 " + expected
                         + "（其余 " + Math.Max(0, checkedCount - covered) + " 只还停在更早的交易日）。\r\n\r\n"
-                        + "· 现在补齐：预计 60~80 分钟（可随时关窗，断了也能从断点续上）\r\n"
-                        + "· 用现有数据继续：结果基于各票现有数据（未补齐），可能不是最新行情",
-                        AppTitle + " - 行情数据不是最新", MessageBoxButtons.YesNoCancel,
+                        + tail,
+                        AppTitle + " - 行情数据不是最新",
+                        hard ? MessageBoxButtons.YesNo : MessageBoxButtons.YesNoCancel,
                         MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
                 });
                 if (dr == DialogResult.Cancel) { Ui(delegate { _stFreshBusy = false; }); return; }
+                // hard 模式：不齐禁止运算（不再提供「用现有数据继续」）
+                if (hard && dr != DialogResult.Yes)
+                {
+                    Ui(delegate
+                    {
+                        _stFreshBusy = false;
+                        SetErr(_stResultStatus, "数据不齐，已禁止运行；请先在「数据下载」补齐或开启自动更新。");
+                    });
+                    return;
+                }
                 if (dr != DialogResult.Yes) { Ui(proceed); return; }
                 Ui(delegate { StWaitFresh(proceed, sid); });
             });

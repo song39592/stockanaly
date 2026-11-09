@@ -26,6 +26,7 @@ import strategies.core.data as sdata
 import strategies.core.registry as registry
 import strategies.core.universe as suniverse
 from strategies import report
+import features.download.service as dl_service
 
 router = APIRouter(prefix="/api/strategies", tags=["策略回测"])
 
@@ -279,6 +280,16 @@ def do_recommend(req: BacktestRequest):
     codes = _resolve_codes(req)
     if not codes:
         raise ValueError("股票池为空，请先选择回测范围")
+    # 行情数据不齐（落后最新交易日）直接拒绝运算，避免产出基于陈旧数据的误导结果。
+    # 与「数据新鲜度守卫」同源：need_refresh 为真（≥1% 标的落后基准交易日，停牌/退市豁免）
+    # 即视为不齐，不再提供「用现有数据继续」的退路。
+    fres = dl_service.freshness(codes)
+    if fres.get("need_refresh"):
+        return JSONResponse(status_code=409, content={"ok": False,
+            "error": {"code": "DATA_STALE",
+                      "message": "行情数据未更新到最新交易日（应有 %s，仅 %d/%d 只已更新）。"
+                                 "请先在「数据下载」开启『每天自动更新数据』或手动补齐后再运行。" % (
+                          fres.get("expected"), fres.get("covered", 0), fres.get("total", 0))}})
     out = backtest.start_reco_task(
         req.strategy_id, req.params, codes, req.start, req.end,
         req.initial_capital, req.commission,

@@ -331,6 +331,33 @@ class _IdxOnly:
         self.index = idx
 
 
+def next_trading_day(date_str: str) -> str:
+    """`date_str` 之后的第一个交易日（含未来日），作为推荐的**执行日**。
+
+    推荐信号基于「最新已下载交易日」，但收盘后已无法在当天交易，
+    真正能下单的是下一个交易日。日历优先用 A 股交易日历，取不到退化为工作日。
+    """
+    try:
+        base = dt.date.fromisoformat(str(date_str)[:10])
+    except (ValueError, TypeError):
+        base = dt.date.today()
+    try:
+        from features.market.service import _a_share_trade_days
+        days = _a_share_trade_days()
+    except Exception:                       # noqa: BLE001 - 日历不可用退化为星期
+        days = set()
+    if days:
+        cand = [d for d in days if d > base.isoformat()]
+        if cand:
+            return min(cand)
+    cur = base
+    for _ in range(14):                     # 退化：逐日找下一个周一~周五
+        cur += dt.timedelta(days=1)
+        if cur.weekday() < 5:
+            return cur.isoformat()
+    return base.isoformat()
+
+
 def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
                   start: str | None = None, end: str | None = None,
                   initial_capital: float = 100000.0, commission: float = 0.0003,
@@ -494,6 +521,7 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
             "params": params or {},
         },
         "date": date or end,
+        "execution_date": next_trading_day(date or end),
         "target_capital": round(target_capital, 2),
         "buy": buy,
         "sell": sell,
