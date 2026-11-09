@@ -236,6 +236,10 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
     _BT_TRADES = trades
 
     warnings = list(flags)
+    # 成交模型：涨停买不进已顺延至次日开盘价买入（覆盖所有策略）；
+    # 其余成本/整手/停牌/跌停卖不出约束见 feasibility 字段，不在此重复。
+    warnings.append("成交模型：涨停买不进已顺延至次日开盘价买入（覆盖所有策略）；"
+                    "整手/停牌/跌停卖不出仍只影响明细可行性")
     # 幸存者偏差：任何模式都必须显式声明，**不允许静默**（偏差消不掉，但必须让人看见）
     warnings.append(data.survivorship_note(universe_mode, len(usable)))
     if window:
@@ -302,7 +306,8 @@ def _feasibility_summary(trades: list[dict], n_checked: int) -> dict:
         "trades": n,
         "tradable_ratio": round(ok_n / n, 4) if n else None,
         "blocked_counts": blocked,
-        "note": "可行性口径独立于 equity（净值不含整手/涨跌停/停牌）",
+        "note": "净值已对涨停买不进做次日开盘顺延（equity 含该修正）；"
+                "整手/停牌/跌停卖不出约束仍只影响明细可行性",
     }
 
 
