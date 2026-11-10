@@ -110,6 +110,9 @@ class BacktestRequest(BaseModel):
     universe_mode: str = "interval_data"   # interval_data / pool_snapshot / index_constituent
     benchmark: Optional[str] = None        # 指数代码；不给则用「等权全池买入持有」作默认基准
     ruin_threshold: Optional[float] = None  # 组合净值跌破「该比例 × 初始资金」即破产截断；None=不截断，0.0=归零截断
+    # 单日策略的**目标执行日**（YYYY-MM-DD）。不给则按收盘前后自动选：
+    # 收盘前=今天、收盘后=下一交易日。仅 /recommend 使用，回测忽略。
+    target_date: Optional[str] = None
 
 
 _CODE_ERR = {
@@ -280,19 +283,55 @@ def do_recommend(req: BacktestRequest):
     codes = _resolve_codes(req)
     if not codes:
         raise ValueError("股票池为空，请先选择回测范围")
-    # 行情数据不齐（落后最新交易日）直接拒绝运算，避免产出基于陈旧数据的误导结果。
-    # 与「数据新鲜度守卫」同源：need_refresh 为真（≥1% 标的落后基准交易日，停牌/退市豁免）
-    # 即视为不齐，不再提供「用现有数据继续」的退路。
-    fres = dl_service.freshness(codes)
+
+    # ---- 单日策略：目标执行日 → 信号日 ----
+    # 口径恒为「前一交易日收盘信号 → 本交易日执行」。收盘前默认执行日=今天
+    # （信号=上一交易日，今天还能下单）；收盘后默认=下一交易日（信号=今天）。
+    # 日期控件可任选一天：选到非交易日会**顺延到下一个交易日**执行（周末不开市）；
+    # 但**不允许顺延到下一交易日之后** —— 那天连信号都还没产生。
+    ctx = dl_service.trading_day_context()
+    picked = str(req.target_date or ctx["default_exec_date"])[:10]
+    ctx_sel = dl_service.trading_day_context(picked)
+    target = ctx_sel["exec_date"]          # 顺延后的真实执行日
+    signal_date = ctx_sel["signal_date"]
+    if target < ctx["min_exec_date"]:
+        return JSONResponse(status_code=400, content={"ok": False,
+            "error": {"code": "BAD_TARGET_DATE",
+                      "message": "目标执行日 %s 早于本地数据覆盖范围（最早 %s）。"
+                                 "请选择不早于该日期的执行日。" % (
+                                     target, ctx["min_exec_date"])}})
+    if target > ctx["next_trade_day"]:
+        return JSONResponse(status_code=400, content={"ok": False,
+            "error": {"code": "BAD_TARGET_DATE",
+                      "message": "目标执行日 %s 超出可用范围（最晚 %s）。"
+                                 "该日对应的信号尚未产生，无法计算。" % (
+                                     target, ctx["next_trade_day"])}})
+    if signal_date > ctx["today"]:
+        return JSONResponse(status_code=400, content={"ok": False,
+            "error": {"code": "BAD_TARGET_DATE",
+                      "message": "目标执行日 %s 对应的信号日 %s 尚未产生收盘数据，无法计算。"
+                                 % (target, signal_date)}})
+
+    # 数据齐否按**信号日**判定（不是笼统的「应有最新交易日」）：收盘后选
+    # 「今天执行」时信号是上一交易日、数据其实已齐，不该被今日缺口误伤。
+    # ⚠️ 不传 codes：传了会走「指定票逐只精确判定」，一只长期停牌股就能
+    #    永久卡死；与前端守卫一致用全市场 1% 容忍口径。
+    fres = dl_service.freshness(expected_day=signal_date)
     if fres.get("need_refresh"):
         return JSONResponse(status_code=409, content={"ok": False,
             "error": {"code": "DATA_STALE",
-                      "message": "行情数据未更新到最新交易日（应有 %s，仅 %d/%d 只已更新）。"
-                                 "请先在「数据下载」开启『每天自动更新数据』或手动补齐后再运行。" % (
-                          fres.get("expected"), fres.get("covered", 0), fres.get("total", 0))}})
+                      "message": "%s 收盘行情尚未下载完成（应有 %s，仅 %d/%d 只已更新），"
+                                 "无法生成 %s 执行的单日策略。"
+                                 "请开启『每天自动更新数据』或在「数据下载」手动补齐后再运行。" % (
+                          signal_date, fres.get("expected"), fres.get("covered", 0),
+                          fres.get("total", 0), target)}})
+
+    # ⚠️ 把 end 截断到信号日：否则收盘后数据已部分入库时，策略会读到
+    #    「今天」的不完整 K 线，等于用未来数据算今天的信号。
     out = backtest.start_reco_task(
-        req.strategy_id, req.params, codes, req.start, req.end,
+        req.strategy_id, req.params, codes, req.start, signal_date,
         req.initial_capital, req.commission,
+        execution_date=target, signal_date=signal_date,
     )
     if not out.get("ok"):
         return JSONResponse(status_code=409,

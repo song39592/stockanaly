@@ -361,7 +361,9 @@ def next_trading_day(date_str: str) -> str:
 def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
                   start: str | None = None, end: str | None = None,
                   initial_capital: float = 100000.0, commission: float = 0.0003,
-                  lookback: int = 250, progress=None) -> dict:
+                  lookback: int = 250, progress=None,
+                  execution_date: str | None = None,
+                  signal_date: str | None = None) -> dict:
     """当前策略推荐：按**最新一日**的目标仓位给出买入 / 卖出 / 持股三档。
 
     与回测共用同一套信号与 T+1 口径，只是不统计历史净值，只回答「今天怎么做」：
@@ -397,6 +399,11 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
         days = data.recent_trading_days(lookback)
         if len(days) >= 2:
             start, end = days[0], days[-1]
+    # 单日策略：强制把 end 锁在信号日。上面的自动回看会把 end 推到「本地最新
+    # 交易日」，收盘后当日数据部分入库时就会读到不完整的 K 线（未来函数）。
+    # 必须在回看之后再覆盖，否则被它抹掉。
+    if signal_date:
+        end = signal_date
 
     _require_pool(strategy_id, start, end)
 
@@ -521,7 +528,10 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
             "params": params or {},
         },
         "date": date or end,
-        "execution_date": next_trading_day(date or end),
+        # 路由层按「目标执行日」反推后传入 → 结果如实回显用户选的那一天；
+        # 直接调用（自检 / 旧调用方）时退化为「信号日的下一交易日」。
+        "execution_date": execution_date or next_trading_day(date or end),
+        "signal_date": signal_date or date or end,
         "target_capital": round(target_capital, 2),
         "buy": buy,
         "sell": sell,
@@ -595,7 +605,9 @@ def reco_result() -> dict | None:
 def start_reco_task(strategy_id: str, params: dict | None, codes: list[str],
                     start: str | None = None, end: str | None = None,
                     initial_capital: float = 100000.0,
-                    commission: float = 0.0003) -> dict:
+                    commission: float = 0.0003,
+                    execution_date: str | None = None,
+                    signal_date: str | None = None) -> dict:
     """启动一次后台推荐并**立即返回**；已有任务在跑时返回 ok=false（不排队）。
 
     并发上限为 1，与回测任务同理由：两个全市场并行会把 CPU 与 SQLite 读盘打满，
@@ -648,7 +660,9 @@ def start_reco_task(strategy_id: str, params: dict | None, codes: list[str],
             try:
                 out = run_recommend(strategy_id, params, codes, start, end,
                                    initial_capital, commission,
-                                   progress=_on_progress)
+                                   progress=_on_progress,
+                                   execution_date=execution_date,
+                                   signal_date=signal_date)
             except base.Cancelled:
                 with _RECO_LOCK:
                     _RECO_TASK.update(

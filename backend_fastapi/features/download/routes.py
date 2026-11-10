@@ -125,7 +125,7 @@ def auto_state(refresh: bool = False):
 
 
 @router.get("/freshness")
-def freshness(codes: str = ""):
+def freshness(codes: str = "", expected: str = ""):
     """**行情数据新鲜度**（第 24 项）：K 线页 / 策略页运行前的前置检查。
 
     `codes` 为逗号分隔的股票代码；**留空则统计全市场**（策略页的用法 ——
@@ -133,12 +133,34 @@ def freshness(codes: str = ""):
 
     返回里的 `expected` 是**交易日**而非自然日：收盘前不期望今天的数据，
     非交易日自动退到上一交易日。`stale_codes` 只回前若干只，够前端提示用。
+
+    `expected`（YYYY-MM-DD，可选）：单日策略选定执行日后，按其**信号日**判定
+    覆盖率 —— 不用它会误按「应有最新交易日」判定，收盘后数据未齐时把
+    「今天执行（用上一交易日信号）」也一并拦掉。
     """
     try:
         wanted = [c.strip() for c in str(codes or "").split(",") if c.strip()]
-        return {"ok": True, **download_service.freshness(wanted)}
+        day = str(expected or "").strip()[:10] or None
+        return {"ok": True, **download_service.freshness(wanted, expected_day=day)}
     except Exception as exc:                      # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"新鲜度检测失败：{exc}")
+
+
+@router.get("/date-context")
+def date_context(target: str = ""):
+    """**单日策略日期上下文**：目标执行日 / 对应信号日 / 数据是否齐 / 默认值。
+
+    收盘前默认「今天执行」（信号=上一交易日），收盘后默认「下一交易日执行」
+    （信号=今天）。前端据此渲染**日期控件**，不必自己猜交易日或收盘时点。
+
+    `target`（YYYY-MM-DD，可选）：用户当前选中的执行日。给定后按它反查信号日
+    并重新判定数据齐否（日期控件可任选一天，提示必须跟着选中的那天走）。
+    """
+    try:
+        day = str(target or "").strip()[:10] or None
+        return {"ok": True, **download_service.trading_day_context(day)}
+    except Exception as exc:                      # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"日期上下文获取失败：{exc}")
 
 
 @router.post("/sync-code")
