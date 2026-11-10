@@ -1843,12 +1843,16 @@ def settings_view() -> dict[str, Any]:
     }
 
 
-def tdx_status(path: str | None = None) -> dict[str, Any]:
+def tdx_status(path: str | None = None, coverage: bool = False) -> dict[str, Any]:
     """通达信目录检测结果（设置页 / 下载页用）：是否有效、有多少只、覆盖到哪天。
 
     没配置时**回退到自动检测**，与 `_resolve_codes` / `_tdx_root` 保持一致：
     配置存在数据库里，换数据目录后会是一个空库，若这里不回退，
     下载页的「同步通达信历史数据」会凭空空掉，看起来像「配置丢了」。
+
+    `coverage=True` 时额外做一次**全扫覆盖度统计**（最新日 / 起点 / 例外只数），
+    结果放在 `coverage` 字段里。这一步要读全部 .day 的头尾，冷盘 1~10 秒，
+    所以**不默认做**：设置页只想要「能不能用」，不必付这个代价。
     """
     configured = download_store.get_setting("tdx_path", "")
     target = path or configured or tdx_reader.auto_detect() or ""
@@ -1859,7 +1863,28 @@ def tdx_status(path: str | None = None) -> dict[str, Any]:
                 "markets": {}, "total_files": 0, "sample": "", "has_gbbq": False}
     info["configured"] = configured
     info["auto_detected"] = tdx_reader.auto_detect()
-    info["codes"] = len(tdx_reader.list_codes(target)) if info.get("valid") else 0
+    stats: dict[str, Any] = {}
+    if coverage and info.get("valid"):
+        try:
+            stats = tdx_reader.coverage_stats(target)
+        except Exception:                           # noqa: BLE001 - 统计失败不该拖垮检测
+            stats = {}
+        # 本机通达信比**库里**最新落后几个交易日 —— 这是「缺口到底多大」的可执行口径
+        # （通达信同步只能覆盖本地已有的日期，缺口必须用在线源补）。
+        try:
+            latest_map = _span_dates("latest", price_store.code_latest_dates)
+            tdx_last = str(stats.get("latest") or "")
+            if tdx_last and latest_map:
+                db_days = sorted({str(v)[:10] for v in latest_map.values()
+                                  if str(v)[:10] > tdx_last})
+                stats["gap_trade_days"] = len(db_days)
+                stats["db_latest"] = db_days[-1] if db_days else tdx_last
+        except Exception:                           # noqa: BLE001
+            pass
+    info["coverage"] = stats
+    # 全扫已经数过一遍 A 股文件，不必再 glob 一遍
+    info["codes"] = int(stats.get("files") or 0) if stats else (
+        len(tdx_reader.list_codes(target)) if info.get("valid") else 0)
     return info
 
 

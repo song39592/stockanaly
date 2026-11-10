@@ -180,7 +180,7 @@ namespace StockPool
             _dlTdxNote = Mute(Lbl("未检测到通达信目录：到「设置」页配置后出现本功能"));
             _dlTdxNote.AutoSize = false;
             _dlTdxNote.Width = 700;
-            _dlTdxNote.Height = 32;
+            _dlTdxNote.Height = 88;         // 最多 5 行（最新日 / 起点 / 缺口提示）
             AddRow(b4, Row(_dlTdxNote));
             _dlTdxBtn = MiniBtn("同步通达信历史数据", delegate { DlStart("tdx"); }, 176);
             AddRow(b4, Row(_dlTdxBtn));
@@ -471,7 +471,8 @@ namespace StockPool
                 string resp;
                 try
                 {
-                    if (!Probe(DlApi + "/tdx/status", 10000, out resp)) return;
+                    // coverage=true 会做一次全扫覆盖度统计（冷盘 1~10 秒，后端有 5 分钟缓存）
+                    if (!Probe(DlApi + "/tdx/status?coverage=true", 60000, out resp)) return;
                     var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
                     Ui(delegate { DlRenderTdx(root); });
                 }
@@ -493,10 +494,57 @@ namespace StockPool
                 return;
             }
             int codes = J.Int(J.GetFrom(root, "codes"));
-            var sample = Convert.ToString(J.GetFrom(root, "sample") ?? "");
-            _dlTdxNote.Text = string.Format("本机通达信：{0} 只 A 股，数据覆盖 {1}。"
-                + "同步只读取本地文件（秒级、不联网），不补更早的历史。", codes, sample);
+            var cover = J.GetFrom(root, "coverage") as Dictionary<string, object>;
+            var lines = new List<string>();
+            lines.Add(string.Format("本机通达信：{0} 只 A 股", codes));
+            if (cover != null)
+            {
+                var latest = Convert.ToString(J.GetFrom(cover, "latest") ?? "");
+                var firstMode = Convert.ToString(J.GetFrom(cover, "first_mode") ?? "");
+                if (latest.Length > 0)
+                {
+                    // 「最新日」用众数而不是区间：绝大多数票停在同一天，
+                    // 用「最早 ~ 最晚」的区间会被一只极端票带偏（新股/退市股）。
+                    double ratio = J.Num(J.GetFrom(cover, "at_latest_ratio"));
+                    int stale = J.Int(J.GetFrom(cover, "stale_count"));
+                    lines.Add(string.Format("日线最新 {0}（{1} 的股票到这一天，{2} 只因停牌/退市更早）",
+                        latest, DlPct(ratio), stale));
+                }
+                if (firstMode.Length > 0)
+                {
+                    int newStocks = J.Int(J.GetFrom(cover, "new_count"));
+                    lines.Add(string.Format("历史起点 多数票 {0}（另有 {1} 只新股按上市日起算）",
+                        firstMode, newStocks));
+                }
+                int gap = J.Int(J.GetFrom(cover, "gap_trade_days"));
+                var dbLatest = Convert.ToString(J.GetFrom(cover, "db_latest") ?? "");
+                if (gap > 0)
+                {
+                    lines.Add(string.Format("⚠ 本机通达信止于 {0}，库里已到 {1}（差 {2} 个交易日）",
+                        latest, dbLatest, gap));
+                    lines.Add("本地 .day 里就没有这几天，通达信同步补不了 —— 只能靠在线源补齐");
+                }
+                else if (latest.Length > 0)
+                {
+                    lines.Add("✓ 本机数据与库里最新一致，没有缺口");
+                }
+            }
+            else
+            {
+                var sample = Convert.ToString(J.GetFrom(root, "sample") ?? "");
+                lines.Add(string.Format("数据覆盖 {0}。", sample));
+                lines.Add("同步只读取本地文件（秒级、不联网），不补更早的历史。");
+            }
+            _dlTdxNote.Text = string.Join(Environment.NewLine, lines.ToArray());
             _dlTdxGroup.Visible = true;
+        }
+
+        /// <summary>比例转百分比文本（0.9973 → "99.7%"），固定小数点与 culture。</summary>
+        private static string DlPct(double ratio)
+        {
+            if (ratio <= 0) return "0%";
+            if (ratio > 1) ratio = 1;
+            return (ratio * 100).ToString("0.0", CultureInfo.InvariantCulture) + "%";
         }
 
         // ------------------------------------------------- 后台自动化（开关状态）

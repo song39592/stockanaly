@@ -107,10 +107,14 @@ def save_settings(req: SettingsRequest):
 
 
 @router.get("/tdx/status")
-def tdx_status(path: str | None = None):
-    """通达信目录检测（设置页用）：是否有效、覆盖多少只、数据到哪天。"""
+def tdx_status(path: str | None = None, coverage: bool = False):
+    """通达信目录检测（设置页用）：是否有效、覆盖多少只、数据到哪天。
+
+    `coverage=true` 附带**全扫覆盖度统计**（最新日 / 起点 / 例外只数），
+    冷盘要 1~10 秒，故只在下载页需要展示时才请求。
+    """
     try:
-        return {"ok": True, **download_service.tdx_status(path)}
+        return {"ok": True, **download_service.tdx_status(path, coverage=coverage)}
     except Exception as exc:                      # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"通达信目录检测失败：{exc}")
 
