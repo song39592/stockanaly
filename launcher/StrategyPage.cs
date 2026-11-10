@@ -1082,7 +1082,8 @@ private void StRefreshCurStrategy()
             // 目标执行日：交给后端反推信号日并截断行情，避免「选了今天却读到
             // 明天的 K 线」。未选 / 后端不可用时不带该字段 → 后端按收盘前后自动选。
             if (targetDate.Length > 0) req["target_date"] = targetDate;
-            _stRecoStatus.Text = "正在提交…（全市场约 7~10 分钟，可随时切走）";
+            _stRecoStatus.Text = "正在提交…（首次运行需联网取股票名称，约 1 分钟；"
+                + "随后全市场计算约 7~10 分钟，可随时切走）";
             _stRecoStatus.ForeColor = _cSub;
             string body = new JavaScriptSerializer().Serialize(req);
             System.Threading.Tasks.Task.Run(delegate
@@ -1787,9 +1788,17 @@ private void StRefreshCurStrategy()
                 StSetControlButtons(true, paused);
                 string text;
                 if (phase == "loading")
-                    text = name + " · 读取数据中 " + done + " / " + total + " 只（"
-                           + (total > 0 ? (done * 100.0 / total).ToString("F1") : "0.0")
-                           + "%）· 已用 " + ((int)elapsed) + " 秒";
+                {
+                    // total 还是 0 = 正在解析股票池。这步可能**联网**（排除 ST 特征
+                    // 要拉全市场股票名称，实测 30~60 秒），此时显示「0 / 0 只」像卡死
+                    // —— 直说在做什么，别让用户以为程序没反应。
+                    text = total > 0
+                        ? name + " · 读取数据中 " + done + " / " + total + " 只（"
+                          + (done * 100.0 / total).ToString("F1") + "%）· 已用 "
+                          + ((int)elapsed) + " 秒"
+                        : name + " · 正在准备股票池（含联网获取股票名称，约 1 分钟）· 已用 "
+                          + ((int)elapsed) + " 秒";
+                }
                 else
                     // 策略计算阶段外部无法细分（done 保持 total），别编百分比
                     text = name + " · 计算信号中 " + done + " / " + total + " 只 · 已用 "
