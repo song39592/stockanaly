@@ -85,11 +85,21 @@ namespace StockPool
         private FlowLayoutPanel _stRecentCards;
         private StockGrid _stRecentGrid;
 
-        // ⑤ 当前策略推荐（买入 / 卖出 / 持股）
+        // ⑤ 单日策略（买入 / 卖出 / 持股）
         private Label _stRecoStatus;
         private FlowLayoutPanel _stRecoCards;
         private StockGrid _stBuyGrid, _stSellGrid, _stHoldGrid;
         private GroupBox _stBuyGroup, _stSellGroup;   // 标题含「执行日」，渲染时改写
+        // 目标执行日（日期控件，可任选一天）：收盘前默认「今天」（信号=上一交易日），
+        // 收盘后默认「下一交易日」（信号=今天）。默认日期与「选了哪天→信号日是哪天、
+        // 数据齐不齐」都由后端 /date-context 下发，前端不自己猜交易日 / 收盘时点。
+        private DateTimePicker _stRecoDate;
+        private Label _stRecoDateHint;
+        private string _stRecoSignalDate = "";   // 当前选中执行日对应的信号日
+        private string _stRecoExecDate = "";     // 顺延后的真实执行日（非交易日→下一交易日）
+        private bool _stRecoDateLoading;
+        private bool _stRecoDateInit;           // 首次加载：把控件置为后端给的默认执行日
+        private string _stFreshExpected = "";   // 本次新鲜度守卫的信号日（单日策略专用）
 
         // ⑥ 历史结果（已保存回测报告的独立页签）
         private ListView _stHistList;
@@ -205,7 +215,7 @@ namespace StockPool
             _stStrip.Add("回测范围", StBuildScope);
             _stStrip.Add("回测结果", StBuildResult);
             _stStrip.Add("近期策略成果", StBuildRecent);
-            _stStrip.Add("当前策略推荐", StBuildReco);
+            _stStrip.Add("单日策略", StBuildReco);   // 原名「当前策略推荐」：只算一个交易日的动作
             _stStrip.Add("历史结果", StBuildHistory);
 
             // 「开始回测」提到页签栏，挂在「回测范围」后面（页签下标 1）：
@@ -220,6 +230,8 @@ namespace StockPool
         private void StOnEnter()
         {
             if (!_stLoaded) StLoadStrategies();
+            // 收盘时点会变（15:00 前后默认执行日不同），每次进策略页重拉一次日期上下文。
+            StLoadRecoDates();
             if (_stStrip != null)
             {
                 _stStrip.Select(_stStrip.Index);
@@ -335,12 +347,13 @@ private void StRefreshCurStrategy()
             _stCurStrategy.ForeColor = C.DownSoft;
         }
 
-        /// <summary>第 23 项：刷新「当前策略推荐」页顶部的说明行。</summary>
-private void StRefreshRecoTitle()
+        /// <summary>第 23 项：刷新「单日策略」页顶部的说明行。</summary>
+        private void StRefreshRecoTitle()
         {
             if (_stRecoTitle == null) return;
             _stRecoTitle.Text = "当前策略：" + StCurStrategyName()
-                + "　—　按它在**最新交易日**的信号给出操作建议；范围 / 资金 / 佣金沿用「回测范围」页的设置。";
+                + "　—　单日策略：按「目标执行日」前一交易日的收盘信号给出该日操作建议；"
+                + "范围 / 资金 / 佣金沿用「回测范围」页的设置。";
         }
 
         private void StAddParamEditor(Dictionary<string, object> p)
@@ -864,9 +877,9 @@ private void StRefreshRecoTitle()
             }
         }
 
-        // ---------------- ⑤ 当前策略推荐 ----------------
-        // 按最新交易日的信号给出三档建议：买入（今日建仓）/ 卖出（今日清仓）/
-        // 持股（继续持有，含建仓成本与浮盈亏）。
+        // ---------------- ⑤ 单日策略 ----------------
+        // 按「目标执行日」前一交易日的收盘信号给出三档建议：
+        // 买入（执行日建仓）/ 卖出（执行日清仓）/ 持股（继续持有，含建仓成本与浮盈亏）。
         private void StBuildReco(TableLayoutPanel stack)
         {
             // 第 23 项：标题行直接写出策略名。这一页的按钮是「生成当前推荐」，
@@ -875,6 +888,24 @@ private void StRefreshRecoTitle()
             _stRecoTitle = Mute(Lbl(""));
             AddRow(stack, _stRecoTitle);
             StRefreshRecoTitle();
+
+            // ---- 目标执行日：收盘前默认今天、收盘后默认下一交易日 ----
+            // 口径恒为「前一交易日收盘信号 → 本交易日执行」，默认值与「选了哪天
+            // → 信号日是哪天、数据齐不齐」都由后端 /date-context 下发
+            // （交易日历 / 是否收盘只在后端判一次）。
+            _stRecoDate = new DateTimePicker();
+            _stRecoDate.Width = 130;
+            _stRecoDate.Format = DateTimePickerFormat.Custom;
+            _stRecoDate.CustomFormat = "yyyy-MM-dd";
+            // 可选范围：下界=本地数据覆盖起点（由后端 /date-context 下发），
+            // 上界=今天+10 天（再往后信号日还没产生，算不出东西）。
+            // 后端仍会再校验一次，这里只是不让用户选到明显无意义的日子。
+            _stRecoDate.MinDate = DateTime.Today.AddYears(-1);
+            _stRecoDate.MaxDate = DateTime.Today.AddDays(10);
+            _stRecoDate.ValueChanged += delegate { StLoadRecoDates(); };
+            _stRecoDateHint = Mute(Lbl("正在获取交易日信息…"));
+            AddRow(stack, Row(Lbl("目标执行日"), _stRecoDate, _stRecoDateHint));
+
             AddRow(stack, Row(MiniBtn("生成当前推荐", delegate { StRunReco(); }, 130),
                 _stRecoStatus = Mute(Lbl("尚未生成"))));
 
@@ -925,6 +956,94 @@ private void StRefreshRecoTitle()
             _stHoldGrid.SetSortable(true);       // 第 20 项：可按浮盈亏/仓位排序
             AddRow(b3, _stHoldGrid);
             AddRow(stack, g3);
+
+            StLoadRecoDates();                  // 首次构建即填充下拉（StOnEnter 会再刷新一次）
+        }
+
+        /// <summary>
+        /// 拉取「目标执行日」上下文：默认日期、当前选中日期对应的信号日、
+        /// 该信号日数据是否齐。日期控件任选一天，所以每次变更都要重问后端
+        /// （交易日历与收盘时点只在后端判一次，前端不自己推）。
+        /// </summary>
+        private void StLoadRecoDates()
+        {
+            if (_stRecoDate == null || _stRecoDateLoading) return;
+            _stRecoDateLoading = true;
+            string picked = _stRecoDate.Value.ToString("yyyy-MM-dd");
+            RunUi<Dictionary<string, object>>(
+                delegate
+                {
+                    string body;
+                    string url = "http://127.0.0.1:8000/api/history/download/date-context?target=" + picked;
+                    if (!GetText(url, 20000, out body))
+                        return null;
+                    try { return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body); }
+                    catch { return null; }
+                },
+                delegate(Dictionary<string, object> j)
+                {
+                    _stRecoDateLoading = false;
+                    if (j == null || !J.IsOk(j))
+                    {
+                        if (_stRecoDateHint != null) _stRecoDateHint.Text = "交易日信息获取失败，将按系统默认执行日运行";
+                        return;
+                    }
+                    string def = J.StrOr(J.Get(j, "default_exec_date"), "");
+                    // 下界用后端给的「数据覆盖起点」，别让用户选到没有行情的年份
+                    string minDay = J.StrOr(J.Get(j, "min_exec_date"), "");
+                    if (minDay.Length > 0)
+                    {
+                        try
+                        {
+                            DateTime md = DateTime.Parse(minDay);
+                            if (md > _stRecoDate.MinDate) _stRecoDate.MinDate = md;
+                        }
+                        catch { }
+                    }
+                    // 首次加载：把控件置为后端给的默认执行日（收盘前=今天，
+                    // 收盘后=下一交易日）。置值会再次触发 ValueChanged → 重新拉一次，
+                    // 用 _stRecoDateInit 抑制，避免「拉到响应又改控件」的乒乓。
+                    if (!_stRecoDateInit && def.Length > 0)
+                    {
+                        _stRecoDateInit = true;
+                        try
+                        {
+                            DateTime d = DateTime.Parse(def);
+                            if (d >= _stRecoDate.MinDate && d <= _stRecoDate.MaxDate)
+                                _stRecoDate.Value = d;      // 触发再次加载（正常）
+                        }
+                        catch { }
+                    }
+                    StApplyRecoDateContext(j, picked);
+                },
+                delegate(Exception ex2)
+                {
+                    _stRecoDateLoading = false;
+                    if (_stRecoDateHint != null) _stRecoDateHint.Text = "交易日信息获取失败，将按系统默认执行日运行";
+                },
+                null);
+        }
+
+        /// <summary>把后端返回的信号日 / 数据齐否写进提示行。</summary>
+        private void StApplyRecoDateContext(Dictionary<string, object> j, string picked)
+        {
+            if (_stRecoDateHint == null) return;
+            string sig = J.StrOr(J.Get(j, "signal_date"), "");
+            string exec = J.StrOr(J.Get(j, "exec_date"), picked);
+            object readyObj = J.Get(j, "data_ready");
+            bool ready = readyObj is bool && (bool)readyObj;
+            _stRecoSignalDate = sig;
+            _stRecoExecDate = exec;
+            if (sig.Length == 0)
+            {
+                _stRecoDateHint.Text = "—";
+                return;
+            }
+            string tail = ready ? " · 数据已齐" : " · ⚠ " + sig + " 收盘数据未下载完成，无法生成该日策略";
+            object kindObj = J.Get(j, "picked_is_trade_day");
+            bool isTrade = !(kindObj is bool) || (bool)kindObj;
+            string kind = isTrade ? "" : "（非交易日，已顺延到 " + exec + "）";
+            _stRecoDateHint.Text = "信号日 " + sig + " 收盘 → " + exec + " 执行" + kind + tail;
         }
 
         private void StRunReco()
@@ -944,16 +1063,25 @@ private void StRefreshRecoTitle()
             // 占位（含等待补齐数据的整段时间）：否则用户在新鲜度检查期间
             // 再点一次，就会起两个全市场推荐。
             StJobReserve(ST_JOB_RECO);
-            // 第 24 项：与回测共用同一个数据新鲜度守卫；策略用点击时的快照。
-            // hard=true：当前策略推荐在数据不齐时禁止运算（不再给「用现有数据继续」）。
-            // abort：用户放弃（弹窗取消 / 数据不齐禁跑）时释放任务槽，别把闸门卡死。
-            StEnsureFresh(meta, delegate { StRunRecoInner(meta); }, true,
-                delegate { StJobRelease(); });
+            // 目标执行日取**点击时**的快照：等待数据补齐可能长达一小时，
+            // 期间用户改了日期，弹窗说的日子必须和真正提交的日子是同一个。
+            string targetDate = _stRecoExecDate.Length > 0
+                ? _stRecoExecDate
+                : (_stRecoDate != null ? _stRecoDate.Value.ToString("yyyy-MM-dd") : "");
+            string signalDate = _stRecoSignalDate;
+            // 第 24 项：与回测共用同一个数据新鲜度守卫。
+            // hard=true：数据不齐时不用旧数据冒充；仍弹窗给「等待补齐后自动运行」。
+            // abort：用户放弃时释放任务槽，别把闸门卡死。
+            StEnsureFresh(meta, delegate { StRunRecoInner(meta, targetDate); }, true,
+                delegate { StJobRelease(); }, signalDate, targetDate);
         }
 
-        private void StRunRecoInner(Dictionary<string, object> meta)
+        private void StRunRecoInner(Dictionary<string, object> meta, string targetDate)
         {
             var req = StRequest(meta, 0);
+            // 目标执行日：交给后端反推信号日并截断行情，避免「选了今天却读到
+            // 明天的 K 线」。未选 / 后端不可用时不带该字段 → 后端按收盘前后自动选。
+            if (targetDate.Length > 0) req["target_date"] = targetDate;
             _stRecoStatus.Text = "正在提交…（全市场约 7~10 分钟，可随时切走）";
             _stRecoStatus.ForeColor = _cSub;
             string body = new JavaScriptSerializer().Serialize(req);
@@ -1015,10 +1143,10 @@ private void StRefreshRecoTitle()
             StFillRecoGrid(_stSellGrid, j["sell"], false);
             StFillRecoGrid(_stHoldGrid, j["hold"], true);
 
-            // 信号日 = 推荐所基于的行情日；执行日 = 收盘后真正能下单的下一交易日。
-            // 收盘后算出来的「今日建仓/清仓」语义是错的，这里全部改写为执行日。
-            string sigDate = J.StrOr(j["date"], "");
-            string execDate = J.StrOr(j["execution_date"], sigDate);
+            // 信号日 = 推荐所基于的收盘行情日；执行日 = 用户选中的目标交易日。
+            // 两个都由后端按 target_date 反推后回显，前端不自己猜，避免口径不一致。
+            string sigDate = J.StrOr(J.Get(j, "signal_date"), J.StrOr(J.Get(j, "date"), ""));
+            string execDate = J.StrOr(J.Get(j, "execution_date"), sigDate);
             if (_stBuyGroup != null) _stBuyGroup.Text = "买入（" + execDate + " 建仓）";
             if (_stSellGroup != null) _stSellGroup.Text = "卖出（" + execDate + " 清仓）";
             _stRecoStatus.Text = "策略：" + StCurStrategyName() + " · 信号日 " + sigDate
@@ -1199,8 +1327,15 @@ private void StRefreshRecoTitle()
         /// `abort`：用户放弃（弹窗取消 / 数据不齐禁跑）时的收尾回调 —— 必须释放
         ///   统一任务区的互斥闸门，否则用户取消一次之后再也点不动任何运行按钮。
         /// </summary>
-        private void StEnsureFresh(Dictionary<string, object> meta, Action then, bool hard = false, Action abort = null)
+        private void StEnsureFresh(Dictionary<string, object> meta, Action then, bool hard = false,
+                                   Action abort = null, string signalDate = null, string execDate = null)
         {
+            // 单日策略：按选中执行日对应的**信号日**判定覆盖率，而不是笼统按
+            // 「应有最新交易日」。否则收盘后选「今天执行」（信号=上一交易日、
+            // 数据本已齐）也会被今日缺口误拦；选「明天执行」才需要今日数据齐。
+            string expectedDay = signalDate ?? "";
+            string fresUrl = "http://127.0.0.1:8000/api/history/download/freshness"
+                + (expectedDay.Length > 0 ? "?expected=" + expectedDay : "");
             if (_stFreshBusy)
             {
                 // ⚠️ 不能静默 return：上一次点击的检查还在飞时用户又选了个策略再点，
@@ -1212,6 +1347,10 @@ private void StRefreshRecoTitle()
                 return;
             }
             _stFreshBusy = true;
+            // ⚠️ 必须在忙检查**之后**再落到字段：否则另一次点击（哪怕被忙检查
+            //    挡下并 return）已经改掉了基准日，正在等待补齐的那一轮轮询就会
+            //    拿错基准判「齐了」。
+            _stFreshExpected = expectedDay;
             // 策略名取**点击时**的快照（而不是稍后 proceed 时再读列表选中项），
             // 保证「弹窗里写的策略」==「实际提交的策略」。
             string sid = J.StrOr(meta["name"], J.StrOr(meta["id"], "—"));
@@ -1234,7 +1373,7 @@ private void StRefreshRecoTitle()
                 try
                 {
                     f = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(
-                        VRequest("http://127.0.0.1:8000/api/history/download/freshness", null, 60000));
+                        VRequest(fresUrl, null, 60000));
                 }
                 catch (Exception ex)
                 {
@@ -1258,23 +1397,32 @@ private void StRefreshRecoTitle()
                 DialogResult dr = DialogResult.None;
                 Ui(delegate
                 {
-                    // hard=true（当前策略推荐）：不齐禁止运算，只给「补齐 / 取消」，
-                    // 不再提供「用现有数据继续」的退路（后端此时也会直接拒算）。
+                    // 单日策略（signalDate 非空）：把「缺哪天、影响哪天的策略」说清楚，
+                    // 而不是笼统的「行情数据不是最新」。仍保留「等待补齐后自动运行」。
+                    bool singleDay = _stFreshExpected.Length > 0;
+                    string head = singleDay
+                        ? "「" + sid + "」要生成 " + (string.IsNullOrEmpty(execDate) ? "目标日" : execDate)
+                          + " 执行的单日策略，\r\n需要 " + _stFreshExpected + " 的收盘行情作为信号，\r\n"
+                        : "「" + sid + "」要用全市场 " + checkedCount + " 只股票做筛选，\r\n";
                     string tail = hard
-                        ? "· 必须先补齐数据才能运行（不齐时运算结果不可信，已禁止运行）"
+                        ? "· 是：等待后台补齐完成后**自动运行**（预计 60~80 分钟，可切走）\r\n"
+                          + "· 否：取消本次运行（数据未齐时不会用旧数据冒充）\r\n\r\n"
+                          + "请开启「每天自动更新数据」，或在「数据下载」手动补齐。"
                         : "· 现在补齐：预计 60~80 分钟（可随时关窗，断了也能从断点续上）\r\n"
                           + "· 用现有数据继续：结果基于各票现有数据（未补齐），可能不是最新行情";
                     dr = MessageBox.Show(this,
-                        "「" + sid + "」要用全市场 " + checkedCount + " 只股票做筛选，\r\n"
+                        head
                         // ⚠️ 新鲜度是**逐票**判定的：covered = 已更新到 expected 的只数，
                         // latest = 全市场里最新那一只的日期（通常就是 expected）。
                         // 原来写「本地行情只更新到 <latest>（应有 <expected>）」在
                         // latest==expected 时会自相矛盾（"只更新到 10-13，应有 10-13"），
                         // 完全看不出「其实 5573 只还停在更早」。这里改成按只数说。
-                        + "但其中只有 " + covered + " 只的行情更新到 " + expected
+                        + "但 " + checkedCount + " 只里只有 " + covered + " 只更新到 " + expected
                         + "（其余 " + Math.Max(0, checkedCount - covered) + " 只还停在更早的交易日）。\r\n\r\n"
+                        + (singleDay ? "本地行情尚未更新到 " + expected + "，" : "")
+                        + (singleDay ? "无法生成该日执行的单日策略。\r\n\r\n" : "")
                         + tail,
-                        AppTitle + " - 行情数据不是最新",
+                        AppTitle + " - " + (singleDay ? "收盘数据未下载完成，无法运行" : "行情数据不是最新"),
                         hard ? MessageBoxButtons.YesNo : MessageBoxButtons.YesNoCancel,
                         MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
                 });
@@ -1282,11 +1430,15 @@ private void StRefreshRecoTitle()
                 // hard 模式：不齐禁止运算（不再提供「用现有数据继续」）
                 if (hard && dr != DialogResult.Yes)
                 {
+                    string why = _stFreshExpected.Length > 0
+                        ? _stFreshExpected + " 收盘数据未下载完成，无法生成 "
+                          + (string.IsNullOrEmpty(execDate) ? "目标日" : execDate) + " 的单日策略；已取消运行。"
+                        : "数据不齐，已禁止运行；请先在「数据下载」补齐或开启自动更新。";
                     Ui(delegate
                     {
                         _stFreshBusy = false;
-                        StJobText("数据不齐，已禁止运行；请先在「数据下载」补齐或开启自动更新。", true);
-                        SetErr(_stResultStatus, "数据不齐，已禁止运行；请先在「数据下载」补齐或开启自动更新。");
+                        StJobText(why, true);
+                        SetErr(_stResultStatus, why);
                         if (abort != null) abort();
                     });
                     return;
@@ -1307,21 +1459,28 @@ private void StRefreshRecoTitle()
             }
             // 等待补齐可能长达一小时，提示必须写在**顶部任务区**（常驻可见），
             // 写在结果页的话用户在别的子页根本不知道后台在等什么。
-            StJobText("正在等待行情数据补齐…（" + sid + "）", false);
-            SetErr(_stResultStatus, "正在等待行情数据补齐…（" + sid + "）");
+            string waitMsg = _stFreshExpected.Length > 0
+                ? "正在等待 " + _stFreshExpected + " 收盘行情补齐…（" + sid + "，完成后自动运行）"
+                : "正在等待行情数据补齐…（" + sid + "）";
+            StJobText(waitMsg, false);
+            SetErr(_stResultStatus, waitMsg);
             _stFreshTimer.Start();
             StPollFresh(then, sid);
         }
 
         private void StPollFresh(Action then, string sid)
         {
+            // 与 StEnsureFresh 保持同一个基准日：等待补齐期间不能退回「应有最新
+            // 交易日」，否则选「今天执行」时会一直等到今天数据补齐才放行。
+            string fresUrl = "http://127.0.0.1:8000/api/history/download/freshness"
+                + (_stFreshExpected.Length > 0 ? "?expected=" + _stFreshExpected : "");
             System.Threading.Tasks.Task.Run(delegate
             {
                 Dictionary<string, object> f = null;
                 try
                 {
                     f = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(
-                        VRequest("http://127.0.0.1:8000/api/history/download/freshness", null, 60000));
+                        VRequest(fresUrl, null, 60000));
                 }
                 catch (Exception) { return; }        // 单次失败下个周期再试
                 bool need = f.ContainsKey("need_refresh") && f["need_refresh"] is bool

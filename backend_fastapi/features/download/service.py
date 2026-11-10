@@ -1240,11 +1240,117 @@ def _options_for(mode: str, *, source: str = SOURCE_ONLINE, start_date: str | No
     }
 
 
-def freshness(codes: list[str] | None = None) -> dict[str, Any]:
+def _prev_trade_day(day: dt.date) -> dt.date:
+    """`day` 之前（不含）最近一个交易日；日历不可用时 `_is_trade_day` 退化为工作日。"""
+    cur = day - dt.timedelta(days=1)
+    for _ in range(14):
+        if _is_trade_day(cur):
+            return cur
+        cur -= dt.timedelta(days=1)
+    return day - dt.timedelta(days=1)
+
+
+def _next_trade_day(day: dt.date) -> dt.date:
+    """`day` 之后（不含）最近一个交易日；日历不可用时 `_is_trade_day` 退化为工作日。"""
+    cur = day + dt.timedelta(days=1)
+    for _ in range(14):
+        if _is_trade_day(cur):
+            return cur
+        cur += dt.timedelta(days=1)
+    return day + dt.timedelta(days=1)
+
+
+def _earliest_covered_day(earliest: dict[str, str]) -> str:
+    """库里「多数票已覆盖」的最早日期（可选执行日的下界）。
+
+    取**中位数**而不是最小值：一只 2005 年上市的极端老票会把最小值拉到
+    2005，看起来像可选十几年前，实际多数票那几年根本没数据。也不用交集
+    （会被那一只覆盖最短的票压得很窄）。中位数代表典型水平。
+
+    入参是 `code_earliest_dates()` 的结果（每只票的最早日 K 日期）——
+    不是 `code_latest_dates()`（那是最新日期，中位数会落在最近几天）。
+    """
+    if not earliest:
+        return ""
+    days = sorted(str(v)[:10] for v in earliest.values() if v)
+    if not days:
+        return ""
+    mid = len(days) // 2
+    return days[mid] if len(days) % 2 else min(days[mid - 1], days[mid])
+
+
+def trading_day_context(target: str | None = None) -> dict[str, Any]:
+    """「单日策略」日期上下文：今天 / 是否交易日 / 是否收盘 / 目标执行日。
+
+    口径恒为「**前一交易日收盘信号 → 本交易日执行**」（A 股 T+1）：
+      · 交易日收盘前：默认执行日 = 今天（用上一交易日收盘信号，今天还能下单）；
+      · 收盘后 / 非交易日：默认执行日 = 下一交易日（用刚收盘这天的信号）。
+
+    `target`（YYYY-MM-DD，可选）：用户选定的执行日。给定后反查它对应的
+    **信号日**（该日之前的最近交易日）并按信号日判定数据齐否 —— 日期控件
+    可任选一天，所以这里必须支持任意日期，而不是只有「今天/明天」两个候选。
+
+    `data_ready` 按信号日判定全市场覆盖率（与 `freshness` 同样的 1% 容忍，
+    停牌/退市股不会误伤）。
+    """
+    today = dt.date.today()
+    is_trade = _is_trade_day(today)
+    closed = _market_has_closed_today()
+    next_day = _next_trade_day(today)
+
+    # 默认执行日：收盘前=今天，收盘后/非交易日=下一交易日
+    default_exec = today if (is_trade and not closed) else next_day
+    picked: dt.date | None = None
+    if target:
+        try:
+            picked = dt.date.fromisoformat(str(target)[:10])
+        except (TypeError, ValueError):
+            picked = None
+    exec_day = picked or default_exec
+    # 选到非交易日（如周六）时**顺延到下一个交易日**再执行 —— 周末不开市，
+    # 「周六执行」没有意义。（不是往前顺：往前会用更早的信号，跟「目标执行日
+    # 之后的市场」对不上。）
+    if not _is_trade_day(exec_day):
+        exec_day = _next_trade_day(exec_day)
+    # 信号日 = 执行日**之前**的最近交易日（执行日当天的收盘数据要到收盘后才有，
+    # 用它当信号会取到尚不存在的数据）。
+    signal_day = _prev_trade_day(exec_day)
+    sig_iso = signal_day.isoformat()
+
+    latest = _span_dates("latest", price_store.code_latest_dates)
+    total = len(latest)
+    tolerance = max(5, int(total * 0.01))
+    covered = sum(1 for v in latest.values() if str(v)[:10] >= sig_iso)
+    return {
+        "today": today.isoformat(),
+        "is_trade_day": is_trade,
+        "market_closed": closed,
+        "prev_trade_day": _prev_trade_day(today).isoformat(),
+        "next_trade_day": next_day.isoformat(),
+        # 可选下界 = 库里最早有数据的交易日（多数票覆盖到的起点）。日期控件
+        # 可以往回选历史日期，算那天的单日策略；早于它就没有行情可用。
+        "min_exec_date": _earliest_covered_day(
+            _span_dates("earliest", price_store.code_earliest_dates)),
+        "default_exec_date": default_exec.isoformat(),
+        "exec_date": exec_day.isoformat(),
+        "picked_date": (picked or default_exec).isoformat(),
+        "signal_date": sig_iso,
+        "exec_is_trade_day": _is_trade_day(exec_day),
+        "picked_is_trade_day": _is_trade_day(picked or default_exec),
+        "covered": covered,
+        "total": total,
+        "data_ready": total > 0 and (total - covered) <= tolerance,
+    }
+
+
+def freshness(codes: list[str] | None = None,
+              expected_day: str | None = None) -> dict[str, Any]:
     """行情数据新鲜度（第 24 项）：K 线页 / 策略页运行前的前置检查。
 
     `codes` 为空 = 统计全市场（策略页的用法）。**判定基准是交易日**
     （`_expected_data_day`），不是自然日 —— 否则盘中与长假后都会误报缺口。
+    `expected_day` 可覆盖基准日：单日策略选定「执行日」后，要按其对应的
+    **信号日**判定数据齐否，而不是笼统按「应有最新交易日」。
 
     返回 `need_refresh` 给前端决定「是否要先补数据」。刻意**不在这里自动启动
     下载**：全市场一轮 60~80 分钟（实测吞吐 1.2~1.4 只/秒），同步等待不现实；
@@ -1253,9 +1359,11 @@ def freshness(codes: list[str] | None = None) -> dict[str, Any]:
     wanted = [str(c).strip() for c in (codes or []) if str(c).strip()]
     latest = price_store.code_latest_dates()
     if not latest:
-        return {"expected": None, "total": 0, "covered": 0, "stale": 0,
-                "latest": None, "need_refresh": bool(wanted), "checked": []}
-    expected = _expected_data_day()
+        return {"expected": expected_day, "total": 0, "covered": 0, "stale": 0,
+                "latest": None, "need_refresh": bool(wanted), "checked": [],
+                "market_closed": _market_has_closed_today(),
+                "next_trade_day": _next_trade_day(dt.date.today()).isoformat()}
+    expected = expected_day or _expected_data_day()
     if wanted:
         checked = [c for c in wanted if c in latest]
         # 库里完全没有的票也算缺口（第一次打开的新股）
@@ -1281,6 +1389,7 @@ def freshness(codes: list[str] | None = None) -> dict[str, Any]:
         "need_refresh": _need,
         "stale_examples": (stale_codes + missing)[:10],
         "market_closed": _market_has_closed_today(),
+        "next_trade_day": _next_trade_day(dt.date.today()).isoformat(),
     }
 
 
@@ -1817,12 +1926,16 @@ def settings_view() -> dict[str, Any]:
     }
 
 
-def tdx_status(path: str | None = None) -> dict[str, Any]:
+def tdx_status(path: str | None = None, coverage: bool = False) -> dict[str, Any]:
     """通达信目录检测结果（设置页 / 下载页用）：是否有效、有多少只、覆盖到哪天。
 
     没配置时**回退到自动检测**，与 `_resolve_codes` / `_tdx_root` 保持一致：
     配置存在数据库里，换数据目录后会是一个空库，若这里不回退，
     下载页的「同步通达信历史数据」会凭空空掉，看起来像「配置丢了」。
+
+    `coverage=True` 时额外做一次**全扫覆盖度统计**（最新日 / 起点 / 例外只数），
+    结果放在 `coverage` 字段里。这一步要读全部 .day 的头尾，冷盘 1~10 秒，
+    所以**不默认做**：设置页只想要「能不能用」，不必付这个代价。
     """
     configured = download_store.get_setting("tdx_path", "")
     target = path or configured or tdx_reader.auto_detect() or ""
@@ -1833,7 +1946,28 @@ def tdx_status(path: str | None = None) -> dict[str, Any]:
                 "markets": {}, "total_files": 0, "sample": "", "has_gbbq": False}
     info["configured"] = configured
     info["auto_detected"] = tdx_reader.auto_detect()
-    info["codes"] = len(tdx_reader.list_codes(target)) if info.get("valid") else 0
+    stats: dict[str, Any] = {}
+    if coverage and info.get("valid"):
+        try:
+            stats = tdx_reader.coverage_stats(target)
+        except Exception:                           # noqa: BLE001 - 统计失败不该拖垮检测
+            stats = {}
+        # 本机通达信比**库里**最新落后几个交易日 —— 这是「缺口到底多大」的可执行口径
+        # （通达信同步只能覆盖本地已有的日期，缺口必须用在线源补）。
+        try:
+            latest_map = _span_dates("latest", price_store.code_latest_dates)
+            tdx_last = str(stats.get("latest") or "")
+            if tdx_last and latest_map:
+                db_days = sorted({str(v)[:10] for v in latest_map.values()
+                                  if str(v)[:10] > tdx_last})
+                stats["gap_trade_days"] = len(db_days)
+                stats["db_latest"] = db_days[-1] if db_days else tdx_last
+        except Exception:                           # noqa: BLE001
+            pass
+    info["coverage"] = stats
+    # 全扫已经数过一遍 A 股文件，不必再 glob 一遍
+    info["codes"] = int(stats.get("files") or 0) if stats else (
+        len(tdx_reader.list_codes(target)) if info.get("valid") else 0)
     return info
 
 
