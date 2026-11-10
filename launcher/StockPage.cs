@@ -344,12 +344,11 @@ namespace StockPool
         //   老链路读到的其实是**空串** → 走错分支（当成指标名）→ 股票根本没换。
         //   2026-11-10 实测：输入 600812，IND 日志仍是上一只 002285、页面也没切。
         //   文本只当「用户输入的内容」，不当「传参通道」。
-        private void StockOpen() { StockOpen(null); }
-
-        /// <summary>打开个股 / 切换指标。`code` 为 null 时取输入框文本（兼容旧调用方）。</summary>
+        /// <summary>打开个股 / 切换指标。`code` 为 6 位数字 → 打开个股；否则按指标名 / id 切换主图 / 副图。
+        /// **代码必须显式传进来**（无参重载已移除）：输入框文本会被 HideQuickSearch 清空，
+        /// 拿它当传参通道 = 读到空串 → 走错分支（2026-11-10 实测：输入 600812，股票没换）。</summary>
         private void StockOpen(string code)
         {
-            if (code == null) code = _quickSearch.Text;
             code = (code ?? "").Trim();
             _quickActiveCode = code;                    // 记入激活字段，供异步守卫使用（与输入框文本解耦）
             if (!Regex.IsMatch(code, "^[0-9]{6}$"))
