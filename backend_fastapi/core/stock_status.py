@@ -75,3 +75,16 @@ def is_suspended_like(code: str) -> bool:
     """是否已被标记为停牌 / 退市（供 `_stamp_span` 排除并集起点用）。"""
     s = get_status(code)
     return s is not None and s["status"] in (STATUS_SUSPENDED, STATUS_DELISTED)
+
+
+def suspended_like_codes() -> set[str]:
+    """一次取出**全部**被标记为停牌 / 退市的代码。
+
+    给「全库扫描」类判定用（stale 口径、每日自动更新的排队列）：
+    逐票调 `is_suspended_like` 是几千次小查询，而这里一次就取全。
+    """
+    with _lock, _conn() as conn:
+        rows = conn.execute(
+            "SELECT code FROM stock_status WHERE status IN (?, ?)",
+            (STATUS_SUSPENDED, STATUS_DELISTED)).fetchall()
+    return {str(r["code"]) for r in rows}
