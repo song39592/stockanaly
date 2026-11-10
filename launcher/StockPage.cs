@@ -337,9 +337,20 @@ namespace StockPool
         }
 
         // ---- 打开（输入来自右下角隐藏输入框；见 QuickSearch.cs）----
-        private void StockOpen()
+        //
+        // ⚠️ 代码**显式传进来**，不再从 `_quickSearch.Text` 里读：
+        //   输入框文本会被 `SelectTab` 内部的 `HideQuickSearch()` 清空（那是「切页时
+        //   顺手收起输入框」的副作用）→ 于是「先设文本 → SelectTab → StockOpen」这条
+        //   老链路读到的其实是**空串** → 走错分支（当成指标名）→ 股票根本没换。
+        //   2026-11-10 实测：输入 600812，IND 日志仍是上一只 002285、页面也没切。
+        //   文本只当「用户输入的内容」，不当「传参通道」。
+        private void StockOpen() { StockOpen(null); }
+
+        /// <summary>打开个股 / 切换指标。`code` 为 null 时取输入框文本（兼容旧调用方）。</summary>
+        private void StockOpen(string code)
         {
-            string code = _quickSearch.Text.Trim();
+            if (code == null) code = _quickSearch.Text;
+            code = (code ?? "").Trim();
             _quickActiveCode = code;                    // 记入激活字段，供异步守卫使用（与输入框文本解耦）
             if (!Regex.IsMatch(code, "^[0-9]{6}$"))
             {
@@ -480,8 +491,7 @@ namespace StockPool
                 // 打开上次的个股：仅在还没打开任何票时，避免覆盖用户刚做的操作
                 if (_stockCurrent == null && !string.IsNullOrEmpty(ls.code) && Regex.IsMatch(ls.code, "^[0-9]{6}$"))
                 {
-                    _quickSearch.Text = ls.code;
-                    StockOpen();
+                    StockOpen(ls.code);
                 }
             }
             catch { }
@@ -903,7 +913,7 @@ namespace StockPool
                 btn.ForeColor = cur ? Color.White : _cText;
                 string name = string.IsNullOrEmpty(h.Name) ? "" : ("  " + h.Name);
                 btn.Text = h.Code + name;
-                btn.Click += delegate { _quickSearch.Text = h.Code; StockOpen(); _stockStrip.Select(0); };
+                btn.Click += delegate { StockOpen(h.Code); _stockStrip.Select(0); };
                 btn.MouseUp += delegate(object s, MouseEventArgs e)
                 {
                     if (e.Button == MouseButtons.Right) StockRemoveHistory(h.Code);

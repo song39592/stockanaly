@@ -662,7 +662,14 @@ namespace StockPool
         /// <summary>切换标签：只显示对应页面，并刷新标签行配色。</summary>
         private void SelectTab(int index)
         {
-            if (index < 0 || index >= _tabPages.Count) return;
+            if (index < 0 || index >= _tabPages.Count)
+            {
+                // 页签下标失配时**必须留痕**：静默 return 会表现为「点了没反应 / 没跳页」，
+                // 且事后无从排查。
+                Log("页面", string.Format("{0} SelectTab 越界 index={1} pages={2} cur={3}",
+                    _stamp(), index, _tabPages.Count, _tabIndex));
+                return;
+            }
             // 第 20 项：ESC 返回点只在「表格跳转」这条路上有效。带 ESC 返回返回到本页时
             // 要清掉（见 EscReturnFromStock），而用户**手动**切到别的页签同样意味着
             // 「放弃返回意图」—— 否则他离开个股页去别处办事，回头按ESC 会被拽回来。
