@@ -10,7 +10,11 @@ pydantic
 python-dotenv
 pypdf
 python-multipart
-pypinyin
+
+# optional 标记 = **可选依赖**：缺失只让对应功能降级，**不阻断启动**。
+#   判据 = 代码里该库是 try/except 软 import（缺了主流程照常，只是那个功能失效）。
+#   仍会被自动安装尝试修复；离线设备装不上时也不该拦住整个程序。
+pypinyin  # optional: 缺了仅「股票名称拼音搜索」失效，其余功能正常
 
 # pandas / numpy 是 akshare 的传递依赖，但跨平台最易出现 _libs / ABI 不匹配
 # （macOS arm64 尤其），显式限版本，避免不同设备各自解析到不兼容的新版本。

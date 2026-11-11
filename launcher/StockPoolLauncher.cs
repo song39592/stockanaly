@@ -1752,6 +1752,9 @@ namespace StockPool
             if (r.Ok)
             {
                 Ui(delegate { Log("环境", "环境检查通过：Python " + (r.Version ?? "-")); });
+                // ⚠️ Warnings 在「检查通过」时也要打出来 —— 否则「依赖版本不符」这类
+                //    只影响可选功能、但值得提醒的提示会被整段吞掉（没人看日志就白做了）。
+                Ui(delegate { foreach (var w in r.Warnings) Log("环境", "提示：" + w); });
                 return true;
             }
             Ui(delegate
@@ -1847,6 +1850,34 @@ namespace StockPool
                     else
                         r.Problems.Add("后端依赖不完整（requirements.txt 没装齐）" + Brief(depOut));
                 }
+
+                // ---- 按 requirements.txt **逐包**核对「装没装」 ----
+                // ⚠️ 单一来源：backend_fastapi\check_deps.py。
+                //    不要再手抄 import 清单 —— 过去 launcher 与 install_env.ps1 各抄了一份，
+                //    两份**都漏了 pypinyin**（11-05 才加进 requirements.txt，venv 却是 9-15 建的），
+                //    于是缺它时这里判定「环境完整」→ 永远不触发安装 → 拼音搜索静默失效，
+                //    而界面 / 后端 / 健康检查**全都正常**，没有任何一处会报错。
+                //    脚本不存在 = 目录是老版本 → 跳过这项检查，不阻塞启动（老目录本来也没这要求）。
+                var depsScript = Path.Combine(_root, "backend_fastapi", "check_deps.py");
+                if (File.Exists(depsScript))
+                {
+                    int chkCode;
+                    var chkOut = RunCapture(py, "\"" + depsScript + "\" --json", 60000, out chkCode);
+                    var missing = ParseMissingDeps(chkOut);
+                    if (missing.Count > 0)
+                        r.Problems.Add("缺少依赖：" + string.Join("、", missing.ToArray())
+                                     + "（按 requirements.txt 逐包核对）");
+                    // ⚠️ **可选依赖缺失只提示、不拦启动**：缺 pypinyin 只会让
+                    //    「股票名称拼音搜索」失效，其余功能照常 —— 离线设备上更不能
+                    //    因为一个可选库把整个程序卡死。给出可执行的下一步即可。
+                    foreach (var om in ParseOptionalMissing(chkOut))
+                        r.Warnings.Add(om + "（可选依赖，缺失只让对应功能降级，不影响其它功能）；"
+                                     + "修复：运行 launcher\\install_env.ps1 或在「服务控制台」点『检查/修复环境』");
+                    // 版本不符只作**提示**，不进 Problems —— 越界的版本多半还能跑，
+                    // 贸然降级可能打断正在运行的任务（pip 换版本会换掉已加载的 .pyd）。
+                    foreach (var mm in ParseVersionMismatch(chkOut))
+                        r.Warnings.Add(mm);
+                }
             }
 
             string node = UiSync<string>(delegate
@@ -1859,6 +1890,96 @@ namespace StockPool
                 r.Warnings.Add("agent_dsh\\node_modules 缺失：AI 服务（:3080）起不来，后端和网页不受影响");
 
             return r;
+        }
+
+        /// <summary>解析 backend_fastapi\check_deps.py --json 的输出，取「可选依赖缺失」的包名。</summary>
+        /// <remarks>
+        /// 可选依赖（requirements.txt 里标了 `# optional`）缺失 = 只让对应功能降级，
+        /// 不该拦住启动。解析不了就返回空列表（宁可漏报也别误报）。
+        /// </remarks>
+        private static List<string> ParseOptionalMissing(string jsonOut)
+        {
+            var list = new List<string>();
+            try
+            {
+                var root = DepsJson(jsonOut);
+                if (root == null) return list;
+                var arr = J.Get(root, "optional_missing") as System.Collections.IList;
+                if (arr == null) return list;
+                foreach (var o in arr)
+                {
+                    string s = Convert.ToString(o);
+                    if (!string.IsNullOrEmpty(s)) list.Add(s);
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        /// <summary>解析 backend_fastapi\check_deps.py --json 的输出，取「版本不符」的说明。</summary>
+        /// <remarks>
+        /// 解析不了就返回空列表 —— **检查失败 ≠ 版本有问题**（宁可漏报也别误报）。
+        /// </remarks>
+        private static List<string> ParseVersionMismatch(string jsonOut)
+        {
+            var list = new List<string>();
+            try
+            {
+                var root = DepsJson(jsonOut);
+                if (root == null) return list;
+                var arr = J.Get(root, "mismatch") as System.Collections.IList;
+                if (arr == null) return list;
+                foreach (var o in arr)
+                {
+                    var it = o as Dictionary<string, object>;
+                    if (it == null) continue;
+                    string name = J.StrAt(it, "name");
+                    if (name.Length == 0) continue;
+                    list.Add("依赖版本不符：" + name + " 装了 " + J.StrAt(it, "installed")
+                             + "（要求 " + J.StrAt(it, "spec") + "）");
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        /// <summary>解析 backend_fastapi\check_deps.py --json 的输出，取「没装的包名」列表。</summary>
+        /// <remarks>
+        /// 解析不了就返回空列表 —— **检查失败 ≠ 依赖缺失**。
+        /// 宁可漏报（顶多不触发自动安装）也不要误报（把好好的环境说成缺一堆包，
+        /// 引导用户去反复重装，越装越乱）。
+        /// </remarks>
+        private static List<string> ParseMissingDeps(string jsonOut)
+        {
+            var list = new List<string>();
+            try
+            {
+                var root = DepsJson(jsonOut);
+                if (root == null) return list;
+                var arr = J.Get(root, "missing") as System.Collections.IList;
+                if (arr == null) return list;
+                foreach (var o in arr)
+                {
+                    string s = Convert.ToString(o);
+                    if (!string.IsNullOrEmpty(s)) list.Add(s);
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        /// <summary>从 check_deps.py 的输出里取出 JSON 段并反序列化。</summary>
+        /// <remarks>
+        /// ⚠️ RunCapture 把 stdout 与 stderr **合并**成一段文本，
+        /// python 的警告等可能混在 JSON 前后 → 先截出 {...} 那一段再解析。
+        /// </remarks>
+        private static Dictionary<string, object> DepsJson(string jsonOut)
+        {
+            if (string.IsNullOrEmpty(jsonOut)) return null;
+            int i = jsonOut.IndexOf('{');
+            int j = jsonOut.LastIndexOf('}');
+            if (i >= 0 && j > i) jsonOut = jsonOut.Substring(i, j - i + 1);
+            return J.Ser().Deserialize<Dictionary<string, object>>(jsonOut);
         }
 
         /// <summary>跑一次环境安装脚本（PowerShell），输出实时进日志框，同时收集全文（失败时落盘 + 弹窗展示）。</summary>

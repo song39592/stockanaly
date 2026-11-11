@@ -269,11 +269,48 @@ if ($LASTEXITCODE -ne 0) {
 # ---------------------------------------------------------------------------
 # 4. 校验依赖真的能导入
 # ---------------------------------------------------------------------------
-Say '[3/4] 校验依赖导入...'
+Say '[3/4] 校验依赖...'
+
+# ---- 3.1 逐包核对 requirements.txt（**单一来源**：backend_fastapi\check_deps.py）----
+# ⚠️ 别再手抄 import 清单：过去 launcher 与本脚本各抄了一份，两份**都漏过 pypinyin**
+#    （11-05 才加进 requirements.txt，venv 却是 9-15 建的）—— 于是缺它时两处都判定
+#    「装齐了」→ 永远不装 → 拼音搜索整片失效，而界面/后端/健康检查全都正常，无任何报错。
+#    脚本不存在 = 目标目录是老版本 → 跳过这项，不阻塞安装。
+$depCheck = Join-Path $backendDir 'check_deps.py'
+if (Test-Path -LiteralPath $depCheck) {
+    $depJson = (& $venvPy $depCheck --json 2>&1 | Out-String)
+    $dep = $null
+    try { $dep = $depJson | ConvertFrom-Json } catch { $dep = $null }
+    if ($dep -and $dep.missing -and $dep.missing.Count -gt 0) {
+        Say '       依赖没装齐（按 requirements.txt 逐包核对）：'
+        foreach ($m in $dep.missing) { Say "         $m" }
+        Say ''
+        Say '[FATAL] 装完仍缺依赖，请检查网络 / 代理 / pip 源后重跑本脚本。'
+        Say "       也可手动执行：`"$venvPy`" -m pip install -r `"$reqFile`""
+        Wait-Enter
+        exit 5
+    }
+    Say '       依赖逐包核对通过。'
+    # ⚠️ **可选依赖缺失**（requirements.txt 里标了 `# optional`）：只让对应功能降级，
+    #    不阻断 —— 离线设备上不能因为一个可选库把整个程序卡死。只提示。
+    if ($dep -and $dep.optional_missing -and $dep.optional_missing.Count -gt 0) {
+        foreach ($m in $dep.optional_missing) {
+            Say "         可选依赖缺失：$m（不影响其它功能；如需修复可重跑本脚本）"
+        }
+    }
+    # 版本不符**只提示、不阻塞**：越界的版本多半还能跑，贸然降级可能打断正在运行的任务
+    if ($dep -and $dep.mismatch -and $dep.mismatch.Count -gt 0) {
+        foreach ($m in $dep.mismatch) {
+            Say "         版本不符：$($m.name) 装了 $($m.installed)（要求 $($m.spec)）"
+        }
+    }
+}
+
+# ---- 3.2 import 校验：装齐了**能不能真的用起来**（如 pandas 的 .pyd 被系统策略拦住）----
 $verifyLog = Join-Path $env:TEMP 'stockpool_env_verify.log'
 & $venvPy -c 'import uvicorn, fastapi, akshare, pypdf, multipart, requests, bs4, dotenv' *> $verifyLog
 if ($LASTEXITCODE -eq 0) {
-    Say '       后端依赖校验通过。'
+    Say '       后端依赖导入校验通过。'
 } else {
     foreach ($l in @(Get-Content -LiteralPath $verifyLog -ErrorAction SilentlyContinue)) { Say $l }
     Say ''

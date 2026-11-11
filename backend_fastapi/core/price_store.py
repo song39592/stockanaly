@@ -390,9 +390,12 @@ def refresh_stock_meta() -> dict:
     """全量拉一次 A 股列表（akshare），与本地 stock_meta 做差量：
 
     - 新增的 INSERT、退市的 DELETE、名称变更（极少见）的 UPDATE；
+    - **拼音回填**（pinyin 为空但这次算出来了 → UPDATE，见下方 `pinyin_fixed`）；
     - 固定数据只拉一次，之后只有「有新股」才动到库，不每次重拉。
 
     返回统计 / 错误信息（任一来源失败只降级，不影响其它模块）。
+    `pinyin_fixed` 是自愈条数：**装上 pypinyin 后跑一次就能把历史空拼音补齐**，
+    不必手工改库（否则拼音搜索会一直空 —— 2026-11-11 就是这个坑）。
     """
     result = {"fetched": 0, "inserted": 0, "deleted": 0, "updated": 0, "error": None}
     try:
@@ -417,26 +420,40 @@ def refresh_stock_meta() -> dict:
             continue
         full, initial = _to_pinyin(name)
         seen[code] = (name, full, initial, _market_of(code))
-    inserted = deleted = updated = 0
+    inserted = deleted = updated = pinyin_fixed = 0
     with db.connect(db.FACTORS_DB) as conn:
-        existing = {r["code"]: r["name"]
-                    for r in conn.execute("SELECT code, name FROM stock_meta").fetchall()}
+        # existing[code] = (name, pinyin, pinyin_initial)
+        existing = {r["code"]: (r["name"], r["pinyin"] or "", r["pinyin_initial"] or "")
+                    for r in conn.execute(
+                        "SELECT code, name, pinyin, pinyin_initial FROM stock_meta").fetchall()}
         for code, (name, full, initial, mkt) in seen.items():
-            if code not in existing:
+            old = existing.get(code)
+            if old is None:
                 conn.execute(
                     "INSERT INTO stock_meta(code,name,pinyin,pinyin_initial,market,updated_at) "
                     "VALUES(?,?,?,?,?,?)", (code, name, full, initial, mkt, now))
                 inserted += 1
-            elif existing[code] != name:
+            elif old[0] != name:
                 conn.execute(
                     "UPDATE stock_meta SET name=?,pinyin=?,pinyin_initial=?,market=?,updated_at=? "
                     "WHERE code=?", (name, full, initial, mkt, now, code))
                 updated += 1
+            elif full and old[1] != full:
+                # ⚠️ **拼音自愈**（不能省）：pypinyin 曾经缺失时，播种写进去的是空串，
+                # 而这里原本只有「名称变更」才 UPDATE —— 于是**装上 pypinyin 后重跑刷新
+                # 也补不回来**，拼音搜索会一直返回空（表现：输入拼音没有联想、也跳不过去）。
+                # 2026-11-11 实测：5928 行拼音 100% 为空，就是这么来的。
+                # `full and ...`：只有真算出拼音时才比对 —— pypinyin 仍缺失时不做无意义写入。
+                conn.execute(
+                    "UPDATE stock_meta SET name=?,pinyin=?,pinyin_initial=?,market=?,updated_at=? "
+                    "WHERE code=?", (name, full, initial, mkt, now, code))
+                pinyin_fixed += 1
         gone = [c for c in existing if c not in seen]
         if gone:
             conn.executemany("DELETE FROM stock_meta WHERE code=?", [(c,) for c in gone])
             deleted = len(gone)
-    result.update(fetched=len(seen), inserted=inserted, deleted=deleted, updated=updated)
+    result.update(fetched=len(seen), inserted=inserted, deleted=deleted,
+                  updated=updated, pinyin_fixed=pinyin_fixed)
     return result
 
 
