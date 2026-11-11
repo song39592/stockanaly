@@ -1956,7 +1956,9 @@ def tdx_status(path: str | None = None, coverage: bool = False) -> dict[str, Any
         # （通达信同步只能覆盖本地已有的日期，缺口必须用在线源补）。
         try:
             latest_map = _span_dates("latest", price_store.code_latest_dates)
-            tdx_last = str(stats.get("latest") or "")
+            # ⚠️ 用**众数**（last_mode）而不是最大日期：常有「只有 1 只更新到今天、
+            #    绝大多数停在昨天」的情况，按 max 比会得出「没有缺口」的错误结论。
+            tdx_last = str(stats.get("last_mode") or stats.get("latest") or "")
             if tdx_last and latest_map:
                 db_days = sorted({str(v)[:10] for v in latest_map.values()
                                   if str(v)[:10] > tdx_last})
