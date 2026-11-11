@@ -107,6 +107,38 @@ def _record_error(label: str, module_name: str, exc: BaseException) -> None:
     logger.warning("%s（%s）不可用：%s", label, module_name, detail, exc_info=True)
 
 
+def _check_runtime_deps() -> None:
+    """启动时核对**当前解释器**的依赖状态，把「降级项」明确记进日志。
+
+    ⚠️ 为什么后端也要查一遍（launcher 已经查过）：
+    - launcher 查的是它**解析出来的**那个解释器，可能与后端实际运行用的不是同一个；
+    - 后端日志会落盘到 `<data>/logs/backend.log`，事后回溯时能直接看到「当时缺了什么」；
+    - 关键诉求：**缺依赖造成的功能降级必须在启动日志里明说**，
+      而不是等用到那个功能才发现 —— 2026-11-11 就是缺 pypinyin 导致拼音搜索整片失效，
+      而界面、后端、健康检查**全都正常**，没有任何一处会报错。
+
+    单一来源：`backend_fastapi/check_deps.py`（launcher 与 install_env.ps1 也用它）。
+    """
+    try:
+        import check_deps
+        names = check_deps.parse_requirements(check_deps.DEFAULT_REQUIREMENTS)
+        missing, optional_missing, mismatch = check_deps.inspect(names)
+    except Exception as exc:              # noqa: BLE001 - 自检失败不该拖垮启动
+        logger.info("依赖状态未检查（%s）", exc)
+        return
+    if missing:
+        logger.warning("依赖缺失：%s —— 相关功能不可用",
+                       "、".join(missing))
+    if optional_missing:
+        logger.warning("可选依赖缺失：%s —— 只让对应功能降级，不影响其它功能；"
+                       "修复：重跑 launcher\\install_env.ps1",
+                       "、".join(optional_missing))
+    if mismatch:
+        logger.warning("依赖版本与 requirements.txt 不符：%s",
+                       "、".join("%s 装了 %s（要求 %s）"
+                                 % (m["name"], m["installed"], m["spec"]) for m in mismatch))
+
+
 def _mount_routes() -> None:
     """逐个挂载业务模块；单个模块失败只记录错误，不影响其他模块与主页。"""
     for label, module_name in ROUTE_MODULES:
@@ -202,6 +234,7 @@ except instance_lock.AlreadyRunningError as exc:
     raise SystemExit(1) from None
 
 _init_stores()
+_check_runtime_deps()
 _mount_routes()
 
 # 后台预热 RPS 等横截面指标需要的「全市场日 K 面板」：约 15 秒，放后台线程，
