@@ -770,7 +770,7 @@ private void StRefreshCurStrategy()
             var req = StRequest(meta, days, ruin);
             _stRecentStatus.Text = "提交中…";
             _stRecentStatus.ForeColor = _cSub;
-            string body = new JavaScriptSerializer().Serialize(req);
+            string body = J.Ser().Serialize(req);
             System.Threading.Tasks.Task.Run(delegate
             {
                 try
@@ -778,7 +778,7 @@ private void StRefreshCurStrategy()
                     // 只等「启动」立即返回；旧实现是同步 /backtest + 600s 固定超时，
                     // 全市场 3 年实测 761s 必然超时，这里不再继承那个坑。
                     string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/start", body, 30000);
-                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    var j = J.Ser().Deserialize<Dictionary<string, object>>(resp);
                     Invoke((Action)(() =>
                     {
                         if (J.IsFailed(j))
@@ -799,7 +799,7 @@ private void StRefreshCurStrategy()
                     try
                     {
                         string pj = VRequest("http://127.0.0.1:8000/api/strategies/backtest/progress", null, 5000);
-                        var p = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(pj);
+                        var p = J.Ser().Deserialize<Dictionary<string, object>>(pj);
                         var st = (Dictionary<string, object>)J.Get(p, "state");
                         string state = st == null ? "" : J.StrAt(st, "state");
                         if (state == "running" || state == "ready")
@@ -985,7 +985,7 @@ private void StRefreshCurStrategy()
                     string url = "http://127.0.0.1:8000/api/history/download/date-context?target=" + picked;
                     if (!GetText(url, 20000, out body))
                         return null;
-                    try { return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body); }
+                    try { return J.Ser().Deserialize<Dictionary<string, object>>(body); }
                     catch { return null; }
                 },
                 delegate(Dictionary<string, object> j)
@@ -1117,14 +1117,14 @@ private void StRefreshCurStrategy()
             _stRecoStatus.Text = "正在提交…（首次运行需联网取股票名称，约 1 分钟；"
                 + "随后全市场计算约 7~10 分钟，可随时切走）";
             _stRecoStatus.ForeColor = _cSub;
-            string body = new JavaScriptSerializer().Serialize(req);
+            string body = J.Ser().Serialize(req);
             System.Threading.Tasks.Task.Run(delegate
             {
                 try
                 {
                     // 只等「启动」这一下（实测0.01s返回），不再等算完
                     string resp = VRequest("http://127.0.0.1:8000/api/strategies/recommend", body, 30000);
-                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    var j = J.Ser().Deserialize<Dictionary<string, object>>(resp);
                     Invoke((Action)(() =>
                     {
                         if (J.IsFailed(j))
@@ -1263,7 +1263,7 @@ private void StRefreshCurStrategy()
                 string body;
                 if (!GetText("http://127.0.0.1:8000/api/strategies/universe/summary" + q, 20000, out body))
                     return null;
-                try { return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body); }
+                try { return J.Ser().Deserialize<Dictionary<string, object>>(body); }
                 catch { return null; }
             }, delegate(Dictionary<string, object> j)
             {
@@ -1411,7 +1411,7 @@ private void StRefreshCurStrategy()
                 Dictionary<string, object> f = null;
                 try
                 {
-                    f = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(
+                    f = J.Ser().Deserialize<Dictionary<string, object>>(
                         VRequest(fresUrl, null, 60000));
                 }
                 catch (Exception ex)
@@ -1518,7 +1518,7 @@ private void StRefreshCurStrategy()
                 Dictionary<string, object> f = null;
                 try
                 {
-                    f = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(
+                    f = J.Ser().Deserialize<Dictionary<string, object>>(
                         VRequest(fresUrl, null, 60000));
                 }
                 catch (Exception) { return; }        // 单次失败下个周期再试
@@ -1614,7 +1614,7 @@ private void StRefreshCurStrategy()
 
             _stResultStatus.Text = "回测中：" + J.StrOr(meta["name"], sid) + "…（进度见顶部任务区）";
             _stResultStatus.ForeColor = _cSub;
-            string body = new JavaScriptSerializer().Serialize(req);
+            string body = J.Ser().Serialize(req);
 
             // 第 18 项：改**后台任务 + 轮询**。原来是一次同步请求 + 10 分钟超时，
             // 全市场（5000+ 只）冷缓存实测要 7 分钟以上，结构上仍会超时，
@@ -1626,7 +1626,7 @@ private void StRefreshCurStrategy()
                 {
                     string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/start",
                                            body, 60000);
-                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    var j = J.Ser().Deserialize<Dictionary<string, object>>(resp);
                     Invoke((Action)(() =>
                     {
                         if (J.IsFailed(j))                       // 例如「已有回测在运行」
@@ -1780,7 +1780,7 @@ private void StRefreshCurStrategy()
                 delegate
                 {
                     string resp = VRequest(url, null, 30000);
-                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    return J.Ser().Deserialize<Dictionary<string, object>>(resp);
                 },
                 delegate(Dictionary<string, object> j)
                 {
@@ -1881,7 +1881,7 @@ private void StRefreshCurStrategy()
                 delegate
                 {
                     string resp = VRequest(url, null, 120000);
-                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    return J.Ser().Deserialize<Dictionary<string, object>>(resp);
                 },
                 delegate(Dictionary<string, object> j)
                 {
@@ -1997,7 +1997,7 @@ private void StRefreshCurStrategy()
                 {
                     string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/reports?limit=100",
                                            null, 15000);
-                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    return J.Ser().Deserialize<Dictionary<string, object>>(resp);
                 },
                 delegate(Dictionary<string, object> j)
                 {
@@ -2085,13 +2085,17 @@ private void StRefreshCurStrategy()
         private void StLoadHistory(string file)
         {
             SetErr(_stResultStatus, "正在加载历史报告…");
+            // ⚠️ 加载前**先清空结果区**：否则加载中（9 MB 的报告要读几秒）或加载失败时，
+            // 屏幕上留着的**上一次回测**的指标卡与净值曲线会被当成这份历史报告的内容。
+            // 金融数字误读的代价太大，宁可先给一片空白。
+            StClearResultArea();
             RunUi<Dictionary<string, object>>(
                 delegate
                 {
                     string resp = VRequest(
                         "http://127.0.0.1:8000/api/strategies/backtest/reports/"
                         + System.Uri.EscapeDataString(file), null, 60000);
-                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    return J.Ser().Deserialize<Dictionary<string, object>>(resp);
                 },
                 delegate(Dictionary<string, object> j)
                 {
@@ -2121,6 +2125,22 @@ private void StRefreshCurStrategy()
                 null);
         }
 
+        /// <summary>清空回测结果区（指标卡 / 净值曲线 / 个股明细 / 展开状态）。
+        /// 换一份结果前必须先清，否则旧结果的数字会被当成新结果的。</summary>
+        private void StClearResultArea()
+        {
+            if (_stMetricCards != null) _stMetricCards.Controls.Clear();
+            _stEqDates = null;
+            _stEq = null;
+            _stEqBench = null;
+            _stPerStockData = new List<Dictionary<string, object>>();
+            _stExpanded.Clear();
+            _stDetailCache.Clear();
+            _stResultId = "";
+            if (_stEquityBox != null) _stEquityBox.Invalidate();
+            if (_stPerStockGrid != null) StFillPerStockRows();
+        }
+
         /// <summary>历史结果页：刷新已保存报告列表。</summary>
         private void StHistRefresh()
         {
@@ -2130,7 +2150,7 @@ private void StRefreshCurStrategy()
                 {
                     string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/reports?limit=100",
                                            null, 15000);
-                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    return J.Ser().Deserialize<Dictionary<string, object>>(resp);
                 },
                 delegate(Dictionary<string, object> j)
                 {
@@ -2195,7 +2215,7 @@ private void StRefreshCurStrategy()
                     string resp = VRequest(
                         "http://127.0.0.1:8000/api/strategies/backtest/reports/"
                         + System.Uri.EscapeDataString(file), null, 15000, "DELETE");
-                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    return J.Ser().Deserialize<Dictionary<string, object>>(resp);
                 },
                 delegate(Dictionary<string, object> j)
                 {
@@ -2299,7 +2319,7 @@ private void StRefreshCurStrategy()
                 {
                     string resp = VRequest("http://127.0.0.1:8000/api/strategies/backtest/trades?rid="
                         + rid + "&code=" + code, null, 30000);
-                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    var j = J.Ser().Deserialize<Dictionary<string, object>>(resp);
                     var trades = (j != null && j.ContainsKey("trades"))
                         ? j["trades"] as System.Collections.IList : null;
                     Invoke((Action)delegate { StDetailArrived(code, trades); });
@@ -2469,8 +2489,8 @@ private void StRefreshCurStrategy()
                 {
                     string rs = VRequest("http://127.0.0.1:8000/api/strategies", null);
                     string rc = VRequest("http://127.0.0.1:8000/api/strategies/codes", null);
-                    var js = new JavaScriptSerializer().Deserialize<object[]>(rs);
-                    var jc = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(rc);
+                    var js = J.Ser().Deserialize<object[]>(rs);
+                    var jc = J.Ser().Deserialize<Dictionary<string, object>>(rc);
                     var list = new List<Dictionary<string, object>>();
                     if (js != null)
                         foreach (var it in js)
@@ -2547,7 +2567,7 @@ private void StRefreshCurStrategy()
                 {
                     string resp = VRequest(
                         "http://127.0.0.1:8000/api/strategies/backtest/" + action, "{}", 15000);
-                    return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    return J.Ser().Deserialize<Dictionary<string, object>>(resp);
                 },
                 delegate(Dictionary<string, object> j)
                 {
