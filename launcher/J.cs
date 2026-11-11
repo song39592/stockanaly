@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Web.Script.Serialization;
 
 namespace StockPool
 {
@@ -20,6 +21,35 @@ namespace StockPool
     /// </summary>
     internal static class J
     {
+        // ---------------- JSON 序列化器 ----------------
+
+        /// <summary>
+        /// JSON 序列化器工厂（放开长度上限）。**策略页（重 JSON 页）一律用它**，
+        /// 别再 new JavaScriptSerializer()。
+        ///
+        /// 起因：.NET Framework 的 <see cref="JavaScriptSerializer.MaxJsonLength"/>
+        /// 默认只有 **2 MB**，而历史回测报告（含逐笔明细）动辄 5~15 MB
+        /// ——实测一份全市场 JWZZ 报告：磁盘 14.9 MB，接口返回 9.7 MB 字符 ——
+        /// 反序列化会在那一刻直接抛「字符串的长度超过了 maxJsonLength 属性设置的值」，
+        /// 界面上只留一句看不懂的英文，且**报错点与真正的病因隔了十万八千里**。
+        /// （刚跑完的实时回测结果只有 0.2 MB，所以「回测正常、一翻历史报告就炸」。）
+        ///
+        /// <see cref="JavaScriptSerializer.RecursionLimit"/> 默认 100 也一并放宽，
+        /// 嵌套深的报告不至于半路炸。
+        ///
+        /// **为什么只改了策略页**：实测其它页面的接口响应体都在 200 KB 以内
+        /// （策略实时结果 208 KB、RPS 池 167 KB、行情类 &lt; 11 KB），
+        /// 离 2 MB 还差一个数量级 —— 全站改一遍是纯噪音，review 成本大于收益。
+        /// 以后哪个接口的返回体真长起来了，把那一处换成 J.Ser() 即可。
+        /// </summary>
+        public static JavaScriptSerializer Ser()
+        {
+            var s = new System.Web.Script.Serialization.JavaScriptSerializer();
+            s.MaxJsonLength = int.MaxValue;
+            s.RecursionLimit = 256;
+            return s;
+        }
+
         // ---------------- 取值 ----------------
 
         /// <summary>按 key 取值；字典为 null 或缺 key 都返回 null。</summary>
