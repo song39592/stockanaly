@@ -100,6 +100,13 @@ namespace StockPool
         private bool _stRecoDateLoading;
         private bool _stRecoDateInit;           // 首次加载：把控件置为后端给的默认执行日
         private string _stFreshExpected = "";   // 本次新鲜度守卫的信号日（单日策略专用）
+        // 「结果是否还对应着所选执行日」：改了目标执行日**不会自动重跑**，
+        // 若不比对，结果区会静默留着上一次的旧结果（用户会当成"没更新"）。
+        // 记下当前显示结果的执行日，与所选执行日不一致时在提示行里明确说。
+        private string _stRecoResultExecDate = "";
+        private Dictionary<string, object> _stRecoDateCtx;   // 最近一次 /date-context 响应
+        private Color _stRecoDateHintBase = SystemColors.ControlText;   // 提示行常态色（结果过期时改红）
+        private string _stRecoPickedDate = "";        // 用户在控件上选的那一天（后端可能顺延）
 
         // ⑥ 历史结果（已保存回测报告的独立页签）
         private ListView _stHistList;
@@ -904,6 +911,7 @@ private void StRefreshCurStrategy()
             _stRecoDate.MaxDate = DateTime.Today.AddDays(10);
             _stRecoDate.ValueChanged += delegate { StLoadRecoDates(); };
             _stRecoDateHint = Mute(Lbl("正在获取交易日信息…"));
+            _stRecoDateHintBase = _stRecoDateHint.ForeColor;   // 提示行的常态色（异常时改红）
             AddRow(stack, Row(Lbl("目标执行日"), _stRecoDate, _stRecoDateHint));
 
             AddRow(stack, Row(MiniBtn("生成当前推荐", delegate { StRunReco(); }, 130),
@@ -1027,7 +1035,23 @@ private void StRefreshCurStrategy()
         /// <summary>把后端返回的信号日 / 数据齐否写进提示行。</summary>
         private void StApplyRecoDateContext(Dictionary<string, object> j, string picked)
         {
+            _stRecoDateCtx = j;
+            _stRecoPickedDate = picked ?? "";
+            StRenderRecoDateHint();
+        }
+
+        /// <summary>渲染提示行：信号日 → 执行日、数据齐否，以及「结果是否已过期」。</summary>
+        private void StRenderRecoDateHint()
+        {
             if (_stRecoDateHint == null) return;
+            var j = _stRecoDateCtx;
+            if (j == null)
+            {
+                _stRecoDateHint.Text = "—";
+                _stRecoDateHint.ForeColor = _stRecoDateHintBase;
+                return;
+            }
+            string picked = J.StrOr(J.Get(j, "picked_date"), _stRecoPickedDate);
             string sig = J.StrOr(J.Get(j, "signal_date"), "");
             string exec = J.StrOr(J.Get(j, "exec_date"), picked);
             object readyObj = J.Get(j, "data_ready");
@@ -1037,13 +1061,21 @@ private void StRefreshCurStrategy()
             if (sig.Length == 0)
             {
                 _stRecoDateHint.Text = "—";
+                _stRecoDateHint.ForeColor = _stRecoDateHintBase;
                 return;
             }
             string tail = ready ? " · 数据已齐" : " · ⚠ " + sig + " 收盘数据未下载完成，无法生成该日策略";
             object kindObj = J.Get(j, "picked_is_trade_day");
             bool isTrade = !(kindObj is bool) || (bool)kindObj;
             string kind = isTrade ? "" : "（非交易日，已顺延到 " + exec + "）";
-            _stRecoDateHint.Text = "信号日 " + sig + " 收盘 → " + exec + " 执行" + kind + tail;
+            string text = "信号日 " + sig + " 收盘 → " + exec + " 执行" + kind + tail;
+            // ⚠️ 改了目标执行日**不会自动重跑**：若当前显示的结果是按别的执行日
+            //    生成的，必须说清楚，否则用户会把上一次的旧结果当成"没更新"。
+            bool stale = _stRecoResultExecDate.Length > 0 && _stRecoResultExecDate != exec;
+            if (stale)
+                text += " · ⚠ 当前显示的是 " + _stRecoResultExecDate + " 的结果，与所选执行日不一致，请重新点「生成当前推荐」";
+            _stRecoDateHint.Text = text;
+            _stRecoDateHint.ForeColor = stale ? C.UpErr : _stRecoDateHintBase;
         }
 
         private void StRunReco()
@@ -1150,10 +1182,12 @@ private void StRefreshCurStrategy()
             string execDate = J.StrOr(J.Get(j, "execution_date"), sigDate);
             if (_stBuyGroup != null) _stBuyGroup.Text = "买入（" + execDate + " 建仓）";
             if (_stSellGroup != null) _stSellGroup.Text = "卖出（" + execDate + " 清仓）";
+            _stRecoResultExecDate = execDate;   // 记下这次结果的执行日，供「结果是否过期」比对
             _stRecoStatus.Text = "策略：" + StCurStrategyName() + " · 信号日 " + sigDate
                     + " · 执行日 " + execDate
                     + " · 目标资金 " + J.Money(StM(j as Dictionary<string, object>, "target_capital"));
             _stRecoStatus.ForeColor = C.DownSoft;
+            StRenderRecoDateHint();              // 重算提示行（清掉「结果已过期」的告警）
         }
 
         private void StFillRecoGrid(StockGrid grid, object list, bool hold)
@@ -1219,7 +1253,11 @@ private void StRefreshCurStrategy()
         {
             if (_stScopeHint == null) return;
             var ex = StExcludeList();
-            string q = ex.Count > 0 ? "?exclude=" + string.Join(",", ex) : "";
+            // ⚠️ 后端 `exclude: list[str] = Query(...)` 是**重复参数**形式
+            //    (?exclude=a&exclude=b)，不是逗号分隔。逗号拼接会被当成
+            //    一个整体参数 "a,b"，过滤规则一个都不匹配 → 预览永远显示
+            //    「剔除后 = 基池数」。
+            string q = ex.Count > 0 ? "?" + string.Join("&exclude=", ex) : "";
             RunUi<Dictionary<string, object>>(delegate
             {
                 string body;
