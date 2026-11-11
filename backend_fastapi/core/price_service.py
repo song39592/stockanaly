@@ -176,6 +176,21 @@ _DAILY_BUDGET = 45.0
 _DAILY_PER_SOURCE = 35.0
 
 
+class NoDataError(RuntimeError):
+    """**所有数据源都没有这只票的日 K** —— 退市 / 长期停牌的典型表现。
+
+    单独一个类型，是为了让下载层能区分「永久性没有数据」与「网络 / 接口故障」：
+
+    * 前者重试没有意义 —— 重试只是把同一只票的全源尝试再做 3 遍
+      （实测一只退市票 3 源串行 6~11 秒，再叠 3 次重试 + 2/6/15 秒退避，
+      单只 20~40 秒；几百只退市股就是**几十分钟的长尾**）。
+    * 后者必须重试 —— 那是数据源抖动，重试就能拿到。
+
+    之前两者都表现为一句 `RuntimeError: 行情数据源未返回日 K`，下载层只能
+    统一重试 3 次，于是每晚的自动更新都要在尾部再磨掉半小时。
+    """
+
+
 def fetch_daily(code: str, start: dt.date, end: dt.date,
                 adjust: str = "raw") -> tuple[list[dict[str, Any]], str, list[str]]:
     """抓取并校验某区间的日 K。
@@ -220,7 +235,8 @@ def fetch_daily(code: str, start: dt.date, end: dt.date,
 
     bars = normalize_bars(frame)
     if not bars:
-        raise RuntimeError("行情数据源未返回日 K")
+        # 「所有源都取不到这只票」→ 单独的错误类型（见 NoDataError 的说明）
+        raise NoDataError("行情数据源未返回日 K")
     bars, rejected = validate_bars(bars)              # 入库前挡住不合格数据
     if not bars:
         raise RuntimeError("行情数据全部未通过校验：" + "；".join(rejected[:3]))
@@ -304,6 +320,11 @@ def sync_all_adjusts(code: str, start: dt.date | None = None,
     for adjust in SYNC_ADJUSTS:
         try:
             results[adjust] = sync_bars(code, adjust, start=start, end=end)
+        except NoDataError:
+            # 「所有源都没有这只票的日 K」必须**原样上抛**：一旦被包进 errors，
+            # 下载层只看到一句字符串，认不出「永久性无数据」，只能按普通故障
+            # 重试 3 次（每只白等 3 遍全源尝试 + 23 秒退避）。
+            raise
         except Exception as exc:          # noqa: BLE001 - 单口径失败不影响其余口径
             results[adjust] = None
             errors.append(f"{adjust}：{exc}")

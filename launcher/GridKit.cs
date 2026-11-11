@@ -478,9 +478,11 @@ namespace StockPool
             code = code.Trim();
             if (!Regex.IsMatch(code, "^[0-9]{6}$")) return;   // 非 6 位数字（如名称列）不跳
             if (_tabIndex != _stockTabIndex) _returnTabIndex = _tabIndex;
-            _quickSearch.Text = code;
+            // ⚠️ 代码**显式传给 StockOpen**，不再借输入框文本当通道：
+            //   `SelectTab` 内部的 HideQuickSearch() 会清空 `_quickSearch.Text`，
+            //   放在它后面调 StockOpen() 读到的是空串 → 股票不换（2026-11-10 实测）。
             SelectTab(_stockTabIndex);
-            StockOpen();
+            StockOpen(code);
         }
 
         /// <summary>ESC 返回用：上一个页签（-1 = 无）。由 OpenStock 写、ESC 消费后清空。</summary>

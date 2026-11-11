@@ -61,12 +61,31 @@ namespace StockPool
                 {
                     e.Handled = true;
                     string code = _quickSearch.Text.Trim();
-                    HideQuickSearch();                       // 先收起（会清空文本，故先取 code）
-                    if (code.Length == 0) return;
-                    SelectTab(_stockTabIndex);
-                    _quickSearch.Text = code;                // 交给 StockOpen：6 位数字=个股；否则按指标名/id 切换副图
-                    StockOpen();
-                    _stockStrip.Select(0);
+                    // ⚠️ 顺序：**先做业务（切页 + 打开个股），最后才收起输入框**。
+                    // 原来先调 HideQuickSearch() —— 它内部会把焦点还给「唤起前那个控件」，
+                    // 那个 Focus() 会连带触发原控件的 Enter / Leave / Validating 事件；
+                    // 只要其中任何一个抛了异常，异常就会**冒泡上来把后面的切页吞掉**，
+                    // 表现是「输入框收起了（Visible 已置 false），但界面没跳到个股分析」。
+                    // 焦点还原属于「锦上添花」，绝不该影响跳转这种主流程。
+                    if (code.Length > 0)
+                    {
+                        try
+                        {
+                            SelectTab(_stockTabIndex);
+                            StockOpen(code);                // 显式传代码（不靠输入框文本，见 StockOpen 注释）
+                            _stockStrip.Select(0);
+                        }
+                        catch (Exception ex)
+                        {
+                            // 兜底：跳转失败要留下证据（曾出现「框收起了但界面没跳」）
+                            Log("输入", string.Format("{0} 回车打开个股失败 code={1} {2}: {3}",
+                                _stamp(), code, ex.GetType().Name, ex.Message));
+                            MessageBox.Show("打开个股失败：" + ex.Message, "提示",
+                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        }
+                    }
+                    HideQuickSearch();                       // 最后收起（code 已取出）
+                    return;
                 }
             };
             _quickSearch.TextChanged += delegate { StockSugUpdate(); };
@@ -137,10 +156,26 @@ namespace StockPool
         {
             if (_quickSearch == null || !_quickSearch.Visible) return;
             _quickSearch.Visible = false;
-            _quickSearch.Text = "";
+            // ⚠️ 这里**不再清空文本**：清空是「唤起时重置」那一步的事（ShowQuickSearch 里
+            //   每次都 `_quickSearch.Text = ""`）。在收起时清会把调用方刚写进去的代码抹掉
+            //   —— 2026-11-10 的「输入代码不换股票」就是这么来的（SelectTab 内部会调本方法）。
             Control prev = _quickPrevFocus;
             _quickPrevFocus = null;
-            if (restoreFocus && prev != null && !prev.IsDisposed && prev.Visible) prev.Focus();
+            if (restoreFocus && prev != null && !prev.IsDisposed && prev.Visible)
+            {
+                try
+                {
+                    prev.Focus();
+                }
+                catch (Exception ex)
+                {
+                    // 焦点还原是「锦上添花」：prev 的 Enter / Leave / Validating 处理器一旦抛错，
+                    // 异常会冒泡上来，**把调用方后续的流程一并吞掉**（曾表现为：输入框收起了，
+                    // 但界面没跳到个股分析）。这里就地吃掉并留下日志。
+                    Log("输入", string.Format("{0} 焦点还原失败 {1}: {2}",
+                        _stamp(), ex.GetType().Name, ex.Message));
+                }
+            }
         }
 
         // ===== 输入联想下拉 =====
@@ -275,9 +310,8 @@ namespace StockPool
                 _stockStrip.Select(0);
                 return;
             }
-            _quickSearch.Text = m.Name;
+            StockOpen(m.Name);                          // 指标名 → StockOpen 内解析并替换副图（显式传参）
             StockSugHide();
-            StockOpen();                                // StockOpen 内按指标名解析并替换副图
             HideQuickSearch();                          // 选完即收起：否则输入框仍可见且带旧文字，下次输入会叠加
         }
 
