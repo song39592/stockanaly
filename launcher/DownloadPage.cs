@@ -500,15 +500,23 @@ namespace StockPool
             if (cover != null)
             {
                 var latest = Convert.ToString(J.GetFrom(cover, "latest") ?? "");
+                var lastMode = Convert.ToString(J.GetFrom(cover, "last_mode") ?? "");
                 var firstMode = Convert.ToString(J.GetFrom(cover, "first_mode") ?? "");
-                if (latest.Length > 0)
+                // ⚠️「最新日」必须用**众数**（last_mode），不能用最大日期（latest）：
+                // 通达信刚下载完日线时，常有「只有 1 只更新到今天、绝大多数停在昨天」
+                // 的情况 —— 用 latest 会显示「最新 11-10（0.0% 的股票到这一天，
+                // 5588 只更早）」，既难看又完全误导。
+                string day = lastMode.Length > 0 ? lastMode : latest;
+                if (day.Length > 0)
                 {
-                    // 「最新日」用众数而不是区间：绝大多数票停在同一天，
-                    // 用「最早 ~ 最晚」的区间会被一只极端票带偏（新股/退市股）。
-                    double ratio = J.Num(J.GetFrom(cover, "at_latest_ratio"));
-                    int stale = J.Int(J.GetFrom(cover, "stale_count"));
-                    lines.Add(string.Format("日线最新 {0}（{1} 的股票到这一天，{2} 只因停牌/退市更早）",
-                        latest, DlPct(ratio), stale));
+                    double ratio = J.Num(J.GetFrom(cover, "last_ratio"));
+                    int stale = J.Int(J.GetFrom(cover, "stale_vs_mode"));
+                    int ahead = J.Int(J.GetFrom(cover, "newer_count"));
+                    string tail2 = ahead > 0
+                        ? "；另有 " + ahead + " 只已更新到 " + latest
+                        : "";
+                    lines.Add(string.Format("日线最新 {0}（{1} 的股票到这一天，{2} 只因停牌/退市更早{3}）",
+                        day, DlPct(ratio), stale, tail2));
                 }
                 if (firstMode.Length > 0)
                 {
@@ -521,7 +529,7 @@ namespace StockPool
                 if (gap > 0)
                 {
                     lines.Add(string.Format("⚠ 本机通达信止于 {0}，库里已到 {1}（差 {2} 个交易日）",
-                        latest, dbLatest, gap));
+                        day, dbLatest, gap));
                     lines.Add("本地 .day 里就没有这几天，通达信同步补不了 —— 只能靠在线源补齐");
                 }
                 else if (latest.Length > 0)

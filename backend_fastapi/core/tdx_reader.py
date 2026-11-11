@@ -201,6 +201,10 @@ def _scan_coverage(base: Path) -> dict[str, Any]:
     at_latest = sum(1 for value in lasts if value == latest) if latest else 0
     stale = sum(1 for value in lasts if latest and value < latest)
     newer = sum(1 for value in lasts if last_mode and value > last_mode)
+    # 相对**众数**更早的只数（停牌 / 退市 / 长期无数据）。展示口径以众数为准：
+    # 若以最大日期为准，个别刚更新的票会把「最新日」拉高一天，
+    # 而绝大多数票其实停在昨天 —— 那个文案既难看又会误导。
+    stale_vs_mode = sum(1 for value in lasts if last_mode and value < last_mode)
     # 首日期晚于众数的 = 上市更晚的新股（按上市日起算，不是数据缺口）
     new_stocks = sum(1 for value in firsts if first_mode and value > first_mode)
     early = sum(1 for value in firsts if first_mode and value < first_mode)
@@ -216,6 +220,7 @@ def _scan_coverage(base: Path) -> dict[str, Any]:
         "at_latest": at_latest,
         "at_latest_ratio": round(at_latest / total, 4) if total else 0.0,
         "stale_count": stale,
+        "stale_vs_mode": stale_vs_mode,
         "newer_count": newer,
         "first_mode": first_mode,
         "first_mode_count": first_mode_count,

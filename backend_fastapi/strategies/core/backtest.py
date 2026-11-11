@@ -607,8 +607,19 @@ def start_reco_task(strategy_id: str, params: dict | None, codes: list[str],
                     initial_capital: float = 100000.0,
                     commission: float = 0.0003,
                     execution_date: str | None = None,
-                    signal_date: str | None = None) -> dict:
+                    signal_date: str | None = None,
+                    codes_resolver=None) -> dict:
     """启动一次后台推荐并**立即返回**；已有任务在跑时返回 ok=false（不排队）。
+
+    `codes_resolver`：可选的「股票池解析函数」，给了它就在**后台线程**里调用
+    并解析出最终 codes —— 与 `start_task` 同一套机制。
+
+    为什么必须有它：`/recommend` 的股票池解析会**联网**（排除 ST 特征时要拉
+    全市场股票名称，akshare 分批抓取实测 30~50 秒）。放在启动请求里同步做，
+    前端 30 秒超时先到 → 用户看到「无法启动：请求被中止: 操作超时」，
+    而后端其实还在跑。`/backtest/start` 早就为此改造过，本次是给
+    `/recommend` 补上同一处 —— 两边共用同一个 `_resolve_codes()`，漏一处
+    就会换个入口再踩一次同样的坑。
 
     并发上限为 1，与回测任务同理由：两个全市场并行会把 CPU 与 SQLite 读盘打满，
     而且前端一次也只看不了两个结果。
@@ -653,10 +664,33 @@ def start_reco_task(strategy_id: str, params: dict | None, codes: list[str],
 
     def _work():
         global _RECO_CTRL
+        nonlocal codes
         t0 = time.time()
         _RECO_CTRL = base.RunControl()
         base.install_control(_RECO_CTRL)
         try:
+            if codes_resolver is not None:
+                # 解析股票池（含联网拉股票名称，实测 30~50 秒）放到后台，
+                # 别卡启动响应 —— 与 `start_task` 同一套做法。
+                try:
+                    codes = codes_resolver() or []
+                except Exception as exc:
+                    with _RECO_LOCK:
+                        _RECO_TASK.update(state="error", phase="done",
+                                          finished_at=dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                          elapsed=round(time.time() - t0, 1),
+                                          error=f"{type(exc).__name__}: {exc}")
+                    return
+                if not codes:
+                    with _RECO_LOCK:
+                        _RECO_TASK.update(state="error", phase="done",
+                                          finished_at=dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                          elapsed=round(time.time() - t0, 1),
+                                          error="股票池为空，请先选择回测范围")
+                    return
+                with _RECO_LOCK:
+                    _RECO_TASK["total"] = len(codes)
+                    _RECO_TASK["codes_count"] = len(codes)
             try:
                 out = run_recommend(strategy_id, params, codes, start, end,
                                    initial_capital, commission,

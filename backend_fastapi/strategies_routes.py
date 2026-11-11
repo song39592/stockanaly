@@ -280,9 +280,16 @@ def do_recommend(req: BacktestRequest):
 
     同一时间只允许一个任务（两个全市场并行互相拖慢）。
     """
-    codes = _resolve_codes(req)
-    if not codes:
-        raise ValueError("股票池为空，请先选择回测范围")
+    # ⚠️ 股票池解析**不在请求线程里做**：它会**联网**（排除 ST 特征时要拉全市场
+    # 股票名称，akshare 分批抓取实测 30~50 秒）。同步做必然先撞上前端 30 秒
+    # 超时 → 用户看到「无法启动：请求被中止: 操作超时」，而后端其实还在跑。
+    # 与 `/backtest/start` 同一套做法（codes_resolver）：解析放进后台线程，
+    # 启动接口立即返回、前端马上开始轮询。股票池为空也由后台任务报错。
+    def _resolve_codes_lazy():
+        codes = _resolve_codes(req)
+        if not codes:
+            raise ValueError("股票池为空，请先选择回测范围")
+        return codes
 
     # ---- 单日策略：目标执行日 → 信号日 ----
     # 口径恒为「前一交易日收盘信号 → 本交易日执行」。收盘前默认执行日=今天
@@ -314,24 +321,25 @@ def do_recommend(req: BacktestRequest):
 
     # 数据齐否按**信号日**判定（不是笼统的「应有最新交易日」）：收盘后选
     # 「今天执行」时信号是上一交易日、数据其实已齐，不该被今日缺口误伤。
-    # ⚠️ 不传 codes：传了会走「指定票逐只精确判定」，一只长期停牌股就能
-    #    永久卡死；与前端守卫一致用全市场 1% 容忍口径。
-    fres = dl_service.freshness(expected_day=signal_date)
-    if fres.get("need_refresh"):
+    # ⚠️ 直接用 `trading_day_context` 已经算好的 `data_ready`（全市场 1% 容忍，
+    #    与前端守卫同口径），**不要**再调一次 `freshness()`：那是同一份全库
+    #    聚合再扫一遍（各 2~6 秒），口径完全一样、纯属重复计算。
+    if not ctx_sel.get("data_ready"):
         return JSONResponse(status_code=409, content={"ok": False,
             "error": {"code": "DATA_STALE",
                       "message": "%s 收盘行情尚未下载完成（应有 %s，仅 %d/%d 只已更新），"
                                  "无法生成 %s 执行的单日策略。"
                                  "请开启『每天自动更新数据』或在「数据下载」手动补齐后再运行。" % (
-                          signal_date, fres.get("expected"), fres.get("covered", 0),
-                          fres.get("total", 0), target)}})
+                          signal_date, signal_date, ctx_sel.get("covered", 0),
+                          ctx_sel.get("total", 0), target)}})
 
     # ⚠️ 把 end 截断到信号日：否则收盘后数据已部分入库时，策略会读到
     #    「今天」的不完整 K 线，等于用未来数据算今天的信号。
     out = backtest.start_reco_task(
-        req.strategy_id, req.params, codes, req.start, signal_date,
+        req.strategy_id, req.params, [], req.start, signal_date,
         req.initial_capital, req.commission,
         execution_date=target, signal_date=signal_date,
+        codes_resolver=_resolve_codes_lazy,
     )
     if not out.get("ok"):
         return JSONResponse(status_code=409,
