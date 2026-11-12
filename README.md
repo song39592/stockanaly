@@ -84,7 +84,7 @@ frontend/ (原生 HTML/JS 单页)
 ```
 stockanaly/                        # 项目根目录
 ├── stockpool.exe                  # 原生 Windows 窗口程序（由 launcher\build_exe.bat 编译）
-├── launcher/                      # 上述 EXE 的源码（32 个 .cs）
+├── launcher/                      # 上述 EXE 的源码（35 个 .cs）
 │   ├── StockPoolLauncher.cs       #   主窗体 partial class MainForm + 进程/托盘/设置
 │   ├── StockPage*.cs              #   个股页及 6 个分部
 │   ├── MarketPage / ValuationPage / DownloadPage / MentorLabPage / RedBullPage / ...
