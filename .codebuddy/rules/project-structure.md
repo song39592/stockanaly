@@ -53,13 +53,15 @@ backend_fastapi/
 
 frontend/              home/（股票池主页面）、chip-scr/（SCR 选股）、mentor-lab/（实验室）
                        shared/analysis-engine.js（评分与回测引擎）、shared/theme.js（主题引擎）
-                       theme-state.js ⚠ 遗留副本，生效的是 shared/theme-state.js
+                       shared/stock-handoff.js（网页 → 原生的个股详情移交）
+                       ⚠ 网页与原生窗口**无命令通道**：个股详情只有原生页，网页点代码只能
+                         「复制代码 + 提示去启动器个股分析」，别再写死网页链接
 agent_dsh/             plugins/（bull-http 网关 + bull-store 共享状态 + 2 个 Tool + role-skills）
                        skills_library/<skillId>.skill、cordis.patch.yml（模板）/ .runtime.yml（产物）
 scripts/               check-docs.ps1 —— 文档一致性自检（链接 / 路径 / API 前缀 / 规则区预算）
 ```
 
-**转发壳**：`config.py` / `db.py` / `price_store.py` / `chip_service.py` … 共 39 个顶层文件是
+**转发壳**：`config.py` / `db.py` / `price_store.py` … 共 39 个顶层文件是
 `core/` 与 `features/` 的别名。用 `sys.modules` 别名而非 `import *` 是必须的——
 `market_service._ak` 是私有名（`import *` 不导出会 AttributeError），
 且 `patch.object(config, ...)` 打在副本上会**补丁静默失效**。
