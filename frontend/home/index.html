@@ -506,6 +506,7 @@
 <!-- 浅色 / 深色：由启动器窗口顶部的「主题」按钮控制，页面跟随 -->
 <script src="../shared/theme-state.js"></script>
 <script src="../shared/theme.js"></script>
+<script src="../shared/stock-handoff.js"></script>
 </head>
 <body>
 
@@ -766,7 +767,7 @@
       <p style="margin:0 0 10px;"><b style="color:var(--text);">4. 表格排序</b>：点击表头切换排序；点击「细分行业」按行业分组（组内按连续天数降序）。</p>
       <p style="margin:0 0 10px;"><b style="color:var(--text);">5. 数据备份</b>：「导出备份」下载 JSON 文件；「恢复数据」从 JSON 导入；「数据管理」可按天删除或清空。</p>
       <p style="margin:0 0 10px;"><b style="color:var(--text);">6. 字段识别</b>：自动识别表头中的「代码 / 名称 / 细分行业 / 地区」列；行业为空归为「未分类」；股票代码自动补零到 6 位、自动去重。</p>
-      <p style="margin:0;"><b style="color:var(--text);">7. 个股研究详情</b>：点击表格/排行榜中的股票，查看真实日 K、均线、成交量、进出池标记和公告/新闻时间轴；详情页中的“AI 调研”按钮可继续生成主营业务、近期事项和多空观点报告。行情与调研依赖本地 FastAPI 后端，双击根目录的 <span style="font-family:ui-monospace,Consolas,monospace;">股票池追踪系统.exe</span>（launcher）即可自动启动。</p>
+      <p style="margin:0;"><b style="color:var(--text);">7. 个股研究详情</b>：点击表格/排行榜中的股票，查看真实日 K、均线、成交量、进出池标记和公告/新闻时间轴；详情页中的“AI 调研”按钮可继续生成主营业务、近期事项和多空观点报告。行情与调研依赖本地 FastAPI 后端，双击根目录的 <span style="font-family:ui-monospace,Consolas,monospace;">stockpool.exe</span>（launcher）即可自动启动。</p>
     </div>
     <div class="m-actions">
       <button class="btn primary" id="btnHelpClose">知道了</button>
@@ -774,7 +775,7 @@
   </div>
 </div>
 
-<!-- 个股详情已拆为独立页面：stock-analysis.html（原弹窗代码已移除） -->
+<!-- 个股详情已迁入原生启动器「个股分析」标签页（原弹窗代码已移除） -->
 
 <!-- 个股 AI 调研弹窗 -->
 <div class="modal-mask" id="aiModal">
@@ -1390,12 +1391,16 @@ function findStock(code) {
   return null;
 }
 
-/* 个股 K 线 / 入池轨迹 / 消息面的渲染与加载已移至独立页面 stock-analysis.html */
+/* 个股 K 线 / 入池轨迹 / 消息面的渲染与加载已移至**原生启动器**的「个股分析」标签页
+   （launcher/StockPage.cs）；网页版 stock-analysis.html 早已删除。
+   网页与原生窗口之间没有命令通道，网页无法直接调起原生页 ——
+   所以这里走 shared/stock-handoff.js：复制代码 + 提示下一步，而不是留一个 404 死链。 */
 
-/** 打开个股分析：跳转到独立页面（前复权日K + 入池轨迹 + 消息面时间轴） */
+/** 打开个股分析：移交到启动器「个股分析」页（复制代码并给出下一步） */
 function openStockDetail(code) {
   if (!code) return;
-  window.open(`stock-analysis.html?code=${encodeURIComponent(code)}`, '_blank');
+  if (typeof window.stockHandoff === 'function') { window.stockHandoff(code); return; }
+  toast('个股详情已迁入启动器「个股分析」标签页，请输入代码 ' + code, 'err');
 }
 
 /** 重建搜索候选（code -> 股票，去重） */
@@ -1407,7 +1412,7 @@ function buildStockList() {
     .map(s => `<option value="${esc(s.code)} ${esc(s.name)}">${esc(s.name)}</option>`).join('');
 }
 
-// 个股详情已拆为独立页面 stock-analysis.html，入口统一走 openStockDetail() 跳转
+// 个股详情已迁入原生启动器「个股分析」标签页，入口统一走 openStockDetail() 移交
 
 // 顶栏搜索：回车 → 打开个股详情
 document.getElementById('stockSearch').addEventListener('keydown', (e) => {
@@ -1539,7 +1544,7 @@ function warnOutdatedBackend(health) {
     + 'font:14px/1.6 "Microsoft YaHei UI",sans-serif;box-shadow:0 2px 12px rgba(0,0,0,.35)';
   bar.textContent = `检测到旧版后端（api_version ${health?.api_version ?? '未知'}）：代码已更新，`
     + '但正在运行的后端还是旧进程，新接口会返回 404。'
-    + '请关闭旧后端窗口，重新启动「股票池追踪系统.exe」（launcher），再按 Ctrl+F5 刷新本页。';
+    + '请关闭旧后端窗口，重新启动根目录的「stockpool.exe」（launcher），再按 Ctrl+F5 刷新本页。';
   document.body.prepend(bar);
 }
 

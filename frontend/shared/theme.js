@@ -40,9 +40,20 @@
   window.__applyTheme(pick());
 
   // 跟着启动器走：定时加载启动器写的 theme-state.js（文件不存在时静默跳过）
+  //
+  // ⚠️ 路径必须相对**本脚本**解析，不能直接写 'theme-state.js'：
+  // script.src 相对的是**文档**基址（各页在 frontend/<页面>/），写成裸文件名会
+  // 请求 frontend/home/theme-state.js —— 该文件不存在，轮询永远 404，
+  // 「已打开的页面跟着启动器切主题」就静默失效了（不报错，只是主题不变）。
+  // 以本脚本自身的 src 为基准解析，页面放多深都不会错。
+  var selfSrc = (document.currentScript && document.currentScript.src) || '';
+  var stateUrl = selfSrc
+    ? new URL('theme-state.js', selfSrc).href
+    : new URL('../shared/theme-state.js', document.baseURI).href;
+
   setInterval(function () {
     var s = document.createElement('script');
-    s.src = 'theme-state.js?t=' + Date.now();
+    s.src = stateUrl + '?t=' + Date.now();
     s.onload = s.onerror = function () {
       window.__applyTheme(window.__LAUNCHER_THEME__);
       if (s.parentNode) s.parentNode.removeChild(s);

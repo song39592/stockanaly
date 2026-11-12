@@ -115,11 +115,15 @@ stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
      装不上就弹出错误日志（开头 + 关键错误行 + 末尾三段）并退出，不会反复重试。设置页也有「检查 / 修复环境」可手动触发。
      Node 缺失只提示（AI 服务 :3080 起不来，后端与网页不受影响）。
 3. **单独启动 / 调试**：
-   - 后端：手动 `D:/ai/backend_fastapi/venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000`；
-   - dsh：`cd D:\ai\agent_dsh && npx dsh web --patch cordis.patch.yml`，看到 `dsh web: http://127.0.0.1:3080` 即成功。
+   - 后端：手动 `backend_fastapi\venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000`；
+   - dsh：`cd agent_dsh`，先 `node generate-patch.mjs`（产出按当前目录算好插件路径的
+     `cordis.runtime.yml`），再 `npx dsh web --patch cordis.runtime.yml`，
+     看到 `dsh web: http://127.0.0.1:3080` 即成功。
 4. 打开 `frontend/home/index.html`，右下角 🐂 开始对话；调试 Agent 轨迹看 `http://127.0.0.1:3080` webui。
 
-> 启动脚本与 `cordis.patch.yml` 中硬编码了 `D:\ai` 绝对路径，若移动项目目录需同步修改这些文件。
+> dsh 的插件路径不再硬编码：`cordis.patch.yml` 是模板（`__PLUGIN_BASE__` 占位），
+> `cordis.runtime.yml` 由 `generate-patch.mjs` 按当前目录生成 —— 启动器拉起 dsh 前会自动跑一次，
+> 项目换目录 / 拷到别的电脑都不用手改路径。
 
 ## 🔑 API Key 配置位置
 
