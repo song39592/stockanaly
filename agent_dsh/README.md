@@ -32,10 +32,14 @@ frontend 用 marked 渲染
 
 ## 三、启动
 
-1. **FastAPI 后端**：双击根目录 `股票池追踪系统.exe`（launcher，会自动打开前端），
-   或手动 `D:/ai/backend_fastapi/venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000`。
-2. **dsh 服务**：`cd D:\ai\agent_dsh && npx dsh web --patch cordis.patch.yml`。
+1. **FastAPI 后端**：双击根目录 `stockpool.exe`（launcher，会自动打开前端），
+   或手动 `backend_fastapi\venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000`。
+2. **dsh 服务**：`cd agent_dsh`，
+   先 `node generate-patch.mjs`（把模板 `cordis.patch.yml` 里的 `__PLUGIN_BASE__`
+   换成当前机器的插件目录绝对路径，产出 `cordis.runtime.yml`），
+   再 `npx dsh web --patch cordis.runtime.yml`。
    看到 `dsh web: http://127.0.0.1:3080` 即成功。
+   > 走启动器时不用手动做这步：启动器在拉起 dsh 前会自动跑 `generate-patch.mjs`。
 3. 打开 `frontend/home/index.html`，点右下角 🐂 开始对话。
 
 ## 四、调试（看 Agent 轨迹）
@@ -50,7 +54,7 @@ frontend 用 marked 渲染
 
 ## 五、Skill 规则（多角色）
 
-Skill v2 增加 `strategyType`、`parameters` 和 `riskRules`。编辑器通过详情接口读取完整正文；重复 ID 返回 409，导入会在写盘前整体校验，并且至少保留一个 Skill。启动时自动生成当前目录对应的 `cordis.runtime.yml`，项目可移动目录。
+Skill v2 增加 `strategyType`、`parameters` 和 `riskRules`。编辑器通过详情接口读取完整正文；重复 ID 返回 409，导入会在写盘前整体校验，并且至少保留一个 Skill。`cordis.runtime.yml` 由 `generate-patch.mjs` 按**当前目录**生成（启动器拉起 dsh 前会自动跑一次），因此项目可移动目录、换电脑不用手改路径。
 
 - 位置：`agent_dsh/skills_library/*.skill`（JSON 文件，自带 `general.skill` 即最简格式范例）。
 - 在聊天窗顶部下拉切换 Skill（绑定到当前会话，切换后下一轮生效）。

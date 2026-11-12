@@ -432,6 +432,7 @@ namespace StockPool
         private Label _lbAiAddr;
         private TextBox _tbPython;
         private TextBox _tbNode;
+        private string _nodeExe;      // 本机 node.exe（启动 dsh / 生成 cordis.runtime.yml 都用它）
         private TextBox _tbRoot;
         private TextBox _tbDataDir;
         private Label _lbDataDirState;
@@ -2328,6 +2329,7 @@ namespace StockPool
             _dsh = new ServiceItem();
             _dsh.Name = "AI服务";
             _dsh.Exe = node;
+            _nodeExe = node;   // 记下来：生成 cordis.runtime.yml 时还要用
             _dsh.Args = "\"" + dshBin + "\" web --patch cordis.runtime.yml";
             _dsh.WorkDir = Path.Combine(_root, "agent_dsh");
             _dsh.HealthUrl = "http://127.0.0.1:3080/";
@@ -2400,6 +2402,9 @@ namespace StockPool
                 }
                 else
                 {
+                    // AI 服务已经在跑（多半是之前手动起的）。仍把 cordis.runtime.yml 按当前目录刷一遍：
+                    // 那个进程加载的可能是**旧机器**的插件路径，下次重启才会暴露出来。
+                    Ui(delegate { EnsureDshRuntimePatch(); });
                     Ui(delegate { Log("系统", "检测到 AI 服务已在运行"); });
                 }
                 Ui(delegate { RefreshStatus(false); });
@@ -2562,7 +2567,70 @@ namespace StockPool
 
         private void StartDsh(bool warn)
         {
+            // 先把 cordis.runtime.yml 生成出来 —— dsh 启动参数里写死的就是它。
+            // 模板 cordis.patch.yml 里的 __PLUGIN_BASE__ 是占位符，不替换的话
+            // dsh 加载不到插件目录（而 dsh 仍然「启动成功」，只是插件静默不生效）。
+            EnsureDshRuntimePatch();
             StartOne(_dsh, warn);
+        }
+
+        /// <summary>
+        /// 生成 agent_dsh\cordis.runtime.yml：把模板 cordis.patch.yml 里的 __PLUGIN_BASE__
+        /// 替换成**当前机器上**的插件目录绝对路径（项目换目录 / 拷到别的电脑后依然可用）。
+        /// 启动器一直用「--patch cordis.runtime.yml」，而这个文件此前没有任何生成入口 ——
+        /// 换机器后 plugins 路径失配，AI 服务的插件会静默不生效。
+        /// 失败不阻断启动：只是 AI 侧能力退化，股票池与估值不受影响。
+        /// </summary>
+        private void EnsureDshRuntimePatch()
+        {
+            try
+            {
+                var dir = Path.Combine(_root, "agent_dsh");
+                var script = Path.Combine(dir, "generate-patch.mjs");
+                var target = Path.Combine(dir, "cordis.runtime.yml");
+                if (!File.Exists(script)) return;
+
+                // 已经是当前机器的插件路径就别重跑（起一次 node 要 ~100ms，而这条路径会被调多次）
+                var pluginBase = "file:///" + Path.Combine(dir, "plugins").Replace('\\', '/');
+                if (File.Exists(target))
+                {
+                    try
+                    {
+                        if (File.ReadAllText(target, Encoding.UTF8).Contains(pluginBase)) return;
+                    }
+                    catch { /* 读不了就当它是坏的，重新生成 */ }
+                }
+
+                if (string.IsNullOrEmpty(_nodeExe) || !File.Exists(_nodeExe))
+                {
+                    Log("系统", "未找到 node，跳过生成 cordis.runtime.yml（AI 服务不可用）");
+                    return;
+                }
+
+                var psi = new ProcessStartInfo(_nodeExe, "\"" + script + "\"");
+                psi.WorkingDirectory = dir;
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError = true;
+                psi.StandardOutputEncoding = Encoding.UTF8;
+                psi.StandardErrorEncoding = Encoding.UTF8;
+
+                var sb = new StringBuilder();
+                int code = RunAndCollect(psi, 20000, sb, null);
+                if (code == 0)
+                {
+                    Log("系统", "已生成 cordis.runtime.yml（插件路径按当前目录重算）");
+                }
+                else
+                {
+                    Log("系统", "生成 cordis.runtime.yml 失败（退出码 " + code + "）：" + sb.ToString().Trim());
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("系统", "生成 cordis.runtime.yml 失败：" + ex.Message);
+            }
         }
 
         private void StartOne(ServiceItem svc, bool warn, bool force = false)
@@ -2663,7 +2731,7 @@ namespace StockPool
                     Ui(delegate { Msg("旧服务未停止，重启未完成。请检查服务控制台。"); });
                     return;
                 }
-                UiSync<bool>(delegate { StartOne(svc, false, true); return true; });
+                UiSync<bool>(delegate { if (svc == _dsh) EnsureDshRuntimePatch(); StartOne(svc, false, true); return true; });
                 WaitHealth(svc, 45);
                 Ui(delegate {
                     RefreshStatus(false);

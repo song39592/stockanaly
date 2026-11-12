@@ -46,13 +46,22 @@ public class Cap {
 
 [Cap]::SetProcessDPIAware() | Out-Null
 
+# exe 由 launcher\build_exe.bat 产出在**项目根**，文件名是 stockpool.exe
+# （「股票池追踪系统」是窗口标题，不是文件名 —— 早期 exe 名已改，别再按标题去 kill 进程）
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$exePath = Join-Path $projectRoot 'stockpool.exe'
+$exeName = [System.IO.Path]::GetFileNameWithoutExtension($exePath)
+if (-not (Test-Path -LiteralPath $exePath)) {
+  throw "找不到启动器可执行文件：$exePath`n请先运行 launcher\build_exe.bat 生成。"
+}
+
 $dir = Join-Path $env:TEMP 'stockpool-shots'
 if (Test-Path $dir) { Remove-Item $dir -Recurse -Force }
 New-Item -ItemType Directory -Path $dir | Out-Null
 
-Get-Process -Name '股票池追踪系统' -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process -Name $exeName -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1
-$p = Start-Process -FilePath 'c:\Users\Administrator\Desktop\stockanaly\股票池追踪系统.exe' -PassThru
+$p = Start-Process -FilePath $exePath -PassThru
 Start-Sleep -Seconds 12
 $p.Refresh()
 $h = $p.MainWindowHandle

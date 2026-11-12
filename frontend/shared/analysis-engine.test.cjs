@@ -40,7 +40,9 @@ test('empty data returns explicit error', () => {
 });
 
 test('frontend inline application scripts have valid JavaScript syntax', () => {
-  for (const file of ['index.html', 'mentor-lab.html']) {
+  // 页面已按页面分子目录（frontend/home|chip-scr|mentor-lab），本文件在 shared/，
+  // 路径必须用 ../<页面目录>/index.html —— 早先写 shared/index.html 是搬目录前的旧路径。
+  for (const file of ['../home/index.html', '../chip-scr/index.html', '../mentor-lab/index.html']) {
     const html = fs.readFileSync(__dirname + '/' + file, 'utf8');
     const start = html.lastIndexOf('<script>');
     const end = html.indexOf('</script>', start);

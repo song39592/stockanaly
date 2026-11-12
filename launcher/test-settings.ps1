@@ -1,4 +1,4 @@
-﻿param([string]$AssemblyPath = "$PSScriptRoot\build\股票池追踪系统.exe")
+﻿param([string]$AssemblyPath = "$PSScriptRoot\..\stockpool.exe")
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 $assembly = [Reflection.Assembly]::LoadFrom($AssemblyPath)

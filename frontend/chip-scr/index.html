@@ -95,6 +95,7 @@ html[data-theme=light] .modal-b .hi{color:#8a5a00}
 <!-- 浅色 / 深色：由启动器窗口顶部的「主题」按钮控制，页面跟随 -->
 <script src="../shared/theme-state.js"></script>
 <script src="../shared/theme.js"></script>
+<script src="../shared/stock-handoff.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -118,7 +119,7 @@ html[data-theme=light] .modal-b .hi{color:#8a5a00}
         解析结果可在下方表格中手动修改；支持一次选择多个文件。<br>
         计算需要<b>最近 5 周</b>的数据（按周归组，一周内多份只取其一）：<b>周一~周四及周五收盘前</b>最新一期为上一周，
         <b>周五 15:00 收盘后及周末</b>为本周；缺少任意一期会直接报错并列出缺口，窗口之外的更早文件不参与计算。<br>
-        结果表格中的<b>代码 / 名称可点击</b>，会在新标签页打开「个股分析」（日 K + 入池轨迹 + 消息面时间轴）。
+        结果表格中的<b>代码 / 名称可点击</b>，会把代码复制到剪贴板并提示在启动器「个股分析」标签页打开（日 K + 入池轨迹 + 消息面时间轴）。
       </div>
       <div id="fileList"><div class="empty">加载中…</div></div>
     </div>
@@ -387,8 +388,8 @@ function tierTable(key, tier) {
 
   const rows = items.map((it, i) => `<tr>
       <td class="num">${i + 1}</td>
-      <td><a class="stock-link" href="stock-analysis.html?code=${esc(it.code)}" target="_blank" rel="noopener" title="打开个股分析">${esc(it.code)}</a></td>
-      <td><a class="stock-link name" href="stock-analysis.html?code=${esc(it.code)}" target="_blank" rel="noopener" title="打开个股分析">${esc(it.name)}</a></td>
+      <td><a class="stock-link" href="#" data-code="${esc(it.code)}" title="移交到启动器「个股分析」页">${esc(it.code)}</a></td>
+      <td><a class="stock-link name" href="#" data-code="${esc(it.code)}" title="移交到启动器「个股分析」页">${esc(it.name)}</a></td>
       <td>${esc(it.industry || '—')}</td>
       <td class="num">${fmt(it.market, 1)}</td>
       <td class="num">${it.pe == null ? '—' : fmt(it.pe, 2)}</td>
@@ -548,6 +549,15 @@ $('bodyResult').addEventListener('click', (e) => {
     const key = header.dataset.toggle;
     tierState[key].collapsed = !tierState[key].collapsed;
     renderTierBlocks();
+    return;
+  }
+  // 个股代码 / 名称：移交到原生启动器的「个股分析」标签页
+  // （网页版 stock-analysis.html 已删除，这里原本是指向它的**死链**）
+  const link = e.target.closest('a.stock-link[data-code]');
+  if (link) {
+    e.preventDefault();
+    if (typeof window.stockHandoff === 'function') window.stockHandoff(link.dataset.code);
+    else window.alert('个股详情已迁入启动器「个股分析」标签页，请输入代码 ' + link.dataset.code);
   }
 });
 
