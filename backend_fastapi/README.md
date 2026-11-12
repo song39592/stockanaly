@@ -6,7 +6,8 @@
 ## 一、环境要求
 
 - Python 3.10+（本机可用 `py -3.11`）
-- 项目虚拟环境使用 `.venv/`，依赖见 `requirements.txt`（fastapi / uvicorn / akshare / requests / beautifulsoup4 / pydantic / python-dotenv）
+- 项目虚拟环境目录为本仓库的 `venv/`（`launcher/install_env.ps1` 也兼容 `.venv/` 布局），
+  依赖见 `requirements.txt`（fastapi / uvicorn / akshare / requests / beautifulsoup4 / pydantic / python-dotenv）
 
 ## 二、配置密钥
 
@@ -31,8 +32,8 @@
 手动启动（调试用）：
 
 ```bash
-cd D:/ai/backend_fastapi
-.venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+cd backend_fastapi
+venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
 ## 四、接口
@@ -94,10 +95,13 @@ curl -X POST "http://127.0.0.1:8000/api/stock/research" \
 
 | 模块 | 职责 |
 |---|---|
-| `db.py` | 共享 SQLite 基础设施：连接、库路径、建表调度、幂等加列 |
-| `price_store.py` | **行情存储与复权计算**，纯数据、不发网络请求；对外入口 `load_bars(code, adjust, as_of)` |
-| `price_service.py` | 行情采集：日 K（只落盘不复权原始价一份）、复权因子、除权明细，含数据源降级 |
-| `history_store.py` / `history_service.py` | 股票池快照、消息面与后台同步任务编排 |
+| `core/db.py` | 共享 SQLite 基础设施：连接、库路径、建表调度、幂等加列 |
+| `core/price_store.py` | **行情存储与复权计算**，纯数据、不发网络请求；对外入口 `load_bars(code, adjust, as_of)` |
+| `core/price_service.py` | 行情采集：日 K（只落盘不复权原始价一份）、复权因子、除权明细，含数据源降级 |
+| `features/history/{store,service}.py` | 股票池快照、消息面与后台同步任务编排 |
+
+> 顶层同名文件（如 `price_store.py`）是**转发壳**，真实现都在 `core/` 与 `features/` 下；
+> 目录地图见 `../.codebuddy/rules/project-structure.md`。
 
 **数据落盘口径**：库里只存 **不复权原始价** 与 **后复权因子 `hfq_factor`**，复权价一律现算：
 
@@ -260,7 +264,7 @@ GET  /api/history/download/tdx/status       通达信目录检测
 
 ## 十、盘面及板块分析（`market_service.py`）
 
-启动器原生「盘面及板块」标签页（`launcher/MarketPage.cs`；原前端页 `frontend/market-sector.html` 已删除）由 `GET /api/market/*` 五个接口驱动：
+启动器原生「盘面及板块」标签页（`launcher/MarketPage.cs`；原前端网页版已删除）由 `GET /api/market/*` 五个接口驱动：
 外围环境、大盘资金、板块β、连板梯队、大面股。
 
 - 数据源：新浪行情（外围指数 / 大宗商品）、新浪指数（两市成交额）、乐咕乐股（涨跌家数）、
@@ -272,113 +276,78 @@ GET  /api/history/download/tdx/status       通达信目录检测
 
 ## 十一、数据盘与日志约定
 
-> 本节只做**导航**。权威细节在代码注释里（`config.py` / `storage.py` / `logutil.py`），
-> 改实现时请改那里，本节不复制规则，免得变成第二份需要同步的真相。
+> 本节只做**导航**：给「东西在哪、谁说了算」，**不复制规则**。
+> 权威细节一律在代码注释里（`core/config.py` / `core/storage.py` / `core/logutil.py` / `cleanup.py`），
+> 改实现请改那里。表结构见 `../docs/database.md`（同样以代码为准）。
 
 ### 1. 数据根目录怎么定
 
-解析优先级（见 `config._resolve_data_dir`）：
+解析优先级（权威：`core/config.py` 的 `_resolve_data_dir`）：
 
 ```
-环境变量 STOCK_DATA_DIR  >  环境变量 DATA_DIR  >  默认 <仓库上一级>/stockanaly-data
+环境变量 STOCK_DATA_DIR  >  环境变量 DATA_DIR  >  默认 <程序上一级>/stockanaly-data
 ```
 
 默认值取自**程序自身位置**，不依赖盘符，整个目录换机器 / 移动都不受影响。
 用户可在设置页或直接写 `.env` 的 `DATA_DIR` 改到别处（`storage.update_data_dir`，改完需重启）。
 
 ⚠️ 数据盘在**仓库外、不受 git 跟踪**：老用户升级后要拿到新结构，**只能靠启动时的自动迁移**，
-不能指望「提交里带上新目录」。这是下面迁移规则存在的原因。
+不能指望「提交里带上新目录」。
 
-### 2. 分区表
+### 2. 分区
 
-| 分区 | 放什么 | 谁在写 | 丢了能重建吗 |
-|---|---|---|---|
-| `config/` | 用户可手工改的配置 json | 迁移逻辑 | ❌ 属用户数据 |
-| `state/` | SQLite 库、单实例锁 | `db.py` / `mentor_store.py` / `instance_lock.py` | ❌ |
-| `logs/` | 日志（见下） | `logutil.py` | ✅ 只是没历史 |
-| `cache/` | 可重建缓存 | 尚未使用（为诊断包与定时清理预留） | ✅ |
-| `bars/` | 行情分片 `bars_YYYY.db` + `factors.db` | `price_store.py` | ⚠️ 能但要重下（约 2 GB） |
-| `chip/` | SCR 原始文件与计算结果 | `chip_service.py` / `chip_rank_service.py` | ✅ 重算即可 |
+数据根目录下按用途分区（常量在 `core/config.py`，建目录在 `core/storage.py` 的 `ensure_dirs()`）：
+`state/`（SQLite 库与单实例锁）、`config/`（用户可改的配置）、`logs/`、`cache/`、
+`bars/`（行情分片与因子）、`chip/`（SCR 原始文件与结果）。
 
-`bars/` 与 `chip/` **刻意留在根目录不搬进子目录**：`bars/` 体积占绝对多数，搬动既慢又易中断且无收益。
-
-新增分区的做法：在 `config.py` 加常量 → 加进 `storage.ensure_dirs()` → 各模块**引用常量**，不要自己拼路径。
+`bars/` 与 `chip/` **刻意留在根目录不搬进子目录**：`bars/` 体积占绝对多数，搬动既慢又易中断。
+新增分区：在 `core/config.py` 加常量 → 加进 `core/storage.py` 的 `ensure_dirs()` →
+各模块**引用常量**，不要自己拼路径。
 
 ### 3. 迁移规则（一次性、非破坏）
 
-由 `storage.migrate_to_subdirs()` 在启动时执行：
+由 `core/storage.py` 的 `migrate_to_subdirs()` 在启动时执行：仅当「源存在且目标不存在」才搬；
+先复制 → 校验（大小一致 + SQLite `quick_check`）→ 通过才删源；库文件连同 `-wal` / `-shm` 一起搬；
+幂等。另有 `migrate_legacy()` 把项目内旧位置 `backend_fastapi/data/` 的数据补进 `state/`（只复制、不删源）。
 
-- **仅当「源存在且目标不存在」时才搬** —— 目标已有则一律不动，绝不用旧文件覆盖可能更新的数据。
-- 先复制 → 校验（大小一致 + SQLite `quick_check`）→ 通过才删源；任一步失败保留原状并记进 `errors`。
-- 库文件连同 `-wal` / `-shm` 一起搬，避免 WAL 未落盘导致库不完整。
-- **幂等**：可重复执行。
-- 另有 `migrate_legacy()` 把项目内旧位置 `backend_fastapi/data/` 的数据补进 `state/`（只复制、不删源）。
-
-执行顺序是**先 `migrate_to_subdirs()` 再 `migrate_legacy()`**，不能反：
+⚠️ 执行顺序**先 `migrate_to_subdirs()` 再 `migrate_legacy()`**，不能反：
 迁移语义是「目标已有就不动」，必须让根目录的真数据先落位，否则项目内的旧副本会把它顶掉
 （实测 `mentor_lab.db` 就出现过「项目内是空库、数据盘才是真数据」的分叉）。
 
-### 4. 日志规则
+### 4. 日志
 
 - **位置**：`<data>/logs/backend.log`（INFO 及以上）、`<data>/logs/uvicorn-error.log`（WARNING 及以上）。
 - **双写，不能只写文件**：stderr **必须保留** —— 启动器按输出流实时捕获并打 `[err]` 标签，
   停掉 stderr 界面上就什么都看不到了。文件只是给事后回溯用的副本。
-- **轮转**：按天轮转、保留 **7 天**（`logutil.KEEP_DAYS`，与 `cleanup.DEFAULT_RETAIN_DAYS`
-  是同一个口径 —— 两个数字必须一起改）。跨分区的过期清理由 `cleanup.py` 负责，见下节。
-- **级别**：`info` 常规流程 / `warning` 降级与异常（带 `exc_info=True` 让堆栈一起进文件）/
-  `critical` 致命（打到 stderr 显示为 `[fatal]`）。
+- **具名 logger `stockpool`**（`core/logutil.py`），**不要改成直接配 root**：
+  uvicorn 用 `--log-config` 调 `dictConfig()`，其配置不动 root 且带 `disable_existing_loggers: false`，
+  自建具名 logger 并设 `propagate=False` 才不会被冲掉。
 - **禁止写入**：密钥、`LLM_API_KEY`、DPAPI 密封值、`.env` 全文 —— 只写「已配置 / 未配置」这类状态。
-- **为什么用具名 logger `stockpool` 而不是配 root**：uvicorn 用 `--log-config` 调
-  `logging.config.dictConfig()`，其配置不动 root 且带 `disable_existing_loggers: false`；
-  自建具名 logger 并设 `propagate=False` 才不会被冲掉。**别改成直接配 root。**
 - **日志不可写时降级为只写 stderr**，绝不让日志拖垮启动。
 - **排障导出**：`POST /api/system/dump` 一键打包诊断信息到 `logs/dump-<时间戳>.zip`
   （含日志末尾与**脱敏**配置）。打包前会做密钥扫描，命中即拒绝生成 —— 详见 `dumplog.py`。
 
-### 5. 新模块要打日志时怎么写
+新模块要打日志时用 `logutil.logger`（`info` 常规 / `warning` 降级与异常并带 `exc_info=True` /
+`critical` 致命打 stderr），**不要**再写 `print(..., file=sys.stderr)` —— 那样关掉窗口就没了。
 
-```python
-import logutil
-
-logger = logutil.logger
-
-logger.info("已为 %d 只股票补算数据指纹", n)
-try:
-    ...
-except Exception as exc:
-    logger.warning("某某模块不可用：%s", exc, exc_info=True)   # 堆栈进文件
-```
-
-**不要**再写 `print(..., file=sys.stderr)` —— 那样只会打到控制台，关掉窗口就没了。
-
-### 6. 启动器侧的兼容
+### 5. 启动器侧的兼容
 
 启动器「读取错误日志」按钮硬编码读**旧路径** `backend_fastapi/uvicorn-error.log`。
 该路径**保持原样不动**（仍由 uvicorn 的重定向写入），`<data>/logs/` 下的同名文件只是副本，
-所以启动器无需改动。等下次因其它原因重新编译 exe 时再考虑切换。
+所以启动器无需改动。
 
-### 7. 清理（`cleanup.py`）
+### 6. 清理（`cleanup.py`）
 
 清理逻辑**刻意与「谁触发它」解耦**：定时清理跑在后端进程里，而「程序打不开」恰恰最需要
 清理（日志撑爆、缓存损坏）—— 那时定时器根本没机会执行。所以 `cleanup.py` 做成
 **零业务依赖**（不 import FastAPI / main / 任何 service），后端完全起不来也能跑。
 
-| 对象 | 默认策略 |
-|---|---|
-| `logs/*.log.<日期>`（轮转旧日志） | 超过 7 天删除 |
-| `logs/dump-*.zip`（诊断包） | 超过 7 天删除 |
-| `cache/**` | 全部可清（定义上就能重建） |
-| `chip/processed/scr90_rank_*.json` | **非当前周**删除，当前周那份保留 |
-| `bars/*.db.bak`（约 1 GB） | **默认不动**，需显式 `--bak` —— 它是迁移失败时唯一的回滚退路，删了不可逆 |
+**红线（不可改）**：`state/`（库与锁）、`config/`（用户配置）、`bars/*.db`（行情分片）、
+`chip/raw`、`chip/meta.json` **永不清理**；`bars/*.db.bak` **默认不动**，需显式 `--bak`
+—— 它是迁移失败时唯一的回滚退路，删了不可逆。宁可多占空间，也不能让清理变成数据事故。
 
-**永不清理**：`state/`（库与锁）、`config/`（用户配置）、`bars/*.db`（行情分片）、
-`chip/raw`、`chip/meta.json`。宁可多占空间，也不能让清理变成数据事故。
-
-三种触发方式：
-- **手动救急**：双击 `backend_fastapi/清理日志与缓存.bat`（默认预览，加 `--go` 才真删）；
-  或直接 `python cleanup.py --dry-run` / `--go` / `--bak` / `--days N`。
-- **定时**：`download_service._scheduler_tick()` 每天调一次 `cleanup.schedule_tick()`，
-  内部按**日期**去重（不是每 tick），60 秒一轮也不会重复扫描目录。
-- 清理放在 tick 的**最前面**：否则会被长时间运行的下载任务「饿死」，而有任务时最该清日志。
-
-每一项独立 try/except：日志清不掉也继续清缓存；`--dry-run` 可先看会删什么。
+清理对象与保留天数见 `cleanup.py` 顶部常量（轮转保留天数与 `core/logutil.py` 的 `KEEP_DAYS`
+是**同一个口径，两个数字必须一起改**）。触发方式：手动 `python cleanup.py --dry-run` /
+`--go` / `--bak` / `--days N`，或由 `features/download/service.py` 的调度 tick 每天调一次
+（按**日期**去重，且放在 tick **最前面**，否则会被长任务「饿死」）。
+每一项独立 try/except：日志清不掉也继续清缓存。
