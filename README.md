@@ -14,18 +14,18 @@
 - **红色小牛问答 Agent**：右下角悬浮 🐂 聊天窗，基于 dsh（deepseek-harness）运行，
   读取页面股票池快照、按当前 Skill 角色规则回答，可链式调用个股调研工具；
   支持多套 Skill 角色（通用分析 / 短线猎手 / 巴菲特价值投资），完整 Agent 轨迹可在 dsh webui 回看调试。
-- **盘面及板块分析**（原生启动器「盘面及板块」标签页，源码 `launcher/MarketPage.cs`；原 `frontend/market-sector.html` 已删除）：
+- **盘面及板块分析**（原生启动器「盘面及板块」标签页，源码 `launcher/MarketPage.cs`；原网页版已删除）：
   ① 外围环境（美股 / 亚太韩日 / 港股 / 大宗商品 / 费城半导体）、② 大盘资金（主力净流向 / 特大单方向 / 两市成交 / 涨跌家数）、
   ③ 板块β（行业与概念资金流 Top10 + 申万一级行业涨跌）、④ 连板梯队（连板结构 + 晋级率）、⑤ 大面股（炸板 / 跌停）；
   顶部可选择交易日：①③ 支持历史交易日（部分口径有历史源）、④⑤ 按所选交易日回溯、② 暂无历史源恒为实时快照；
   对应后端 `GET /api/market/*`，多源公开接口 + 单源失败自动降级 + 进程内缓存。
-- **股票估值计算**（原生启动器「估值计算」标签页，源码 `launcher/ValuationPage.cs`；原 `frontend/valuation.html` 已删除）：
+- **股票估值计算**（原生启动器「估值计算」标签页，源码 `launcher/ValuationPage.cs`；原网页版已删除）：
   输入 6 位代码即自动抓取股价 / 总股本 / 期初净利润（TTM 归母优先，缺失时退回年报扣非 / 年报归母），
   输入后即时显示股票名称与股价用于确认（`GET /api/stock/quote`）；
   用两段法（前 5 年净利润贴现 + 永续增长，贴现率 10%）给出乐观 / 中性 / 悲观三档每股价值、
   股价/价值（低估程度）、预测 N 年价与收益率，并逐步展示计算过程；对应 `POST /api/stock/valuation`。
   机构预测第 N 年净利润为可选：提供时三档为乐观 ×1.5 / 中性 ×1 / 悲观固定 5%，未提供则兜底 25% / 10% / 5%。
-- **SCR 选股（筹码体系）**（`frontend/chip-scr/index.html`，从股票池页「筹码体系 · SCR 选股」进入）：
+- **SCR 选股（筹码体系）**（`frontend/chip-scr/index.html`，独立页面，浏览器直接打开）：
   导入行情软件导出的多期「临时条件股YYYYMMDD.xls」（文件名日期自动解析、可在页面手改），
   跨期合并做周级三档分类：磨主峰（连续 N 期全勤 ∩ 流通市值 100–800 亿 ∩ PE>0）/ 向下破位离榜 / 启动型离榜；
   阈值可调，点「🔄 刷新计算」手动触发；计算需**最近 5 周**数据（按周归组，周中执行时最新一期为上一周，
@@ -42,19 +42,25 @@
 
 ## 系统架构
 
+四个部件：原生启动器（主界面 + 进程管家）、FastAPI 后端、浏览器前端、dsh Agent。
+
 ```
-frontend/home/index.html（原生 HTML/JS 单页，浏览器本地 localStorage 存数据）
-   │  Excel 导入 / 图表 / 个股调研弹窗 / 红色小牛聊天窗
-   ├──────────────► backend_fastapi（FastAPI，:8000）
-   │                  GET  /health
-   │                  POST /api/stock/research  → 采集 + LLM → markdown
-   │                  GET  /api/market/*        → 盘面及板块（外围/资金/板块β/连板/大面）
-   │
-   └──────────────► agent_dsh（dsh 服务，Node，:3080，webui 同端口）
-                      自定义 Tool：getStockPoolSnapshot（读快照）
-                                  fetchStockResearch（回连 :8000 调研）
-                      Skill 规则引擎：skills_library/*.skill 按会话注入
-                      REST 网关：/api/bull/*（会话/快照/对话/Skill CRUD）
+┌──────────────────┐   拉起 / 监控 / 托盘常驻 / 退出收尾
+│ launcher (exe)   │───────────────────────────────┐
+│  WinForms        │   启动后端 :8000              │  启动 Agent :3080
+└────────┬─────────┘                                │
+         │ 业务页面 + 设置                            ▼
+         │                            ┌──────────────────────────┐
+         │                            │ agent_dsh (Node / dsh)   │
+         │                            │  Tool: getStockPoolSnapshot
+         │                            │  Tool: fetchStockResearch │
+         │                            │  REST: /api/bull/*        │
+         │                            └──────────────────────────┘
+         ▼
+frontend/ (原生 HTML/JS 单页)
+   │  Excel 导入 / ECharts 图表 / 个股调研弹窗 / 红色小牛聊天窗
+   │  ←→ 后端 :8000（行情/指标/策略/筹码/估值/调研）
+   └─→ dsh :3080（快照上传 + 对话 + Skill CRUD）
 ```
 
 前端不直接调大模型：所有 LLM / 工具调用 / 会话轨迹均由 dsh 托管；个股调研由 FastAPI 后端托管。
@@ -63,40 +69,49 @@ frontend/home/index.html（原生 HTML/JS 单页，浏览器本地 localStorage 
 
 | 目录 | 说明 | 技术栈 |
 |---|---|---|
-| `frontend/` | 前端单页（Excel 导入、ECharts 图表、个股调研弹窗、红色小牛 UI） | 原生 HTML/JS（CDN 引入 SheetJS / ECharts / marked） |
-| `backend_fastapi/` | FastAPI 调研后端（个股公告/新闻/调研采集 + LLM 调研接口） | Python 3.10+ / FastAPI / akshare |
+| `launcher/` | 原生 Windows 启动器兼主界面（内嵌拉起后端与 Agent） | C# / WinForms / `csc.exe` 离线编译 |
+| `backend_fastapi/` | FastAPI 后端（行情存储、指标、策略回测、筹码、估值、调研） | Python 3.10+ / FastAPI / akshare / SQLite |
+| `frontend/` | 前端单页（股票池追踪、SCR 选股、策略实验室） | 原生 HTML/JS（CDN 引入 SheetJS / ECharts / marked） |
 | `agent_dsh/` | 红色小牛 Agent（自定义 Tool 插件、Skill 角色规则库） | Node 22+ / @deepseek-ai/dsh |
-| `docs/` | 需求、变更日志、开发规范 | — |
+| `docs/` | 需求、数据库结构、变更日志、开发规范 | — |
 
 ## 目录结构
 
+> 完整的目录地图、单一来源清单与「改 X 必同步 Y」矩阵见
+> [`.codebuddy/rules/project-structure.md`](.codebuddy/rules/project-structure.md)（**权威位置**）。
+> 下面只是速览。
+
 ```
-stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
-├── 股票池追踪系统.exe            # 原生 Windows 窗口程序（由 launcher\build_exe.bat 编译，自带窗口、不加载 HTML）
-├── launcher/                     # 上述 EXE 的源码：主窗体 StockPoolLauncher.cs + 各业务标签页
-│                                 #   （MarketPage / StockPage / ValuationPage / DownloadPage.cs）、
-│                                 #   构建脚本 build_exe.bat、环境安装脚本 install_env.ps1
-├── frontend/                     # 按页面分目录：home/（股票池）、mentor-lab/（大佬策略实验室）、
-│                                 # chip-scr/（SCR 选股），每个目录下都是 index.html；shared/ 放共享 js
-├── backend_fastapi/              # FastAPI 后端（业务模块化：*_routes.py 管 HTTP、*_service.py 管逻辑）
-│   ├── main.py                   # 应用入口：容错挂载各模块路由 + /health（单模块故障不影响其他模块）
-│   ├── chip_routes.py            # 筹码体系 · SCR 选股接口
-│   ├── market_routes.py          # 盘面及板块分析接口
-│   ├── mentor_routes.py          # 大佬策略实验室接口
-│   ├── stock_routes.py           # 个股调研与股票估值接口
-│   ├── download_routes.py        # 历史数据下载接口（启动 / 进度 / 暂停 / 继续 / 取消 / 重试失败项）
-│   ├── download_service.py       # 遍历编排：worker 池、限速、失败重试、断点续传、后台调度
-│   ├── download_store.py         # 下载任务与队列持久化（download_tasks / download_codes / download_settings）
-│   ├── tdx_reader.py             # 本机通达信 .day 日线文件解析（纯读取，不联网）
-│   ├── llm_client.py             # LLM 调用与错误翻译（各模块共用）
-│   └── .env.example              # 密钥模板（复制为 .env）
-├── agent_dsh/                    # dsh Agent（plugins/ + skills_library/）
-│   ├── cordis.patch.yml          # 插件挂载 + 角色 persona 配置
-│   └── .env.example              # DEEPSEEK_API_KEY 模板
-├── docs/                         # requirement / changelog / CONTRIBUTING
-├── .gitignore
-├── README.md
-└── LICENSE                       # MIT
+stockanaly/                        # 项目根目录
+├── stockpool.exe                  # 原生 Windows 窗口程序（由 launcher\build_exe.bat 编译）
+├── launcher/                      # 上述 EXE 的源码（32 个 .cs）
+│   ├── StockPoolLauncher.cs       #   主窗体 partial class MainForm + 进程/托盘/设置
+│   ├── StockPage*.cs              #   个股页及 6 个分部
+│   ├── MarketPage / ValuationPage / DownloadPage / MentorLabPage / RedBullPage / ...
+│   ├── Http.cs / J.cs / Palette.cs / AsyncKit.cs / UiKit.cs / GridKit.cs / ...
+│   ├── build_exe.bat              #   编译脚本（显式源文件清单，无通配符）
+│   └── install_env.ps1            #   环境安装脚本（带 # INTEGRITY 标记）
+├── frontend/                      # 按页面分目录，每个目录下都是 index.html
+│   ├── home/                      #   股票池追踪（主页面）
+│   ├── chip-scr/                  #   SCR 选股
+│   ├── mentor-lab/                #   大佬策略实验室
+│   └── shared/                    #   共享 js（analysis-engine.js / theme.js）
+├── backend_fastapi/               # FastAPI 后端
+│   ├── main.py                    #   应用入口：单实例锁 → 迁移/建表 → 容错挂载路由 → /health
+│   ├── core/                      #   21 个基础设施模块（依赖图底部）
+│   ├── features/                  #   7 个业务子包：chip/download/history/market/mentor/stock/system
+│   ├── indicators/                #   技术指标插件包（@indicator 自动注册）
+│   ├── strategies/                #   策略回测插件包（@strategy）
+│   ├── chipformulas/              #   筹码峰公式插件包（@chip_formula）
+│   ├── formulas/                  #   指标与策略共用的中立计算内核
+│   └── .env.example               #   密钥模板（复制为 .env）
+├── agent_dsh/                     # dsh Agent
+│   ├── plugins/                   #   bull-http（REST 网关）+ 2 个 Tool + role-skills
+│   ├── skills_library/            #   <skillId>.skill 角色规则库
+│   └── cordis.patch.yml           #   插件挂载 + 角色 persona 配置
+├── docs/                          # requirement / database / changelog / CONTRIBUTING
+├── .codebuddy/rules/              # 工程纪律（常驻加载，改代码前必读）
+└── LICENSE                        # MIT
 ```
 
 ## 快速启动
@@ -105,8 +120,8 @@ stock-pool-agent/                 # 项目根目录（本机为 D:\ai）
    - 后端：`backend_fastapi/.env` 填 `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`（模板见 `.env.example`）；
    - dsh：`agent_dsh/.env` 填 `DEEPSEEK_API_KEY`（模板见 `.env.example`），并已执行
      `cd D:\ai\agent_dsh && npm install`（依赖 `@deepseek-ai/dsh`）。
-2. **一键启动**：双击根目录 `股票池追踪系统.exe`（launcher 原生窗口程序）即可，它内嵌拉起后端（:8000）/ dsh（:3080）并自带服务控制台、状态灯、托盘；点「打开完整网页版」按钮打开前端页面。
-   - 也可以用原生窗口程序：双击 `launcher\build_exe.bat` 生成根目录 `股票池追踪系统.exe`
+2. **一键启动**：双击根目录 `stockpool.exe`（launcher 原生窗口程序）即可，它内嵌拉起后端（:8000）/ dsh（:3080）并自带服务控制台、状态灯、托盘；点「打开完整网页版」按钮打开前端页面。
+   - 也可以用原生窗口程序：双击 `launcher\build_exe.bat` 生成根目录 `stockpool.exe`
      （调用系统自带 `csc.exe` 编译，离线、零第三方依赖），之后双击该 EXE：
      **自带 WinForms 窗口**（服务控制台 / 个股查询 / 运行日志 / 设置），内嵌拉起两个服务、
      状态灯实时显示、托盘常驻、退出自动收尾子进程；业务页面仍由「打开完整网页版」按钮唤起浏览器。
@@ -143,7 +158,7 @@ C:\Users\Admin\Desktop\stockanaly-main\agent_dsh\.env         →  DEEPSEEK_API_
   **三项必须来自同一平台**，混用会返回 401（典型坑：Key 取自腾讯云 TokenHub，地址却填成混元老平台）。
 - 两边填的 Key 可以不同；**只填一边时只有对应功能可用**（「个股调研报错、红色小牛正常」通常就是后端这处没填）。
 - `.env` 已被 `.gitignore` 忽略；**`.env.example` 会被提交，只能放占位符，切勿写入真实密钥**。
-- 修改 `.env` 后必须**重启对应服务**才生效（后端：在 launcher 点「重启后端」，或关闭后端窗口后重新双击 `股票池追踪系统.exe`）。
+- 修改 `.env` 后必须**重启对应服务**才生效（后端：在 launcher 点「重启后端」，或关闭后端窗口后重新双击 `stockpool.exe`）。
 - 自查：`http://127.0.0.1:8000/health` 的 `llm_ready` 为 `true` 且 `llm_problem` 为空；
   调用报错时错误信息会附带上游原始说明，便于判断是哪家平台的 Key 有问题。
 - 常用平台配置对照：
@@ -176,15 +191,30 @@ C:\Users\Admin\Desktop\stockanaly-main\agent_dsh\.env         →  DEEPSEEK_API_
 
 ## 文档
 
+**工程纪律**（改代码前必读，常驻加载）：
+
+- [.codebuddy/rules/project-structure.md](.codebuddy/rules/project-structure.md) — **目录结构权威地图**：四个部件、backend 分层与路由前缀、单一来源清单、改动同步矩阵
+- [.codebuddy/rules/add-indicator-strategy.md](.codebuddy/rules/add-indicator-strategy.md) — 新增指标 / 策略的规程
+- [.codebuddy/rules/docs-sync.md](.codebuddy/rules/docs-sync.md) — 规则与说明文件的同步纪律
+- [.codebuddy/rules/cross-device-portability.md](.codebuddy/rules/cross-device-portability.md) — 跨设备可移植性
+- [.codebuddy/rules/git-safety.md](.codebuddy/rules/git-safety.md) — Git 提交与推送纪律
+- [.codebuddy/rules/launcher-ux.md](.codebuddy/rules/launcher-ux.md) — 启动器交互反馈
+- [.codebuddy/rules/powershell-authoring.md](.codebuddy/rules/powershell-authoring.md) — PowerShell 脚本写法
+- [.codebuddy/rules/engineering-discipline.md](.codebuddy/rules/engineering-discipline.md) — 动手前的通用工程纪律
+
+**说明文档**：
+
+- [docs/requirement.md](docs/requirement.md) — 功能范围现状
+- [docs/database.md](docs/database.md) — **数据库表结构权威**
+- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — 版本号 / 备份策略
+- [docs/changelog.md](docs/changelog.md) — 版本变更日志（历史流水）
+- [backend_fastapi/README.md](backend_fastapi/README.md) — 后端接口与运维手册
 - [agent_dsh/README.md](agent_dsh/README.md) — 红色小牛 Agent 架构与接口
-- [backend_fastapi/README.md](backend_fastapi/README.md) — FastAPI 后端接口
-- [docs/requirement.md](docs/requirement.md) — 需求文档
-- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — 提交规范 / 分支策略 / 版本回退
-- [docs/changelog.md](docs/changelog.md) — 版本变更日志
 
 ## 版本管理
 
-见 [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)。分支：`main`（稳定 + tag）→ `dev`（日常开发）→ `feature/xxx`（功能分支）。
+分支策略与提交规范见 [.codebuddy/rules/git-safety.md](.codebuddy/rules/git-safety.md)（**权威**）；
+版本号与备份策略见 [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)。
 
 ## 注意事项
 

@@ -1,104 +1,164 @@
 ---
-description: 目录结构与构建清单约定：launcher 顶层类文件、build_exe.bat 源文件清单、分发单元、指标层跨层契约
+description: 目录结构权威地图：四个部件、backend 分层与路由前缀、单一来源清单、改动同步矩阵、launcher 与指标层约定
 alwaysApply: true
 enabled: true
 ---
 
 # 文件结构与构建清单
 
-## launcher\：一个主类一个文件
+> 本文是**目录与权威位置的唯一来源**：读完本文件即可定位代码，不必扫仓库。
+> 展开细节（表结构 / 接口清单 / 口径推导）**不在这里**，只给指针。
+> 纪律类内容各自成篇：新增指标 `add-indicator-strategy.md`、可移植性 `cross-device-portability.md`、
+> Git `git-safety.md`、启动器交互 `launcher-ux.md`、脚本写法 `powershell-authoring.md`、
+> 动手前评估 `engineering-discipline.md`、文档同步 `docs-sync.md`。
+
+## 一、全景：四个部件
+
+| 部件 | 位置 | 端口 | 入口文件 |
+|---|---|---|---|
+| 原生启动器 | `launcher/*.cs` → 仓库根 `stockpool.exe`（C# WinForms，`csc.exe` 离线编译） | — | `launcher/StockPoolLauncher.cs`（`partial class MainForm`） |
+| 后端 | `backend_fastapi/`（FastAPI + akshare + SQLite） | 8000 | `backend_fastapi/main.py` |
+| 前端 | `frontend/`（原生 HTML/JS + CDN） | file:// | `frontend/home/index.html` |
+| AI Agent | `agent_dsh/`（Node 22 + `@deepseek-ai/dsh`） | 3080 | `agent_dsh/plugins/bull-http.mjs` |
+
+启动器负责拉起后端与 Agent、状态灯、托盘常驻、退出时收尾子进程。
+**前端不直接调大模型**：LLM 调用一律由后端（:8000）或 dsh（:3080）托管。
+
+
+## 二、目录地图
+
+```
+launcher/              32 个 .cs → 一个 exe（stockpool.exe）
+  StockPoolLauncher.cs   主窗体 partial class MainForm + Program / ServiceItem / WebWindow / Win32
+  StockPage*.cs          个股页及 6 个分部（Kline/Profile/Records/Valuation/Saolei/AI/Overlays）
+  MarketPage / ValuationPage / DownloadPage / MentorLabPage / RedBullPage / RpsPoolPage
+  ChipPanel / ChipRankPage / IndicatorIndexPage / StrategyPage
+  公共件：Http.cs / J.cs / Palette.cs / AsyncKit.cs / UiKit.cs / Cards.cs / GridKit.cs / ChartKit.cs
+          KLineChart.cs / BootOverlay.cs / SubTabStrip.cs / QuickSearch.cs / UserSettings.cs
+  build_exe.bat（显式源文件清单，无通配符）/ install_env.ps1（带 # INTEGRITY 标记）
+  test-launcher-conventions.ps1（静态约定自检，退出码 0 = 通过）
+
+backend_fastapi/
+  main.py              入口：单实例锁 → 迁移/建表/指纹/签名 → 容错挂载 11 组路由 → /health
+  apiutil.py           统一错误体 {ok, detail, error:{code,message}}（全仓生效）
+  indicators_routes.py / strategies_routes.py（顶层，未搬）
+  core/                21 个基础设施模块 —— 依赖图底部，不依赖任何业务包
+  features/            7 个业务子包：chip/download/history/market/mentor/stock/system
+                       子包内按 routes.py（HTTP）/ service.py（业务）/ store.py（持久化）分层
+  indicators/          插件包 @indicator —— 扫目录自动注册，**id 与文件名无关**
+  strategies/          插件包 @strategy  —— **id 必须 == 文件名**
+  chipformulas/        插件包 @chip_formula —— **id 必须 == 文件名**
+  formulas/            中立纯计算内核（无注册）—— 依赖方向恒为「指标 → formulas ← 策略」
+  <39 个顶层转发壳>      旧 import 路径的别名（sys.modules[__name__] = _impl），**不是实现**
+
+frontend/              home/（股票池主页面）、chip-scr/（SCR 选股）、mentor-lab/（实验室）
+                       shared/analysis-engine.js（评分与回测引擎）、shared/theme.js（主题引擎）
+                       theme-state.js ⚠ 遗留副本，生效的是 shared/theme-state.js
+agent_dsh/             plugins/（bull-http 网关 + bull-store 共享状态 + 2 个 Tool + role-skills）
+                       skills_library/<skillId>.skill、cordis.patch.yml（模板）/ .runtime.yml（产物）
+scripts/               check-docs.ps1 —— 文档一致性自检（链接 / 路径 / API 前缀 / 规则区预算）
+```
+
+**转发壳**：`config.py` / `db.py` / `price_store.py` / `chip_service.py` … 共 39 个顶层文件是
+`core/` 与 `features/` 的别名。用 `sys.modules` 别名而非 `import *` 是必须的——
+`market_service._ak` 是私有名（`import *` 不导出会 AttributeError），
+且 `patch.object(config, ...)` 打在副本上会**补丁静默失效**。
+
+## 三、路由前缀速查（后端对外 HTTP）
+
+| 前缀 | 业务 |
+|---|---|
+| `/api/indicators` | 技术指标（清单 / compute / batch / diagnose） |
+| `/api/strategies` | 策略回测（清单 / 校验 / 推荐 / 回测 / 报告 / 成交） |
+| `/api/history` | 股票池历史与 K 线 |
+| `/api/history/download` | 历史数据下载（任务 / 队列 / 通达信） |
+| `/api/chip/scr` | SCR 选股 |
+| `/api/chip/rank` | SCR90 周榜 |
+| `/api/chip/dist` | 筹码分布（筹码峰） |
+| `/api/market` | 盘面及板块（global / capital / sectors / limit-up / big-loss） |
+| `/api/mentor` | 大佬策略实验室 |
+| `/api/stock` | 个股调研 / 估值 / 档案 / 板块 |
+| `/api/system` | 数据目录 / 完整性 / 诊断包 |
+
+路由文件：前两个在顶层，其余在 `features/<子包>/routes.py`；`/api/bull` 由 `agent_dsh/plugins/bull-http.mjs` 提供。
+
+> ⚠️ `/api/system/storage` 的前缀**一字都不能改** —— Windows 启动器直接探这个地址
+> （`launcher/StockPoolLauncher.cs` 的 `RefreshDataDir` / `SaveDataDir`）。
+
+## 四、单一来源清单（改这里，别处自动生效）
+
+| 事实 | 唯一权威 | 其它引用点 |
+|---|---|---|
+| 日线标准列 + 复权缩放 | `core/bars_schema.py` | `indicators/data.py`、`strategies/core/data.py` |
+| 三套注册的机械骨架 | `core/registry_scan.py` | 三个插件包各自的 `registry.py` |
+| `ParamSpec` 定义 | `core/paramspec.py` | 三个插件包的 `base.py` |
+| 行情取数 + 周期合样 | `core/kline_service.py` | `indicators/data.py`、`strategies/core/data.py` |
+| 日→周/月 合样 | `core/periods.py` | `core/kline_service.py`、`indicators/rps_data.py` |
+| 行情存储与复权现算 | `core/price_store.py` | `core/price_service.py`、`core/kline_service.py` |
+| 通达信本地日线读取 | `core/tdx_reader.py` | `core/price_service.py`、`features/download/service.py` |
+| 数据目录解析 / 迁移 | `core/config.py` / `core/storage.py` | `main.py`、`features/system/routes.py` |
+| 完整性签名 + 密钥密封 | `core/crypto.py` + `core/dpapi.py` | `core/db.py`、`features/system/integrity.py` |
+| 日志 | `core/logutil.py` | 全仓 |
+| 指标 / 策略共用的纯计算 | `formulas/` | `indicators/*`、`strategies/*` |
+| 指标数值基准 | `indicators/_golden.json` | `test_indicators_golden.py` |
+| 数据库表结构 | `docs/database.md` | 建表代码在 `core/db.py` / `core/price_store.py` |
+| 用户本地设置 | `launcher/UserSettings.cs` | `launcher/StockPoolLauncher.cs` |
+| 语义色调色板 | `launcher/Palette.cs` | `launcher/KLineChart.cs` 等 |
+| 前端评分 / 回测引擎 | `frontend/shared/analysis-engine.js` | `frontend/home/`、`frontend/mentor-lab/` |
+
+## 五、改动同步矩阵（改 X 必同步 Y）
+
+完整矩阵在 `docs-sync.md` 第四节「触发矩阵」。最容易踩的三条：
+
+| 你改了什么 | 必须同步 | 漏了会怎样 |
+|---|---|---|
+| `launcher\*.cs`（新增/删除顶层文件） | `build_exe.bat` 清单 + 重跑生成 `stockpool.exe` | 新类不进 exe（「改了没生效」） |
+| 后端接口的**字段 / 返回结构** | `launcher/*.cs` 的消费端 | 前端读到旧字段**静默降级**（不报错，最难发现） |
+| 指标 / 策略 / 筹码公式的**计算逻辑** | `python -m indicators.golden --update` + `_golden.json` 入库 | `test_indicators_golden` 失败 |
+
+## 六、launcher\：一个主类一个文件 + 同步 build_exe.bat
+
 - 主窗体是分部的（`StockPoolLauncher.cs` + `StockPage.*.cs` 等）；**新抽出来的控件 / 面板类放独立顶层文件**
-  （如 `launcher\ChipPanel.cs`、`launcher\KLineChart.cs`、`launcher\BootOverlay.cs`），
-  不要塞回 `MainForm` 里当嵌套类。
-- 嵌套类只在「外部完全用不到」时保留；一旦别的顶层类要用，它就必须提升为顶层 `internal` 类型
-  （同命名空间同程序集可见）。
-- 提升时要**一起提升它的基类**（如 `ChartControl`）与它依赖的其它嵌套类型（如 `KBar` / `KMark`），
-  否则编译期报 CS0246（类型找不到）。
-- 顶层类放在 `namespace StockPool` 下、标 `internal`（不要 public）。
+  （如 `launcher\ChipPanel.cs`、`launcher\KLineChart.cs`），不要塞回 `MainForm` 里当嵌套类。
+- 嵌套类只在「外部完全用不到」时保留；一旦别的顶层类要用，就必须提升为顶层 `internal` 类型，
+  并**一起提升它的基类**（如 `ChartControl`）与依赖的其它嵌套类型（如 `KBar` / `KMark`），
+  否则编译期报 CS0246（类型找不到）。顶层类放 `namespace StockPool` 下、标 `internal`。
+- **新增或删除顶层 .cs 后必须同步改 `build_exe.bat`** —— 它是**显式源文件清单**（不是通配符），
+  否则新类不会进 exe（表现为「改了没生效」）。改完重跑 `build_exe.bat` 重新生成 `stockpool.exe`；
+  **发布版 exe 要入库**（见 git-safety 规则）。
 
-## 新增 / 删除 launcher\*.cs 必须同步 build_exe.bat
-- `launcher\build_exe.bat` 是**显式源文件清单**（不是通配符）：新增或删除顶层 .cs 后必须同步改这个清单，
-  否则新类不会进 exe（表现为「改了没生效」）。
-- 改完清单要重跑 `build_exe.bat` 重新生成 `stockpool.exe`；**发布版 exe 要入库**（见 git-safety 规则）。
+## 七、单一来源模块的坑（对应第四节的行）
 
-## backend_fastapi\：几个「单一来源」模块
-- `core/bars_schema.py` —— **日线标准列集合 + 复权缩放规则**的唯一来源。
-  指标侧（`indicators/data.py`）与策略侧（`strategies/core/data.py`）都从这里取，
-  改一处两处生效；历史上两侧各写一份，漏一处就静默失真（两边算出两个数、两边都不报错）。
-  ⚠️ 新增量纲为「价」的列（如成交额）时，必须同时加进 `PRICE_SCALED_COLUMNS`。
-- `core/registry_scan.py` —— 指标 / 策略 / 筹码公式三套注册机制的**公共骨架**
-  （遍历目录 / 强制重导入 / 单注册校验 / 报告组装 / mtime 缓存）。
-  **判据各包自理**（指标的 id 与文件名无关、策略与公式必须相同），机械动作共用这一份。
-  新增第四套注册机制时复用它，不要照抄。
-- `core/tdx_reader.py` —— **通达信本地日线读取的唯一实现**（纯文件解析，不联网）。
-  ⚠️ `detect()` 必须保持**轻量**（秒级）：它被「目录是否可用」的热路径反复调用
+- `core/bars_schema.py` —— ⚠️ 新增量纲为「价」的列（如成交额）时，必须同时加进 `PRICE_SCALED_COLUMNS`。
+- `core/registry_scan.py` —— **判据各包自理**（指标的 id 与文件名无关、策略与公式必须相同），
+  机械动作共用这一份；新增第四套注册机制时复用它，不要照抄。
+- `core/tdx_reader.py` —— ⚠️ `detect()` 必须保持**轻量**（秒级）：它被「目录是否可用」的热路径反复调用
   （`_tdx_is_valid`、设置保存校验）。要全量覆盖度统计请走 `coverage_stats()`
   （并发 8 线程全扫、结果按目录缓存 5 分钟），**不要**把全扫塞进 `detect()`。
   ⚠️ 覆盖度里的「最新日」以**众数**（`last_mode`）为准，**不用**最大日期（`latest`）：
   通达信刚下载完日线时常见「只有 1 只更新到今天、绝大多数停在昨天」，
   按 max 显示会变成「最新 11-10（0.0% 的股票到这一天，5588 只更早）」—— 既难看又完全误导。
   「本机比库里落后几个交易日」的缺口判定**同样**要按众数比，否则会误报「没有缺口」。
-- `formulas/` —— **中立计算内核包**：指标与策略共用的纯计算放这里。
-  依赖方向恒为「指标 → formulas ← 策略」，**不存在反向依赖**。
-  ⚠️ 不要把共用内核塞进 `chipformulas/core/`（那是筹码语义）—— 那会让「非筹码的东西住在筹码包里」
-  变成默认惯例，下一个新增的人照抄。
-- `indicators/golden.py` + `indicators/_golden.json` —— **数值基准**（每个指标在确定性合成行情上的
-  输出快照）。改了指标计算逻辑或新增指标后**必须** `python -m indicators.golden --update`，
-  否则 `test_indicators_golden` 失败。基准文件入库。
+- `formulas/` —— ⚠️ 不要把共用内核塞进 `chipformulas/core/`（那是筹码语义）——
+  那会让「非筹码的东西住在筹码包里」变成默认惯例，下一个新增的人照抄。
+- `indicators/_golden.json` —— 改了指标计算逻辑或新增指标后**必须** `python -m indicators.golden --update`，
+  否则 `test_indicators_golden` 失败；基准文件入库。
 
-## backend_fastapi\indicators\：跨层上下文必须显式
+## 八、backend_fastapi\indicators\：跨层上下文必须显式
+
 - 指标函数只允许从**签名**拿到「按代码 / 周期再取数」这类上下文：
   `def xxx(df, *, ctx=None, ...)`，框架经 `context.CalcContext` 注入。
 - **禁止**再用 `df.attrs["code"]` 这类藏在数据里的通道 —— 签名里看不见 = 契约是假的，
   单元测试还得伪造 attrs 才能跑。
-- `ctx` 是框架注入参数：走 `base.INJECTED_PARAMS` 白名单、必须是**关键字参数**且有默认值、
-  不进用户参数表（ParamSpec）；`ctx=None` 表示「没有上下文」（合成数据自检），需要 code 的指标据此
-  抛「取不到股票代码」，由 `scan` 判为需外部数据跳过。
-- 详见 `backend_fastapi\indicators\ARCHITECTURE.md` §5。
-- 指标的颜色 / 线宽由 `@indicator(styles=...)` 声明并随计算结果下发（`series[].style`），
-  **新增指标不必改前端**；前端保留硬编码规则作兼容回退，且用户覆盖过的调色板语义色优先。
-- ⚠️ `indicators/` 目录下的 .py 会被 `__init__.py` **自动 import**：
-  非指标模块（如 `golden.py`）必须列进 `_EXCLUDE`，否则会在包加载时顺手执行一遍。
+- `ctx` 走 `base.INJECTED_PARAMS` 白名单、必须是**关键字参数**且有默认值、不进用户参数表（ParamSpec）；
+  `ctx=None` 表示「没有上下文」（合成数据自检），需要 code 的指标据此抛「取不到股票代码」，
+  由 `scan` 判为需外部数据跳过。详见 `indicators\ARCHITECTURE.md` §5。
+- 颜色 / 线宽由 `@indicator(styles=...)` 声明并随计算结果下发（`series[].style`），
+  **新增指标不必改前端**；前端保留硬编码规则作兼容回退，用户覆盖过的语义色优先。
+- ⚠️ `indicators/` 下的 .py 会被 `__init__.py` **自动 import**：非指标模块（如 `golden.py`）
+  必须列进 `_EXCLUDE`，否则会在包加载时顺手执行一遍。
 
-## 分发单元：目标设备要能直接跑，缺一不可
-- `stockpool.exe`（发布版）
-- `launcher\install_env.ps1`（环境安装脚本；exe 之外，必须同步更新）
-- `backend_fastapi\`（含 `requirements.txt`）
-- `agent_dsh\`（AI 服务）
-- 交付说明里要写清「**只换 exe 不换脚本等于没换**」。
+## 九、文档分工（谁说了算）
 
-## 通用工程纪律：动手前先评估
-
-### 一、防守性改动：先判断「实际使用能否触发」
-- **同一根因、多个入口**时（同一个限制 / 同一个坑散落在多个模块），先判断「实际使用能否触发」：
-  给**可复现的判据**（实测响应体大小 / 数据量上限 / 代码里的硬阈值）与**具体数字**，
-  不写「应该不会触发」。评估结论连同「触发的代价」一起给用户，
-  **跨模块的批量统一必须等用户拍板**；单模块内统一可自判，但要在方案里写明评估结论。
-- 典型对照（`JavaScriptSerializer.MaxJsonLength` 默认 2 MB）：
-  历史回测报告实测 **9.7 MB 字符**（必炸），而同页实时结果只有 0.2 MB、其它页接口 ≤ 208 KB（触发不了）
-  → 结论是只改策略页那一个文件，不做全站 81 处替换：**后者收益为 0**，
-  却把冲突面、误伤面、review 面一起放大（还会连带拖慢每次 exe 合并）。
-- 结论是「低概率但高代价」→ **不要默默扩散改动，也不要默默不修**：把风险写进方案，由人决定。
-
-### 二、发现「大量相似调用」：先判断该不该抽象
-- **先分清是哪种相似**：
-  - **同一逻辑被复制了 N 遍**（业务代码里同一段算法 / 口径出现在多处）
-    → **该抽成单一来源**（见 `formulas/`、`registry_scan.py`）：口径会漂移，漏改一处就静默失真。
-  - **底层 API 长得像**（同一个框架调用出现在多处，但各处参数与语义各不相同）
-    → **默认不抽**：抽出来只能「包一层」，省下几行却多一层间接，外加一个不完全贴合的通用函数。
-- **抽之前问一句：这批调用点共享同一条「必须同时满足」的约束吗？**
-  - 共享（如「都要设 MaxJsonLength」「都要带同一个鉴权头」「都要同一套重试策略」）
-    → **该抽**：约束从 N 处降为 1 处，漏改风险同比例下降。
-  - 只是形似、各自独立（漏改其中一个并不产生错误）→ **不该抽**。
-- **还要看抽象自身的体量**：新增多少行、改多少个调用点。
-  13 行小工厂 + 21 个调用点 → 值得；200 行新层 + 80 个调用点 → 要慎重
-  （**抽象不贴合时比重复更糟**）。
-- **抽象的收益是「消除口径漂移」，不是「少写几行」**：
-  拿不出「将来哪两处会不一致」的证据，就别抽。
-- 看到同一写法重复出现时，**主动给出「抽 / 不抽」的判断与理由**，
-  不要默默批量改，也不要默默忽略这件事。
-- 典型对照（同上 `MaxJsonLength`）：全站 81 处 `new JavaScriptSerializer()` 属于
-  「框架 API 长得像」→ **不抽到全站**；但策略页 21 处共享
-  「这一页的 payload 大小由后端决定，前端不该假设它一定小」这条约束 → 抽一个 13 行的 `J.Ser()` 值得。
-  ⚠️ 注意：**抽象与「不要扩大改动面」是两件事，可以同时成立** ——
-  真正会炸的仍然只有 1 处（历史回测报告 9.7 MB），抽象不改变「改哪一处」的结论。
+同一事实只允许有**一处**权威表述，其余位置只写指针。「哪份文档说了算 / 何时同步」
+见 `docs-sync.md` 第二节与第四节。

@@ -379,10 +379,10 @@ lowerPanels: Series[][]          // 每个 lower 指标一组，纵向堆叠成�
 
 ---
 
-## 11. 与筹码公式包（`chip_formulas/`）的分工
+## 11. 与筹码公式包（`chipformulas/`）的分工
 
 筹码分布本身**不是指标**：它输出「按**价格**分箱的直方图」，横轴不是时间，
-与 §6 的日期序列契约不通用，故单独成包（见 `chip_formulas/ARCHITECTURE.md`）。
+与 §6 的日期序列契约不通用，故单独成包（见 `chipformulas/ARCHITECTURE.md`）。
 但它派生出的**按日期的延伸量**是指标，放在本目录（具体清单以运行时注册表为准）：
 
 **判据（按量纲选 panel，与 §6.2 同一条规则）**：
@@ -402,7 +402,7 @@ lowerPanels: Series[][]          // 每个 lower 指标一组，纵向堆叠成�
 （同一 `(code, formula, days, bins, adjust)` 只算一次，见 `data.get_chip_frames` 的缓存）。
 `formula` 参数的选项由 `registry.list_indicators()` 运行时从公式注册表填充。
 
-> ⚠️ 依赖方向是单向的：`chip_formulas.core.data` 依赖本包的 `data`（取行情 / 换手率 / 均价）；
+> ⚠️ 依赖方向是单向的：`chipformulas.core.data` 依赖本包的 `data`（取行情 / 换手率 / 均价）；
 > 本包要让指标拿到矩阵，只能在 `data.py` / `registry.py` 的**函数内延迟 import** 那个包
 > （模块级互导会形成环）。指标实现文件不得 import 它。
 

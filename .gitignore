@@ -17,14 +17,16 @@
 #
 #   backend_fastapi/    后端源码：core/（基础设施）+ features/（按功能分包
 #                       market / stock / history / download / system / mentor
-#                       / chip）+ indicators/ + strategies/ + 顶层兼容转发
-#                       （chip_formulas 已于第 34 项搬入 features/chip/formulas/）
+#                       / chip）+ indicators/ + strategies/ + chipformulas/（筹码公式
+#                       插件包）+ formulas/（中立计算内核）+ 顶层兼容转发壳
 #   launcher/           前端原生启动器（按页面 StockPage / StrategyPage / MarketPage /
 #                       ValuationPage / DownloadPage / ChipRankPage，
 #                       公共件 UiKit / GridKit / ChartKit / Cards / J / Http /
 #                       AsyncKit / Palette / SubTabStrip）
 #   frontend/           前端网页（按页面分目录，shared 放共享 js）
 #   agent_dsh/          dsh agent（其 node_modules 由第 2 类统一忽略）
+#   scripts/            仓库级自检脚本（check-docs.ps1 文档一致性检查）
+#   .codebuddy/rules/   工程纪律（常驻加载，改代码前必读）
 #
 # 本类**不要**在这里写任何忽略规则。
 # ----------------------------------------------------------
