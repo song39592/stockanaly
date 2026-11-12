@@ -964,6 +964,13 @@ namespace StockPool
                 c.BackColor = C.Accent;
                 c.ForeColor = Color.White;
             }
+            else if (c is WheelValueBox)
+            {
+                // 滚轮数值块（继承 Label，必须排在 Label 分支之前）：
+                // 底色跟输入框一致（看着仍是个"格子"），但不可键入，点它弹滚轮
+                var wv = (WheelValueBox)c;
+                wv.ApplyTheme(_cInput, _cInputText);
+            }
             else if (c is Label)
             {
                 c.ForeColor = (tag == "muted") ? _cSub : _cText;

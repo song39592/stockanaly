@@ -8,9 +8,7 @@ enabled: true
 
 > 本文是**目录与权威位置的唯一来源**：读完本文件即可定位代码，不必扫仓库。
 > 展开细节（表结构 / 接口清单 / 口径推导）**不在这里**，只给指针。
-> 纪律类内容各自成篇：新增指标 `add-indicator-strategy.md`、可移植性 `cross-device-portability.md`、
-> Git `git-safety.md`、启动器交互 `launcher-ux.md`、脚本写法 `powershell-authoring.md`、
-> 动手前评估 `engineering-discipline.md`、文档同步 `docs-sync.md`。
+> 纪律类内容各自成篇（规则清单见 README「规则」一节）。
 
 ## 一、全景：四个部件
 
@@ -28,13 +26,14 @@ enabled: true
 ## 二、目录地图
 
 ```
-launcher/              32 个 .cs → 一个 exe（stockpool.exe）
+launcher/              35 个 .cs → 一个 exe（stockpool.exe）
   StockPoolLauncher.cs   主窗体 partial class MainForm + Program / ServiceItem / WebWindow / Win32
   StockPage*.cs          个股页及 6 个分部（Kline/Profile/Records/Valuation/Saolei/AI/Overlays）
   MarketPage / ValuationPage / DownloadPage / MentorLabPage / RedBullPage / RpsPoolPage
   ChipPanel / ChipRankPage / IndicatorIndexPage / StrategyPage
   公共件：Http.cs / J.cs / Palette.cs / AsyncKit.cs / UiKit.cs / Cards.cs / GridKit.cs / ChartKit.cs
           KLineChart.cs / BootOverlay.cs / SubTabStrip.cs / QuickSearch.cs / UserSettings.cs
+  数值控件：WheelKit.cs（数值块 + 滚轮浮层）/ WheelRoller.cs（数字滚轮）/ WheelSlider.cs（竖直滑条）
   build_exe.bat（显式源文件清单，无通配符）/ install_env.ps1（带 # INTEGRITY 标记）
   test-launcher-conventions.ps1（静态约定自检，退出码 0 = 通过）
 

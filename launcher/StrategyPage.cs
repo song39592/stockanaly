@@ -42,7 +42,7 @@ namespace StockPool
         private TextBox _stComm, _stBench;
         private Label _stScopeHint;
         private DateTimePicker _stStart, _stEnd;
-        private NumericUpDown _stCapital;
+        private WheelValueBox _stCapital;
         private CheckBox _stBenchChk;
         private int _stLocalCodeCount;
 
@@ -80,7 +80,7 @@ namespace StockPool
         private string _stResultId;                                 // 后端回测上下文句柄（明细按需拉取）
 
         // ④ 近期策略成果（最近 N 个交易日回测）
-        private NumericUpDown _stRecentDays;
+        private WheelValueBox _stRecentDays;
         private Label _stRecentStatus;
         private FlowLayoutPanel _stRecentCards;
         private StockGrid _stRecentGrid;
@@ -117,7 +117,7 @@ namespace StockPool
         // 全市场推荐 / 近期回测都是长任务（全市场实测 419s / 761s），已改为后端异步任务，
         // 进度统一由上面的「统一任务区」跟进（_stJobTimer / _stJobKind）。
         private CheckBox _stRecentRuinChk;       // 近期回测：「破产截断」开关
-        private NumericUpDown _stRecentRuinPct;  // 破产阈值（%，0=净值归零）
+        private WheelValueBox _stRecentRuinPct;  // 破产阈值（%，0=净值归零）
         // 当前选中的策略名（第 23 项）。放在**顶部操作区**而不是「策略选择与编辑」
         // 子页里 —— 因为所有「运行回测 / 生成推荐」都读列表选中项，跑错策略时用户
         // 在别的子页看不到自己选了什么。顶部常驻，任何子页都一眼可见。
@@ -137,9 +137,9 @@ namespace StockPool
             public Control Ctrl;
             public object Read()
             {
-                NumericUpDown nud = Ctrl as NumericUpDown;
-                if (nud != null)
-                    return nud.DecimalPlaces == 0 ? (object)(int)nud.Value : (object)(double)nud.Value;
+                WheelValueBox wv = Ctrl as WheelValueBox;
+                if (wv != null)
+                    return wv.Step >= 1m ? (object)(int)wv.Value : (object)(double)wv.Value;
                 ComboBox cb = Ctrl as ComboBox;
                 if (cb != null) return cb.SelectedItem == null ? "" : cb.SelectedItem.ToString();
                 TextBox tb = Ctrl as TextBox;
@@ -266,6 +266,7 @@ namespace StockPool
             _stDesc.MaximumSize = new Size(720, 0);
             _stDesc.AutoSize = true;
             AddRow(b, _stDesc);
+            AddRow(b, Mute(Lbl("数字参数：点数值弹出滚轮来调（已取消直接键入）。")));
             _stParamPanel = new FlowLayoutPanel();
             _stParamPanel.FlowDirection = FlowDirection.LeftToRight;
             _stParamPanel.WrapContents = true;
@@ -389,26 +390,24 @@ private void StRefreshCurStrategy()
             }
             else if (type == "int")
             {
-                var n = new NumericUpDown();
-                n.DecimalPlaces = 0;
-                n.Width = 100;
                 double mn = J.NumOr(p["min"], int.MinValue);
                 double mx = J.NumOr(p["max"], int.MaxValue);
-                n.Minimum = (decimal)Math.Max(int.MinValue, mn);
-                n.Maximum = (decimal)Math.Min(int.MaxValue, mx);
-                n.Value = (decimal)Clamp(J.NumOr(p["default"], 0), (double)n.Minimum, (double)n.Maximum);
+                decimal lo = (decimal)Math.Max(int.MinValue, mn);
+                decimal hi = (decimal)Math.Min(int.MaxValue, mx);
+                decimal def = (decimal)Clamp(J.NumOr(p["default"], 0), (double)lo, (double)hi);
+                var n = new WheelValueBox(lo, hi, 1m, def);
+                n.Width = 100;
                 ctrl = n;
             }
             else if (type == "float")
             {
-                var n = new NumericUpDown();
-                n.DecimalPlaces = 4;
-                n.Width = 100;
                 double mn = J.NumOr(p["min"], double.MinValue);
                 double mx = J.NumOr(p["max"], double.MaxValue);
-                n.Minimum = (decimal)mn;
-                n.Maximum = (decimal)mx;
-                n.Value = (decimal)Clamp(J.NumOr(p["default"], 0), mn, mx);
+                decimal lo = (decimal)mn;
+                decimal hi = (decimal)mx;
+                decimal def = (decimal)Clamp(J.NumOr(p["default"], 0), mn, mx);
+                var n = new WheelValueBox(lo, hi, 0.01m, def);
+                n.Width = 100;
                 ctrl = n;
             }
             else
@@ -504,17 +503,12 @@ private void StRefreshCurStrategy()
             AddRow(stack, g2);
 
             var g3 = Group("资金与费用", out b);
-            _stCapital = new NumericUpDown();
-            _stCapital.Minimum = 1000;
-            _stCapital.Maximum = 100000000;
-            _stCapital.Increment = 10000;
-            _stCapital.DecimalPlaces = 0;
+            _stCapital = new WheelValueBox(1000m, 100000000m, 10000m, 100000m);
             _stCapital.Width = 120;
-            _stCapital.Value = 100000;
             _stComm = new TextBox();
             _stComm.Width = 100;
             _stComm.Text = "0.0003";
-            AddRow(b, Row(Lbl("初始资金(元)"), _stCapital));
+            AddRow(b, Row(Lbl("初始资金(元)"), _stCapital, Mute(Lbl("滚轮 1 万/格"))));
             AddRow(b, Row(Lbl("单边佣金比例"), _stComm, Mute(Lbl("如 0.0003 = 万三"))));
             AddRow(stack, g3);
 
@@ -679,24 +673,16 @@ private void StRefreshCurStrategy()
         private void StBuildRecent(TableLayoutPanel stack)
         {
             AddRow(stack, Mute(Lbl("用当前策略在「最近 N 个交易日」上跑一次回测，快速看近期表现；范围 / 资金 / 佣金沿用「回测范围」页的设置。")));
-            _stRecentDays = new NumericUpDown();
-            _stRecentDays.Minimum = 2;
-            _stRecentDays.Maximum = 120;
-            _stRecentDays.Value = 5;
+            _stRecentDays = new WheelValueBox(2m, 120m, 1m, 5m);
             _stRecentDays.Width = 70;
-            _stRecentDays.TabStop = false;
             AddRow(stack, Row(MiniBtn("运行近期回测", delegate { StRunRecent(); }, 120),
                 Lbl("交易日数"), _stRecentDays, _stRecentStatus = Mute(Lbl("尚未运行"))));
             _stRecentRuinChk = new CheckBox();
             _stRecentRuinChk.Text = "破产截断";
             _stRecentRuinChk.Checked = true;
             _stRecentRuinChk.TabStop = false;
-            _stRecentRuinPct = new NumericUpDown();
-            _stRecentRuinPct.Minimum = 0;
-            _stRecentRuinPct.Maximum = 100;
-            _stRecentRuinPct.Value = 0;
+            _stRecentRuinPct = new WheelValueBox(0m, 100m, 1m, 0m);
             _stRecentRuinPct.Width = 60;
-            _stRecentRuinPct.TabStop = false;
             AddRow(stack, Row(_stRecentRuinChk, Lbl("阈值%"), _stRecentRuinPct,
                 Mute(Lbl("(0=净值归零即断)"))));
 
