@@ -227,4 +227,19 @@ namespace StockPool
             return c;
         }
     }
+
+    /// <summary>
+    /// 数值格式化（**单一来源**）：数值块 / 滚轮浮层 / 数字滚轮共用同一口径。
+    ///
+    /// 为什么收在一处：这段表达式曾复制 3 份（数值块、浮层、数字滚轮各一份），
+    /// 改格式必然漏改其中一处 → 出现「主界面显示 1、滚轮里显示 1.0」的不一致。
+    /// </summary>
+    internal static class NumKit
+    {
+        /// <summary>按步长选呈现：step ≥ 1 → 整数；否则最多 4 位小数（去掉尾随 0）。</summary>
+        public static string Format(decimal v, decimal step)
+        {
+            return step >= 1m ? ((long)v).ToString() : v.ToString("0.####");
+        }
+    }
 }

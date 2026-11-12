@@ -146,11 +146,6 @@ namespace StockPool
             return _min + row * _step;
         }
 
-        private string Format(decimal v)
-        {
-            return _step >= 1m ? ((long)v).ToString() : v.ToString("0.####");
-        }
-
         private static Color Blend(Color a, Color b, double t)
         {
             int r = (int)Math.Round(a.R + (b.R - a.R) * t);
@@ -213,7 +208,7 @@ namespace StockPool
                     }
                     using (var br = new SolidBrush(c))
                     {
-                        string txt = Format(ValueAt(row));
+                        string txt = NumKit.Format(ValueAt(row), _step);
                         float avail = Width - 4;
                         SizeF sz = g.MeasureString(txt, f);
                         if (sz.Width > avail && sz.Width > 0)

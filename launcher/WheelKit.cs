@@ -42,7 +42,7 @@ namespace StockPool
             TextAlign = ContentAlignment.MiddleCenter;
             Font = new Font("Microsoft YaHei UI", 9.5f);
             Cursor = Cursors.Hand;
-            Text = Format(_value);
+            Text = NumKit.Format(_value, _step);
 
             Click += delegate { OpenPicker(); };
         }
@@ -76,16 +76,11 @@ namespace StockPool
             return v;
         }
 
-        private string Format(decimal v)
-        {
-            return _step >= 1m ? ((long)v).ToString() : v.ToString("0.####");
-        }
-
         private void SetValue(decimal v, bool notify)
         {
             decimal nv = ClampTo(v);
             _value = nv;
-            Text = Format(_value);
+            Text = NumKit.Format(_value, _step);
             if (notify && ValueChanged != null) ValueChanged(this, EventArgs.Empty);
         }
 
@@ -165,7 +160,7 @@ namespace StockPool
             _value.Font = _fontBig;
             _value.ForeColor = fg;
             _value.BackColor = bg;
-            _value.Text = Format(value);
+            _value.Text = NumKit.Format(value, _step);
 
             // 配色：底 = 浮层底色；选中带 = 底色略亮；分隔线 = 前景色淡；选中数字 = 前景色；
             //       未选中数字 = 前景色偏暗（越远越淡）
@@ -244,11 +239,6 @@ namespace StockPool
             Location = new Point(x, y);
         }
 
-        private string Format(decimal v)
-        {
-            return _step >= 1m ? ((long)v).ToString() : v.ToString("0.####");
-        }
-
         /// <summary>滚轮 → 滑条（滚轮动了，滑块跟着走）。</summary>
         private void SyncSlider()
         {
@@ -277,7 +267,7 @@ namespace StockPool
         /// <summary>顶部大号数值（浮层窄，字号按宽度自动降档，避免溢出）。</summary>
         private void SetValueText(decimal v)
         {
-            string s = Format(v);
+            string s = NumKit.Format(v, _step);
             _value.Text = s;
             float avail = Math.Max(16, _value.ClientSize.Width - 6);
             Font f = _fontBig;
