@@ -15,17 +15,22 @@
 **资金利用率仅 1.72%**，且同一策略在 500 只池与 5559 只池结果差 11 倍，不可横向对比。
 新口径与池子大小彻底解耦。
 
-【成本分层】按「能否用 Δw × NAV 精确表达」分层，不是按「重要不重要」：
+【成本与成交分层】按「能否用 Δw × NAV 精确表达」分层，不是按「重要不重要」：
     进 equity（比例项，权重口径即可精确算出）
         佣金 commission / 印花税 stamp_duty（卖出单边）/ 滑点 slippage
         最低佣金 min_commission = max(notional × rate, 5.0)  ← 不需要股数
+        一字板买不进 → 该份额度当日就是现金、不重分配（见 compute 的「严格成交模型」段）
+        一字跌停卖不出 → 清零延后到第一个能卖的日子（同上）
     只进 trades 明细（需要股数与价格粒度）
-        整手 lot_size / 停牌 / 跌停卖不出 → 只产出「可行性」指标，不改净值；
-        涨停买不进已由净值层顺延至次日开盘价（见 compute 的「涨停顺延」段）
+        整手 lot_size / 停牌 → 只产出「可行性」指标，不改净值
 
-为什么这样分：本引擎的主要用途是**横向比较多策略的信号质量**，`equity` 需要一个
-干净、与执行细节无关的口径；但把成本整体赶出净值会让成本模型退化成摆设，
-而最低佣金恰好是能用金额精确表达的，不该被浪费。
+为什么这样分：前一组都能用「权重 × 净值」精确表达，代价只是改一个权重；
+后一组需要股数与价格粒度（整手按手数取整、停牌当天没有价格），强行进净值会把
+理想权重曲线改造成事件驱动模拟。本引擎的主要用途是**横向比较多策略的信号质量**，
+`equity` 需要一个干净、可用权重精确表达的口径；但把成本整体赶出净值会让成本
+模型退化成摆设，而最低佣金恰好是能用金额精确表达的，不该被浪费。
+⚠️ 一字板「买不进」进净值后，空出来的仓位**不会**被别的票接手——这会让
+`capital_utilization` 下降（Σw 变小），是**如实反映**而不是打折。
 
 【trades 与 equity 同口径】逐笔 pnl 用**现金流归因**（真实的 Δw × NAV 进出），
 与净值曲线用同一套成本公式，故「Σ逐笔 pnl」与「total_return 的金额」可互相印证。
@@ -59,8 +64,8 @@ _EPS = 1e-12
 # 与 ST 板的特殊情形，同时足够宽松、不会误杀真实行情。
 # 实测本地库因复权因子缺失出现过 -88% ~ -96% 的假跌幅（详见 compute 里的说明）。
 _IMPOSSIBLE_RET = 0.5
-_BOARD_LIMIT = 0.198       # 创业板(30)/科创板(68) 涨跌停阈值
-_MAIN_LIMIT = 0.098        # 主板阈值（ST 的 4.9% 需 ST 标识，本数据源没有，见 _limit_pct）
+_BOARD_LIMIT = 0.20          # 创业板(30)/科创板(68) 涨跌停阈值
+_MAIN_LIMIT = 0.10           # 主板阈值（ST 自 2025-04 起也是 10%，见 _limit_pct）
 
 # (code, date) → (reason, meta)，由 set_trade_reasons() 注入，供逐笔明细挂归因。
 # 单独设一个模块级槽而不是层层透传：逐笔明细在 `_build_trades` 里逐段构造，
@@ -135,17 +140,65 @@ def _native(series: pd.Series):
 
 
 def _limit_pct(code: str) -> float:
-    """该代码所属板块的涨跌停阈值。
+    """该代码所属板块的涨跌停阈值（**现行口径**：主板 10%、双创 20%）。
 
-    ⚠️ **ST 的 4.9% 判不出来**：涨跌停是真实市场规则（作用于**原始价**，
-    hfq 会平滑除权跳空、掩盖真实涨跌停，故可行性判定一律用 raw），
-    但本地行情里没有「是否 ST」的标识字段，所以 ST 票会按主板 9.8% 判，
-    从而漏掉一部分 ST 的一字板。属于已知缺口，不静默——见「可行性」的 blocked 统计。
+    ⚠️ 涨跌停幅度是**分时段**的，这里暂未实现，两处已知缺口（别当成"已处理"）：
+      1. **ST**：2025-04 起 ST/*ST 的日涨跌幅已由 5% 统一为 10%（与主板一致），
+         但 2025-04 之前是 5%。本地行情没有「是否 ST」的标识字段，要按时间段
+         精确判定需要额外数据源。当前一律按 10% 处理，**回测区间跨越 2025-04 时，
+         早期一段的涨跌停判定会偏松**（5% 的板会被当成 10% 的板）。
+      2. **北交所**（8xx/43x）：幅度是 30%，本函数未覆盖 → 按主板 10% 处理，
+         北交所票的一字板会判不出来。
+    默认回测范围若含 ST 票，以上偏差会体现为"买不进"笔数偏少。
+
+    另：涨跌停作用于**原始价**，hfq 会平滑除权跳空、掩盖真实涨跌停，
+    故可行性判定一律用 raw。
     """
     c = str(code)
     if c.startswith(("300", "301", "688", "689")):
         return _BOARD_LIMIT
     return _MAIN_LIMIT
+
+
+def _limit_prices(prev_close: float, thr: float) -> tuple[float, float]:
+    """按昨收算涨停价 / 跌停价（四舍五入到分，与交易所口径一致）。
+
+    交易所的涨跌停价 = round(昨收 × (1 ± 幅度), 2)。直接用「收盘涨跌幅 ≥ 幅度」
+    判定不准：昨收 10.00 的涨停价是 11.00，而 9.8% 的涨幅阈值对应 10.98，
+    中间那 0.02 的缝隙会把「最低价 10.99（盘中开过板、买得到）」的票误判成一字板。
+    按**价比对**更贴实盘。
+    """
+    if prev_close <= 0:
+        return (0.0, 0.0)
+    return (round(prev_close * (1.0 + thr), 2), round(prev_close * (1.0 - thr), 2))
+
+
+def _is_limit_up(hi: float, lo: float, prev_close: float, thr: float) -> bool:
+    """当天是否**一字涨停**（买不进）：`low >= 涨停价`。
+
+    含义是「全天最低价都在涨停价」—— 没有任何低于涨停价的成交机会，
+    挂涨停价单只能排队、买不到。
+
+    ⚠️ 旧写法是「high == low 且 |收盘涨跌幅| ≥ 幅度」，买卖两侧共用**绝对值**涨跌幅，
+    造成**一字跌停的买入被标成涨停**（跌停板上买单是能成交的，买得到）。
+    实测 jwzz top_n=1 有 23 笔「一字跌停」被误标成买不进，占买入金额 7.3%。
+    """
+    if prev_close <= 0:
+        return False
+    up, _ = _limit_prices(prev_close, thr)
+    return up > 0 and lo >= up
+
+
+def _is_limit_down(hi: float, lo: float, prev_close: float, thr: float) -> bool:
+    """当天是否**一字跌停**（卖不出）：`high <= 跌停价`。
+
+    含义是「全天最高价都在跌停价」—— 没有任何高于跌停价的成交机会。
+    与 _is_limit_up 对称：卖出侧只看跌停，涨停时卖出是完全能成交的。
+    """
+    if prev_close <= 0:
+        return False
+    _, dn = _limit_prices(prev_close, thr)
+    return dn > 0 and hi <= dn
 
 
 def _window(sl: pd.Series | np.ndarray, tail: int | None):
@@ -179,7 +232,6 @@ def _feasibility(code: str, raw: pd.DataFrame | None, dates: list[str],
     low = raw["low"] if "low" in raw.columns else None
     close = raw["close"] if "close" in raw.columns else None
     prev = close.shift(1) if close is not None else None
-    chg = (close / prev - 1.0).abs() if prev is not None else None
     thr = _limit_pct(code)
 
     pos_of = {d: i for i, d in enumerate([str(x)[:10] for x in raw.index])}
@@ -195,10 +247,19 @@ def _feasibility(code: str, raw: pd.DataFrame | None, dates: list[str],
                 out["feasible"] = False
                 out["blocked_by"] = out["blocked_by"] or "suspended"
                 continue
-            if (high is not None and low is not None and len(high) and len(low)
-                    and float(high.iloc[i]) == float(low.iloc[i])
-                    and chg is not None and len(chg) and not pd.isna(chg.iloc[i])
-                    and float(chg.iloc[i]) >= thr):
+            if (high is None or low is None or close is None or prev is None
+                    or not len(high) or not len(low) or not len(prev)):
+                continue
+            pc = prev.iloc[i]
+            if pd.isna(pc) or float(pc) <= 0:
+                continue
+            hi, lo = float(high.iloc[i]), float(low.iloc[i])
+            # 买卖方向各判各的：买入侧只认「买不进」（一字涨停），
+            # 卖出侧只认「卖不出」（一字跌停）。一字跌停时**买入是能成交的**
+            # （板上是卖单），一字涨停时**卖出是能成交的**（板上是买单）。
+            blocked = (_is_limit_up(hi, lo, float(pc), thr) if is_buy
+                       else _is_limit_down(hi, lo, float(pc), thr))
+            if blocked:
                 key = "limit_up" if is_buy else "limit_down"
                 out["blocked_counts"][key] += 1
                 out["feasible"] = False
@@ -297,58 +358,69 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
             r = r.mask(bad, 0.0)      # 判为数据错误，当日按 0 收益，并计入 flags
         R[:, j] = r.to_numpy(dtype=np.float32)
 
-    # ---- 涨停买不进 → 次日开盘价买入（修复理想成交虚高）----
-    # 权重模型：t_b 日发出的权重 w 在 t_b+1 日才作为持仓产生收益（wp=W[t_b]）。
-    # 若 t_b 日该票**一字涨停**（实盘买不进），真实成交价为 t_b+1 日开盘价；
-    # 故把 t_b+1 日的收益口径从 close-to-close 改为「开盘→收盘」(close/open-1)，
-    # 即「次日开盘买入、当日收盘」的真实收益。W 本身不动（信号日仍记为建仓，
-    # 逐笔明细保留「涨停买不进」标记，与净值分层），仅修正次日收益；
-    # 仅作用于「建仓首日」(W 从 0 跳升)，不影响已有持仓。
+    # ---- 严格成交模型：一字板买不进即空仓、跌停卖不出即延后清仓 ----
+    # 权重模型：t_b 日发出的权重 w 在 t_b+1 日才作为持仓产生收益（wp = W[t_b]）。
+    #   买入侧：t_b 日一字涨停（买不进）→ 该份额度当日就是**现金**，
+    #           **不重分配给其他票**（其余票保持各自的 w，Σw 自然 < 1）。
+    #   卖出侧：清零日一字跌停（卖不掉）→ 继续持有，把清零推到第一个能卖的日子。
+    # 这两类都是「权重口径能精确表达」的约束（不像整手/停牌需要股数与价格粒度），
+    # 所以进 equity；空出来的仓位直接反映在 capital_utilization / avg_positions 上，
+    # **不需要另加指标**。
+    # ⚠️ 旧口径是「涨停买不进 → 顺延至次日开盘价买入」，那等于**假设次日一定买得到**，
+    #   实测把 top_n=1 的收益抬到远高于真实可实现的水平（见 _is_limit_up 的说明）。
+    #   现在改成「买不到就不买」，更保守也更诚实。
+    #
+    # ⚠️ 判定必须基于**实际持仓**而不是「策略目标权重是否跳升」：d1 买不进 → d1 实际
+    #   空仓 → d2 策略仍选中它时 d2 **仍然是一次建仓**，若 d2 也是一字板就必须再拦一次。
+    #   按"目标权重跳升"判定会漏掉这种连续买不进的情况，等于默认买进了。
+    n_buy_blocked = 0        # 因一字涨停买不进、**根本没发生**的建仓次数
+    n_sell_deferred = 0       # 因一字跌停卖不出、清零被延后的次数
     if raw_by_code:
         for j, code in enumerate(codes):
             raw = raw_by_code.get(code)
-            if raw is None or "open" not in getattr(raw, "columns", []) \
+            if raw is None or "high" not in getattr(raw, "columns", []) \
+               or "low" not in getattr(raw, "columns", []) \
                or "close" not in getattr(raw, "columns", []):
                 continue
             rcols = {str(d)[:10]: i for i, d in enumerate(raw.index)}
             rclose = raw["close"]
-            ropen = raw["open"]
-            rhi = raw["high"] if "high" in getattr(raw, "columns", []) else None
-            rlo = raw["low"] if "low" in getattr(raw, "columns", []) else None
+            rhi = raw["high"]
+            rlo = raw["low"]
             thr = _limit_pct(code)
-            w = W[:, j]
-            prev = np.concatenate(([0.0], w[:-1]))
-            for t_b in np.flatnonzero((w > _EPS) & (prev <= _EPS)).tolist():
-                d = common[t_b]
-                i = rcols.get(d)
+            target = W[:, j].copy()      # 策略目标权重
+            actual = np.zeros(T, dtype=np.float32)   # 实际持仓权重（成交之后）
+
+            def _blocked(t: int, up: bool) -> bool:
+                """t 日是否一字板（up=True 判涨停买不进 / False 判跌停卖不出）。"""
+                i = rcols.get(common[t])
                 if i is None or i == 0:
-                    continue
+                    return False
                 pc = float(rclose.iloc[i - 1])
-                cc = float(rclose.iloc[i])
                 if pc <= 0:
-                    continue
-                chg = abs(cc / pc - 1.0)
-                hi = float(rhi.iloc[i]) if rhi is not None else cc
-                lo = float(rlo.iloc[i]) if rlo is not None else cc
-                if not (hi == lo and chg >= thr):
-                    continue                       # 非一字涨停 → 当日可正常买入
-                t_act = t_b + 1
-                if t_act >= T:
-                    continue                       # 末日涨停无法顺延
-                i2 = rcols.get(common[t_act])
-                if i2 is None:
-                    continue
-                o2 = float(ropen.iloc[i2])
-                c2 = float(rclose.iloc[i2])
-                if o2 <= 0 or c2 <= 0:
-                    continue
-                r_open = c2 / o2 - 1.0
-                if abs(r_open) > _IMPOSSIBLE_RET:
-                    continue                       # 防御除权日异常
-                # 保持 W 不变（信号日仍记为建仓、逐笔明细保留「涨停买不进」标记），
-                # 仅把次日（t_act=t_b+1）的收益口径从 close-to-close 改为
-                # 开盘→收盘（close/open-1），即「次日开盘买入、当日收盘」的真实收益。
-                R[t_act, j] = float(r_open)
+                    return False
+                hi, lo = float(rhi.iloc[i]), float(rlo.iloc[i])
+                return (_is_limit_up(hi, lo, pc, thr) if up
+                        else _is_limit_down(hi, lo, pc, thr))
+
+            for t in range(T):
+                held = actual[t - 1] if t > 0 else 0.0
+                tgt = float(target[t])
+                if tgt > _EPS:
+                    if held <= _EPS:
+                        # 建仓：买不进就是空仓（不重分配给其他票）
+                        if _blocked(t, True):
+                            n_buy_blocked += 1
+                            continue           # actual[t] 保持 0
+                    actual[t] = tgt             # 有仓或买得进 → 按目标权重持有
+                else:
+                    if held <= _EPS:
+                        continue               # 本来就空仓
+                    if _blocked(t, False):
+                        actual[t] = held        # 卖不掉 → 继续持有原权重
+                        n_sell_deferred += 1
+                        continue
+                    actual[t] = 0.0             # 卖得掉 → 清零
+            W[:, j] = actual
 
     rate = commission + slippage
 
@@ -551,7 +623,9 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
 
     metrics = {
         "schema_version": SCHEMA_VERSION,
-        "equity_model": "weight_idealized",      # 净值不含整手/涨跌停/停牌
+        # 口径标识：一字板买不进即空仓 / 跌停卖不出即延后清仓 → 净值已含这两条约束。
+        # 整手 / 停牌仍只影响明细可行性，不进净值。
+        "equity_model": "weight_strict_fill",
         "total_return": total_return,
         "annual_return": ann,          # ⚠️ 不能 float(ann)：净值非正时 ann 是 None
         "max_drawdown": max_dd,
@@ -611,6 +685,12 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
         "per_stock": per_stock,
         "trades": trades,
         "flags": flags,
+        # 严格成交模型下的"没成交"计数：这两次是**根本没有交易**（买不进 / 卖不掉），
+        # 所以不会出现在 trades 明细里（trades 只记真的发生了的成交）。
+        # 单独带出来是为了让报告能回答"有多少次想买没买成"——
+        # 它不是新增的对比维度，只是把已进净值的约束**说清楚**。
+        "fill_blocked": {"buy_blocked": n_buy_blocked,
+                         "sell_deferred": n_sell_deferred},
     })
 
 
