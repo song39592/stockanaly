@@ -1,9 +1,9 @@
 # 开发规范（版本号 / 备份策略 / 常用命令）
 
 > ⚠️ **分支策略与提交规范的权威是
-> [.codebuddy/rules/git-safety.md](../.codebuddy/rules/git-safety.md)** —— 本文不重复，
+> [.codebuddy/rules/git-workflow.md](../.codebuddy/rules/git-workflow.md)** —— 本文不重复，
 > 只保留它没覆盖的部分（版本号、备份策略、命令速查、自检清单）。
-> 两处如有冲突，**以 `git-safety.md` 为准**。
+> 两处如有冲突，**以 `git-workflow.md` 为准**。
 
 ## 一、版本号（语义化）
 
@@ -55,7 +55,7 @@ git show <commit-id>
 ```
 
 > ⚠️ `--force` / `--force-with-lease` 仅在明确知道后果时使用；
-> 远程 base 与本地不一致时**不得强推**（见 `git-safety.md`）。
+> 远程 base 与本地不一致时**不得强推**（见 `git-workflow.md`）。
 
 ## 四、提交前自检
 
