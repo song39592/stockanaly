@@ -226,7 +226,8 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
         t["name"] = names.get(t["code"]) or None
 
     # 可行性汇总（整手/涨跌停/停牌 —— 只影响明细、不影响净值，单列成一组指标）
-    feas = _feasibility_summary(trades, len(changed))
+    feas = _feasibility_summary(trades, len(changed),
+                                fill_blocked=core.get("fill_blocked"))
 
     global _BT_CTX, _BT_TRADES
     rid = uuid.uuid4().hex[:12]
@@ -236,10 +237,10 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
     _BT_TRADES = trades
 
     warnings = list(flags)
-    # 成交模型：涨停买不进已顺延至次日开盘价买入（覆盖所有策略）；
-    # 其余成本/整手/停牌/跌停卖不出约束见 feasibility 字段，不在此重复。
-    warnings.append("成交模型：涨停买不进已顺延至次日开盘价买入（覆盖所有策略）；"
-                    "整手/停牌/跌停卖不出仍只影响明细可行性")
+    # 成交模型：一字板买不进即空仓、跌停卖不出即延后清仓（覆盖所有策略）；
+    # 其余成本/整手/停牌约束见 feasibility 字段，不在此重复。
+    warnings.append("成交模型：一字涨停买不进即空仓（该份额度当日为现金、不重分配），"
+                    "一字跌停卖不出即延后清仓；整手/停牌仍只影响明细可行性")
     # 幸存者偏差：任何模式都必须显式声明，**不允许静默**（偏差消不掉，但必须让人看见）
     warnings.append(data.survivorship_note(universe_mode, len(usable)))
     if window:
@@ -267,7 +268,7 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
             "lot_size": lot_size,
             "benchmark": benchmark,
             "universe_mode": universe_mode,
-            "equity_model": "weight_idealized",
+            "equity_model": "weight_strict_fill",
             "per_stock_truncated": trunc_info,
             "feasibility": feas,
             "warnings": warnings,
@@ -284,11 +285,17 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
     }
 
 
-def _feasibility_summary(trades: list[dict], n_checked: int) -> dict:
+def _feasibility_summary(trades: list[dict], n_checked: int,
+                         fill_blocked: dict | None = None) -> dict:
     """整手 / 涨跌停 / 停牌的可行性汇总（**独立于净值的一组指标**）。
 
-    口径提醒：`equity` 是权重口径的理想曲线，不含这些约束；这里给出的是
-    「这笔在真实市场里能不能成交」，两者必须分区展示，不能混读成「实际赚到的钱」。
+    口径提醒：`equity` 已含「一字板买不进即空仓、跌停卖不出即延后清仓」；
+    这里给出的是**逐笔明细**里「这笔在真实市场里能不能成交」，
+    两者必须分区展示，不能混读成「实际赚到的钱」。
+
+    `fill_blocked` 是**根本没发生成交**的计数（买不进的建仓 / 卖不掉的清零）——
+    它们不会出现在 trades 明细里（trades 只记真的发生了的成交），单独带出来，
+    好让报告能回答"有多少次想买没买成"。
     """
     n = len(trades)
     blocked = {"suspended": 0, "limit_up": 0, "limit_down": 0,
@@ -301,13 +308,16 @@ def _feasibility_summary(trades: list[dict], n_checked: int) -> dict:
         b = t.get("blocked_by")
         if b in blocked:
             blocked[b] += 1
+    fb = fill_blocked or {}
     return {
         "checked_codes": n_checked,
         "trades": n,
         "tradable_ratio": round(ok_n / n, 4) if n else None,
         "blocked_counts": blocked,
-        "note": "净值已对涨停买不进做次日开盘顺延（equity 含该修正）；"
-                "整手/停牌/跌停卖不出约束仍只影响明细可行性",
+        "fill_blocked": {"buy_blocked": int(fb.get("buy_blocked") or 0),
+                         "sell_deferred": int(fb.get("sell_deferred") or 0)},
+        "note": "净值已含一字板约束：一字涨停买不进即空仓（该份额度当日为现金、"
+                "不重分配），一字跌停卖不出即延后清仓；整手/停牌仍只影响明细可行性",
     }
 
 
