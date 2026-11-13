@@ -53,6 +53,8 @@ POST /api/stock/valuation → 股票估值（简化 DCF：前 5 年 + 永续，�
                             股价（新浪）、总股本（腾讯）、期初净利润（东财，TTM 归母 → 年报扣非 → 年报归母）
                             net_profit_forecast 为可选，不传则三档按兜底 25% / 10% / 5% 计算
 GET  /api/stock/quote     → 按代码查名称与当前股价（供输入代码后即时确认，不拉财务数据）
+GET  /api/strategies/universe/summary → 回测范围预览（基池/剔除后只数 + 每项剔除只数 + 口径说明）
+                                       判定口径与字段含义详见 strategies/ARCHITECTURE.md「股票池层」
 ```
 
 测试：

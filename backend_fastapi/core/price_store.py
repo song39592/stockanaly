@@ -603,6 +603,56 @@ def bulk_latest_close(ttl: int = 3600) -> dict[str, float]:
     return out
 
 
+# 「某日收盘价」缓存：{day: {"at": ts, "map": {code: close}}}
+_CLOSE_AT_CACHE: dict = {}
+
+
+def bulk_close_at(day: str, lookback_days: int = 90, ttl: int = 3600) -> dict[str, float]:
+    """每只票在 day（含）之前**最近一个交易日**的收盘价 {code: close}（raw 口径）。
+
+    给回测范围「微盘股」按**区间起点**市值判定用（point-in-time）。
+
+    为什么不能用 `bulk_latest_close()`：
+      · 最新收盘价 = **今天**的价格 → 用「今天的市值」去筛整段历史是**前视偏差**
+        （后来跌成微盘的票被整段剔除，连它过去那段大涨一起消失）；
+      · 而且市值 = 今日收盘价 × 最新股本 → **天天变** → 同一区间今天跑和明天跑
+        得到不同的池子、不同的净值（实测同参数两次跑差 10 倍）。
+
+    只扫 [day-lookback_days, day] 覆盖到的分片：交易日连续，正常停牌也能取到；
+    长期停牌 / 尚未上市的票在窗口内没有 K 线 → **不在结果里**（调用方按
+    「数据缺失不判定」处理，不会被误当成微盘股剔掉）。
+    """
+    day = str(day or "")[:10]
+    if not day:
+        return {}
+    now = time.time()
+    ent = _CLOSE_AT_CACHE.get(day)
+    if ent and now - ent["at"] < ttl:
+        return ent["map"]
+    try:
+        lo = (dt.date.fromisoformat(day) - dt.timedelta(days=int(lookback_days))).isoformat()
+    except (TypeError, ValueError):
+        lo = day
+    out: dict[str, float] = {}
+    adj = _store_adjust("raw")
+    y0, y1 = int(lo[:4]), int(day[:4])
+    for year in _shard_years():
+        if year < y0 or year > y1:
+            continue
+        with db.connect(db.bars_db(year)) as conn:
+            # ORDER BY code, trade_date → 同 code 后面的行覆盖前面的，
+            # 最终留下窗口内**最后一个交易日**的收盘价。
+            for row in conn.execute(
+                "SELECT code, close FROM daily_bars WHERE adjust=? "
+                "AND trade_date>=? AND trade_date<=? ORDER BY code, trade_date",
+                (adj, lo, day),
+            ):
+                if row["close"] is not None:
+                    out[row["code"]] = float(row["close"])
+    _CLOSE_AT_CACHE[day] = {"at": now, "map": out}
+    return out
+
+
 def _digest_is_broken(conn, code: str) -> bool:
     """该股**既有**指纹是否已不匹配（供写入前判定）。无指纹记录时视为正常。
 

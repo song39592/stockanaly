@@ -116,6 +116,19 @@ def _require_pool(strategy_id: str, start: str | None, end: str | None) -> None:
         #    「池历史覆盖的最后一天」当结束日都跑不了）。
 
 
+def _resolve_pool(codes_resolver):
+    """调用股票池解析函数，返回 (codes, extra)。
+
+    解析函数可以只返回代码列表，也可以返回 (codes, detail)：
+    detail 是**范围明细**（每项剔除只数、判定基准日、口径说明），
+    必须原样带进报告 scope —— 否则报告无法自证「这次到底剔了什么」。
+    """
+    resolved = codes_resolver() or []
+    if isinstance(resolved, tuple):
+        return list(resolved[0] or []), dict(resolved[1] or {})
+    return list(resolved), {}
+
+
 def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                  start: str | None, end: str | None,
                  initial_capital: float = 100000.0, commission: float = 0.0003,
@@ -124,6 +137,7 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                  benchmark: str | None = None, window: int | None = None,
                  universe_mode: str = "interval_data",
                  ruin_threshold=None,
+                 scope_extra: dict | None = None,
                  progress=None) -> dict:
     """执行回测，返回标准化结果字典。异常由路由层转成错误响应。
 
@@ -243,6 +257,12 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                     "一字跌停卖不出即延后清仓；整手/停牌仍只影响明细可行性")
     # 幸存者偏差：任何模式都必须显式声明，**不允许静默**（偏差消不掉，但必须让人看见）
     warnings.append(data.survivorship_note(universe_mode, len(usable)))
+    # 范围口径：每项剔除了多少只 + 哪些判定用的是「当前状态」（含前视偏差）。
+    # 以前只声明幸存者偏差，读者会误以为「已声明偏差 = 样本无问题」——
+    # 而剔除特征其实是用今天的状态去筛整段历史。
+    scope_extra = dict(scope_extra or {})
+    if scope_extra.get("note"):
+        warnings.append(str(scope_extra["note"]))
     if window:
         warnings.append(f"short_window: 只统计最近 {window} 个交易日（区间被裁剪）")
     warnings.extend(errors[:20])
@@ -268,6 +288,16 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
             "lot_size": lot_size,
             "benchmark": benchmark,
             "universe_mode": universe_mode,
+            # 范围口径（剔除明细 + 判定基准日 + 哪些判定含前视偏差）
+            "exclude": list(scope_extra.get("exclude") or []),
+            "exclusion": {
+                "base_count": scope_extra.get("base_count"),
+                "filtered_count": scope_extra.get("filtered_count"),
+                "excluded_count": scope_extra.get("excluded_count"),
+                "dropped": scope_extra.get("dropped") or {},
+                "as_of": scope_extra.get("as_of"),
+                "forward_looking": scope_extra.get("forward_looking") or [],
+            },
             "equity_model": "weight_strict_fill",
             "per_stock_truncated": trunc_info,
             "feasibility": feas,
@@ -683,7 +713,7 @@ def start_reco_task(strategy_id: str, params: dict | None, codes: list[str],
                 # 解析股票池（含联网拉股票名称，实测 30~50 秒）放到后台，
                 # 别卡启动响应 —— 与 `start_task` 同一套做法。
                 try:
-                    codes = codes_resolver() or []
+                    codes, _reco_extra = _resolve_pool(codes_resolver)
                 except Exception as exc:
                     with _RECO_LOCK:
                         _RECO_TASK.update(state="error", phase="done",
@@ -912,6 +942,7 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
     def _work():
         global _BT_CTRL
         nonlocal codes
+        scope_extra: dict = {}
         t0 = time.time()
         # 装控制器：装上之后 base.checkpoint() 才不是 no-op，
         # 暂停/停止标志也需要一个跨请求可见的落脚点。
@@ -921,7 +952,9 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
             if codes_resolver is not None:
                 # 解析股票池（全市场冷缓存可能要扫几千只）放到后台，别卡启动响应
                 try:
-                    codes = codes_resolver() or []
+                    # resolver 可返回 (codes, detail)：detail 是范围明细
+                    #（每项剔除只数、判定基准日），要写进报告 scope
+                    codes, scope_extra = _resolve_pool(codes_resolver)
                 except Exception as exc:
                     with _BT_LOCK:
                         _BT_TASK.update(state="error", phase="done",
@@ -944,7 +977,8 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
                                    initial_capital, commission, stamp_duty,
                                    slippage, min_commission, lot_size,
                                    benchmark, window, universe_mode,
-                                   ruin_threshold, progress=_on_progress)
+                                   ruin_threshold, scope_extra=scope_extra,
+                                   progress=_on_progress)
             except base.Cancelled:
                 # 用户主动停止：**不是错误**。用 paused/cancelled 状态，
                 # 界面上按中性提示显示，绝不弹红色报错或堆栈。

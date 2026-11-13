@@ -57,35 +57,60 @@ def list_codes():
 
 
 def _universe_spec(req: BacktestRequest) -> dict:
-    """回测请求 → 股票池层的 spec（范围规则只在这一处翻译）。"""
+    """回测请求 → 股票池层的 spec（范围规则只在这一处翻译）。
+
+    `as_of` = **区间起点**：「距今多少天」类剔除（新股/次新股）与微盘市值
+    都按**回测当时视角**判定，不再用结束日/今天 —— 那是未来信息，
+    还会让同一个区间每天跑出不同的池子。
+    """
     return {
         "universe_mode": req.universe_mode,
         "start": req.start,
         "end": req.end,
-        "as_of": req.end,
+        "as_of": req.start,
         "exclude": req.exclude,
     }
 
 
 def _resolve_codes(req: BacktestRequest):
-    """把请求解析成最终回测代码列表。
+    """把请求解析成最终回测代码列表 + 范围明细。
 
-    · use_all=True → 交给股票池层 `universe.build`（带进程内缓存）：基池 = 本地全部，
-      按 exclude 剔除对应特征；连续不改范围时直接复用内存结果，不重复扫描/联网。
+    · use_all=True → 交给股票池层 `universe.build_detail`（带进程内缓存）：
+      基池 = 本地全部，按 exclude 剔除对应特征；连续不改范围时直接复用内存结果，
+      不重复扫描/联网。
     · use_all=False → 用 codes（自定义，兼容旧前端）。
+
+    返回 (codes, detail)。detail 含**每项剔除只数**与口径说明，
+    必须写进报告 scope —— 否则报告无法自证「这次到底剔了什么」。
     """
     if not req.use_all:
-        return [str(c).strip() for c in (req.codes or []) if str(c).strip()]
-    return suniverse.build(_universe_spec(req))
+        return [str(c).strip() for c in (req.codes or []) if str(c).strip()], {}
+    codes, detail = suniverse.build_detail(_universe_spec(req))
+    detail = dict(detail)
+    detail["note"] = suniverse.scope_note(detail)
+    return codes, detail
 
 
 @router.get("/universe/summary")
-def universe_summary(exclude: list[str] = Query(default=[])):
-    """回测范围预览：基池数量 + 按 exclude 剔除后的数量（复用股票池层缓存）。
+def universe_summary(exclude: list[str] = Query(default=[]),
+                     start: Optional[str] = Query(default=None),
+                     end: Optional[str] = Query(default=None)):
+    """回测范围预览：基池数量 + 剔除后数量 + **每项剔除只数** + 口径说明。
 
     供前端在勾选「排除特征」时实时显示「本地共 N 只 · 剔除后 M 只」。
+
+    ⚠️ 必须与实跑用**同一个 spec**（含 start/end/as_of）：以前这里只传 exclude，
+    实跑传 exclude+start/end/as_of → 两个不同的缓存键 → 各算各的 →
+    界面显示「剔除后 = 基池」而实跑剔掉一千多只（用户以为没剔，其实剔了）。
     """
-    out = suniverse.summary({"exclude": list(exclude)})
+    spec = {
+        "universe_mode": "interval_data",
+        "start": start,
+        "end": end,
+        "as_of": start,
+        "exclude": list(exclude),
+    }
+    out = suniverse.summary(spec)
     out.update({"ok": True, "exclude": list(exclude)})
     return out
 
@@ -127,7 +152,7 @@ _guard = apiutil.guard
 @router.post("/backtest")
 @_guard(code=_CODE_ERR)
 def do_backtest(req: BacktestRequest):
-    codes = _resolve_codes(req)
+    codes, scope_extra = _resolve_codes(req)
     # window 交给编排层处理（取数会额外向前预热，只统计最近 N 日）
     result = backtest.run_backtest(
         req.strategy_id, req.params, codes, req.start, req.end,
@@ -136,6 +161,7 @@ def do_backtest(req: BacktestRequest):
         min_commission=req.min_commission, lot_size=req.lot_size,
         benchmark=req.benchmark, window=req.window,
         universe_mode=req.universe_mode, ruin_threshold=req.ruin_threshold,
+        scope_extra=scope_extra,
     )
     # 回测跑完**自动落盘一份报告**（策略 + 覆盖范围 + 指标 + 逐票汇总），
     # 便于事后对比不同策略 / 不同区间 —— 原来结果只在一次响应里，关掉就没了。
@@ -164,10 +190,11 @@ def do_backtest_start(req: BacktestRequest):
     # 前端 `/backtest/start` 会先超时报「无法启动：操作超时」（用户实际遇到的就是这个）。
     # 把解析放进后台线程（codes_resolver），启动接口立即返回、前端马上开始轮询。
     def _resolve_codes_lazy():
-        codes = _resolve_codes(req)
+        codes, extra = _resolve_codes(req)
         if not codes:
             raise ValueError("股票池为空，请先选择回测范围")
-        return codes
+        # 返回 (codes, detail)：编排层把 detail 写进 scope，报告才带剔除明细
+        return codes, extra
 
     out = backtest.start_task(
         req.strategy_id, req.params, [], req.start, req.end,
@@ -286,10 +313,10 @@ def do_recommend(req: BacktestRequest):
     # 与 `/backtest/start` 同一套做法（codes_resolver）：解析放进后台线程，
     # 启动接口立即返回、前端马上开始轮询。股票池为空也由后台任务报错。
     def _resolve_codes_lazy():
-        codes = _resolve_codes(req)
+        codes, _extra = _resolve_codes(req)
         if not codes:
             raise ValueError("股票池为空，请先选择回测范围")
-        return codes
+        return codes, _extra
 
     # ---- 单日策略：目标执行日 → 信号日 ----
     # 口径恒为「前一交易日收盘信号 → 本交易日执行」。收盘前默认执行日=今天

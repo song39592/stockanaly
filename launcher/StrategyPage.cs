@@ -42,6 +42,16 @@ namespace StockPool
         private TextBox _stComm, _stBench;
         private Label _stScopeHint;
         private DateTimePicker _stStart, _stEnd;
+        // 回测范围的「口径说明」气泡：判定基准日 + 前视偏差声明 + 数据限制
+        private readonly ToolTip _stScopeTip = new ToolTip();
+        // 剔除特征 → 中文名（与后端 universe.FEATURE_LABELS 一一对应）
+        private static readonly Dictionary<string, string> StFeatureLabels =
+            new Dictionary<string, string>
+        {
+            { "chinext", "创业板" }, { "star", "科创板" }, { "bse", "北交所" },
+            { "st", "ST" }, { "star_st", "*ST" }, { "ipo", "新股" },
+            { "sub_new", "次新股" }, { "micro", "微盘股" },
+        };
         private WheelValueBox _stCapital;
         private CheckBox _stBenchChk;
         private int _stLocalCodeCount;
@@ -1243,7 +1253,19 @@ private void StRefreshCurStrategy()
             //    (?exclude=a&exclude=b)，不是逗号分隔。逗号拼接会被当成
             //    一个整体参数 "a,b"，过滤规则一个都不匹配 → 预览永远显示
             //    「剔除后 = 基池数」。
-            string q = ex.Count > 0 ? "?" + string.Join("&exclude=", ex) : "";
+            //    ⚠️ 而且**第一个参数也要带键名**：以前写成
+            //    "?" + string.Join("&exclude=", ex) → 得到 "?st&exclude=ipo..."
+            //    → "st" 成了无值参数，第一个剔除项直接丢掉了。
+            var parts = new List<string>();
+            foreach (var e in ex) parts.Add("exclude=" + Uri.EscapeDataString(e));
+            // 预览必须与实跑用**同一个 spec**：后端判定基准日 = 区间起点，
+            // 不传 start → 预览按今天算、实跑按区间起点算 → 两边数字对不上
+            // （实测预览显示「剔除后 = 基池」而实跑剔掉了一千多只）。
+            string st = StDate(_stStart);
+            string en = StDate(_stEnd);
+            if (!string.IsNullOrEmpty(st)) parts.Add("start=" + Uri.EscapeDataString(st));
+            if (!string.IsNullOrEmpty(en)) parts.Add("end=" + Uri.EscapeDataString(en));
+            string q = parts.Count > 0 ? "?" + string.Join("&", parts) : "";
             RunUi<Dictionary<string, object>>(delegate
             {
                 string body;
@@ -1260,7 +1282,30 @@ private void StRefreshCurStrategy()
                 }
                 int baseN = (int)J.Num(J.Get(j, "base_count"));
                 int filtN = (int)J.Num(J.Get(j, "filtered_count"));
-                _stScopeHint.Text = "共 " + baseN + " 只 · 剔除后 " + filtN + " 只";
+                string txt = "共 " + baseN + " 只 · 剔除后 " + filtN + " 只";
+                // 每项剔了多少只 —— 必须让人看见：以前只显示两个总数，
+                // 「勾了却显示没剔」的事故就是这么发生的。
+                var dropped = J.Map(J.Get(j, "dropped"));
+                if (dropped != null && dropped.Count > 0)
+                {
+                    var bits = new List<string>();
+                    foreach (var kv in dropped)
+                    {
+                        int n = (int)J.Num(kv.Value);
+                        if (n > 0)
+                        {
+                            string label;
+                            if (!StFeatureLabels.TryGetValue(kv.Key, out label)) label = kv.Key;
+                            bits.Add(label + " " + n);
+                        }
+                    }
+                    if (bits.Count > 0) txt += "（" + string.Join("、", bits) + "）";
+                }
+                _stScopeHint.Text = txt;
+                // 口径说明（判定基准日 / 前视偏差 / 数据限制）挂气泡
+                string note = J.StrOr(J.Get(j, "note"), "");
+                _stScopeTip.SetToolTip(_stScopeHint,
+                    string.IsNullOrEmpty(note) ? txt : note + "\n" + txt);
             }, delegate(Exception ex2)
             {
                 _stScopeHint.Text = "共 " + _stLocalCodeCount + " 只";
@@ -2506,6 +2551,9 @@ private void StRefreshCurStrategy()
                         _stList.Items.Clear();
                         foreach (var m in list) _stList.Items.Add(J.StrOr(m["name"], J.StrOr(m["id"], "?")));
                         if (_stScopeHint != null) _stScopeHint.Text = "共 " + cnt + " 只 · 剔除后 " + cnt + " 只";
+                        // 勾选状态是从 settings.ini 恢复的（scope_exclude），
+                        // 载入后必须重新拉一次预览，否则显示的仍是「剔除后 = 基池」。
+                        StScopePreview();
                         // 文案别写成「清单已加载（N 个策略 / M 只股票）」—— 那个「N 个策略」
 // 紧挨着「运行回测」按钮，读起来像是「本次要跑 N 个策略」。实际是**单选**：
 // 一次只跑列表里选中的那一个。策略页的 ListBox 是单选、后端 BacktestRequest
