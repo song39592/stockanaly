@@ -261,29 +261,6 @@ def code_first_dates() -> dict[str, str]:
     return price_store.code_earliest_dates()
 
 
-def market_caps(codes) -> dict:
-    """{code: 总市值(元)}：总市值 = 最新总股本 × 最新收盘价（raw）。
-
-    总股本取 share_capital 最新一条；收盘价取 price_store.bulk_latest_close。
-    任一项缺失的票不进入结果（保守：它不会被当作微盘股剔除）。
-    """
-    closes = price_store.bulk_latest_close()
-    with _core_db.connect(_core_db.FACTORS_DB) as conn:
-        rows = conn.execute(
-            "SELECT code, total_shares FROM share_capital "
-            "WHERE (code, as_of) IN (SELECT code, MAX(as_of) "
-            "FROM share_capital GROUP BY code)"
-        ).fetchall()
-    shares = {r["code"]: r["total_shares"] for r in rows if r["total_shares"]}
-    caps: dict = {}
-    for code in codes:
-        s = shares.get(code)
-        c = closes.get(code)
-        if s and c:
-            caps[code] = float(s) * float(c)
-    return caps
-
-
 def share_capital_at(as_of: str) -> tuple[dict[str, float], int]:
     """每只票在 as_of（含）之前**最近一条生效记录**的总股本。
 
@@ -329,8 +306,8 @@ def share_capital_at(as_of: str) -> tuple[dict[str, float], int]:
 def market_caps_at(codes, as_of: str) -> tuple[dict, dict]:
     """{code: 总市值(元)}，**as_of 时点**口径：as_of 前最近交易日的收盘价 × 当时的总股本。
 
-    与 `market_caps()`（最新口径）的区别 —— 后者取的是「今天的市值」：
-      · 用今天的状态去筛整段历史 = **前视偏差**（后来跌成微盘的票被整段剔除，
+    ⚠️ 这里**只有这一份市值口径**。别再另写一份「最新市值」函数：
+      · 用「今天的市值」去筛整段历史 = **前视偏差**（后来跌成微盘的票被整段剔除，
         连它过去那段大涨一起消失；反过来今天是大票的当年微盘股照样进池）；
       · 市值天天变 → 同一区间两次跑得到不同池子 → 净值不可复现。
 

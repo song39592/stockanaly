@@ -89,7 +89,7 @@ stats.py      ⑥ hfq 收盘价 → 净值曲线与指标（与策略无关）
 
 | 文件 | 角色 | 职责 | 允许依赖 |
 | --- | --- | --- | --- |
-| `data.py` | **数据层** | `load_bars(codes, fields) -> {code: DataFrame}`、`list_universe_codes(universe_mode)`、`load_bars_raw_for(codes)`；原始分类数据 `load_names()` / `code_first_dates()` / `market_caps()`（最新口径）/ `market_caps_at(as_of)`（**区间起点口径**，PIT）；取数走 **`kline_service`**（全项目唯一的「取数 + 周期合样」出口）；包内**唯一**允许 `import price_store` 的地方 | `kline_service`、`price_store` |
+| `data.py` | **数据层** | `load_bars(codes, fields) -> {code: DataFrame}`、`list_universe_codes(universe_mode)`、`load_bars_raw_for(codes)`；原始分类数据 `load_names()` / `code_first_dates()` / `market_caps_at(as_of)`（**区间起点口径**，PIT —— 市值只有这一份口径，别再另写「最新市值」）；取数走 **`kline_service`**（全项目唯一的「取数 + 周期合样」出口）；包内**唯一**允许 `import price_store` 的地方 | `kline_service`、`price_store` |
 | `universe.py` | **股票池层** | `build_detail(spec)` 按规则（板块前缀/ST/上市日/市值）把基池筛成回测代码**并回传每项剔除只数与口径说明**；`summary(spec)` 给前端预览；**小型键值缓存**（最多 8 种范围），范围不变直接复用；**不依赖 backtest** | `data` |
 | `base.py` | **契约层** | `@strategy` / `ParamSpec` / `Signal` / `StrategyContext`；`run()` 调策略、`signals_to_positions()` 信号→权重序列、**`diff_trades()` 权重→流水** | `data`（仅类型）、`pandas` |
 | `stats.py` | **统计引擎** | 目标权重序列 + hfq 收盘价 → 净值与指标；raw OHLCV → 可行性指标；**与策略完全解耦** | 仅 `numpy/pandas` |

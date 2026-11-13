@@ -583,7 +583,10 @@ def bulk_latest_close(ttl: int = 3600) -> dict[str, float]:
     """每只已下载股票**最新交易日**的收盘价 {code: close}（raw 口径）。
 
     用「(code, trade_date) IN (SELECT code, MAX(trade_date) ...)」一次性取各股最新收盘，
-    全库只扫一遍；结果进程内缓存 `ttl` 秒。回测范围「微盘股」按 总市值=总股本×收盘价 判定用。
+    全库只扫一遍；结果进程内缓存 `ttl` 秒。
+
+    ⚠️ 「最新」= **今天**。拿它去筛历史样本就是前视偏差 —— 回测范围「微盘股」已改用
+    `bulk_close_at(day)`（区间起点口径）。这里只适合「当下行情」类查询。
     """
     now = time.time()
     if _LATEST_CLOSE_CACHE["map"] and now - _LATEST_CLOSE_CACHE["at"] < ttl:

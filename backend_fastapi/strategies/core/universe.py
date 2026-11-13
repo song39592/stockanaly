@@ -6,7 +6,7 @@
 既不属于 HTTP 路由（routes 只该转发请求），也不属于回测编排（backtest 只该消费 codes）。
 把它抽成独立层后：
 
-    routes  ──spec──▶  universe.build()  ──codes──▶  backtest.start_task()
+    routes  ──spec──▶  universe.build_detail()  ──codes+明细──▶  backtest.start_task()
 
 ## 缓存
 结果只由「规则 + 基准日」决定。连续多次回测不改范围时**没必要重算** —— 尤其 ST 名称表
@@ -189,7 +189,15 @@ def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str,
 
 
 def build_detail(spec: dict, force: bool = False) -> tuple[list[str], dict]:
-    """返回 (代码列表, 范围明细)。
+    """返回 (代码列表, 范围明细)。**股票池层的唯一入口**（命中缓存直接返回，
+    force=True 强制重建）。
+
+    spec 字段（全部可选）：
+        universe_mode  interval_data / pool_snapshot / index_constituent
+        start / end    区间（pool_snapshot 用；start 也是「距今」类剔除的基准日）
+        as_of          判定基准日（缺省用 start，再缺省用今天）——「回测当时视角」
+        exclude        排除特征键列表（见 CATEGORIES）
+        ipo_days / sub_new_days / micro_cap   阈值覆盖
 
     明细含：基池/剔除后数量、**每项剔除只数**、判定基准日 as_of、
     以及哪些特征只能用「当前状态」判定（含前视偏差）。
@@ -229,20 +237,6 @@ def build_detail(spec: dict, force: bool = False) -> tuple[list[str], dict]:
     if len(_cache) > _CACHE_MAX:
         _cache.pop(min(_cache, key=lambda k: _cache[k][2]), None)  # 丢掉最旧的
     return list(codes), detail
-
-
-def build(spec: dict, force: bool = False) -> list[str]:
-    """按 spec 生成回测代码列表（命中缓存直接返回，force=True 强制重建）。
-
-    spec 字段（全部可选）：
-        universe_mode  interval_data / pool_snapshot / index_constituent
-        start / end    区间（pool_snapshot 用；start 也是「距今」类剔除的基准日）
-        as_of          判定基准日（缺省用 start，再缺省用今天）——「回测当时视角」
-        exclude        排除特征键列表（见 CATEGORIES）
-        ipo_days / sub_new_days / micro_cap   阈值覆盖
-    """
-    codes, _ = build_detail(spec, force=force)
-    return codes
 
 
 def scope_note(detail: dict) -> str:
