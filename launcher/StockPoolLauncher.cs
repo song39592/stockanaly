@@ -1763,6 +1763,12 @@ namespace StockPool
                 // ⚠️ Warnings 在「检查通过」时也要打出来 —— 否则「依赖版本不符」这类
                 //    只影响可选功能、但值得提醒的提示会被整段吞掉（没人看日志就白做了）。
                 Ui(delegate { foreach (var w in r.Warnings) Log("环境", "提示：" + w); });
+                // ⚠ **依赖齐备 ≠ 配置是本机的**：整目录拷到新电脑后，.env 的 DATA_DIR /
+                //    DATA_SECRET_SEALED、embeddable Python 的 ._pth、dsh 插件路径里都可能
+                //    还残留旧机器的绝对路径 → 后端照样起不来（实测：依赖自检全过 → 启动器
+                //    判定「环境没问题」→ 从不执行安装脚本 → 换设备必然失败）。
+                //    这里补跑一次 -ConfigOnly：不联网、不装依赖、只改有结论性判据的项、幂等。
+                HealCrossDeviceConfig(stage);
                 return true;
             }
             Ui(delegate
@@ -1796,7 +1802,7 @@ namespace StockPool
             if (stage != null) stage("正在安装依赖（首次安装可能需要几分钟）…");
             Ui(delegate { Log("环境", "开始安装环境（launcher\\install_env.ps1）…"); });
             int code;
-            var output = RunInstaller(runnable, out code);
+            var output = RunInstaller(runnable, out code, null, true, 20 * 60 * 1000);
             if (code != 0) { EnvFail("安装脚本退出码 " + code + "：" + ExitReason(code), output); return false; }
 
             var r2 = CheckEnv();
@@ -1814,6 +1820,58 @@ namespace StockPool
                 }
             });
             return true;
+        }
+
+        /// <summary>
+        /// 跨设备配置自愈：依赖齐备时也补跑一次 <c>install_env.ps1 -ConfigOnly</c>。
+        ///
+        /// 为什么必须有这一步：**依赖装齐了 ≠ 配置是本机的**。整目录拷到新电脑后，
+        /// .env 的 DATA_DIR / DATA_SECRET_SEALED、embeddable Python 的 ._pth、
+        /// agent_dsh 的插件路径都可能还指着旧机器 → 后端照样起不来。
+        /// 实测过的坑：依赖自检全过 → 启动器判定「环境没问题」→ 从不执行安装脚本
+        /// → 换设备后必然失败，而且没有任何一处会提示原因。
+        ///
+        /// 纪律：
+        ///   · 判据与动作全在脚本里（幂等、只改有结论性判据的项）→ 这里**不复制第二份判据逻辑**；
+        ///   · -ConfigOnly 不联网、不装依赖、不校验依赖 → 不会拖慢启动、不会碰用户环境；
+        ///   · 失败只写日志、**不阻断启动**（配置问题不该让程序直接起不来）；
+        ///   · 每次进程启动只跑一次（PrepareEnv 里 _envChecked 缓存），不会反复刷。
+        /// </summary>
+        private void HealCrossDeviceConfig(Action<string> stage)
+        {
+            try
+            {
+                var ps1 = Path.Combine(_root, "launcher", "install_env.ps1");
+                if (!File.Exists(ps1)) return;      // 老目录没这个脚本 → 跳过（不阻塞启动）
+
+                string problem;
+                var runnable = PrepareEnvScript(ps1, out problem);
+                if (runnable == null)
+                {
+                    Ui(delegate { Log("环境", "配置自愈跳过：" + problem); });
+                    return;
+                }
+
+                if (stage != null) stage("自愈跨设备配置…");
+                int code;
+                var output = RunInstaller(runnable, out code, "-ConfigOnly", false, 60 * 1000);
+                if (code == 0)
+                {
+                    Ui(delegate { Log("环境", "跨设备配置自愈已执行（-ConfigOnly，未联网、未装依赖）。"); });
+                }
+                else
+                {
+                    Ui(delegate
+                    {
+                        Log("环境", "跨设备配置自愈退出码 " + code + "：" + ExitReason(code));
+                        if (!string.IsNullOrEmpty(output)) Log("环境", output);
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Ui(delegate { Log("环境", "跨设备配置自愈出错：" + ex.Message); });
+            }
         }
 
         /// <summary>检查 Python / 后端依赖（硬要求），以及 Node、node_modules（只提示）。</summary>
@@ -1996,14 +2054,18 @@ namespace StockPool
         /// 行尾被拷贝成 LF 会让 if/else 块整体错位、cmd 按控制台代码页读 UTF-8 中文会打乱字节对齐、
         /// 块里任何特殊字符都可能让整块语法崩掉。PowerShell 三样都不吃。
         /// </remarks>
-        private string RunInstaller(string ps1, out int exitCode)
+        /// <param name="extraArgs">追加给脚本的参数（如 -ConfigOnly）；为空则不追加。</param>
+        /// <param name="logEachLine">是否把脚本输出逐行写进日志（配置自愈走 false，避免每次启动刷屏）。</param>
+        /// <param name="timeoutMs">超时上限（完整安装要几分钟；配置自愈给 60 秒就够）。</param>
+        private string RunInstaller(string ps1, out int exitCode, string extraArgs, bool logEachLine, int timeoutMs)
         {
             var sb = new StringBuilder();
             var psi = new ProcessStartInfo();
             psi.FileName = "powershell.exe";
             // -Root 去掉结尾反斜杠：powershell 的参数解析里 "C:\路径\" 结尾的 \ 会把引号吃掉
             psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + ps1 + "\" -Root \"" +
-                            _root.TrimEnd('\\') + "\" -Silent";
+                            _root.TrimEnd('\\') + "\" -Silent"
+                            + (string.IsNullOrEmpty(extraArgs) ? "" : " " + extraArgs);
             psi.WorkingDirectory = _root;
             psi.UseShellExecute = false;
             psi.CreateNoWindow = true;
@@ -2016,9 +2078,9 @@ namespace StockPool
             psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
             psi.EnvironmentVariables["PYTHONUTF8"] = "1";
 
-            // 安装可能很久（首次装 akshare / 拉 npm），给 20 分钟上限
-            exitCode = RunAndCollect(psi, 20 * 60 * 1000, sb,
-                delegate(string line) { Ui(delegate { Log("环境", line); }); });
+            // 超时上限由调用方给：完整安装 20 分钟（首次装 akshare / 拉 npm），配置自愈 60 秒
+            exitCode = RunAndCollect(psi, timeoutMs, sb,
+                logEachLine ? (Action<string>)(delegate(string line) { Ui(delegate { Log("环境", line); }); }) : null);
             return sb.ToString();
         }
 
