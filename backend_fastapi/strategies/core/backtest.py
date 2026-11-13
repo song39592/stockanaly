@@ -38,6 +38,7 @@
 """
 from __future__ import annotations
 
+import bisect
 import datetime as dt
 import json
 import threading
@@ -371,6 +372,87 @@ class _IdxOnly:
         self.index = idx
 
 
+def _last_pos_at(index, day: str) -> int:
+    """`index`（升序）中 **≤ `day`** 的最后一个下标；没有则 -1。
+
+    取「≤ day 的最后一行」而不是「恰好等于 day 的那一行」：停牌 / 缺行情的票
+    要按「仍持有」处理，否则它在三档里会因为最后一行落在哪一天而错档。
+    """
+    if not day:
+        return -1
+    try:
+        return max(-1, int(index.searchsorted(day, side="right")) - 1)
+    except Exception:                           # noqa: BLE001 - 索引类型不同则退到字符串比较
+        try:
+            return max(-1, bisect.bisect_right([str(d)[:10] for d in index], day) - 1)
+        except Exception:                       # noqa: BLE001 - 实在取不到就按「无数据」
+            return -1
+
+
+def _close_at(df, day: str) -> tuple[str | None, float | None]:
+    """取 `df` 在 `day` 当日（或之前最后一个有效交易日）的收盘价与该日期。
+
+    返回 `(日期, 收盘价)`；取不到返回 `(None, None)`。
+    日期一律转成 `YYYY-MM-DD` 字符串再比较 —— 行情的 index 可能是
+    DatetimeIndex（字符串比较会抛异常），也可能是字符串索引。
+    """
+    if df is None or len(df) == 0:
+        return None, None
+    try:
+        dates = [str(d)[:10] for d in df.index]
+        i = bisect.bisect_right(dates, str(day)[:10]) - 1
+        if i < 0:
+            return None, None
+        return dates[i], float(df["close"].iloc[i])
+    except Exception:                           # noqa: BLE001 - 取不到价按「无价」处理
+        return None, None
+
+
+def _streak_entry(w, sig_day: str, raw, hfq, axis: list[str]) -> tuple[str, float | None]:
+    """无基线时的建仓日与成本价：按信号序列回溯本次持仓的起点。
+
+    返回 `(建仓日, 成本价)`；成本价取**执行日**的收盘（还没收盘就取该日之前
+    最后一个收盘），取不到再退回信号日。
+
+    口径与旧实现一致（回溯到最后一个空仓日之后的首个持仓日），只是取价改成
+    **按日期**找（原来按位置 `iloc[open_i]` 取，行情缺一天就错位）。
+    """
+    if w is None or len(w) == 0:
+        return sig_day, None
+    open_i = len(w) - 1
+    for i in range(len(w) - 1, -1, -1):
+        if float(w.iloc[i]) <= 0.0:
+            break
+        open_i = i
+    entry_sig = str(w.index[open_i])[:10]
+    buy_date = _exec_day_of(entry_sig, axis)
+    _, cost = _close_at(raw, buy_date)
+    if cost is None:
+        _, cost = _close_at(raw, entry_sig)
+    if cost is None:
+        _, cost = _close_at(hfq, buy_date)
+    return buy_date, cost
+
+
+def _exec_day_of(sig_day: str, axis: list[str]) -> str:
+    """信号日的**下一个交易日** = 该信号对应的执行日（用户实际下单那天）。
+
+    为什么建仓日要用执行日而不是信号日：信号是「前一交易日收盘算出来的」，
+    用户是**执行日**下单的。显示信号日会让「今天持股的成本价」与「昨天买入
+    表里的价」差一天（实测：昨天按建议买的票，今天持股表里建仓日写的是前天
+    的信号日 —— 用户看到的正是「持仓的数据和前一天买入的对不上」）。
+
+    优先用**统一轴**（各标的交易日并集）里的下一根 —— 离线、且与行情口径
+    一致；轴里没有下一根（信号日就是区间最后一天）才退回交易日历。
+    """
+    if not sig_day:
+        return sig_day
+    for d in axis:
+        if d > sig_day:
+            return d
+    return next_trading_day(sig_day)
+
+
 def next_trading_day(date_str: str) -> str:
     """`date_str` 之后的第一个交易日（含未来日），作为推荐的**执行日**。
 
@@ -403,13 +485,14 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
                   initial_capital: float = 100000.0, commission: float = 0.0003,
                   lookback: int = 250, progress=None,
                   execution_date: str | None = None,
-                  signal_date: str | None = None) -> dict:
+                  signal_date: str | None = None,
+                  baseline: dict | None = None) -> dict:
     """当前策略推荐：按**最新一日**的目标仓位给出买入 / 卖出 / 持股三档。
 
     与回测共用同一套信号与 T+1 口径，只是不统计历史净值，只回答「今天怎么做」：
-      buy   上一日空仓、当日建仓；
-      sell  上一日持仓、当日清仓；
-      hold  当日仍在持仓（含加仓 / 减仓），附建仓成本价与浮盈亏金额。
+      buy   上次建议没持有、本次建仓；
+      sell  上次建议持有、本次不在目标组合里了；
+      hold  上次建议持有、本次仍在持仓（含加仓 / 减仓），附建仓成本价与浮盈亏金额。
 
     未指定区间时自动回看最近 `lookback` 个交易日——MACD 这类长周期策略
     只看最近几天是算不出有效信号的。
@@ -417,6 +500,11 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
     金额口径：组合权重 × 目标资金（`amount = initial_capital × weight`），
     与回测的净值口径一致；盈亏用**后复权**序列算（消除除权的假盈亏），
     价格展示用原始收盘（不复权，用户看得懂）。
+
+    `baseline`：上一次推荐结果（整份 dict）。三档以它为**持仓基线** ——
+    否则三档描述的是「策略的仓位」而不是「用户按建议建立的仓位」，会出现
+    「昨天买入的票今天既不在持股也不在卖出（凭空消失）」。没有基线时
+    退回「信号相邻两日差分」口径（首次运行 / 换了策略 / 往回改日期重跑）。
 
     `progress(done, total)` 与 `run_backtest` 同义（哨兵 done=-1 表示进入
     不可细分的策略计算阶段）——原先这里没往下传，导致异步化之后进度条
@@ -477,33 +565,96 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
     signals = base.run(strategy_id, ctx, params)
     close_by_code = {c: _IdxOnly(ix) for c, ix in idx_by_code.items()}
     positions = base.signals_to_positions(signals, close_by_code)
+    # 统一日期轴（各标的交易日的并集）：三档必须在**同一天**上比较 —— 见下方
+    # 「统一轴」注释。集合只有几百个交易日，但要遍历全部标的的日期，
+    # 所以在释放 idx_bycode 之前算一次（遍历成本约 0.2s）。
+    axis: set[str] = set()
+    for _ix in idx_by_code.values():
+        axis.update(_ix)
+    days_axis: list[str] = sorted(axis)
+    del axis
     # 第 1 遍的索引已不再需要（后面只用需要的标的的行情），尽早释放
     del idx_by_code, close_by_code
 
-    # ---- 第 2 遍：**只给「非空仓」标的取价**（第 A 项）----
+    # ---- 统一日期轴：信号日 / 前一交易日 ----
+    # ⚠ 为什么必须「统一轴」：原来三档直接取**每只票自己序列的最后两根**。
+    #    停牌票的最后两根落在不同日期（有的停在 11-11、有的停在 11-13），
+    #    于是同一只票在两次运行里会被归到不同的档、甚至凭空消失
+    #    （实测：002623 在 11-13 的推荐里是持仓，改日重跑后三张表里都没有）。
+    #    统一轴后：信号日 = 轴上最后一天、前一交易日 = 倒数第二天，
+    #    每只票都按「该日（或之前最后一个有效交易日）」取值 → 停牌按「仍持有」处理。
+    sig_day = days_axis[-1] if days_axis else ""
+    prev_day = days_axis[-2] if len(days_axis) >= 2 else ""
+
+    # 信号日 / 前一交易日的目标权重（>0 才留）
+    target: dict[str, float] = {}
+    prev_w: dict[str, float] = {}
+    for code, w in positions.items():
+        i_cur = _last_pos_at(w.index, sig_day)
+        if i_cur >= 0:
+            cur = float(w.iloc[i_cur])
+            if cur > 0.0:
+                target[code] = cur
+        i_prev = _last_pos_at(w.index, prev_day)
+        if i_prev >= 0:
+            pv = float(w.iloc[i_prev])
+            if pv > 0.0:
+                prev_w[code] = pv
+
+    # ---- 持仓基线：**上一次推荐结果**优先；没有才退回「信号相邻两日差分」----
+    # 为什么要有基线：三档若只看「策略信号的两日差分」，它描述的是**策略**的仓位，
+    # 不是**用户按建议建立的仓位**。于是「昨天买入的票」今天既不在持股、也不在卖出
+    # （凭空消失），建仓日/成本价还会随策略信号回溯而变（实测 002086 在 11-13 与
+    # 11-16 两次运行里建仓日分别是 10-30 / 11-12）。
+    # 以「上一次推荐」为基线后：昨天买入 → 今天要么持股、要么卖出，**不会消失**，
+    # 且建仓日/成本价跨运行稳定（= 用户实际那一笔）。
+    base_hold: dict[str, dict] = {}
+    base_exec = ""
+    if isinstance(baseline, dict) and baseline:
+        b_sid = str((baseline.get("strategy") or {}).get("id") or "")
+        b_exec = str(baseline.get("execution_date") or "")[:10]
+        cur_exec = str(execution_date or "")[:10]
+        # 只接受「**更早**」的基线：往回改日期重跑时不能拿未来那次当过去；
+        # 同一天重跑也不用基线（那会把「今天该买」显示成「已持有」），
+        # 退回信号差分 → 同一天跑两次结果一致。
+        if b_sid == strategy_id and b_exec and (not cur_exec or b_exec < cur_exec):
+            for it in (baseline.get("hold") or []):
+                c = str(it.get("code") or "")
+                if c:
+                    base_hold[c] = {"buy_date": str(it.get("buy_date") or "")[:10],
+                                    "cost_price": it.get("cost_price"),
+                                    "weight": it.get("weight")}
+            for it in (baseline.get("buy") or []):
+                c = str(it.get("code") or "")
+                if c:
+                    base_hold[c] = {"buy_date": b_exec,
+                                    "cost_price": it.get("cost_price") or it.get("price"),
+                                    "weight": it.get("weight")}
+    use_ledger = bool(base_hold)
+    # 三档的判定集合：有基线用基线（用户实际持仓），否则用信号差分（策略仓位）
+    held = set(base_hold) if use_ledger else set(prev_w)
+
+    # ---- 第 2 遍：**只给有仓位的标的取价**（第 A 项）----
     # 原实现在这里对**全市场**再读一遍raw（`adjust="raw"` 与上面 hfq 是两套独立
     # 缓存，实测 108.8s / 5585 只），可它只为「买 / 卖 / 持」三档取两个**展示价**。
-    # 而三档只覆盖 `prev>0 or cur>0` 的标的 —— 实测全市场 5585 只里只有
+    # 而三档只覆盖有仓位的标的 —— 实测全市场 5585 只里只有
     # 107 只（买 9 + 卖 5 + 持 93）进得去，其余 5478 只的 raw 纯属白读。
     # 空仓的票三个分支都进不去，一个价格都用不到，直接跳过。
-    priced: dict[str, tuple[float, float]] = {}
-    for code, w in positions.items():
-        if len(w) < 2:
-            continue
-        prev, cur = float(w.iloc[-2]), float(w.iloc[-1])
-        if prev <= 0.0 and cur <= 0.0:
-            continue
-        priced[code] = (prev, cur)
-    need = list(priced.keys())
+    need = sorted(set(target) | held)
+    # 取价区间要够到**执行日**：展示价/成本价按执行日收盘口径给（执行日没收盘
+    # 则自动退到该票最后一个有效交易日，见 _close_at）。
+    price_end = str(end or "")
+    if execution_date and str(execution_date)[:10] > price_end:
+        price_end = str(execution_date)[:10]
 
-    hfq_bars = data.load_bars(need, start, end, fields=["close"], adjust="hfq")
+    hfq_bars = data.load_bars(need, start, price_end, fields=["close"], adjust="hfq")
     try:
-        raw_bars = data.load_bars(need, start, end, fields=["close"], adjust="raw")
+        raw_bars = data.load_bars(need, start, price_end, fields=["close"], adjust="raw")
     except Exception:                            # noqa: BLE001 - 原始价拿不到就用复权价展示
         raw_bars = {}
     data.release_cache(need)      # 两种口径都取完即还回去，别把内存挂在 107 只上
 
-    names = _load_names(list(priced.keys()))
+    names = _load_names(need)
     # 组合权重口径：金额 = 目标资金 × 权重。**没有「资金带」**——
     # 旧口径的 initial_capital/N 会让同一策略在 500 只池与 5559 只池给出差 11 倍的
     # 建议金额（池子越大每票分到越少），推荐结果因此不可横向对比、也不可跨池复用。
@@ -512,53 +663,79 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
     buy: list[dict] = []
     sell: list[dict] = []
     hold: list[dict] = []
-    for code, w in positions.items():
-        if code not in priced:            # 空仓：买/卖/持都进不去，无需任何价格
-            continue
-        prev, cur = priced[code]
+    for code in need:
+        w = positions.get(code)
         hfq = hfq_bars.get(code)
-        if hfq is None or len(hfq) < 2:
-            continue
         raw = raw_bars.get(code)
-        px = float(raw["close"].iloc[-1]) if (raw is not None and len(raw)) else float(hfq["close"].iloc[-1])
+        cur = target.get(code, 0.0)
+        prev = prev_w.get(code, 0.0)
+        b = base_hold.get(code) if use_ledger else None
         nm = names.get(code) or None
 
-        if cur > 0.0 and prev <= 0.0:                       # 建仓
-            buy.append({"code": code, "name": nm, "weight": round(cur, 4),
-                        "price": round(px, 2), "amount": round(target_capital * cur, 2)})
-        elif cur <= 0.0 and prev > 0.0:                     # 清仓
-            sell.append({"code": code, "name": nm, "weight": round(prev, 4),
-                         "price": round(px, 2), "amount": round(target_capital * prev, 2)})
-        elif cur > 0.0 and prev > 0.0:                      # 继续持仓（可能加/减仓）
-            open_i = len(w) - 1                             # 回溯到本次持仓的建仓日
-            for i in range(len(w) - 1, -1, -1):
-                if float(w.iloc[i]) <= 0.0:
-                    break
-                open_i = i
-            hfq_buy = float(hfq["close"].iloc[open_i])
-            hfq_now = float(hfq["close"].iloc[-1])
-            pnl_pct = (hfq_now / hfq_buy - 1.0) if hfq_buy else 0.0
+        # 现价：执行日收盘（该日还没收盘/停牌 → 退到最后一个有效交易日）
+        px_day = str(execution_date or "")[:10] or sig_day
+        px_date, px = _close_at(raw, px_day)
+        if px is None:
+            px_date, px = _close_at(hfq, px_day)
+        if px is None:
+            px_date, px = _close_at(raw, sig_day)
+        if px is None:
+            px_date, px = _close_at(hfq, sig_day)
+        if px is None:
+            errors.append(f"{code}: 取价失败（区间内无收盘价）")
+            # 卖出档不能因为取不到价就凭空消失：退回基线里那一笔的成本价
+            if not (b and b.get("cost_price")):
+                continue
+            px = float(b["cost_price"])
+            px_date = ""
+
+        if cur > 0.0 and code in held:                          # 继续持仓（可能加/减仓）
+            if b and b.get("buy_date"):
+                # 基线有 → 沿用用户那一笔的建仓日与成本价（跨运行稳定）
+                buy_date = str(b["buy_date"])[:10]
+                cost = float(b.get("cost_price") or px)
+            else:
+                # 无基线 → 按信号序列回溯本次持仓的建仓日（**执行日**口径）
+                buy_date, cost = _streak_entry(w, sig_day, raw, hfq, days_axis)
+                cost = float(cost if cost is not None else px)
+            _, hfq_buy = _close_at(hfq, buy_date)
+            _, hfq_now = _close_at(hfq, px_date or sig_day)
+            pnl_pct = (hfq_now / hfq_buy - 1.0) if (hfq_buy and hfq_now) else 0.0
             amount = target_capital * cur
-            cost = float(raw["close"].iloc[open_i]) if (raw is not None and len(raw) > open_i) else hfq_buy
+            # 加仓 / 减仓：跟**基线**的权重比（有基线 = 用户实际那笔；无基线 = 策略上一日）
+            w_base = float((b or {}).get("weight") or prev or 0.0)
             hold.append({
                 "code": code, "name": nm, "weight": round(cur, 4), "price": round(px, 2),
-                "cost_price": round(cost, 2), "buy_date": str(w.index[open_i])[:10],
+                "cost_price": round(cost, 2), "buy_date": buy_date,
                 "amount": round(amount, 2), "pnl": round(amount * pnl_pct, 2),
                 "pnl_pct": round(pnl_pct, 4),
-                "action": ("加仓" if cur > prev + 1e-9
-                           else ("减仓" if cur < prev - 1e-9 else "持股")),
+                "action": ("加仓" if cur > w_base + 1e-9
+                           else ("减仓" if cur < w_base - 1e-9 else "持股")),
             })
+        elif cur > 0.0:                                          # 建仓（本次新增）
+            buy.append({"code": code, "name": nm, "weight": round(cur, 4),
+                        "price": round(px, 2), "amount": round(target_capital * cur, 2),
+                        # 建仓日 = **执行日**（用户实际下单那天），不是信号日；
+                        # 成本价 = 本次展示价 → 下一次运行原样继承 → 「昨天买入的价」
+                        # 与「今天持股的成本价」永远一致。
+                        "buy_date": str(execution_date or "")[:10] or sig_day,
+                        "cost_price": round(px, 2)})
+        elif code in held:                                       # 清仓（在持仓里、已不在目标组合）
+            w_prev = float((b or {}).get("weight") or prev or 0.0)
+            if w_prev <= 0.0:
+                continue
+            sell.append({"code": code, "name": nm, "weight": round(w_prev, 4),
+                         "price": round(px, 2), "amount": round(target_capital * w_prev, 2),
+                         "buy_date": str((b or {}).get("buy_date") or "")[:10],
+                         "cost_price": round(float((b or {}).get("cost_price") or px), 2)})
 
     buy.sort(key=lambda x: -x["weight"])
     sell.sort(key=lambda x: -x["weight"])
     hold.sort(key=lambda x: -x["pnl"])
 
-    date = ""
-    for ix in positions.values():
-        if len(ix):
-            d = str(ix.index[-1])[:10]
-            if d > date:
-                date = d
+    # 信号日 = 统一轴上的最后一天（原来按「各标的最后一根 K 线」取最大值，
+    # 两者等价，但统一轴的口径已经在这里算好了，直接用）。
+    date = sig_day
 
     return {
         "ok": True,
@@ -572,6 +749,14 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
         # 直接调用（自检 / 旧调用方）时退化为「信号日的下一交易日」。
         "execution_date": execution_date or next_trading_day(date or end),
         "signal_date": signal_date or date or end,
+        # 三档的基线：previous_recommend = 以上一次推荐为持仓基线（账本口径）；
+        # signal_diff = 没有基线，退回「策略信号相邻两日差分」。
+        # 前端要把它显示出来 —— 否则用户看不懂「为什么这只票今天在卖出里」。
+        "baseline": {
+            "source": "previous_recommend" if use_ledger else "signal_diff",
+            "execution_date": base_exec if use_ledger else "",
+            "held_count": len(held),
+        },
         "target_capital": round(target_capital, 2),
         "buy": buy,
         "sell": sell,
@@ -671,6 +856,10 @@ def start_reco_task(strategy_id: str, params: dict | None, codes: list[str],
             # 后者会再去加同一把不可重入的锁，当前线程会永久死锁。
             return {"ok": False, "error": "已有推荐在运行。可点「停止」中断它，或等它结束",
                     "state": _reco_state_locked()}
+        # ⚠ 上一轮结果 = 本轮的**持仓基线**：三档要相对「上次建议」来判，
+        #   否则昨天买入的票今天会凭空消失（既不在持股也不在卖出）。
+        #   必须在清空 _RECO_RESULT **之前**取出来。
+        prev_result = _RECO_RESULT
         _RECO_RESULT = None
         try:
             name = base.REGISTRY[strategy_id].name
@@ -736,7 +925,8 @@ def start_reco_task(strategy_id: str, params: dict | None, codes: list[str],
                                    initial_capital, commission,
                                    progress=_on_progress,
                                    execution_date=execution_date,
-                                   signal_date=signal_date)
+                                   signal_date=signal_date,
+                                   baseline=prev_result)
             except base.Cancelled:
                 with _RECO_LOCK:
                     _RECO_TASK.update(

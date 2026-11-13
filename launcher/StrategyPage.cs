@@ -109,6 +109,13 @@ namespace StockPool
         private string _stRecoExecDate = "";     // 顺延后的真实执行日（非交易日→下一交易日）
         private bool _stRecoDateLoading;
         private bool _stRecoDateInit;           // 首次加载：把控件置为后端给的默认执行日
+        // ⚠ 上下文与控件的**对应关系**：_stRecoExecDate 是异步回填的，填好之前它
+        //   可能还停留在上一次的值上。记住它对应的是控件里的哪一天，提交时据此
+        //   判断上下文是否已跟上 —— 否则会静默提交上一次的执行日，后端跑出同一份
+        //   结果，用户看到的是「表格没更新」（实测现象②）。
+        private string _stRecoCtxDate = "";      // _stRecoExecDate 对应的「控件里的那天」
+        private string _stRecoDatePending = "";  // 取上下文途中又改了日期 → 记下来，取完再补一次
+        private string _stRecoSubmittedDate = "";// 本次实际提交给后端的目标执行日（取结果时回验）
         private string _stFreshExpected = "";   // 本次新鲜度守卫的信号日（单日策略专用）
         // 「结果是否还对应着所选执行日」：改了目标执行日**不会自动重跑**，
         // 若不比对，结果区会静默留着上一次的旧结果（用户会当成"没更新"）。
@@ -971,9 +978,15 @@ private void StRefreshCurStrategy()
         /// </summary>
         private void StLoadRecoDates()
         {
-            if (_stRecoDate == null || _stRecoDateLoading) return;
+            if (_stRecoDate == null) return;
+            // ⚠ **不能因为「上一次还在取」就把本次变更丢掉**：日期控件连点两次时，
+            //    第二次的变更会被这里的 return 吃掉 → `_stRecoExecDate` 停留在上一次的
+            //    执行日 → 点「生成当前推荐」提交的是旧日期 → 后端跑出同一份结果 →
+            //    用户看到「表格没更新」（实测现象②）。改成「记下最新请求，取完再补一次」。
+            _stRecoDatePending = _stRecoDate.Value.ToString("yyyy-MM-dd");
+            if (_stRecoDateLoading) return;
             _stRecoDateLoading = true;
-            string picked = _stRecoDate.Value.ToString("yyyy-MM-dd");
+            string picked = _stRecoDatePending;
             RunUi<Dictionary<string, object>>(
                 delegate
                 {
@@ -1018,6 +1031,12 @@ private void StRefreshCurStrategy()
                         }
                         catch { }
                     }
+                    // 取的过程中日期又变了 → 这次的结果已经对不上控件，丢掉并补取一次
+                    if (_stRecoDatePending != picked)
+                    {
+                        StLoadRecoDates();
+                        return;
+                    }
                     StApplyRecoDateContext(j, picked);
                 },
                 delegate(Exception ex2)
@@ -1033,6 +1052,7 @@ private void StRefreshCurStrategy()
         {
             _stRecoDateCtx = j;
             _stRecoPickedDate = picked ?? "";
+            _stRecoCtxDate = picked ?? "";    // 记下这次上下文对应的是控件里的哪一天
             StRenderRecoDateHint();
         }
 
@@ -1093,9 +1113,23 @@ private void StRefreshCurStrategy()
             StJobReserve(ST_JOB_RECO);
             // 目标执行日取**点击时**的快照：等待数据补齐可能长达一小时，
             // 期间用户改了日期，弹窗说的日子必须和真正提交的日子是同一个。
-            string targetDate = _stRecoExecDate.Length > 0
-                ? _stRecoExecDate
-                : (_stRecoDate != null ? _stRecoDate.Value.ToString("yyyy-MM-dd") : "");
+            //
+            // ⚠ 快照必须与控件当前值**对得上**：`_stRecoExecDate` 是异步回填的，
+            //    日期刚改、上下文还没回来时它还是上一次的执行日 —— 拿它去提交，
+            //    后端就按旧日期跑出同一份结果，用户看到的是「表格没更新」（实测现象②）。
+            //    对不上就**明确说清楚并补取一次**，绝不静默用旧日期提交。
+            string pickedNow = _stRecoDate != null
+                ? _stRecoDate.Value.ToString("yyyy-MM-dd") : "";
+            if (_stRecoExecDate.Length == 0 || _stRecoCtxDate != pickedNow)
+            {
+                StJobRelease();               // 释放占位，别把闸门卡死
+                StJobText("目标执行日信息还在刷新，请稍候再点「生成当前推荐」", true);
+                SetErr(_stRecoStatus, "目标执行日信息还在刷新（" + pickedNow
+                    + "），请稍候再点「生成当前推荐」");
+                StLoadRecoDates();             // 立刻补取一次
+                return;
+            }
+            string targetDate = _stRecoExecDate;
             string signalDate = _stRecoSignalDate;
             // 第 24 项：与回测共用同一个数据新鲜度守卫。
             // hard=true：数据不齐时不用旧数据冒充；仍弹窗给「等待补齐后自动运行」。
@@ -1110,6 +1144,7 @@ private void StRefreshCurStrategy()
             // 目标执行日：交给后端反推信号日并截断行情，避免「选了今天却读到
             // 明天的 K 线」。未选 / 后端不可用时不带该字段 → 后端按收盘前后自动选。
             if (targetDate.Length > 0) req["target_date"] = targetDate;
+            _stRecoSubmittedDate = targetDate;   // 取结果时回验「结果是不是本次这一轮」
             _stRecoStatus.Text = "正在提交…（首次运行需联网取股票名称，约 1 分钟；"
                 + "随后全市场计算约 7~10 分钟，可随时切走）";
             _stRecoStatus.ForeColor = _cSub;
@@ -1179,10 +1214,36 @@ private void StRefreshCurStrategy()
             if (_stBuyGroup != null) _stBuyGroup.Text = "买入（" + execDate + " 建仓）";
             if (_stSellGroup != null) _stSellGroup.Text = "卖出（" + execDate + " 清仓）";
             _stRecoResultExecDate = execDate;   // 记下这次结果的执行日，供「结果是否过期」比对
+            // 持仓基线：previous_recommend = 三档以上一次建议为基线（账本口径，
+            // 「昨天买入的今天一定在持股或卖出里」）；signal_diff = 没有上一次建议，
+            // 退回「策略信号相邻两日差分」。要显示出来 —— 否则用户看不懂
+            // 「为什么这只票今天进了卖出」。
+            string baseTxt = "";
+            var bl = J.Get(j, "baseline") as Dictionary<string, object>;
+            if (bl != null)
+            {
+                string bsrc = J.StrOr(J.Get(bl, "source"), "");
+                string bdate = J.StrOr(J.Get(bl, "execution_date"), "");
+                baseTxt = bsrc == "previous_recommend"
+                    ? " · 持仓基线：" + bdate + " 的建议"
+                    : " · 持仓基线：策略信号差分（无上一次建议）";
+            }
             _stRecoStatus.Text = "策略：" + StCurStrategyName() + " · 信号日 " + sigDate
                     + " · 执行日 " + execDate
-                    + " · 目标资金 " + J.Money(StM(j as Dictionary<string, object>, "target_capital"));
-            _stRecoStatus.ForeColor = C.DownSoft;
+                    + " · 目标资金 " + J.Money(StM(j as Dictionary<string, object>, "target_capital"))
+                    + baseTxt;
+            // ⚠ 结果的**执行日**必须与本次提交的目标日一致：后端 /recommend/result
+            //    返回的是「最近一次已完成」的结果，对不上就说明拿到的不是这一轮的。
+            //    对不上要说清楚，不能让旧结果冒充新结果（实测现象②）。
+            bool mismatch = _stRecoSubmittedDate.Length > 0 && _stRecoSubmittedDate != execDate;
+            if (mismatch)
+            {
+                _stRecoStatus.Text += " · ⚠ 结果的执行日（" + execDate + "）与本次提交的目标日（"
+                    + _stRecoSubmittedDate + "）不一致，请重新点「生成当前推荐」";
+                _stRecoStatus.ForeColor = C.UpErr;
+            }
+            else
+                _stRecoStatus.ForeColor = C.DownSoft;
             StRenderRecoDateHint();              // 重算提示行（清掉「结果已过期」的告警）
         }
 
