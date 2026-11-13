@@ -67,12 +67,12 @@ from formulas.jwzz import DEFAULT_PERIOD, jwzz_series, sma1_series
                    label="触发阈值(‰)"),
         ParamSpec("smooth_period", "int", 0, min=0, max=250,
                    label="平滑周期(0=原始JWZZ；>0需把阈值调低约5倍)"),
-        ParamSpec("top_n", "int", 20, min=1, max=200, label="持仓数量上限"),
+        ParamSpec("top_n", "int", 10, min=1, max=200, label="持仓数量上限"),
         ParamSpec("position", "float", 1.0, min=0.1, max=1.0, label="总仓位系数"),
     ],
 )
 def jwzz_cross(ctx, cost_period: int = DEFAULT_PERIOD, threshold: float = 95.0,
-               smooth_period: int = 0, top_n: int = 20,
+               smooth_period: int = 0, top_n: int = 10,
                position: float = 1.0) -> list:
     codes = [str(c).strip() for c in (ctx.codes or []) if str(c).strip()]
     if not codes:
