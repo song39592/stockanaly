@@ -57,22 +57,6 @@ def list_codes():
     return {"codes": sdata.list_universe_codes()}
 
 
-def _universe_spec(req: BacktestRequest) -> dict:
-    """回测请求 → 股票池层的 spec（范围规则只在这一处翻译）。
-
-    `as_of` = **区间起点**：「距今多少天」类剔除（新股/次新股）与微盘市值
-    都按**回测当时视角**判定，不再用结束日/今天 —— 那是未来信息，
-    还会让同一个区间每天跑出不同的池子。
-    """
-    return {
-        "universe_mode": req.universe_mode,
-        "start": req.start,
-        "end": req.end,
-        "as_of": req.start,
-        "exclude": req.exclude,
-    }
-
-
 def _resolve_codes(req: BacktestRequest):
     """把请求解析成最终回测代码列表 + 范围明细。
 
@@ -83,10 +67,13 @@ def _resolve_codes(req: BacktestRequest):
 
     返回 (codes, detail)。detail 含**每项剔除只数**与口径说明，
     必须写进报告 scope —— 否则报告无法自证「这次到底剔了什么」。
+
+    ⚠️ spec 由股票池层构造（`universe.spec_from_request`）—— 路由层**不自己造 spec**，
+    否则预览与实跑各造一份 → 改口径漏一处 → 界面显示与实跑不一致。
     """
     if not req.use_all:
         return [str(c).strip() for c in (req.codes or []) if str(c).strip()], {}
-    codes, detail = suniverse.build_detail(_universe_spec(req))
+    codes, detail = suniverse.build_detail(suniverse.spec_from_request(req))
     detail = dict(detail)
     detail["note"] = suniverse.scope_note(detail)
     return codes, detail
@@ -103,14 +90,13 @@ def universe_summary(exclude: list[str] = Query(default=[]),
     ⚠️ 必须与实跑用**同一个 spec**（含 start/end/as_of）：以前这里只传 exclude，
     实跑传 exclude+start/end/as_of → 两个不同的缓存键 → 各算各的 →
     界面显示「剔除后 = 基池」而实跑剔掉一千多只（用户以为没剔，其实剔了）。
+
+    ⚠️ spec 同样由股票池层构造（`universe.spec_from_request`），与实跑走同一入口。
     """
-    spec = {
-        "universe_mode": "interval_data",
-        "start": start,
-        "end": end,
-        "as_of": start,
-        "exclude": list(exclude),
-    }
+    spec = suniverse.spec_from_request(
+        {"start": start, "end": end, "exclude": list(exclude)},
+        universe_mode="interval_data",
+    )
     out = suniverse.summary(spec)
     out.update({"ok": True, "exclude": list(exclude)})
     return out

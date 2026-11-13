@@ -105,9 +105,8 @@ stats.py      ⑥ hfq 收盘价 → 净值曲线与指标（与策略无关）
 回测范围到代码列表的翻译**只发生在这里**，路由与编排层都不重复实现规则：
 
 ```python
-spec = {"universe_mode": "interval_data", "start": ..., "end": ...,
-        "as_of": ...,   # 判定基准日 = 区间起点（缺省用 start）
-        "exclude": ["chinext", "star", "bse", "st", "star_st", "ipo", "sub_new", "micro"]}
+# spec 由**股票池层**构造（唯一入口）—— 路由层只转发请求，不自己拼
+spec = universe.spec_from_request(req)        # as_of 固定 = 区间起点
 codes, detail = universe.build_detail(spec)   # detail 含每项剔除只数与口径说明
 ```
 
@@ -136,6 +135,34 @@ ST 类判定用的是「今天的状态」去筛整段历史；而「已声明�
 🔴 **每项剔除了多少只必须回传并落进报告**（`scope.exclusion.dropped`）：
 否则读者无法判断这个净值跑在什么样本上 —— 曾经界面显示「剔除后 = 基池」而实跑剔掉
 一千多只，两边都无从察觉。
+
+#### spec 构造的唯一入口 🆕
+
+`universe.spec_from_request(req)` 是**唯一**的 spec 构造器：
+- 接受 pydantic 请求对象或 dict（预览接口的查询参数）；
+- `as_of` **固定 = 区间起点**（`universe_mode` 可显式覆盖）；
+- 阈值（`ipo_days` / `sub_new_days` / `micro_cap`）**有才带**，不传则用本文件顶部默认值。
+
+路由层**只转发请求**，不拼 spec —— 以前预览一份、实跑一份，
+改口径漏一处 → 界面显示与实跑口径不一致 → **静默失真**
+（曾出现「界面显示剔除后 = 基池、实跑剔掉一千多只」）。
+
+#### 改口径的允许改动面 🆕
+
+改回测范围口径（判定基准日 / 市值 / 剔除特征 / 阈值）时：
+
+| 允许改 | 说明 |
+|---|---|
+| `strategies/core/universe.py` | 判定逻辑 + 阈值常量（**唯一一份**） |
+| `strategies/core/data.py` | **仅当**需要新的取数能力（如 PIT 市值） |
+| `core/price_store.py` | 同上（底层取数） |
+
+**不需要改**：路由层、前端（`launcher/StrategyPage.cs`）、报告层 ——
+`scope` 已贯通（每项剔除只数 + 口径说明 + 前视偏差声明）。
+若发现「必须动前端 / 报告」，先查是不是口径实现跑偏了、或 scope 字段没贯通。
+
+**自检**：`python -m unittest test_conventions`
+（R1 阈值唯一 / R2 spec 唯一入口 / R3 分层不反向依赖 / R4 池子入口唯一）。
 
 ## 策略校验门槛（`registry.py`）
 

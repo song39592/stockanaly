@@ -6,7 +6,12 @@
 既不属于 HTTP 路由（routes 只该转发请求），也不属于回测编排（backtest 只该消费 codes）。
 把它抽成独立层后：
 
-    routes  ──spec──▶  universe.build_detail()  ──codes+明细──▶  backtest.start_task()
+    routes ──spec_from_request()──▶  universe.build_detail()  ──codes+明细──▶  backtest.start_task()
+
+**spec 也归这一层构造**（`universe.spec_from_request`）：路由层只转发请求，
+不自己拼 spec —— 预览与实跑各拼一份时，改口径必然漏一处（漏一处 → 界面与实跑
+口径不一致 → 静默失真）。改范围口径的**允许改动面 = 本文件**（+ 需要新取数能力时
+的 `data.py`），前端与报告不用动。
 
 ## 缓存
 结果只由「规则 + 基准日」决定。连续多次回测不改范围时**没必要重算** —— 尤其 ST 名称表
@@ -108,6 +113,43 @@ def _as_of_date(spec: dict) -> dt.date:
         if v:
             return v
     return dt.date.today()
+
+
+def spec_from_request(req, universe_mode: str | None = None) -> dict:
+    """请求 → 股票池层 spec。**spec 构造的唯一入口**（路由层不许自己造）。
+
+    为什么放在这一层：范围规则（判定基准日、剔除特征、阈值）全属股票池层语义，
+    路由层只该「转发请求」。以前路由层自己造 spec —— 预览一份、实跑一份 ——
+    改口径时两处都要跟着改，容易漏（漏一处 → 界面与实跑口径不一致 → 静默失真）。
+    现在：**改范围口径只动本文件**。
+
+    `req` 走鸭子类型：既接受 pydantic 请求对象，也接受 dict（预览接口的查询参数）。
+    **本层不 import 路由层** —— 否则形成反向依赖。
+
+    `as_of` 固定 = **区间起点**：「距今多少天」类剔除（新股/次新股）与微盘市值
+    都按**回测当时视角**判定，不再用结束日/今天 —— 那是未来信息，
+    还会让同一个区间每天跑出不同的池子。
+
+    阈值（`ipo_days` / `sub_new_days` / `micro_cap`）**有才带**，
+    不传就用本文件顶部的默认值。
+    """
+    def _get(key, default=None):
+        if isinstance(req, dict):
+            return req.get(key, default)
+        return getattr(req, key, default)
+
+    spec = {
+        "universe_mode": universe_mode or _get("universe_mode") or "interval_data",
+        "start": _get("start"),
+        "end": _get("end"),
+        "as_of": _get("start"),                 # 判定基准日 = 区间起点
+        "exclude": list(_get("exclude") or []),
+    }
+    for key in ("ipo_days", "sub_new_days", "micro_cap"):
+        v = _get(key)
+        if v is not None:
+            spec[key] = v
+    return spec
 
 
 def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str, int], dict]:
