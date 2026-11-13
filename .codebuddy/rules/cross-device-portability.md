@@ -42,6 +42,13 @@ enabled: true
   - `agent_dsh\`（AI 服务）
 - 改了 `launcher\*` 下的脚本或后端入口，**必须让目标设备重新拷贝整个目录**，并在交付说明里写清这一点。
 - 交付说明里要写清「**只换 exe 不换脚本等于没换**」。
+- **换设备不用人工跑命令**：启动时依赖检查通过后，启动器会补跑一次
+  `install_env.ps1 -ConfigOnly`，自愈运行期产物里残留的旧机器绝对路径
+  （`.env` 的 `DATA_DIR` / `DATA_SECRET_SEALED`、embeddable Python 的 `._pth`、dsh 插件路径）。
+  判据与动作都在脚本里（幂等、只改有结论性判据的项）—— **启动器不要再复制第二份判据逻辑**。
+- **Node.js 也自动装**：本机没有 node 时，`install_env.ps1 -RuntimeOnly` 会下官方 Windows
+  zip 便携版（约 30MB，免安装器与管理员权限、不写系统 PATH）到 agent_dsh 目录下的 `.node` 子目录；
+  装不上只警告、不阻断 —— AI 服务（:3080）是可选功能，后端与网页不受影响。
 - **路径不要写死在配置里**：dsh 的插件路径原先硬编码成开发机的绝对目录 → 拷到别的电脑就静默失效
   （dsh 照样「启动成功」，只是插件加载不到）。现在由 `agent_dsh\generate-patch.mjs` 按**当前目录**
   生成 `cordis.runtime.yml`，启动器拉起 dsh 前会自动跑一次。同理，任何新增的「按目录算出来」的

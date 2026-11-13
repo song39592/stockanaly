@@ -3,7 +3,9 @@
 # INTEGRITY: STOCKPOOL_ENV_INSTALL_V2
 #
 # 用法：
-#   powershell -NoProfile -ExecutionPolicy Bypass -File launcher\install_env.ps1 -Root "<项目根目录>" [-Silent]
+#   powershell -NoProfile -ExecutionPolicy Bypass -File launcher\install_env.ps1 -Root "<项目根目录>" [-Silent] [-ConfigOnly] [-RuntimeOnly]
+#   -ConfigOnly：只跑「跨设备配置自愈」，不装依赖、不联网、不校验依赖。
+#   -RuntimeOnly：只准备 AI 服务运行时（Node.js + npm 依赖），不装 / 不校验后端依赖。
 #
 # 退出码：0 成功 / 1 根目录不对（项目没拷全） / 2 本机没有可用的 Python 3
 #         3 创建虚拟环境失败 / 4 装依赖失败 / 5 依赖校验失败（多半被安全软件拦了 DLL）
@@ -26,7 +28,9 @@
 [CmdletBinding()]
 param(
     [string]$Root = '',
-    [switch]$Silent
+    [switch]$Silent,
+    [switch]$ConfigOnly,
+    [switch]$RuntimeOnly
 )
 
 $ErrorActionPreference = 'Continue'
@@ -81,6 +85,151 @@ function Test-VenvPortable([string]$venvPy) {
 }
 
 # ---------------------------------------------------------------------------
+# 便携 Node.js：换设备时自动装，免安装器、免管理员权限
+#
+# 为什么不用 msi：msi 要管理员权限，静默装也常被安全软件拦；官方 zip 版解压即用，
+#   不写系统 PATH、不动注册表 → 目录随项目走，换设备时一起拷过去。
+# 装不上怎么办：只警告、不阻断 —— AI 服务（:3080）是可选功能，后端与网页不受影响。
+# ---------------------------------------------------------------------------
+
+# 项目内便携 Node 的目录：agent_dsh\.node\（唯一用途就是跑 dsh，放它旁边最内聚）
+function Get-PortableNodeDir([string]$dshDir) { return (Join-Path $dshDir '.node') }
+
+function Get-PortableNode([string]$dshDir) {
+    $exe = Join-Path (Get-PortableNodeDir $dshDir) 'node.exe'
+    if (Test-Path -LiteralPath $exe) { return $exe }
+    return $null
+}
+
+# 结果用脚本级变量传，不用返回值 ——
+# ⚠ PowerShell 里 `$x = Some-Function` 会把函数内 Write-Output 的**日志**一起吞进 $x，
+#   所以「有日志的函数」一律不靠返回值传结果。
+$script:AiNodeExe = $null
+
+function Install-PortableNode([string]$dshDir) {
+    $dir = Get-PortableNodeDir $dshDir
+    $existing = Get-PortableNode $dshDir
+    if ($existing) {
+        Say "       项目内已有便携 Node：$existing"
+        $script:AiNodeExe = $existing
+        return
+    }
+
+    Say '       没有找到 Node.js，自动下载便携版（Windows zip，约 30MB，无需安装器与管理员权限）...'
+    # 版本号从官方 index.json 取（不写死版本 → 不用跟着 Node 发版改脚本）
+    $ver = $null
+    try {
+        $idx = Invoke-RestMethod -Uri 'https://nodejs.org/dist/index.json' -TimeoutSec 90
+        $ver = ($idx | Where-Object { $_.version -match '^v22\.' } | Select-Object -First 1).version
+    } catch { }
+    if (-not $ver) {
+        Say '       [WARN] 取不到 Node 版本列表（没联网 / 被代理拦），跳过自动安装。'
+        Say '              AI 服务（:3080）不可用；后端与网页不受影响。'
+        return
+    }
+
+    $file = "node-$ver-win-x64.zip"
+    $zip = Join-Path $env:TEMP "stockpool_node_$ver.zip"
+    $urls = @(
+        "https://nodejs.org/dist/$ver/$file",
+        "https://cdn.npmmirror.com/binaries/node/$ver/$file"
+    )
+    foreach ($u in $urls) {
+        Say "       下载 $u ..."
+        try { (New-Object System.Net.WebClient).DownloadFile($u, $zip) } catch { }
+        if (Test-Path -LiteralPath $zip) { break }
+    }
+    if (-not (Test-Path -LiteralPath $zip)) {
+        Say '       [WARN] 下载 Node.js 失败（没联网 / 被代理或杀毒拦）。'
+        Say '              AI 服务（:3080）不可用；后端与网页不受影响。'
+        Say '              手动装法：下载 Windows zip 版（不是 msi，msi 要管理员权限）解压到任意目录，'
+        Say '                        再在设置页「Node 路径」填 node.exe。'
+        return
+    }
+
+    $tmp = Join-Path $env:TEMP ('stockpool_node_x_' + [Guid]::NewGuid().ToString('N'))
+    try {
+        Expand-Archive -Force -Path $zip -DestinationPath $tmp
+        $inner = Get-ChildItem -LiteralPath $tmp -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $inner) { throw '解压结果里没有目录' }
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        foreach ($item in (Get-ChildItem -LiteralPath $inner.FullName -Force)) {
+            Move-Item -LiteralPath $item.FullName -Destination $dir -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        Say "       [WARN] 解压 Node.js 失败：$($_.Exception.Message)"
+        return
+    } finally {
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $exe = Get-PortableNode $dshDir
+    if ($exe) {
+        Say "       便携 Node 就绪：$exe"
+        $script:AiNodeExe = $exe
+    } else {
+        Say '       [WARN] 便携 Node 装好后仍没找到 node.exe。'
+    }
+}
+
+# AI 服务运行时：node（项目内便携版优先 → 系统 PATH → 自动装便携版）+ npm 依赖。
+# 任何一步失败都只警告、不阻断：AI 服务是可选功能。
+function Prepare-AiRuntime([string]$dshDir) {
+    Say '[4/4] 准备 AI 服务运行时（可选）...'
+
+    $nodeExe = $null
+    $npmCmd = $null
+    $portable = Get-PortableNode $dshDir
+    if ($portable) {
+        $nodeExe = $portable
+        $npmCmd = Join-Path (Split-Path -Parent $portable) 'npm.cmd'
+        Say "       使用项目内便携 Node：$nodeExe"
+    } else {
+        $cmd = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($cmd) {
+            $nodeExe = $cmd.Source
+            $npm = Get-Command npm -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($npm) { $npmCmd = $npm.Source }
+            Say "       使用系统 Node：$nodeExe"
+        }
+    }
+
+    if (-not $nodeExe) {
+        $script:AiNodeExe = $null
+        Install-PortableNode -dshDir $dshDir
+        $nodeExe = $script:AiNodeExe
+        if ($nodeExe) { $npmCmd = Join-Path (Split-Path -Parent $nodeExe) 'npm.cmd' }
+    }
+
+    if (-not $nodeExe) {
+        Say '[WARN] 没有可用的 Node.js：AI 服务（:3080）起不来，后端和网页不受影响。'
+        return
+    }
+    if (-not (Test-Path -LiteralPath $dshDir)) {
+        Say "[WARN] 找不到 AI 服务目录：$dshDir（不影响后端与网页）。"
+        return
+    }
+    if (Test-Path -LiteralPath (Join-Path $dshDir 'node_modules\@deepseek-ai')) {
+        Say '       AI 服务依赖已就绪。'
+        return
+    }
+
+    Say '       AI 服务依赖缺失，开始 npm install（可能要几分钟）...'
+    if (-not $npmCmd -or -not (Test-Path -LiteralPath $npmCmd)) {
+        Say '[WARN] 找不到 npm，无法安装 AI 服务依赖（AI 服务不可用，后端与网页不受影响）。'
+        return
+    }
+    Push-Location $dshDir
+    try { & $npmCmd install --no-audit --no-fund } catch { }
+    Pop-Location
+    if ($LASTEXITCODE -ne 0) {
+        Say '[WARN] npm install 失败：AI 服务（:3080）起不来，后端和网页不受影响。'
+        return
+    }
+    Say '       AI 服务依赖安装完成。'
+}
+
+# ---------------------------------------------------------------------------
 # 1. 定位项目根目录
 # ---------------------------------------------------------------------------
 $rootDir = $Root
@@ -105,6 +254,198 @@ if (-not (Test-Path -LiteralPath $reqFile)) {
     Say '        请确认整个项目目录都拷全了（launcher / backend_fastapi / agent_dsh）。'
     Wait-Enter
     exit 1
+}
+
+# ---------------------------------------------------------------------------
+# 1.5 跨设备配置自愈
+#
+# 整目录拷到新电脑后，配置里残留的「旧机器绝对路径」必须在拉起后端之前修掉，
+# 否则会出现「依赖自检全过、后端却起不来」：
+#   · .env 的 DATA_DIR 指向旧机器用户目录 → instance_lock.acquire() 建目录失败；
+#   · .env 的 DATA_SECRET_SEALED 是旧机器 DPAPI 密封 → crypto.secret() 拒绝生成新密钥；
+#   · .venv\python3x._pth 里的 '.' 只解析到 .venv 自身（不是工作目录），
+#     少了 '..' 时 `-m uvicorn main:app` 报 Could not import module "main"；
+#   · agent_dsh\cordis.runtime.yml 里的插件路径是旧机器的 file:/// 绝对 URL。
+#
+# 纪律：只改「有结论性判据」的项，判据不成立一律不动；动作幂等、可重复运行；
+#       不打印 .env 里的任何值；不改 INTEGRITY 标记（旧启动器要能继续执行本脚本）。
+# ---------------------------------------------------------------------------
+
+function Get-DotenvValue {
+    param([string]$envPath, [string]$key)
+    if (-not (Test-Path -LiteralPath $envPath)) { return $null }
+    foreach ($line in @(Get-Content -LiteralPath $envPath -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+        if ($line -match ('^\s*' + [regex]::Escape($key) + '\s*=\s*(.*)$')) {
+            return $matches[1].Trim().Trim('"').Trim("'")
+        }
+    }
+    return $null
+}
+
+# 结论性判据：绝对路径形如 <盘>:\Users\<用户名>\...，且该用户主目录在本机不存在。
+# 「数据目录本身还没创建」不算跨机器 —— 判据落在用户主目录，避免误伤用户主动配置。
+function Test-ForeignUserPath {
+    param([string]$value)
+    if ([string]::IsNullOrWhiteSpace($value)) { return $false }
+    $m = [regex]::Match($value, '^([A-Za-z]:[\\/]+Users[\\/]+[^\\/]+)', 'IgnoreCase')
+    if (-not $m.Success) { return $false }
+    $userHome = $m.Groups[1].Value
+    if ($userHome -ieq $env:USERPROFILE) { return $false }
+    return (-not (Test-Path -LiteralPath $userHome))
+}
+
+# 把指定键的行注释掉（保留原值可追溯；注释行不会被 dotenv / crypto._env_value 读到）。
+function Disable-DotenvLine {
+    param([string]$envPath, [string[]]$keys, [string]$reason)
+    $out = @()
+    $changed = $false
+    foreach ($line in @(Get-Content -LiteralPath $envPath -Encoding UTF8)) {
+        $hit = $false
+        foreach ($k in $keys) {
+            if ($line -match ('^\s*' + [regex]::Escape($k) + '\s*=')) { $hit = $true; break }
+        }
+        if ($hit) {
+            $out += '# [cross-device] ' + $line
+            $changed = $true
+        } else {
+            $out += $line
+        }
+    }
+    if (-not $changed) { return $false }
+    $out = @('# [cross-device] ' + $reason) + $out
+    $tmp = $envPath + '.tmp'
+    try {
+        [System.IO.File]::WriteAllText($tmp, (($out -join "`r`n") + "`r`n"),
+            (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false))
+        Move-Item -LiteralPath $tmp -Destination $envPath -Force
+        return $true
+    } catch {
+        Say "[WARN] 改写 .env 失败：$($_.Exception.Message)"
+        return $false
+    }
+}
+
+# embeddable Python 的 ._pth：相对路径以 python.exe 所在目录（.venv）为基准，
+# '.' = .venv，'..' = backend_fastapi。补 '..' 后 main / config 才能被 uvicorn 导入。
+function Repair-EmbeddablePth {
+    param([string]$backendDir)
+    $venvRoot = Join-Path $backendDir '.venv'
+    if (-not (Test-Path -LiteralPath (Join-Path $venvRoot 'python.exe'))) { return }
+    $pthList = @(Get-ChildItem -LiteralPath $venvRoot -Filter 'python3*._pth' -File -ErrorAction SilentlyContinue)
+    if ($pthList.Count -eq 0) { return }        # 标准 venv 没有 ._pth，不需要动
+    foreach ($pth in $pthList) {
+        $lines = @(Get-Content -LiteralPath $pth.FullName -Encoding UTF8)
+        if ($lines -contains '..') {
+            Say '       embeddable Python 的 sys.path 已含后端目录，跳过。'
+            continue
+        }
+        $out = @()
+        $inserted = $false
+        foreach ($line in $lines) {
+            $out += $line
+            if (-not $inserted -and $line.Trim() -eq '.') {
+                $out += '..'
+                $inserted = $true
+            }
+        }
+        if (-not $inserted) { $out += '..' }
+        [System.IO.File]::WriteAllText($pth.FullName, (($out -join "`r`n") + "`r`n"),
+            (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false))
+        Say "       已补齐 $($pth.Name)：追加 '..'（backend_fastapi 进入 sys.path）"
+    }
+}
+
+# dsh 插件配置：权威生成器是 agent_dsh\generate-patch.mjs（按当前目录算路径）。
+# 有 Node 就调它；没有 Node 时不复制第二份生成逻辑，只把「明确指向别的电脑」的
+# 坏产物改名留档 —— 装好 Node 后启动器 EnsureDshRuntimePatch() 会自动重建。
+function Repair-DshRuntime {
+    param([string]$dshDir)
+    $target = Join-Path $dshDir 'cordis.runtime.yml'
+    $pluginsDir = Join-Path $dshDir 'plugins'
+    if (-not (Test-Path -LiteralPath $pluginsDir)) { return }
+    $expected = ([System.Uri]$pluginsDir).AbsoluteUri.TrimEnd('/')
+    $needFix = $false
+    $why = ''
+    if (-not (Test-Path -LiteralPath $target)) {
+        $needFix = $true
+        $why = '产物不存在'
+    } else {
+        $text = Get-Content -LiteralPath $target -Raw -Encoding UTF8
+        if ($text -match '__PLUGIN_BASE__') {
+            $needFix = $true
+            $why = '仍是模板占位符'
+        } elseif ($text.IndexOf($expected, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            $needFix = $true
+            $why = '插件路径不指向当前目录'
+        }
+    }
+    if (-not $needFix) {
+        Say '       dsh 插件路径已是当前目录，跳过。'
+        return
+    }
+    $gen = Join-Path $dshDir 'generate-patch.mjs'
+    $nodeCmd = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $generated = $false
+    if ($nodeCmd -and (Test-Path -LiteralPath $gen)) {
+        try { $generated = Test-Cmd -exe $nodeCmd.Source -argv @($gen) } catch { $generated = $false }
+    }
+    if ($generated -and (Test-Path -LiteralPath $target)) {
+        Say '       已用 generate-patch.mjs 按当前目录重建 cordis.runtime.yml。'
+        return
+    }
+    if (Test-Path -LiteralPath $target) {
+        Say "       [WARN] 未找到 Node.js，无法重建 dsh 插件配置（$why）。"
+        Say '              现有文件指向另一台电脑的插件目录，改名留档；装好 Node 后启动器会自动重新生成。'
+        Move-Item -LiteralPath $target -Destination ($target + '.foreign.bak') -Force -ErrorAction SilentlyContinue
+    } else {
+        Say "       [WARN] 未找到 Node.js，dsh 插件配置暂缺（$why）；装好 Node 后启动器会自动生成。"
+    }
+}
+
+function Repair-CrossDeviceConfig {
+    param([string]$backendDir, [string]$dshDir)
+    Say '[1.5/4] 跨设备配置自愈（只修有结论性判据的旧机器残留）…'
+    $envPath = Join-Path $backendDir '.env'
+    if (Test-Path -LiteralPath $envPath) {
+        $dataDirValue = Get-DotenvValue -envPath $envPath -key 'DATA_DIR'
+        if (Test-ForeignUserPath -value $dataDirValue) {
+            Say '       .env 的数据目录指向另一台电脑的用户目录（该用户主目录不存在）。'
+            Say '       动作：注释 DATA_DIR（回退默认目录）与 DATA_SECRET_SEALED（旧机器 DPAPI 密钥），'
+            Say '             原行保留在注释中便于追溯；后端会在本机重新生成校验密钥。'
+            $keysToDisable = @('DATA_DIR', 'DATA_SECRET_SEALED')
+            $fixReason = '由 install_env.ps1 自动修复：跨机器残留配置，原行保留在下方注释中'
+            if (Disable-DotenvLine -envPath $envPath -keys $keysToDisable -reason $fixReason) {
+                Say '       已修复 .env。'
+            } else {
+                Say '       .env 未改动（没有命中的行或改写失败）。'
+            }
+        } else {
+            Say '       数据目录配置正常（或不是跨机器残留），未改动。'
+        }
+    } else {
+        Say '       没有 .env（首次运行），跳过。'
+    }
+    Repair-EmbeddablePth -backendDir $backendDir
+    Repair-DshRuntime -dshDir $dshDir
+}
+
+if (-not $RuntimeOnly) {
+    Repair-CrossDeviceConfig -backendDir $backendDir -dshDir $dshDir
+}
+
+if ($ConfigOnly) {
+    Say 'CONFIG_OK 配置自愈完成（-ConfigOnly：未安装 / 校验依赖）。'
+    Wait-Enter
+    exit 0
+}
+
+if ($RuntimeOnly) {
+    # 只准备 AI 服务运行时（Node.js + npm 依赖）：不装 / 不校验后端依赖。
+    # 失败只警告、不阻断 —— AI 服务是可选功能，后端与网页不受影响。
+    Prepare-AiRuntime -dshDir $dshDir
+    Say 'RUNTIME_OK AI 服务运行时准备完成（-RuntimeOnly：未安装 / 校验后端依赖）。'
+    Wait-Enter
+    exit 0
 }
 
 # ---------------------------------------------------------------------------
@@ -217,6 +558,9 @@ if (-not $venvReady -and -not $bootstrapExe) {
         Wait-Enter
         exit 2
     }
+    # 2.5 分支刚用 Set-Content 重写过 ._pth，而 1.5 段跑在解压之前、补不到这个文件。
+    # 这里再补一次，保证「首次自动下载 Python」这条路径同样能把 backend_fastapi 放进 sys.path。
+    Repair-EmbeddablePth -backendDir $backendDir
     Say "       embeddable Python 就绪：$embedPy"
     $venvPy = $embedPy
     $venvReady = $true
@@ -341,23 +685,7 @@ if ($LASTEXITCODE -eq 0) {
 # ---------------------------------------------------------------------------
 # 5. AI 服务依赖（可选：失败只警告，后端和网页不受影响）
 # ---------------------------------------------------------------------------
-Say '[4/4] 检查 AI 服务依赖（可选）...'
-$nodeCmd = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $nodeCmd) {
-    Say '[WARN] 没有找到 Node.js：AI 服务（:3080）起不来，后端和网页不受影响。'
-} elseif (Test-Path -LiteralPath (Join-Path $dshDir 'node_modules\@deepseek-ai')) {
-    Say '       AI 服务依赖已就绪。'
-} elseif (-not (Test-Path -LiteralPath $dshDir)) {
-    Say "[WARN] 找不到 AI 服务目录：$dshDir（不影响后端与网页）。"
-} else {
-    Say '       AI 服务依赖缺失，开始 npm install（可能要几分钟）...'
-    Push-Location $dshDir
-    try { & npm install --no-audit --no-fund } catch { }
-    Pop-Location
-    if ($LASTEXITCODE -ne 0) {
-        Say '[WARN] npm install 失败：AI 服务（:3080）起不来，后端和网页不受影响。'
-    }
-}
+Prepare-AiRuntime -dshDir $dshDir
 
 Say 'ENV_OK 环境安装完成。'
 Wait-Enter

@@ -41,6 +41,9 @@ venv/
 env/
 ENV/
 node_modules/
+# 换设备时自动下载的便携 Node.js（install_env.ps1 放在 agent_dsh\.node\，约 120MB，
+# 属运行期产物 —— 各设备自己下，不入库）
+agent_dsh/.node/
 # 本机 Node 运行时，可重新下载
 # ⚠️ 注释必须写在**上一行**：gitignore 不支持行尾注释 —— 行首的 `#` 才是注释，
 #    行尾的 `#` 会被当成**字面量**，整行模式变成「路径 + # + 文字」而匹配不到任何东西。
