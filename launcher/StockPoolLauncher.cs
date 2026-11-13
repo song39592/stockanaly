@@ -1156,7 +1156,7 @@ namespace StockPool
             _tbNode.Width = 430;
             AddRow(body, Row(Lbl("Node 路径"), _tbNode, MiniBtn("自动探测", delegate
             {
-                var v = FindNode();
+                var v = FindNode(_root);
                 if (v == null) Msg("未找到 Node，可手动选择 node.exe");
                 else _tbNode.Text = v;
             }, 88)));
@@ -1370,11 +1370,18 @@ namespace StockPool
             return FindPython(_root);
         }
 
-        private static string FindNode()
+        /// <summary>
+        /// 找 node.exe。顺序：STOCK_POOL_NODE 环境变量（用户显式指定）→
+        /// 项目内便携版（agent_dsh\.node，换设备时自动装的）→ 系统安装 → PATH。
+        /// 便携版排在系统安装前面：它与 agent_dsh\node_modules 是同一套版本，不会版本打架。
+        /// </summary>
+        private static string FindNode(string root)
         {
             var envN = Environment.GetEnvironmentVariable("STOCK_POOL_NODE");
             if (!string.IsNullOrEmpty(envN) && File.Exists(envN)) return envN;
             var cands = new List<string>();
+            if (!string.IsNullOrEmpty(root))
+                cands.Add(Path.Combine(root, "agent_dsh", ".node", "node.exe"));
             cands.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node.exe"));
             var wb = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                 ".workbuddy", "binaries", "node");
@@ -1411,7 +1418,7 @@ namespace StockPool
         private void LoadSettings()
         {
             string python = FindPython(_root);
-            string node = FindNode();
+            string node = FindNode(_root);
             bool auto = true, mini = true, stop = true, boot = false;
             string theme = "dark";
             string scopeMask = null;
@@ -1728,6 +1735,8 @@ namespace StockPool
         {
             public string Python;
             public string Version;
+            /// <summary>没找到 node（AI 服务起不来；属可选功能，后端与网页不受影响）。</summary>
+            public bool NodeMissing;
             public List<string> Problems = new List<string>();
             public List<string> Warnings = new List<string>();
 
@@ -1769,6 +1778,9 @@ namespace StockPool
                 //    判定「环境没问题」→ 从不执行安装脚本 → 换设备必然失败）。
                 //    这里补跑一次 -ConfigOnly：不联网、不装依赖、只改有结论性判据的项、幂等。
                 HealCrossDeviceConfig(stage);
+                // AI 服务缺 node 时也自愈一次（装项目内便携版 Node + npm 依赖）。
+                // 失败只警告、不阻断：AI 服务是可选功能，后端与网页不受影响。
+                if (r.NodeMissing) HealAiRuntime(stage);
                 return true;
             }
             Ui(delegate
@@ -1874,6 +1886,61 @@ namespace StockPool
             }
         }
 
+        /// <summary>
+        /// AI 服务运行时自愈：本机没有 node 时补跑一次 <c>install_env.ps1 -RuntimeOnly</c>
+        /// （下载项目内便携版 Node + 装 npm 依赖）。
+        ///
+        /// 为什么要有：换设备后 node 大概率没有，而 Node.js 官方有免安装的 Windows zip 版
+        /// → 可以像 embeddable Python 那样自动装（免管理员权限、不写系统 PATH、不动注册表）。
+        ///
+        /// 纪律：
+        ///   · 失败只警告、**不阻断启动** —— AI 服务（:3080）是可选功能，后端与网页不受影响；
+        ///   · 只在「确实没找到 node」时跑（每进程一次），平时不联网、不下载；
+        ///   · 装完把 node 路径回填到设置，否则下一轮仍按旧路径判定为缺失。
+        /// </summary>
+        private void HealAiRuntime(Action<string> stage)
+        {
+            try
+            {
+                var ps1 = Path.Combine(_root, "launcher", "install_env.ps1");
+                if (!File.Exists(ps1)) return;      // 老目录没这个脚本 → 跳过
+
+                string problem;
+                var runnable = PrepareEnvScript(ps1, out problem);
+                if (runnable == null)
+                {
+                    Ui(delegate { Log("环境", "AI 运行时自愈跳过：" + problem); });
+                    return;
+                }
+
+                if (stage != null) stage("准备 AI 服务运行时（可能要下载 Node.js）…");
+                int code;
+                var output = RunInstaller(runnable, out code, "-RuntimeOnly", true, 20 * 60 * 1000);
+                if (code == 0)
+                {
+                    Ui(delegate { Log("环境", "AI 服务运行时已准备（-RuntimeOnly）。"); });
+                    var node = FindNode(_root);
+                    if (!string.IsNullOrEmpty(node) && _tbNode != null)
+                    {
+                        _tbNode.Text = node;
+                        SaveSettingsQuiet();
+                    }
+                }
+                else
+                {
+                    Ui(delegate
+                    {
+                        Log("环境", "AI 服务运行时准备退出码 " + code + "：" + ExitReason(code));
+                        if (!string.IsNullOrEmpty(output)) Log("环境", output);
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Ui(delegate { Log("环境", "AI 服务运行时准备出错：" + ex.Message); });
+            }
+        }
+
         /// <summary>检查 Python / 后端依赖（硬要求），以及 Node、node_modules（只提示）。</summary>
         private EnvCheck CheckEnv()
         {
@@ -1948,10 +2015,15 @@ namespace StockPool
 
             string node = UiSync<string>(delegate
             {
-                return !string.IsNullOrEmpty(_tbNode.Text) ? _tbNode.Text : FindNode();
+                // 设置里存的 node 路径可能来自另一台电脑（文件不存在）→ 回退到自动探测
+                return !string.IsNullOrEmpty(_tbNode.Text) && File.Exists(_tbNode.Text)
+                    ? _tbNode.Text : FindNode(_root);
             });
             if (string.IsNullOrEmpty(node) || !File.Exists(node))
+            {
+                r.NodeMissing = true;
                 r.Warnings.Add("未找到 Node.js：AI 服务（:3080）起不来，后端和网页不受影响");
+            }
             else if (!Directory.Exists(Path.Combine(_root, "agent_dsh", "node_modules")))
                 r.Warnings.Add("agent_dsh\\node_modules 缺失：AI 服务（:3080）起不来，后端和网页不受影响");
 
@@ -2379,7 +2451,7 @@ namespace StockPool
         private void InitServices()
         {
             var py = ResolvePython();
-            var node = string.IsNullOrEmpty(_tbNode.Text) ? FindNode() : _tbNode.Text;
+            var node = string.IsNullOrEmpty(_tbNode.Text) ? FindNode(_root) : _tbNode.Text;
 
             _backend = new ServiceItem();
             _backend.Name = "后端";

@@ -3,8 +3,9 @@
 # INTEGRITY: STOCKPOOL_ENV_INSTALL_V2
 #
 # 用法：
-#   powershell -NoProfile -ExecutionPolicy Bypass -File launcher\install_env.ps1 -Root "<项目根目录>" [-Silent] [-ConfigOnly]
+#   powershell -NoProfile -ExecutionPolicy Bypass -File launcher\install_env.ps1 -Root "<项目根目录>" [-Silent] [-ConfigOnly] [-RuntimeOnly]
 #   -ConfigOnly：只跑「跨设备配置自愈」，不装依赖、不联网、不校验依赖。
+#   -RuntimeOnly：只准备 AI 服务运行时（Node.js + npm 依赖），不装 / 不校验后端依赖。
 #
 # 退出码：0 成功 / 1 根目录不对（项目没拷全） / 2 本机没有可用的 Python 3
 #         3 创建虚拟环境失败 / 4 装依赖失败 / 5 依赖校验失败（多半被安全软件拦了 DLL）
@@ -28,7 +29,8 @@
 param(
     [string]$Root = '',
     [switch]$Silent,
-    [switch]$ConfigOnly
+    [switch]$ConfigOnly,
+    [switch]$RuntimeOnly
 )
 
 $ErrorActionPreference = 'Continue'
@@ -80,6 +82,151 @@ function Test-VenvPortable([string]$venvPy) {
     if (-not $basePy) { return $true }
     if (-not (Test-Path -LiteralPath (Join-Path $basePy 'python.exe'))) { return $false }
     return $true
+}
+
+# ---------------------------------------------------------------------------
+# 便携 Node.js：换设备时自动装，免安装器、免管理员权限
+#
+# 为什么不用 msi：msi 要管理员权限，静默装也常被安全软件拦；官方 zip 版解压即用，
+#   不写系统 PATH、不动注册表 → 目录随项目走，换设备时一起拷过去。
+# 装不上怎么办：只警告、不阻断 —— AI 服务（:3080）是可选功能，后端与网页不受影响。
+# ---------------------------------------------------------------------------
+
+# 项目内便携 Node 的目录：agent_dsh\.node\（唯一用途就是跑 dsh，放它旁边最内聚）
+function Get-PortableNodeDir([string]$dshDir) { return (Join-Path $dshDir '.node') }
+
+function Get-PortableNode([string]$dshDir) {
+    $exe = Join-Path (Get-PortableNodeDir $dshDir) 'node.exe'
+    if (Test-Path -LiteralPath $exe) { return $exe }
+    return $null
+}
+
+# 结果用脚本级变量传，不用返回值 ——
+# ⚠ PowerShell 里 `$x = Some-Function` 会把函数内 Write-Output 的**日志**一起吞进 $x，
+#   所以「有日志的函数」一律不靠返回值传结果。
+$script:AiNodeExe = $null
+
+function Install-PortableNode([string]$dshDir) {
+    $dir = Get-PortableNodeDir $dshDir
+    $existing = Get-PortableNode $dshDir
+    if ($existing) {
+        Say "       项目内已有便携 Node：$existing"
+        $script:AiNodeExe = $existing
+        return
+    }
+
+    Say '       没有找到 Node.js，自动下载便携版（Windows zip，约 30MB，无需安装器与管理员权限）...'
+    # 版本号从官方 index.json 取（不写死版本 → 不用跟着 Node 发版改脚本）
+    $ver = $null
+    try {
+        $idx = Invoke-RestMethod -Uri 'https://nodejs.org/dist/index.json' -TimeoutSec 90
+        $ver = ($idx | Where-Object { $_.version -match '^v22\.' } | Select-Object -First 1).version
+    } catch { }
+    if (-not $ver) {
+        Say '       [WARN] 取不到 Node 版本列表（没联网 / 被代理拦），跳过自动安装。'
+        Say '              AI 服务（:3080）不可用；后端与网页不受影响。'
+        return
+    }
+
+    $file = "node-$ver-win-x64.zip"
+    $zip = Join-Path $env:TEMP "stockpool_node_$ver.zip"
+    $urls = @(
+        "https://nodejs.org/dist/$ver/$file",
+        "https://cdn.npmmirror.com/binaries/node/$ver/$file"
+    )
+    foreach ($u in $urls) {
+        Say "       下载 $u ..."
+        try { (New-Object System.Net.WebClient).DownloadFile($u, $zip) } catch { }
+        if (Test-Path -LiteralPath $zip) { break }
+    }
+    if (-not (Test-Path -LiteralPath $zip)) {
+        Say '       [WARN] 下载 Node.js 失败（没联网 / 被代理或杀毒拦）。'
+        Say '              AI 服务（:3080）不可用；后端与网页不受影响。'
+        Say '              手动装法：下载 Windows zip 版（不是 msi，msi 要管理员权限）解压到任意目录，'
+        Say '                        再在设置页「Node 路径」填 node.exe。'
+        return
+    }
+
+    $tmp = Join-Path $env:TEMP ('stockpool_node_x_' + [Guid]::NewGuid().ToString('N'))
+    try {
+        Expand-Archive -Force -Path $zip -DestinationPath $tmp
+        $inner = Get-ChildItem -LiteralPath $tmp -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $inner) { throw '解压结果里没有目录' }
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        foreach ($item in (Get-ChildItem -LiteralPath $inner.FullName -Force)) {
+            Move-Item -LiteralPath $item.FullName -Destination $dir -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        Say "       [WARN] 解压 Node.js 失败：$($_.Exception.Message)"
+        return
+    } finally {
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $exe = Get-PortableNode $dshDir
+    if ($exe) {
+        Say "       便携 Node 就绪：$exe"
+        $script:AiNodeExe = $exe
+    } else {
+        Say '       [WARN] 便携 Node 装好后仍没找到 node.exe。'
+    }
+}
+
+# AI 服务运行时：node（项目内便携版优先 → 系统 PATH → 自动装便携版）+ npm 依赖。
+# 任何一步失败都只警告、不阻断：AI 服务是可选功能。
+function Prepare-AiRuntime([string]$dshDir) {
+    Say '[4/4] 准备 AI 服务运行时（可选）...'
+
+    $nodeExe = $null
+    $npmCmd = $null
+    $portable = Get-PortableNode $dshDir
+    if ($portable) {
+        $nodeExe = $portable
+        $npmCmd = Join-Path (Split-Path -Parent $portable) 'npm.cmd'
+        Say "       使用项目内便携 Node：$nodeExe"
+    } else {
+        $cmd = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($cmd) {
+            $nodeExe = $cmd.Source
+            $npm = Get-Command npm -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($npm) { $npmCmd = $npm.Source }
+            Say "       使用系统 Node：$nodeExe"
+        }
+    }
+
+    if (-not $nodeExe) {
+        $script:AiNodeExe = $null
+        Install-PortableNode -dshDir $dshDir
+        $nodeExe = $script:AiNodeExe
+        if ($nodeExe) { $npmCmd = Join-Path (Split-Path -Parent $nodeExe) 'npm.cmd' }
+    }
+
+    if (-not $nodeExe) {
+        Say '[WARN] 没有可用的 Node.js：AI 服务（:3080）起不来，后端和网页不受影响。'
+        return
+    }
+    if (-not (Test-Path -LiteralPath $dshDir)) {
+        Say "[WARN] 找不到 AI 服务目录：$dshDir（不影响后端与网页）。"
+        return
+    }
+    if (Test-Path -LiteralPath (Join-Path $dshDir 'node_modules\@deepseek-ai')) {
+        Say '       AI 服务依赖已就绪。'
+        return
+    }
+
+    Say '       AI 服务依赖缺失，开始 npm install（可能要几分钟）...'
+    if (-not $npmCmd -or -not (Test-Path -LiteralPath $npmCmd)) {
+        Say '[WARN] 找不到 npm，无法安装 AI 服务依赖（AI 服务不可用，后端与网页不受影响）。'
+        return
+    }
+    Push-Location $dshDir
+    try { & $npmCmd install --no-audit --no-fund } catch { }
+    Pop-Location
+    if ($LASTEXITCODE -ne 0) {
+        Say '[WARN] npm install 失败：AI 服务（:3080）起不来，后端和网页不受影响。'
+        return
+    }
+    Say '       AI 服务依赖安装完成。'
 }
 
 # ---------------------------------------------------------------------------
@@ -282,10 +429,21 @@ function Repair-CrossDeviceConfig {
     Repair-DshRuntime -dshDir $dshDir
 }
 
-Repair-CrossDeviceConfig -backendDir $backendDir -dshDir $dshDir
+if (-not $RuntimeOnly) {
+    Repair-CrossDeviceConfig -backendDir $backendDir -dshDir $dshDir
+}
 
 if ($ConfigOnly) {
     Say 'CONFIG_OK 配置自愈完成（-ConfigOnly：未安装 / 校验依赖）。'
+    Wait-Enter
+    exit 0
+}
+
+if ($RuntimeOnly) {
+    # 只准备 AI 服务运行时（Node.js + npm 依赖）：不装 / 不校验后端依赖。
+    # 失败只警告、不阻断 —— AI 服务是可选功能，后端与网页不受影响。
+    Prepare-AiRuntime -dshDir $dshDir
+    Say 'RUNTIME_OK AI 服务运行时准备完成（-RuntimeOnly：未安装 / 校验后端依赖）。'
     Wait-Enter
     exit 0
 }
@@ -527,23 +685,7 @@ if ($LASTEXITCODE -eq 0) {
 # ---------------------------------------------------------------------------
 # 5. AI 服务依赖（可选：失败只警告，后端和网页不受影响）
 # ---------------------------------------------------------------------------
-Say '[4/4] 检查 AI 服务依赖（可选）...'
-$nodeCmd = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $nodeCmd) {
-    Say '[WARN] 没有找到 Node.js：AI 服务（:3080）起不来，后端和网页不受影响。'
-} elseif (Test-Path -LiteralPath (Join-Path $dshDir 'node_modules\@deepseek-ai')) {
-    Say '       AI 服务依赖已就绪。'
-} elseif (-not (Test-Path -LiteralPath $dshDir)) {
-    Say "[WARN] 找不到 AI 服务目录：$dshDir（不影响后端与网页）。"
-} else {
-    Say '       AI 服务依赖缺失，开始 npm install（可能要几分钟）...'
-    Push-Location $dshDir
-    try { & npm install --no-audit --no-fund } catch { }
-    Pop-Location
-    if ($LASTEXITCODE -ne 0) {
-        Say '[WARN] npm install 失败：AI 服务（:3080）起不来，后端和网页不受影响。'
-    }
-}
+Prepare-AiRuntime -dshDir $dshDir
 
 Say 'ENV_OK 环境安装完成。'
 Wait-Enter
