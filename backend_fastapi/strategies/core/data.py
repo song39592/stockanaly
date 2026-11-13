@@ -261,27 +261,79 @@ def code_first_dates() -> dict[str, str]:
     return price_store.code_earliest_dates()
 
 
-def market_caps(codes) -> dict:
-    """{code: 总市值(元)}：总市值 = 最新总股本 × 最新收盘价（raw）。
+def share_capital_at(as_of: str) -> tuple[dict[str, float], int]:
+    """每只票在 as_of（含）之前**最近一条生效记录**的总股本。
 
-    总股本取 share_capital 最新一条；收盘价取 price_store.bulk_latest_close。
-    任一项缺失的票不进入结果（保守：它不会被当作微盘股剔除）。
+    返回 (股本表 {code: total_shares}, 回退到最新值的只数)。
+
+    `share_capital` 以「生效日 as_of」为键存序列（见 price_store.upsert_share_capital）。
+    ⚠️ 实测该表的 as_of 只有**采集当天**的几个日期（2026-10~11），**没有历史股本** →
+    绝大多数票在区间起点（2023 年）都取不到「当时的股本」。
+    故取不到时**回退到最新一条**（记进 meta，报告里必须声明）：
+    「股本用当前值，只有价格回到区间起点」—— 这是数据源限制，不是口径选择。
+
+    回退数为 0 → 该票在 as_of 之前没有记录 → 不进入结果（调用方按「不判定」处理）。
     """
-    closes = price_store.bulk_latest_close()
+    day = str(as_of or "")[:10]
+    if not day:
+        return {}, 0
     with _core_db.connect(_core_db.FACTORS_DB) as conn:
         rows = conn.execute(
-            "SELECT code, total_shares FROM share_capital "
-            "WHERE (code, as_of) IN (SELECT code, MAX(as_of) "
-            "FROM share_capital GROUP BY code)"
-        ).fetchall()
-    shares = {r["code"]: r["total_shares"] for r in rows if r["total_shares"]}
+            "SELECT code, as_of, total_shares FROM share_capital "
+            "WHERE as_of<=? AND total_shares IS NOT NULL", (day,)).fetchall()
+    best: dict[str, tuple[str, float]] = {}
+    for r in rows:
+        code = r["code"]
+        cur = best.get(code)
+        if cur is None or str(r["as_of"]) > cur[0]:
+            best[code] = (str(r["as_of"]), float(r["total_shares"]))
+    if best:
+        return {c: v[1] for c, v in best.items()}, 0
+    # 该时点没有任何股本记录 → 回退到最新一条（数据源不提供历史股本）
+    with _core_db.connect(_core_db.FACTORS_DB) as conn:
+        rows = conn.execute(
+            "SELECT code, as_of, total_shares FROM share_capital "
+            "WHERE total_shares IS NOT NULL").fetchall()
+    latest: dict[str, tuple[str, float]] = {}
+    for r in rows:
+        code = r["code"]
+        cur = latest.get(code)
+        if cur is None or str(r["as_of"]) > cur[0]:
+            latest[code] = (str(r["as_of"]), float(r["total_shares"]))
+    return ({c: v[1] for c, v in latest.items()}, len(latest))
+
+
+def market_caps_at(codes, as_of: str) -> tuple[dict, dict]:
+    """{code: 总市值(元)}，**as_of 时点**口径：as_of 前最近交易日的收盘价 × 当时的总股本。
+
+    ⚠️ 这里**只有这一份市值口径**。别再另写一份「最新市值」函数：
+      · 用「今天的市值」去筛整段历史 = **前视偏差**（后来跌成微盘的票被整段剔除，
+        连它过去那段大涨一起消失；反过来今天是大票的当年微盘股照样进池）；
+      · 市值天天变 → 同一区间两次跑得到不同池子 → 净值不可复现。
+
+    这里按回测**区间起点**取数：价格回到区间起点，股本取该时点股本
+    （取不到则回退当前股本，见 `share_capital_at` 的说明）。
+
+    返回 (市值表, meta)；meta 记录股本取值口径，必须写进报告声明。
+    缺任一项（停牌无价 / 无股本记录）→ 该票不判定，不进入结果。
+    """
+    day = str(as_of or "")[:10]
+    if not day:
+        return {}, {"shares_source": "none", "fallback_codes": 0}
+    closes = price_store.bulk_close_at(day)
+    shares, fallback = share_capital_at(day)
     caps: dict = {}
     for code in codes:
         s = shares.get(code)
         c = closes.get(code)
         if s and c:
             caps[code] = float(s) * float(c)
-    return caps
+    meta = {
+        "shares_source": "latest" if fallback else "as_of",
+        "fallback_codes": fallback,
+        "price_date": day,
+    }
+    return caps, meta
 
 
 def survivorship_note(universe_mode: str, n_codes: int) -> str:

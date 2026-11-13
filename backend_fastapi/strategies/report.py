@@ -142,6 +142,11 @@ def _summarize(report: dict) -> dict:
         "benchmark": scope.get("benchmark"),
         "universe_mode": scope.get("universe_mode"),
         "equity_model": scope.get("equity_model"),
+        # ---- 范围口径（剔除明细 + 判定基准日）----
+        # 不落这一组，报告就无法自证「这次到底剔了什么」——两份报告看起来
+        # 同策略同区间，池子却不同，只能靠猜。
+        "exclude": scope.get("exclude") or [],
+        "exclusion": scope.get("exclusion") or {},
         # ---- 横向对比指标（schema_version=2）----
         "total_return": _num(metrics.get("total_return")),
         "annual_return": _num(metrics.get("annual_return")),

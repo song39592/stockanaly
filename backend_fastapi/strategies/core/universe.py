@@ -6,13 +6,21 @@
 既不属于 HTTP 路由（routes 只该转发请求），也不属于回测编排（backtest 只该消费 codes）。
 把它抽成独立层后：
 
-    routes  ──spec──▶  universe.build()  ──codes──▶  backtest.start_task()
+    routes  ──spec──▶  universe.build_detail()  ──codes+明细──▶  backtest.start_task()
 
 ## 缓存
 结果只由「规则 + 基准日」决定。连续多次回测不改范围时**没必要重算** —— 尤其 ST 名称表
 要联网、市值要全库扫一遍。这里用**小型键值缓存**（key = 规范化后的 spec，最多 8 种范围）
 把生成结果留在内存；范围一变就按新 key 重建，旧范围仍可命中。TTL 兜底，防止长期运行后
 数据已更新而池子仍是旧的。
+
+## 判定口径（**与时间的关系**）
+剔除特征不是「按回测区间逐日判断」，而是**一次性把整段历史的池子筛出来**：
+  · 微盘股 → **区间起点**当日市值（point-in-time，不含未来信息，也不随日期漂）；
+  · 新股/次新股 → 上市日距**区间起点**的天数（回测当时视角）；
+  · ST/*ST → akshare **当前**名称表（数据源无历史名单 → 前视偏差，**必须显式声明**）；
+  · 板块 → 代码前缀（与时间无关）。
+「每项剔除了多少只」必须回传并写进报告 —— 否则读者无从判断这个净值跑在什么样本上。
 
 ## 分层
 universe（本文件）→ data（原始取数：基池 / 名称 / 上市日 / 市值）。
@@ -28,6 +36,18 @@ from . import data
 # 与前端约定的排除特征键
 CATEGORIES = ("chinext", "star", "bse", "st", "star_st", "ipo", "sub_new", "micro")
 
+# 特征 → 中文名（预览与报告共用一份，别各处手写）
+FEATURE_LABELS = {
+    "chinext": "创业板", "star": "科创板", "bse": "北交所",
+    "st": "ST", "star_st": "*ST", "ipo": "新股", "sub_new": "次新股",
+    "micro": "微盘股",
+}
+
+# **只能用「当前状态」判定**的特征：数据源不提供历史 ST 名单，
+# 无法还原「某个历史时点它是不是 ST」→ 用今天的状态筛整段历史 = 前视偏差。
+# 这类特征必须在预览与报告里**显式声明**，不能只写一句笼统的「幸存者偏差」。
+_FORWARD_LOOKING = ("st", "star_st")
+
 # 默认阈值（可在 spec 里覆盖，便于以后调参而不用改代码）
 IPO_DAYS = 90                 # 上市 ≤90 自然日 = 新股
 SUB_NEW_DAYS = 365            # 90 < 上市 ≤365 自然日 = 次新股
@@ -35,7 +55,7 @@ MICRO_CAP = 3_000_000_000     # 总市值 ≤30 亿 = 微盘股
 
 _CACHE_TTL = 3600             # 秒；范围不变时的复用窗口
 _CACHE_MAX = 8                # 最多保留多少种范围（预览与回测不会互相挤掉）
-_cache: dict = {}             # key -> (codes, base_count, at)
+_cache: dict = {}             # key -> (codes, base_count, at, detail)
 
 
 def _board_key(code: str) -> str:
@@ -73,96 +93,197 @@ def _spec_key(spec: dict) -> tuple:
     )
 
 
-def _apply_exclusions(base: list[str], spec: dict) -> list[str]:
-    """基池剔除 exclude 里的特征。各特征独立计算、取并集；数据缺失时静默降级。"""
+def _as_of_date(spec: dict) -> dt.date:
+    """「距今多少天」类剔除的基准日 = **区间起点**（回测当时视角）。
+
+    ⚠️ 以前用的是区间**结束日**（`as_of` → `end` → 今天）→「新股/次新股」
+    是按**未来**视角判的：区间早期上市的次新股，到区间末日已上市超过一年
+    → 不算次新股 → 它新股期那段行情照样进池被交易。
+    改成区间起点，才是「回测当时它算不算新股」。
+
+    缺省链：`spec.as_of` → `spec.start` → 今天。
+    """
+    for key in ("as_of", "start"):
+        v = _parse_date(spec.get(key))
+        if v:
+            return v
+    return dt.date.today()
+
+
+def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str, int], dict]:
+    """基池剔除 exclude 里的特征。各特征独立计算、取并集；数据缺失时静默降级。
+
+    返回 (剩余代码, 每项剔除只数)。**只数必须回传** —— 否则读者无法判断
+    「勾了剔除」到底剔掉了什么（界面曾长期显示「剔除后 = 基池数」，而实跑
+    却剔掉了一千多只，就是因为这个数从来没落地过）。
+
+    判定口径（关键）：
+      · 微盘股 → **区间起点**的总市值（point-in-time），不是「今天的市值」；
+      · 新股/次新股 → 上市日距**区间起点**的天数；
+      · ST/*ST → akshare 的**当前**名称表（无历史名单 → 前视偏差，须声明）。
+    """
     ex = set(spec.get("exclude") or [])
     if not ex:
-        return list(base)
+        return list(base), {}, {}
 
     ipo_days = int(spec.get("ipo_days") or IPO_DAYS)
     sub_days = int(spec.get("sub_new_days") or SUB_NEW_DAYS)
     micro_cap = float(spec.get("micro_cap") or MICRO_CAP)
-    as_of_d = _parse_date(spec.get("as_of") or spec.get("end")) or dt.date.today()
+    as_of_d = _as_of_date(spec)
 
     drop: set = set()
+    dropped: dict[str, int] = {}
 
-    # 板块：纯代码前缀，零成本
-    if ex & {"chinext", "star", "bse"}:
-        for code in base:
-            if _board_key(code) in ex:
-                drop.add(code)
+    def _hit(feature: str, codes) -> None:
+        if codes:
+            drop.update(codes)
+            dropped[feature] = dropped.get(feature, 0) + len(codes)
 
-    # ST / *ST：名称（akshare 全市场表，24h 缓存）
+    # 板块：纯代码前缀，零成本（与时间无关）
+    for feat in ("chinext", "star", "bse"):
+        if feat in ex:
+            _hit(feat, [c for c in base if _board_key(c) == feat])
+
+    # ST / *ST：名称（akshare 全市场表，24h 缓存）—— **当前**名单，无法还原历史
     if ex & {"st", "star_st"}:
         names = data.load_names(base)
+        hit_st: list[str] = []
+        hit_star_st: list[str] = []
         for code in base:
             nm = names.get(code) or ""
-            is_star = "*ST" in nm
-            is_st = ("ST" in nm) and not is_star
-            if ("star_st" in ex and is_star) or ("st" in ex and is_st):
-                drop.add(code)
+            if "*ST" in nm:
+                if "star_st" in ex:
+                    hit_star_st.append(code)
+            elif "ST" in nm and "st" in ex:
+                hit_st.append(code)
+        _hit("st", hit_st)
+        _hit("star_st", hit_star_st)
 
-    # 新股 / 次新股：上市日距今（自然日）
+    # 新股 / 次新股：上市日距**区间起点**多少天
     if ex & {"ipo", "sub_new"}:
         first = data.code_first_dates()
+        hit_ipo: list[str] = []
+        hit_sub: list[str] = []
         for code in base:
             list_d = _parse_date(first.get(code))
             if list_d is None:
                 continue
             days = (as_of_d - list_d).days
-            if ("ipo" in ex and days <= ipo_days) or (
-                "sub_new" in ex and ipo_days < days <= sub_days
-            ):
-                drop.add(code)
+            if "ipo" in ex and days <= ipo_days:
+                hit_ipo.append(code)
+            elif "sub_new" in ex and ipo_days < days <= sub_days:
+                hit_sub.append(code)
+        _hit("ipo", hit_ipo)
+        _hit("sub_new", hit_sub)
 
-    # 微盘股：最新总市值
+    # 微盘股：**区间起点**的总市值（point-in-time）。
+    # 不用「今天的市值」：那是前视偏差（后来跌成微盘的票连同它过去那段大涨
+    # 一起被整段剔除），而且市值天天变 → 同一区间两次跑结果不同。
     if "micro" in ex:
-        caps = data.market_caps(base)
-        for code in base:
-            mc = caps.get(code)
-            if mc is not None and mc <= micro_cap:
-                drop.add(code)
+        caps, cap_meta = data.market_caps_at(base, as_of_d.isoformat())
+        _hit("micro", [c for c in base
+                       if caps.get(c) is not None and caps[c] <= micro_cap])
 
-    return [c for c in base if c not in drop]
+    extra = {"market_cap_meta": cap_meta} if "micro" in ex else {}
+    return [c for c in base if c not in drop], dropped, extra
 
 
-def build(spec: dict, force: bool = False) -> list[str]:
-    """按 spec 生成回测代码列表（命中缓存直接返回，force=True 强制重建）。
+def build_detail(spec: dict, force: bool = False) -> tuple[list[str], dict]:
+    """返回 (代码列表, 范围明细)。**股票池层的唯一入口**（命中缓存直接返回，
+    force=True 强制重建）。
 
     spec 字段（全部可选）：
         universe_mode  interval_data / pool_snapshot / index_constituent
-        start / end    区间（pool_snapshot 用；end 也是新股/次新的「距今」基准候选）
-        as_of          新股/次新基准日（缺省用 end，再缺省用今天）
+        start / end    区间（pool_snapshot 用；start 也是「距今」类剔除的基准日）
+        as_of          判定基准日（缺省用 start，再缺省用今天）——「回测当时视角」
         exclude        排除特征键列表（见 CATEGORIES）
         ipo_days / sub_new_days / micro_cap   阈值覆盖
+
+    明细含：基池/剔除后数量、**每项剔除只数**、判定基准日 as_of、
+    以及哪些特征只能用「当前状态」判定（含前视偏差）。
+
+    预览与回测报告**共用这一份**：以前预览只传 `exclude`、实跑还传
+    `start/end/as_of` → 两个不同的缓存键 → 各算各的 → 界面显示「剔除后 = 基池」
+    而实跑剔掉一千多只。现在两边用同一个 spec，数字必然一致。
     """
     key = _spec_key(spec)
     now = time.time()
     ent = _cache.get(key)
     if not force and ent and now - ent[2] < _CACHE_TTL:
-        return list(ent[0])
+        return list(ent[0]), dict(ent[3])
 
     base = data.list_universe_codes(
         universe_mode=spec.get("universe_mode") or "interval_data",
         start=spec.get("start"), end=spec.get("end"),
     )
-    codes = _apply_exclusions(base, spec)
-    _cache[key] = (codes, len(base), now)
+    codes, dropped, extra = _apply_exclusions(base, spec)
+    ex = sorted(set(spec.get("exclude") or []))
+    as_of_d = _as_of_date(spec)
+    detail = {
+        "base_count": len(base),
+        "filtered_count": len(codes),
+        "excluded_count": len(base) - len(codes),
+        "dropped": dropped,
+        "exclude": ex,
+        "as_of": as_of_d.isoformat(),
+        # 只能用当前状态判定的特征 → 前视偏差，必须让人看见（不能只写「幸存者偏差」）
+        "forward_looking": [f for f in _FORWARD_LOOKING if f in ex],
+        # 上市日只能拿「库里最早日K」近似 —— 历史未拉全的老票会被误判成
+        # 新股/次新股（剔除偏多）。误差方向必须写出来，不能让读者自己猜。
+        "listing_date_source": "earliest_bar",
+    }
+    detail.update(extra or {})
+    _cache[key] = (codes, len(base), now, detail)
     if len(_cache) > _CACHE_MAX:
         _cache.pop(min(_cache, key=lambda k: _cache[k][2]), None)  # 丢掉最旧的
-    return list(codes)
+    return list(codes), detail
+
+
+def scope_note(detail: dict) -> str:
+    """范围口径说明（一段话）—— 预览与回测报告**共用同一句**，别各处手写。
+
+    必须点明四件事：
+      ① 每项剔除了多少只（否则读者不知道「勾了剔除」到底做了什么）；
+      ② 判定基准日 = 区间起点（微盘按该日市值、新股/次新股按该日起算）；
+      ③ 哪些判定用的是「当前状态」→ 含前视偏差（数据源不提供历史 ST 名单）；
+      ④ 两条数据限制：股本只有当前值、上市日只能拿「库里最早日K」近似。
+    """
+    detail = detail or {}
+    dropped = detail.get("dropped") or {}
+    as_of = detail.get("as_of") or "-"
+    bits = [f"{FEATURE_LABELS.get(k, k)} {v}" for k, v in dropped.items() if v]
+    detail_txt = "、".join(bits) if bits else "无"
+    txt = (f"范围口径：基池 {detail.get('base_count')} 只 → 剔除后 "
+           f"{detail.get('filtered_count')} 只（剔除明细：{detail_txt}）；"
+           f"判定基准日 = 区间起点 {as_of}"
+           f"（微盘按该日市值 ≤{int(MICRO_CAP / 1e8)} 亿、新股/次新股按该日起算上市天数）")
+    fwd = [FEATURE_LABELS.get(k, k) for k in (detail.get("forward_looking") or [])]
+    if fwd:
+        txt += (f"；⚠️ {'、'.join(fwd)} 按**当前**名单判定（数据源不提供历史名单，"
+                f"无法还原历史 → 含前视偏差）")
+    if detail.get("listing_date_source") == "earliest_bar":
+        txt += "；⚠️ 上市日以「库里最早日K」近似：历史未拉全的老票会被误判成新股/次新股（剔除偏多）"
+    cap_meta = detail.get("market_cap_meta") or {}
+    if cap_meta.get("shares_source") == "latest":
+        txt += "；⚠️ 微盘判定用的**股本是当前值**（数据源不提供历史股本，只有价格回到区间起点）"
+    return txt
 
 
 def summary(spec: dict, force: bool = False) -> dict:
-    """回测范围预览：基池数量、剔除后数量、被剔除数量（复用 build 的缓存）。"""
-    codes = build(spec, force=force)
-    ent = _cache.get(_spec_key(spec))
-    base_n = ent[1] if ent else len(codes)
-    return {
-        "base_count": base_n,
-        "filtered_count": len(codes),
-        "excluded_count": base_n - len(codes),
+    """回测范围预览：基池数量 + 剔除后数量 + **每项剔除只数** + 口径说明。"""
+    codes, detail = build_detail(spec, force=force)
+    out = {
+        "base_count": detail["base_count"],
+        "filtered_count": detail["filtered_count"],
+        "excluded_count": detail["excluded_count"],
+        "dropped": detail["dropped"],
+        "as_of": detail["as_of"],
+        "forward_looking": detail["forward_looking"],
+        "listing_date_source": detail.get("listing_date_source"),
+        "market_cap_meta": detail.get("market_cap_meta") or {},
+        "note": scope_note(detail),
     }
+    return out
 
 
 def invalidate() -> None:

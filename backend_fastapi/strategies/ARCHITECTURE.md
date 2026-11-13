@@ -89,8 +89,8 @@ stats.py      ⑥ hfq 收盘价 → 净值曲线与指标（与策略无关）
 
 | 文件 | 角色 | 职责 | 允许依赖 |
 | --- | --- | --- | --- |
-| `data.py` | **数据层** | `load_bars(codes, fields) -> {code: DataFrame}`、`list_universe_codes(universe_mode)`、`load_bars_raw_for(codes)`；原始分类数据 `load_names()` / `code_first_dates()` / `market_caps()`；取数走 **`kline_service`**（全项目唯一的「取数 + 周期合样」出口）；包内**唯一**允许 `import price_store` 的地方 | `kline_service`、`price_store` |
-| `universe.py` | **股票池层** | `build(spec)` 按规则（板块前缀/ST/上市日/市值）把基池筛成回测代码；`summary(spec)` 给前端预览；**小型键值缓存**（最多 8 种范围），范围不变直接复用；**不依赖 backtest** | `data` |
+| `data.py` | **数据层** | `load_bars(codes, fields) -> {code: DataFrame}`、`list_universe_codes(universe_mode)`、`load_bars_raw_for(codes)`；原始分类数据 `load_names()` / `code_first_dates()` / `market_caps_at(as_of)`（**区间起点口径**，PIT —— 市值只有这一份口径，别再另写「最新市值」）；取数走 **`kline_service`**（全项目唯一的「取数 + 周期合样」出口）；包内**唯一**允许 `import price_store` 的地方 | `kline_service`、`price_store` |
+| `universe.py` | **股票池层** | `build_detail(spec)` 按规则（板块前缀/ST/上市日/市值）把基池筛成回测代码**并回传每项剔除只数与口径说明**；`summary(spec)` 给前端预览；**小型键值缓存**（最多 8 种范围），范围不变直接复用；**不依赖 backtest** | `data` |
 | `base.py` | **契约层** | `@strategy` / `ParamSpec` / `Signal` / `StrategyContext`；`run()` 调策略、`signals_to_positions()` 信号→权重序列、**`diff_trades()` 权重→流水** | `data`（仅类型）、`pandas` |
 | `stats.py` | **统计引擎** | 目标权重序列 + hfq 收盘价 → 净值与指标；raw OHLCV → 可行性指标；**与策略完全解耦** | 仅 `numpy/pandas` |
 | `backtest.py` | **编排层** | 股票池 `codes` → 策略信号 → 统计，串起来并规范化返回（只消费 codes，**不感知范围规则**） | `data/base/stats` |
@@ -106,8 +106,9 @@ stats.py      ⑥ hfq 收盘价 → 净值曲线与指标（与策略无关）
 
 ```python
 spec = {"universe_mode": "interval_data", "start": ..., "end": ...,
+        "as_of": ...,   # 判定基准日 = 区间起点（缺省用 start）
         "exclude": ["chinext", "star", "bse", "st", "star_st", "ipo", "sub_new", "micro"]}
-codes = universe.build(spec)      # 命中缓存直接返回；范围变了才重建
+codes, detail = universe.build_detail(spec)   # detail 含每项剔除只数与口径说明
 ```
 
 - 规则按「**排除**」语义：基池 = `data.list_universe_codes()`，勾选的特征从基池剔除；
@@ -115,6 +116,26 @@ codes = universe.build(spec)      # 命中缓存直接返回；范围变了才�
 - 键值缓存 key = 规范化 spec（模式/区间/基准日/排除项/阈值），最多 8 种范围，TTL 1h；
   `invalidate()` 可手动清空（如刚下载完新股数据后希望重建）。
 - 阈值默认：新股 ≤90 自然日、次新 90~365 自然日、微盘 ≤30 亿总市值，均可在 spec 覆盖。
+
+#### 判定基准日与前视偏差（**必读**）
+
+剔除**不是逐日判断**，而是「按一个基准日把整段历史的池子一次性筛出来」。
+基准日 = **区间起点**（`as_of` → `start` → 今天），各特征的判定依据：
+
+| 特征 | 判定依据 | 含未来信息？ |
+|---|---|---|
+| 微盘股 | 区间起点当日的总市值（收盘价取该日前最近一个交易日） | 价格已回到区间起点 ✅；**股本只有当前值**（数据源不提供历史股本）⚠️ |
+| 新股 / 次新股 | 上市日距**区间起点**的天数（上市日以「库里最早日K」近似） | 基准日已回到区间起点 ✅；**历史未拉全的老票会被误判成次新股（剔除偏多）** ⚠️ |
+| ST / \*ST | akshare **当前**名称表 | 🔴 **是** —— 数据源不提供历史 ST 名单，无法还原历史 |
+| 创业板 / 科创板 / 北交所 | 代码前缀 | 否 |
+
+🔴 **前视偏差必须显式声明**（`scope.warnings` + 预览气泡）：
+ST 类判定用的是「今天的状态」去筛整段历史；而「已声明幸存者偏差」**不等于**「样本无问题」，
+两者是不同的事，不能用前者盖过后者。
+
+🔴 **每项剔除了多少只必须回传并落进报告**（`scope.exclusion.dropped`）：
+否则读者无法判断这个净值跑在什么样本上 —— 曾经界面显示「剔除后 = 基池」而实跑剔掉
+一千多只，两边都无从察觉。
 
 ## 策略校验门槛（`registry.py`）
 
@@ -510,6 +531,12 @@ capital_utilization = mean_t( Σ_i w_i(t) )
 ## HTTP 接口（`strategies_routes.py`，前缀 `/api/strategies`）
 - `GET  ""` 策略清单（含 `inputs/outputs/params/requires_pool`）
 - `GET  /codes` 本地已下载股票代码（按 `universe_mode` 过滤）
+- `GET  /universe/summary` 回测范围预览。查询参数 `exclude`（**重复参数**形式
+  `?exclude=a&exclude=b`）、`start`、`end`；返回 `base_count` / `filtered_count` /
+  `excluded_count` / **`dropped`（每项剔除只数）** / `as_of` / `forward_looking` /
+  `note`（口径说明，含前视偏差声明）。
+  ⚠️ 必须与实跑用**同一个 spec**（含 `start`/`end`）——否则两边各算各的，
+  界面显示与实跑不一致（曾经界面显示「剔除后 = 基池」而实跑剔掉一千多只）。
 - `POST /backtest` 运行回测；`use_all=True` 且超过上限（800）时抽样并回传 `scope.sampled`
 
   🆕 **抽样必须可复现**：旧版"自动随机抽样"导致同一请求两次结果不同。
