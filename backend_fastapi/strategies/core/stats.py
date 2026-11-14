@@ -382,6 +382,10 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
     #   按"目标权重跳升"判定会漏掉这种连续买不进的情况，等于默认买进了。
     n_buy_blocked = 0        # 因一字涨停买不进、**根本没发生**的建仓次数
     n_sell_deferred = 0       # 因一字跌停卖不出、清零被延后的次数
+    # 建仓失败事件（隔日一字涨停 → 买不进）：**逐笔**记下来。
+    # 这些建仓根本没有成交，所以不会出现在 trades 明细里（那里一行 = 一次买卖），
+    # 只有总数的话报告说不清"哪只票、哪天、为什么没买成" → 单独给明细。
+    blocked_builds: list[dict] = []
     if raw_by_code:
         for j, code in enumerate(codes):
             raw = raw_by_code.get(code)
@@ -417,6 +421,14 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
                         # 建仓：买不进就是空仓（不重分配给其他票）
                         if _blocked(t, True):
                             n_buy_blocked += 1
+                            blocked_builds.append({
+                                "code": code,
+                                # 执行日 = 权重生效那天（= 信号日的**隔日**）；
+                                # 信号日 = common[t-1]（t_b 日发出的权重 t_b+1 才生效）
+                                "date": common[t],
+                                "signal_date": common[t - 1] if t > 0 else "",
+                                "reason": "limit_up",
+                            })
                             continue           # actual[t] 保持 0
                     actual[t] = tgt             # 有仓或买得进 → 按目标权重持有
                 else:
@@ -698,6 +710,9 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
         # 它不是新增的对比维度，只是把已进净值的约束**说清楚**。
         "fill_blocked": {"buy_blocked": n_buy_blocked,
                          "sell_deferred": n_sell_deferred},
+        # 建仓失败明细（隔日一字涨停 → 买不进）：**逐笔**事件，与上面的计数同源。
+        # 已在净值里生效（该份额度当日就是现金、不重分配），这里只负责"说清楚"。
+        "build_failures": blocked_builds,
     })
 
 

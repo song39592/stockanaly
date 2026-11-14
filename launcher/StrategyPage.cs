@@ -88,6 +88,13 @@ namespace StockPool
         private int _stTradesTruncated;                             // 被上限截掉的笔数
         private Label _stTradesTip;                                 // 表头上方的口径/笔数说明
 
+        // 建仓失败（隔日一字涨停 → 买不进）：**独立于成交明细**的一组标记。
+        // 这些建仓根本没成交，所以不在「成交明细」里（那里一行 = 一次买卖），
+        // 单开一张小表 + 一行说明，报告才答得出"哪只票、哪天、为什么没买成"。
+        private Label _stBuildFailNote;
+        private GroupBox _stBuildFailGroup;
+        private StockGrid _stBuildFailGrid;
+
         // ④ 近期策略成果（最近 N 个交易日回测）
         private WheelValueBox _stRecentDays;
         private Label _stRecentStatus;
@@ -670,6 +677,26 @@ private void StRefreshCurStrategy()
             _stMetricCards.MaximumSize = new Size(900, 0);
             _stMetricCards.Margin = new Padding(0, 0, 0, 8);
             AddRow(stack, _stMetricCards);
+
+            // 建仓失败标记：默认隐藏（没有失败时不占地方），跑完有失败才显示。
+            _stBuildFailNote = Mute(Lbl(""));
+            _stBuildFailNote.MaximumSize = new Size(900, 0);
+            _stBuildFailNote.Visible = false;
+            AddRow(stack, _stBuildFailNote);
+
+            TableLayoutPanel bfg;
+            _stBuildFailGroup = Group("建仓失败明细（隔日一字涨停 → 买不进；该份额度当日为现金、不重分配）", out bfg);
+            _stBuildFailGrid = NewGrid(new List<GridColumn> {
+                new GridColumn("代码", "code") { IsCode = true, Jump = true },
+                NameColumn(),
+                new GridColumn("执行日", "date"),
+                new GridColumn("信号日", "signal_date"),
+                new GridColumn("原因", "reason"),
+            });
+            StPlaceGrid(_stBuildFailGrid);
+            AddRow(bfg, _stBuildFailGrid);
+            AddRow(stack, _stBuildFailGroup);
+            _stBuildFailGroup.Visible = false;
 
             var chartHost = new Panel();
             chartHost.Height = 240;
@@ -2159,6 +2186,7 @@ private void StRefreshCurStrategy()
             // 参与只数改从 scope.codes_count 取（metrics.num_stocks 已废止 —— 它其实是
             // 回测池大小，不是持仓数，显示出来会被当成「持仓了这么多只」）
             var scope = j["scope"] as Dictionary<string, object>;
+            StFillBuildFailures(scope);
             int doneCount = scope != null ? J.Int(scope["codes_count"]) : 0;
             _stResultStatus.Text = "回测完成（参与统计 " + doneCount + " 只）";
             _stResultStatus.ForeColor = C.DownSoft;
@@ -2322,6 +2350,68 @@ private void StRefreshCurStrategy()
             if (_stEquityBox != null) _stEquityBox.Invalidate();
             if (_stTradesGrid != null) StFillTradesRows(_stTradesGrid, null);
             if (_stTradesTip != null) _stTradesTip.Text = StTradesTipText();
+            StFillBuildFailures(null);          // 建仓失败标记一并清掉
+        }
+
+        /// <summary>
+        /// 填「建仓失败」标记：隔日一字涨停 → 买不进 → 该份额度当日为现金、不计收益。
+        /// 这些建仓**没有成交**，所以不在成交明细里（那里一行 = 一次买卖），
+        /// 单开一张小表 + 一行说明，报告才答得出"哪只票、哪天、为什么没买成"。
+        /// </summary>
+        private void StFillBuildFailures(Dictionary<string, object> scope)
+        {
+            if (_stBuildFailNote == null || _stBuildFailGrid == null) return;
+            _stBuildFailNote.Visible = false;
+            _stBuildFailNote.Text = "";
+            _stBuildFailGroup.Visible = false;
+            _stBuildFailGrid.Rows.Clear();
+            if (scope == null) return;
+
+            var feas = scope["feasibility"] as Dictionary<string, object>;
+            if (feas == null) return;
+            var bf = feas["build_failures"] as Dictionary<string, object>;
+            if (bf == null) return;
+            int count = (int)StM(bf, "count");
+            if (count <= 0) return;
+
+            var items = bf["items"] as System.Collections.IList;
+            _stBuildFailGrid.SuspendLayout();
+            if (items != null)
+            {
+                foreach (var it in items)
+                {
+                    var d = it as Dictionary<string, object>;
+                    if (d == null) continue;
+                    string code = Convert.ToString(J.Get(d, "code"));
+                    string name = Convert.ToString(J.Get(d, "name"));
+                    if (string.IsNullOrEmpty(name)) name = "—";
+                    string day = Convert.ToString(J.Get(d, "date"));
+                    string sig = Convert.ToString(J.Get(d, "signal_date"));
+                    string reason = StBuildFailReason(Convert.ToString(J.Get(d, "reason")));
+                    int ri = _stBuildFailGrid.Rows.Add(code, name, day, sig, reason);
+                    _stBuildFailGrid.Rows[ri].DefaultCellStyle.SelectionBackColor = _cPanel;
+                    _stBuildFailGrid.Rows[ri].DefaultCellStyle.SelectionForeColor = _cText;
+                }
+            }
+            _stBuildFailGrid.ResumeLayout();
+            _stBuildFailGrid.Fit(160, 620);
+
+            int shown = (int)StM(bf, "shown");
+            int dropped = (int)StM(bf, "dropped");
+            string txt = "⚠ 建仓失败 " + count + " 次：信号日发出买入、执行日（隔日）一字涨停买不进"
+                + " → 该份额度当日为现金、不重分配给其他票，也不计入收益。";
+            if (dropped > 0) txt += "（表内显示最近 " + shown + " 条，另有 " + dropped + " 条见回测报告文件）";
+            _stBuildFailNote.Text = txt;
+            _stBuildFailNote.Visible = true;
+            _stBuildFailGroup.Visible = true;
+        }
+
+        /// <summary>建仓失败原因 → 人话（后端给的是稳定的枚举值）。</summary>
+        private static string StBuildFailReason(string reason)
+        {
+            if (reason == "limit_up") return "一字涨停（买不进）";
+            if (string.IsNullOrEmpty(reason)) return "—";
+            return reason;
         }
 
         /// <summary>历史结果页：刷新已保存报告列表。</summary>

@@ -380,8 +380,13 @@ class Signal:
 tradable_ratio      = 可成交笔数 / 总成交笔数
 blocked_limit_up / blocked_limit_down / blocked_suspended   = 各自笔数（明细口径）
 fill_blocked.buy_blocked / fill_blocked.sell_deferred
-                     = 因一字板**根本没发生成交**的次数
-                       （买不进的建仓没进 trades 明细，故单独统计）
+                    = 因一字板**根本没发生成交**的次数
+                      （买不进的建仓没进 trades 明细，故单独统计）
+build_failures.items[]  = **建仓失败逐条明细**（与上面的 buy_blocked 同源）：
+                    {code, name, date(执行日=信号日的隔日), signal_date, reason}
+                    count = 总次数；shown / dropped = 截断标注（上限 300）
+                    —— 这些建仓没成交，所以**不在 trades 明细里**（那里一行 = 一次买卖）；
+                       单开一张表 + 一行说明，报告才答得出"哪只票、哪天、为什么没买成"
 ```
 
 ⚠️ **实测提示**：整手约束下，10 万本金 + top_n=100（每只 1000 元，买 1 手需股价 ≤10 元）

@@ -59,6 +59,9 @@ POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / 
                                        trades_total / trades_truncated）
                                        逐笔口径、两个上限与「为什么内联下发」详见
                                        strategies/ARCHITECTURE.md「逐笔明细的下发口径」
+                                       scope.feasibility.build_failures = **建仓失败明细**
+                                       （隔日一字涨停 → 买不进；该份额度当日为现金、不计收益，
+                                        这些建仓没有成交，故不在 trades 明细里）
 ```
 
 测试：
