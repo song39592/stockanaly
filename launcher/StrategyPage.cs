@@ -191,8 +191,11 @@ namespace StockPool
             //   而 WinForms 一个控件只能有一个父容器：下面 StBuildResult 会把它
             //   Add 到结果页的容器里 —— 同一个控件被二次 Add 会从**原父容器**里
             //   悄悄消失，操作框这行的状态文字于是凭空不见了（顶部看不到任务的
-            //   老毛病之一）。这里只留「刷新清单」。
-            AddRow(b0, Row(Lbl("策略回测"), MiniBtn("刷新清单", delegate { StLoadStrategies(); }, 90)));
+            //   老毛病之一）。
+            //
+            //   「刷新清单」也已搬走：它只作用于「策略选择与编辑」页那张清单，
+            //   放在顶部常驻框里离上下文太远（用户反馈：按钮要跟着列表走）。
+            //   现在放在策略列表正上方，见 StBuildSelect。
 
             // ---- 统一任务区（第 27 项）：进度条 + 暂停/继续/停止 + 状态文案 ----
             // 放在**顶部「操作」框**里（而不是某个子页）：策略页六个子页共用这一块，
@@ -262,13 +265,24 @@ namespace StockPool
         {
             TableLayoutPanel b;
             var g1 = Group("策略列表", out b);
+            // 「刷新清单」放在**列表正上方**（与「历史结果」页同一做法）：
+            // 它只作用于这张清单，入口紧挨着要操作的表格 —— 用户反馈「刷新清单」
+            // 放在页顶「操作」框里离上下文太远，看不出它刷新的是哪张表。
+            // 刷新会保住当前选中的策略（见 StLoadStrategies）。
+            AddRow(b, Row(
+                MiniBtn("刷新清单", delegate { StLoadStrategies(); }, 90),
+                Mute(Lbl("清单来自后端 strategies/ 目录；新增策略后点此刷新（会保住当前选中的策略）。"))));
             _stList = new ListBox();
-            _stList.Width = 320;
-            _stList.Height = 160;
+            _stList.Width = 340;
+            _stList.Height = 200;
             _stList.Font = new Font("Microsoft YaHei UI", 10f);
             _stList.SelectedIndexChanged += delegate { StOnSelectStrategy(); };
-            AddRow(b, Row(_stList,
-                Mute(Lbl("单选：一次只运行列表里选中的那一个策略（不是全列表一起跑）。右侧可编辑其参数。新增策略请在后端 strategies/ 加 <id>.py 文件。"))));
+            // 说明文字限宽换行：原来是一条长单行，把整个分组框横向撑得比页面还宽，
+            // 右侧空一大片。限宽后它固定成列表右边的一栏，版面才紧凑。
+            var listTip = Mute(Lbl("单选：一次只运行列表里选中的那一个策略（不是全列表一起跑）。"
+                + "选中后可在下方「策略说明与参数」里调参；新增策略请在后端 strategies/ 加 <id>.py 文件。"));
+            listTip.MaximumSize = new Size(430, 0);
+            AddRow(b, Row(_stList, listTip));
             AddRow(stack, g1);
 
             var g2 = Group("策略说明与参数", out b);
@@ -652,15 +666,26 @@ private void StRefreshCurStrategy()
             AddRow(stack, chartHost);
 
             TableLayoutPanel bg;
-            var g = Group("个股明细（按区间收益降序 · 点击代码/名称跳个股详情）", out bg);
+            var g = Group("个股明细（按区间收益降序 · 一行 = 一只标的 · 点击代码/名称跳个股详情）", out bg);
+            // ⚠️ 列名必须写**真实口径**，否则「一只票」会被当成「一笔买入」：
+            //   trades = 该股的**持仓段数**（进出次数），不是成交笔数；
+            //   buy_date / sell_date = 该股**第一段**持仓的建仓 / 清仓日；
+            //   ret = **首段**收益。
+            //   组合策略常常同一天买好几只，其中多数是同一只票的再次买入 ——
+            //   按「首次建仓」排序时每个日期只剩几只新面孔，看着就像「每天只买一只」。
+            var psTip = Mute(Lbl("口径：一行 = 一只标的（不是一笔买入）。"
+                + "「首次建仓 / 首次清仓」取该股第一段持仓的起止日；「持仓段数」= 进出段数；"
+                + "「首段收益」= 第一段的收益。同一天买多只会显示多行。"));
+            psTip.MaximumSize = new Size(900, 0);
+            AddRow(bg, psTip);
             _stPerStockGrid = NewGrid(new List<GridColumn> {
                 new GridColumn("代码", "code") { IsCode = true, Jump = true },
                 NameColumn(),          // 名称列带 Jump：点名称同样可跳个股详情
                 new GridColumn("区间收益", "total_return", true),
-                new GridColumn("交易次数", "trades", true),
-                new GridColumn("买入日期", "buy_date"),
-                new GridColumn("卖出日期", "sell_date"),
-                new GridColumn("单笔收益", "ret", true),
+                new GridColumn("持仓段数", "trades", true),
+                new GridColumn("首次建仓", "buy_date"),
+                new GridColumn("首次清仓", "sell_date"),
+                new GridColumn("首段收益", "ret", true),
                 new GridColumn("GRAYP", "grayp", true),
             });
             _stPerStockGrid.SetSortable(true);
@@ -705,12 +730,12 @@ private void StRefreshCurStrategy()
                 new GridColumn("代码", "code") { IsCode = true, Jump = true },
                 NameColumn(),
                 new GridColumn("区间收益", "ret", true),
-                new GridColumn("交易次数", "trades", true),
-                new GridColumn("买入时间", "buy_date"),
-                new GridColumn("卖出时间", "sell_date"),
+                new GridColumn("持仓段数", "trades", true),
+                new GridColumn("首次建仓", "buy_date"),
+                new GridColumn("首次清仓", "sell_date"),
             });
             StPlaceGrid(_stRecentGrid);
-            _stRecentGrid.SetSortable(true);   // 第 20 项：可改按交易次数等排序
+            _stRecentGrid.SetSortable(true);   // 第 20 项：可改按持仓段数等排序
             AddRow(bg, _stRecentGrid);
             AddRow(stack, g);
         }
@@ -2262,7 +2287,7 @@ private void StRefreshCurStrategy()
         }
 
         // ---------------- 个股明细展开 ----------------
-        // 主行：代码 | 名称 | 区间收益 | 交易次数；点击主行切换展开，逐笔明细
+        // 主行：代码 | 名称 | 区间收益 | 持仓段数；点击主行切换展开，逐笔明细
         // 按 result_id 向后端按需拉取（/backtest/trades），插入主行之下。
         // 明细不随回测结果下发——全量 5000+ 只的明细 JSON 会到 10MB 级。
         private void StFillPerStockRows()
