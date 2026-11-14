@@ -529,50 +529,50 @@ def earliest_bar_date(code: str, adjust: str = "raw") -> str | None:
     return None
 
 
-def code_latest_dates(adjust: str = "raw") -> dict[str, str]:
-    """**一次性**取回每只已下载股票的最新日 K 日期 {code: YYYY-MM-DD}。
+def code_date_spans(adjust: str = "raw") -> tuple[dict[str, str], dict[str, str]]:
+    """**一次性**取回每只已下载股票的 (最新日 K 日期, 最早日 K 日期)。
 
-    不能逐只调 `latest_bar_date`——那是「按 code 查、逐分片回溯」，
-    几千只股票会退化成几十万次开库。这里改成**每个分片一次聚合查询**，
-    再在内存里按 code 取全局最大值，全库只扫一遍。
-    成本是一次全表扫描，因此调用方请勿高频调用（见 download_service 的缓存）。
+    两个口径读的是同一批行，分开跑等于把全表扫两遍（实测各 ~1.1 秒，
+    而「单日策略日期上下文」两个都要 → 白等一倍）。故合并成一个
+    `GROUP BY code` 聚合，一次扫描同时给出两端，跨分片再取全局最大 / 最小。
+
+    不能逐只调 `latest_bar_date` / `earliest_bar_date`——那是「按 code 查、
+    逐分片回溯」，几千只股票会退化成几十万次开库。
     """
     store_adjust = _store_adjust(adjust)
-    result: dict[str, str] = {}
+    latest: dict[str, str] = {}
+    earliest: dict[str, str] = {}
     for year in _shard_years():
         with db.connect(db.bars_db(year)) as conn:
             for row in conn.execute(
-                "SELECT code, MAX(trade_date) AS d FROM daily_bars "
+                "SELECT code, MAX(trade_date) AS d, MIN(trade_date) AS e FROM daily_bars "
                 "WHERE adjust=? GROUP BY code", (store_adjust,)):
-                day = row["d"]
-                if not day:
-                    continue
                 code = row["code"]
-                if code not in result or day > result[code]:
-                    result[code] = day
-    return result
+                day = row["d"]
+                if day and (code not in latest or day > latest[code]):
+                    latest[code] = day
+                first = row["e"]
+                if first and (code not in earliest or first < earliest[code]):
+                    earliest[code] = first
+    return latest, earliest
+
+
+def code_latest_dates(adjust: str = "raw") -> dict[str, str]:
+    """**一次性**取回每只已下载股票的最新日 K 日期 {code: YYYY-MM-DD}。
+
+    实现见 `code_date_spans`（一次扫描同时算两端，这里只取 latest 一半）。
+    成本是一次全表扫描，因此调用方请勿高频调用（见 download_service 的缓存）。
+    """
+    return code_date_spans(adjust)[0]
 
 
 def code_earliest_dates(adjust: str = "raw") -> dict[str, str]:
     """**一次性**取回每只已下载股票的最早日 K 日期 {code: YYYY-MM-DD}。
 
-    `code_latest_dates` 的对偶版本，同样是「每个分片一次聚合 + 内存取全局最小」，
-    不能逐只调 `earliest_bar_date`。成本是一次全表扫描，调用方需自行缓存。
+    `code_latest_dates` 的对偶版本，实现同样见 `code_date_spans`。
+    成本是一次全表扫描，调用方需自行缓存。
     """
-    store_adjust = _store_adjust(adjust)
-    result: dict[str, str] = {}
-    for year in _shard_years():
-        with db.connect(db.bars_db(year)) as conn:
-            for row in conn.execute(
-                "SELECT code, MIN(trade_date) AS d FROM daily_bars "
-                "WHERE adjust=? GROUP BY code", (store_adjust,)):
-                day = row["d"]
-                if not day:
-                    continue
-                code = row["code"]
-                if code not in result or day < result[code]:
-                    result[code] = day
-    return result
+    return code_date_spans(adjust)[1]
 
 
 # ---- 批量特征辅助（回测范围「排除特征」筛选用；进程内缓存，避免每次提交全库扫描）----

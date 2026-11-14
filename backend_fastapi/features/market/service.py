@@ -273,7 +273,8 @@ _MARKET_SESSIONS: dict[str, tuple[tuple[int, int], ...]] = {
 
 
 # ---- 交易日与夏令时：不引入时区库，规则自算 + 交易日历（每天拉一次） ----
-_TRADE_DAYS_CACHE: dict = {"day": None, "days": set()}
+_TRADE_DAYS_CACHE: dict = {"day": None, "days": set(), "failed_at": 0.0}
+TRADE_DAYS_RETRY_SECONDS = 600      # 拉取失败后的冷却时长（秒）
 
 
 def _nth_weekday(year: int, month: int, weekday: int, n: int) -> dt.date:
@@ -295,25 +296,56 @@ def _us_dst(now=None) -> bool:
 
 
 def _a_share_trade_days() -> set[str]:
-    """A 股交易日历，**每天只拉一次**并缓存；取不到返回空集，由调用方退化为按星期判断。"""
+    """A 股交易日历，**每天只拉一次**并缓存；取不到返回空集，由调用方退化为按星期判断。
+
+    ⚠️ **失败也必须冷却**：拉不到时若每次调用都重试，一次接口调用里
+    `_is_trade_day` 会被调十几次，每次都重新联网等满 15 秒硬超时 → 整个接口
+    拖成几分钟（实测网络不通时 `/date-context` 要 165 秒，前端 20 秒必然超时）。
+    故失败后 10 分钟内直接返回空集（退化为「工作日」口径），不再反复联网。
+    """
     today = dt.date.today().isoformat()
     if _TRADE_DAYS_CACHE["day"] == today and _TRADE_DAYS_CACHE["days"]:
         return _TRADE_DAYS_CACHE["days"]
+    if (_TRADE_DAYS_CACHE["day"] == today
+            and time.time() - _TRADE_DAYS_CACHE["failed_at"] < TRADE_DAYS_RETRY_SECONDS):
+        return set()
     days: set[str] = set()
     try:
-        frame = _ak(ak.tool_trade_date_hist_sina)
+        # 日历是个小请求，给 8 秒窗口即可（默认 15 秒太长：它挡在页面主路径上）
+        frame = _ak(ak.tool_trade_date_hist_sina, timeout=8)
         if frame is not None and not getattr(frame, "empty", True):
             days = {str(item)[:10] for item in frame["trade_date"]}
     except Exception:                               # noqa: BLE001 - 日历拿不到不影响行情
         days = set()
     _TRADE_DAYS_CACHE["day"] = today
     _TRADE_DAYS_CACHE["days"] = days
+    _TRADE_DAYS_CACHE["failed_at"] = 0.0 if days else time.time()
     return days
 
 
-def _a_share_is_trade_day(moment) -> bool:
-    """某日是否 A 股交易日：以交易日历为准；日历不可用时退化为「工作日」。"""
-    days = _a_share_trade_days()
+def warm_trade_days() -> None:
+    """后台预热交易日历（不阻塞调用方）。
+
+    单日策略页与盘面页都要判「今天是不是交易日 / 收盘没有」，日历是**联网**取的：
+    放在启动后台预热里，页面首次用到时就不用干等那一次请求；网络不通时
+    预热会失败并进入冷却（见 `_a_share_trade_days`），页面退化为「按工作日」判定。
+    """
+    def _run():
+        try:
+            _a_share_trade_days()
+        except Exception:                           # noqa: BLE001 - 预热失败不影响正常请求
+            pass
+    threading.Thread(target=_run, name="trade-days-warm", daemon=True).start()
+
+
+def _a_share_is_trade_day(moment, days: set[str] | None = None) -> bool:
+    """某日是否 A 股交易日：以交易日历为准；日历不可用时退化为「工作日」。
+
+    `days` = **已取好的日历快照**：一次请求内复用同一份，避免重复联网
+    （不传则自行取，走 `_a_share_trade_days` 的当日缓存）。
+    """
+    if days is None:
+        days = _a_share_trade_days()
     if days:
         return moment.date().isoformat() in days
     return moment.weekday() < 5
