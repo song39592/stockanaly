@@ -1259,11 +1259,16 @@ def _trade_days_snapshot() -> set[str]:
     """交易日历**快照**：整个请求只取一次，供所有交易日判定复用。
 
     没有它时，一次 `trading_day_context` 会调十几次 `_is_trade_day`，
-    而每次都要问一遍日历 —— 网络不通时就是十几次 × 15 秒硬超时。
+    而每次都要问一遍日历 —— 网络不通时就是十几次 × 超时。
+
+    ⚠️ **不等网络**（`blocking=False`）：日历接口要抢 V8 全局锁，后端正跑着
+    别的新浪接口时它会排队等锁（实测 8 秒取不到）。这个接口在页面主路径上，
+    等不得 —— 缓存空就退化为「按工作日」判定，并让后台线程补拉；
+    返回值里的 `calendar_ready` 会告诉前端「这轮是降级结果」，前端随后补取。
     """
     try:
         from features.market.service import _a_share_trade_days
-        return _a_share_trade_days()
+        return _a_share_trade_days(blocking=False)
     except Exception:                               # noqa: BLE001 - 日历不可用按工作日退化
         return set()
 
@@ -1369,6 +1374,9 @@ def trading_day_context(target: str | None = None) -> dict[str, Any]:
         "signal_date": sig_iso,
         "exec_is_trade_day": _is_trade_day(exec_day, days),
         "picked_is_trade_day": _is_trade_day(picked or default_exec, days),
+        # 交易日历是否真的拿到了（False = 本轮按「工作日」降级，节假日可能判错，
+        # 前端据此稍后补取一次）
+        "calendar_ready": bool(days),
         "covered": covered,
         "total": total,
         "data_ready": total > 0 and (total - covered) <= tolerance,
