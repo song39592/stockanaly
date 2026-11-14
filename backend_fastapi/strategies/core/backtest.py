@@ -334,7 +334,7 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
     }
 
 
-MAX_BUILD_FAILURES = 300      # 建仓失败明细的下发上限（截断必须标注，否则等于静默改数据）
+MAX_BUILD_FAILURES = 2000     # 建仓失败明细的下发上限（截断必须标注，否则等于静默改数据）
 MAX_SELL_DEFERRALS = 300      # 清仓延后明细的下发上限（同上）
 
 

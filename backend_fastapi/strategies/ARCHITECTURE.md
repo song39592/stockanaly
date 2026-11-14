@@ -384,15 +384,20 @@ fill_blocked.buy_blocked / fill_blocked.sell_deferred
                       （买不进的建仓没进 trades 明细，故单独统计）
 build_failures.items[]  = **建仓失败逐条明细**（与上面的 buy_blocked 同源）：
                     {code, name, date(执行日=信号日的隔日), signal_date, reason}
-                    count = 总次数；shown / dropped = 截断标注（上限 300）
-                    —— 这些建仓没成交，所以**不在 trades 明细里**（那里一行 = 一次买卖）；
-                       单开一张表 + 一行说明，报告才答得出"哪只票、哪天、为什么没买成"
+                    count = 总次数；shown / dropped = 截断标注（上限 2000）
+                    —— 引擎层面这些建仓没成交，所以**不在 trades 里**（那里一行 = 一次买卖）；
+                       展示层把它们**逐条列进成交明细表**：收益 0、备注「买不进」，
+                       与成交行一起按买入日期倒序排（不另开一张全是失败的表）
 sell_deferrals.items[] = **清仓延后逐条明细**（与 sell_deferred 同源，但按「一次延后」记，
                     不是按「被挡的每一天」记）：
                     {code, name, planned_date(计划清仓日), date(实际卖出日=开板那天),
                      price(卖出价=实际卖出日的收盘价), deferred_days(被挡天数),
                      status(sold / cancelled), reason}
                     status=cancelled = 延后期间策略又改主意继续持有 → 那笔没卖成
+                    —— 展示层：这些延后**是成交了的**（只是晚了几天），所以不另开表，
+                       而是把「延后 N 天（计划清仓 YYYY-MM-DD）」写进成交明细那一行的
+                       备注列（按 代码|实际卖出日 对应；cancelled 没有对应成交行，
+                       直接略过）
                     ⚠️ 卖出价是**开板那天的收盘价**，不是开盘价、也不是跌停价：
                        权重模型里权重变化一律按当日收盘价成交（买入侧同理），
                        而日线数据取不到"开板后第一个能成交的价"；
