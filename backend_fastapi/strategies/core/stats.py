@@ -44,7 +44,7 @@
       "equity_benchmark": [float|null,...]|None,   # 等权全池买入持有（默认基准）
       "metrics": {...},                             # schema_version = 2
       "per_stock": [{"code","pnl","total_return","trades","closed"}, ...],
-      "trades": [ {...逐笔明细...} ],                # 由编排层取出落报告，不进 HTTP 响应
+      "trades": [ {...逐笔明细...} ],                # 全量逐笔（编排层裁剪后进响应 / 落报告）
       "flags": [str, ...],                          # 空值/降级原因，永不静默
     }
 """
@@ -66,6 +66,13 @@ _EPS = 1e-12
 _IMPOSSIBLE_RET = 0.5
 _BOARD_LIMIT = 0.20          # 创业板(30)/科创板(68) 涨跌停阈值
 _MAIN_LIMIT = 0.10           # 主板阈值（ST 自 2025-04 起也是 10%，见 _limit_pct）
+
+# 逐笔明细**进 HTTP 响应**的上限（页面表格一行一笔成交）。
+# 全市场一次回测能到十几万笔（实测 15 万+ = 24 MB JSON、解析要 10 秒）——
+# 所以不能全量下发；而页面端实测 DataGridView 填 2 万行要 **4.3 秒**
+# （UI 线程直接卡住），故只带最近 5000 笔：够看清「最近发生了什么」，
+# 全量逐笔仍以报告文件为准（report.MAX_TRADES = 2 万笔）。
+MAX_TRADES_RESPONSE = 5000
 
 # (code, date) → (reason, meta)，由 set_trade_reasons() 注入，供逐笔明细挂归因。
 # 单独设一个模块级槽而不是层层透传：逐笔明细在 `_build_trades` 里逐段构造，
@@ -896,18 +903,7 @@ def set_trade_reasons(index: dict) -> None:
     _TRADE_REASONS = index or {}
 
 
-# ---------------------------------------------------------------- 单票明细（前端按需）
-
-def trades_for_code(trades: list[dict] | None, code: str) -> list[dict]:
-    """从已算好的逐笔明细里挑出某只标的（前端展开某票时按需调用）。
-
-    **不再单票重算**：旧实现有独立的 `trade_detail()`，自己扫权重序列、用
-    硬编码的 100000 折算股数，于是同一笔交易在「全市场明细」与「单票明细」里
-    口径不一致（一个用真实 Δw×NAV、一个用假想资金带），报告没法交叉核对。
-    组合权重口径下逐笔 pnl 就是全市场口径，直接过滤即可，顺带省掉一次重算。
-    """
-    return [t for t in (trades or []) if t.get("code") == code]
-
+# ---------------------------------------------------------------- per_stock 截断
 
 def truncate_per_stock(per_stock: list[dict], limit: int = 500) -> tuple[list[dict], dict]:
     """per_stock **双向截断**：收益降序头部 N + 尾部 N。
@@ -923,3 +919,30 @@ def truncate_per_stock(per_stock: list[dict], limit: int = 500) -> tuple[list[di
     return head + tail, {"truncated": True, "total": len(per_stock),
                          "kept": len(head) + len(tail),
                          "dropped_middle": len(per_stock) - len(head) - len(tail)}
+
+
+def trades_for_response(trades: list[dict] | None,
+                        limit: int = MAX_TRADES_RESPONSE) -> tuple[list[dict], dict]:
+    """逐笔明细的**响应内联**裁剪：按买入日期倒序取最近 N 笔 + 截断元信息。
+
+    ## 为什么按「买入日期倒序」而不是原顺序
+    `_build_trades` 出口的逐笔是按 **(code, buy_date)** 排序的 —— 直接截前 N 笔
+    等于只留下「代码靠前的那些票」，而用户翻这张表看的恰恰是**最近的成交**。
+    故这里按买入日期倒序给：表头就是最近的交易，更早的在报告文件里。
+
+    ## 为什么必须带元信息
+    截断若不标注，就等于**静默改数据**：看表的人会以为「这就是全部成交」。
+    故返回里同时给出总数与被丢掉的笔数（`trades_total` / `trades_truncated`），
+    前端必须把「共 N 笔、显示 M 笔」写在表头上。
+    """
+    src = list(trades or [])
+    total = len(src)
+    if limit <= 0 or total <= limit:
+        return src, {"truncated": False, "total": total, "kept": total,
+                     "dropped": 0, "order": "buy_date_desc"}
+    # 买入日期缺失（理论上不该有）排最后，不让空值顶掉真实交易。
+    ordered = sorted(src, key=lambda t: (str(t.get("buy_date") or ""), str(t.get("code") or "")),
+                     reverse=True)
+    kept = ordered[:limit]
+    return kept, {"truncated": True, "total": total, "kept": len(kept),
+                  "dropped": total - len(kept), "order": "buy_date_desc"}

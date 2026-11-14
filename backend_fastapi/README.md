@@ -55,6 +55,10 @@ POST /api/stock/valuation → 股票估值（简化 DCF：前 5 年 + 永续，�
 GET  /api/stock/quote     → 按代码查名称与当前股价（供输入代码后即时确认，不拉财务数据）
 GET  /api/strategies/universe/summary → 回测范围预览（基池/剔除后只数 + 每项剔除只数 + 口径说明）
                                        判定口径与字段含义详见 strategies/ARCHITECTURE.md「股票池层」
+POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / **trades 逐笔成交明细** /
+                                       trades_total / trades_truncated）
+                                       逐笔口径、两个上限与「为什么内联下发」详见
+                                       strategies/ARCHITECTURE.md「逐笔明细的下发口径」
 ```
 
 测试：
