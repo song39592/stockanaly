@@ -6,7 +6,8 @@
     GET  /codes          本地已下载股票代码列表（供「回测范围」选股票池）
     POST /backtest       运行回测：{"strategy_id","params","codes","use_all",
                                     "start","end","initial_capital","commission","benchmark"}
-    GET  /backtest/trades  逐笔明细：?rid=<result_id>&code=<代码>（回测后按需展开）
+                                    （响应内含 trades 逐笔成交明细 / trades_total /
+                                      trades_truncated，页面表格一行 = 一次买卖）
 
 错误统一返回 {"ok": false, "detail": …, "error": {"code", "message"}}（HTTP 400，
 形状由 apiutil 统一；见第 11 项）。
@@ -395,14 +396,3 @@ def do_recommend_result():
         return {"ok": False, "state": backtest.reco_task_state(),
                 "error": {"code": "NOT_READY", "message": "还没有已完成的推荐结果"}}
     return out
-
-
-@router.get("/backtest/trades")
-@_guard(code=apiutil.CODE_EXPIRED)
-def do_backtest_trades(rid: str, code: str):
-    """单只股票的逐笔交易明细（前端展开个股行时按需调用）。
-
-    价格为原始收盘（未复权）、收益为后复权口径；rid 对应最近一次回测，
-    过期返回 400（前端提示重跑）。
-    """
-    return {"ok": True, "code": code, "trades": backtest.trades_for(rid, code)}

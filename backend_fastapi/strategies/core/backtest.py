@@ -13,7 +13,6 @@
   {
     "ok": True,
     "strategy": {"id","name","params"},
-    "result_id": str,                          # 逐笔明细按需查询的句柄（见 trades_for）
     "scope": {"codes_count","requested","start","end",
               "initial_capital","commission","stamp_duty","slippage",
               "min_commission","lot_size","benchmark","universe_mode",
@@ -28,8 +27,13 @@
                 return_per_utilized_capital, benchmark_return,
                 alpha, beta, ir, tracking_error},
     "per_stock": [{"code","name","pnl","total_return","trades","closed"}, ...],
-                   # 降序**双向**截断（头部+尾部），元信息见 scope.per_stock_truncated；
-                   # 逐笔明细经 /backtest/trades 按需取
+                   # 降序**双向**截断（头部+尾部），元信息见 scope.per_stock_truncated
+    "trades": [{"code","name","buy_date","buy_price","sell_date","sell_price",
+                "ret","pnl","cost","holding_days","open", ...}, ...],
+               # 逐笔「一买一卖」明细，**内联下发**（前端表格一行一笔成交）。
+               # 上限 stats.MAX_TRADES_RESPONSE 笔，按买入日期倒序取最近的；
+               # trades_total = 真实总笔数，trades_truncated = 被丢掉的笔数
+               #（截断必须标注，否则等于静默改数据）。
     "data_errors": [str, ...]                  # 跳过/失败的标的说明
   }
 
@@ -43,16 +47,11 @@ import datetime as dt
 import json
 import threading
 import time
-import uuid
 
 from . import base, data, stats
 
 _MIN_BARS = 30        # 少于此根数视为数据不足
 _WARMUP_BARS = 250    # 短窗口回测的指标预热根数（约一年，够 MACD 这类长周期策略）
-
-# 最近一次回测的上下文（单槽）：per_stock 只带基础列，逐笔明细由前端
-# 按 result_id 展开时经 trades_for 现算，避免全量明细 JSON 打到 10MB 级。
-_BT_CTX: dict | None = None
 
 def _load_names(codes: list[str]) -> dict[str, str]:
     """兼容别名：名称加载已下沉到 `data.load_names`（进程内 24h 缓存）。
@@ -230,25 +229,30 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
     trades: list[dict] = core.pop("trades", []) or []
     flags: list[str] = core.pop("flags", []) or []
 
-    # 名称补齐（只做展示口径，不影响统计）。逐笔明细**不**随结果下发：
-    # 全量 5000+ 只的明细 JSON 会到 10MB 级，改为前端点击展开时按
-    # result_id 调 /backtest/trades 现算（上下文缓存在 _BT_CTX，见 trades_for）。
+    # 名称补齐（只做展示口径，不影响统计）。
     per_stock, trunc_info = stats.truncate_per_stock(core["per_stock"], 500)
-    names = _load_names([x["code"] for x in per_stock])
+    # 名称要把**逐笔涉及到的代码**也一起查：per_stock 已双向截断（500+500），
+    # 只按它的代码查名 → 不在汇总里的那只票，成交明细里就显示「—」。
+    name_codes = {x["code"] for x in per_stock}
+    name_codes.update(t["code"] for t in trades)
+    names = _load_names(list(name_codes))
     for item in per_stock:
         item["name"] = names.get(item["code"]) or None
     for t in trades:
         t["name"] = names.get(t["code"]) or None
 
+    # 逐笔明细**内联进结果体**（前端表格一行一笔成交，不再靠「点行展开」按需拉）。
+    # 但不能全量下发：全市场一次回测 15 万+ 笔 = 24 MB JSON、解析要 10 秒，
+    # 而页面端实测填 2 万行要 4.3 秒（UI 线程卡住）→ 按买入日期倒序只带最近
+    # MAX_TRADES_RESPONSE 笔，并**如实标注**总笔数与被丢掉的笔数。
+    trades_inline, trades_meta = stats.trades_for_response(trades)
+
     # 可行性汇总（整手/涨跌停/停牌 —— 只影响明细、不影响净值，单列成一组指标）
     feas = _feasibility_summary(trades, len(changed),
                                 fill_blocked=core.get("fill_blocked"))
 
-    global _BT_CTX, _BT_TRADES
-    rid = uuid.uuid4().hex[:12]
-    _BT_CTX = {"rid": rid, "positions": positions, "close": close_by_code,
-               "start": start, "end": end, "names": names}
-    # 逐笔明细**只**给报告落盘用，**不进 HTTP 响应**（见返回字典处注释）
+    global _BT_TRADES
+    # 全量逐笔明细**只**给报告落盘用（`last_trades()`）；响应里带的是上面裁过的内联版。
     _BT_TRADES = trades
 
     warnings = list(flags)
@@ -275,7 +279,6 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
             "name": base.REGISTRY[strategy_id].name,
             "params": params or {},
         },
-        "result_id": rid,
         "scope": {
             "codes_count": len(usable),
             "requested": requested,
@@ -309,9 +312,13 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
         "equity_benchmark": core["equity_benchmark"],
         "metrics": core["metrics"],
         "per_stock": per_stock,
-        # ⚠️ **逐笔明细刻意不在这里**：全市场一次回测 15 万+ 笔，随响应下发是
-        # 24 MB JSON、取结果要 10 秒；前端展开某只票时走 /backtest/trades 按需取。
-        # 报告要用的话从 `last_trades()` 取。
+        # 逐笔明细：**内联进响应**（前端表格一行一笔成交）。
+        # 上限 stats.MAX_TRADES_RESPONSE 笔（按买入日期倒序取最近的），
+        # trades_total / trades_truncated 如实给出总笔数与被丢掉的笔数 ——
+        # 截断不标注就等于静默改数据。报告落盘走 last_trades()（全量，2 万笔上限）。
+        "trades": trades_inline,
+        "trades_total": trades_meta["total"],
+        "trades_truncated": trades_meta["dropped"],
         "data_errors": errors[:20],
     }
 
@@ -971,9 +978,8 @@ _BT_TASK: dict = {
 }
 _BT_LOCK = threading.Lock()
 _BT_RESULT: dict | None = None
-# 最近一次回测的逐笔明细：**只**给报告落盘用（`last_trades()`），不进 HTTP 响应。
-# 全市场一次回测能到十几万笔（实测 15 万+），随响应下发就是 24 MB JSON、
-# 取结果要 10 秒 —— 而前端只在展开某只票时才需要明细（走 /backtest/trades 按需取）。
+# 最近一次回测的逐笔明细：**只**给报告落盘用（`last_trades()`），不进 HTTP 响应
+# （响应里带的是按页面上限裁过的内联版，见 run_backtest 的 trades 字段）。
 _BT_TRADES: list = []
 
 
@@ -1206,18 +1212,3 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
 
     threading.Thread(target=_work, name="backtest-task", daemon=True).start()
     return {"ok": True, "state": task_state()}
-
-
-def trades_for(rid: str, code: str) -> list[dict]:
-    """按 result_id 取某只的逐笔交易明细（前端展开时按需调用）。
-
-    上下文是**单槽缓存**（只留最近一次回测）；过期/不匹配直接报错，让前端提示重跑。
-
-    ⚠️ 直接从已算好的全市场明细里过滤，**不再单票重算**：
-    旧实现有独立的 `stats.trade_detail()`，自己扫权重序列并用硬编码的 100000
-    折算股数，于是同一笔交易在「全市场明细」与「单票明细」里口径不一致，
-    报告无法交叉核对。组合权重口径下逐笔 pnl 就是全市场口径。
-    """
-    if not _BT_CTX or _BT_CTX["rid"] != rid:
-        raise ValueError("回测结果已过期，请重新运行回测")
-    return stats.trades_for_code(_BT_TRADES, code)

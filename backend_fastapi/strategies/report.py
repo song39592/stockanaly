@@ -229,21 +229,29 @@ def build_report(payload: dict) -> dict:
     # 逐笔交易明细：全市场一次回测动辄数千~上万笔，全量写进去报告可达数十 MB。
     # 与 per_stock 同策略：**超量就截断并如实标注**，让分析者知道「还有 N 笔没落盘」
     # （而不是误以为这就是全部）。要看全量得重跑并提高上限。
-    all_trades = list(payload.get("trades") or [])
+    #
+    # ⚠️ 取值顺序：**优先单槽里的全量**（last_trades），payload 里的 trades 是
+    # **响应内联版**（已按页面上限截断、且按买入日期倒序）—— 拿它落盘会让报告
+    # 平白少一大截明细。last_trades 取不到（回测在别的进程跑）才退回 payload。
+    all_trades = []
+    try:
+        from strategies.core import backtest as _bt
+        all_trades = list(_bt.last_trades() or [])
+    except Exception:                # noqa: BLE001 - 取不到就当没有明细
+        all_trades = []
     if not all_trades:
-        # trades 刻意不进 HTTP 响应（15 万笔 = 24 MB），只在这里从 backtest 取。
-        try:
-            from strategies.core import backtest as _bt
-            all_trades = list(_bt.last_trades() or [])
-        except Exception:                # noqa: BLE001 - 取不到就当没有明细
-            all_trades = []
+        all_trades = list(payload.get("trades") or [])
     trades_kept = all_trades[:MAX_TRADES]
-    trades_dropped = max(0, len(all_trades) - MAX_TRADES)
+    # 总笔数优先用回测给出的**真实值**：payload 里的 trades 可能已按页面上限截断，
+    # 按 len(all_trades) 重算会把「截了 14 万笔」误报成「没截」。
+    # 被截掉的笔数 = 总笔数 - 实际落盘笔数（两种取数路径下都成立）。
+    payload_total = payload.get("trades_total")
+    trades_total = int(payload_total) if payload_total is not None else len(all_trades)
+    trades_dropped = max(0, trades_total - len(trades_kept))
 
     return {
         "schema": SCHEMA,
         "generated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "result_id": payload.get("result_id"),
         "strategy": {
             "id": strat.get("id"),
             "name": strat.get("name"),
@@ -269,7 +277,7 @@ def build_report(payload: dict) -> dict:
         #   shares                按整手约束折算的股数，仅供可行性参考，**不影响净值**
         #   feasible/blocked_by   整手/涨跌停/停牌的可行性判定（**不改净值**）
         "trades": trades_kept,
-        "trades_total": len(all_trades),
+        "trades_total": trades_total,
         "trades_truncated": trades_dropped,
         "data_errors": list(errors[:50]),
         "env": {"python": "%d.%d.%d" % sys.version_info[:3],
