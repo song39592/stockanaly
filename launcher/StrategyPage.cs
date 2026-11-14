@@ -919,9 +919,11 @@ private void StRefreshCurStrategy()
             AddRow(stack, Row(MiniBtn("生成当前推荐", delegate { StRunReco(); }, 130),
                 _stRecoStatus = Mute(Lbl("尚未生成"))));
 
-            _stRecoCards = StCardRow();
+            // 卡片行放宽上限：七张 140 宽的卡要排成一行（900 装不下 7×148=1036）。
+            _stRecoCards = StCardRow(1400);
             AddRow(stack, _stRecoCards);
 
+            // ---- 三张表保持纵向堆叠（用户要求「其他不需要动」）----
             TableLayoutPanel b1;
             var g1 = Group("买入（执行日建仓）", out b1);
             _stBuyGroup = g1;
@@ -1193,13 +1195,16 @@ private void StRefreshCurStrategy()
             }
             var s = (Dictionary<string, object>)j["summary"];
             _stRecoCards.Controls.Clear();
-            _stRecoCards.Controls.Add(StKpiCard("买入", J.Int(s["buy_count"]) + " 只"));
-            _stRecoCards.Controls.Add(StKpiCard("买入金额", J.Money(J.Num(s["buy_amount"]))));
-            _stRecoCards.Controls.Add(StKpiCard("卖出", J.Int(s["sell_count"]) + " 只"));
-            _stRecoCards.Controls.Add(StKpiCard("卖出金额", J.Money(J.Num(s["sell_amount"]))));
-            _stRecoCards.Controls.Add(StKpiCard("持股", J.Int(s["hold_count"]) + " 只"));
-            _stRecoCards.Controls.Add(StKpiCard("持股市值", J.Money(J.Num(s["hold_amount"]))));
-            _stRecoCards.Controls.Add(StKpiCard("合计浮盈亏", J.Money(J.Num(s["hold_pnl"]))));
+            // ⚠️ 卡片宽度收窄（140）是为了让**七张卡排一行**：原来 150×7 放不下，
+            // 「持股市值」「合计浮盈亏」被挤到第二行，页面因此高出一截（用户反馈：
+            // 「持股市值和浮动盈也放在一行里」）。
+            _stRecoCards.Controls.Add(StKpiCard("买入", J.Int(s["buy_count"]) + " 只", 140));
+            _stRecoCards.Controls.Add(StKpiCard("买入金额", J.Money(J.Num(s["buy_amount"])), 140));
+            _stRecoCards.Controls.Add(StKpiCard("卖出", J.Int(s["sell_count"]) + " 只", 140));
+            _stRecoCards.Controls.Add(StKpiCard("卖出金额", J.Money(J.Num(s["sell_amount"])), 140));
+            _stRecoCards.Controls.Add(StKpiCard("持股", J.Int(s["hold_count"]) + " 只", 140));
+            _stRecoCards.Controls.Add(StKpiCard("持股市值", J.Money(J.Num(s["hold_amount"])), 140));
+            _stRecoCards.Controls.Add(StKpiCard("合计浮盈亏", J.Money(J.Num(s["hold_pnl"])), 140));
             Skin(_stRecoCards);
 
             StFillRecoGrid(_stBuyGrid, j["buy"], false);
@@ -1395,14 +1400,14 @@ private void StRefreshCurStrategy()
             };
         }
 
-        private static FlowLayoutPanel StCardRow()
+        private static FlowLayoutPanel StCardRow(int maxWidth = 900)
         {
             var f = new FlowLayoutPanel();
             f.FlowDirection = FlowDirection.LeftToRight;
             f.WrapContents = true;
             f.AutoSize = true;
             f.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            f.MaximumSize = new Size(900, 0);
+            f.MaximumSize = new Size(maxWidth, 0);
             f.Margin = new Padding(0, 0, 0, 8);
             return f;
         }
@@ -2639,10 +2644,10 @@ private void StRefreshCurStrategy()
             return J.Pct100Plain(J.Num(v));
         }
 
-        private static Panel StKpiCard(string title, string value)
+        private static Panel StKpiCard(string title, string value, int width = 150)
         {
             var card = new Panel();
-            card.Width = 150;
+            card.Width = width;
             card.Height = 66;
             card.Margin = new Padding(0, 0, 8, 0);
             card.BorderStyle = BorderStyle.FixedSingle;
