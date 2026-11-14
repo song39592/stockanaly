@@ -17,6 +17,9 @@
               "initial_capital","commission","stamp_duty","slippage",
               "min_commission","lot_size","benchmark","universe_mode",
               "equity_model","per_stock_truncated","feasibility","warnings"},
+              # feasibility.build_failures = 建仓失败明细（隔日一字涨停 → 买不进）：
+              #   {count, shown, dropped, items[{code,name,date,signal_date,reason}]}
+              #   这些建仓**没有成交**，所以不在 trades 明细里（那里一行 = 一次买卖）。
     "dates": [YYYY-MM-DD, ...],
     "equity": [float|null, ...],               # 组合净值（初始资金起）
     "equity_benchmark": [float|null,...]|None, # 基准净值（默认等权全池买入持有）
@@ -235,6 +238,10 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
     # 只按它的代码查名 → 不在汇总里的那只票，成交明细里就显示「—」。
     name_codes = {x["code"] for x in per_stock}
     name_codes.update(t["code"] for t in trades)
+    # 建仓失败的票也要查名：它们不在 per_stock / trades 里（没成交），
+    # 不查名的话明细里只能显示一串代码。
+    name_codes.update(str(b.get("code") or "") for b in (core.get("build_failures") or []))
+    name_codes.update(str(d.get("code") or "") for d in (core.get("sell_deferrals") or []))
     names = _load_names(list(name_codes))
     for item in per_stock:
         item["name"] = names.get(item["code"]) or None
@@ -249,7 +256,11 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
 
     # 可行性汇总（整手/涨跌停/停牌 —— 只影响明细、不影响净值，单列成一组指标）
     feas = _feasibility_summary(trades, len(changed),
-                                fill_blocked=core.get("fill_blocked"))
+                                fill_blocked=core.get("fill_blocked"),
+                                build_failures=_build_failure_items(
+                                    core.get("build_failures") or [], names),
+                                sell_deferrals=_sell_deferral_items(
+                                    core.get("sell_deferrals") or [], names))
 
     global _BT_TRADES
     # 全量逐笔明细**只**给报告落盘用（`last_trades()`）；响应里带的是上面裁过的内联版。
@@ -323,8 +334,70 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
     }
 
 
+MAX_BUILD_FAILURES = 2000     # 建仓失败明细的下发上限（截断必须标注，否则等于静默改数据）
+MAX_SELL_DEFERRALS = 300      # 清仓延后明细的下发上限（同上）
+
+
+def _sell_deferral_items(items: list[dict], names: dict) -> dict:
+    """清仓延后明细 → 响应体（补名称 + 标注截断）。
+
+    清仓延后 = **隔日一字跌停**：计划清仓那天卖不掉 → 顺延到第一个能卖的日子
+    （开板那天）按**当天收盘价**成交。这些清仓没有在计划日成交，
+    trades 明细里只看得见「最终那一笔」，看不出「本来是哪天要卖的」。
+    """
+    total = len(items)
+    ordered = sorted(items,
+                     key=lambda x: (str(x.get("date") or x.get("planned_date") or ""),
+                                    str(x.get("code") or "")),
+                     reverse=True)
+    out = []
+    for it in ordered[:MAX_SELL_DEFERRALS]:
+        code = str(it.get("code") or "")
+        out.append({
+            "code": code,
+            "name": names.get(code) or None,
+            "planned_date": str(it.get("planned_date") or ""),   # 原本要清仓那天
+            "date": str(it.get("date") or ""),                    # 实际卖出日（开板那天）
+            "price": it.get("price"),                            # 卖出价 = 实际卖出日收盘价
+            "deferred_days": int(it.get("deferred_days") or 0),   # 被挡了几天
+            "status": str(it.get("status") or ""),                # sold / cancelled
+            "reason": str(it.get("reason") or ""),
+        })
+    return {"count": total, "shown": len(out),
+            "dropped": total - len(out), "items": out}
+
+
+def _build_failure_items(items: list[dict], names: dict) -> dict:
+    """建仓失败明细 → 响应体（补名称 + 标注截断）。
+
+    建仓失败 = **隔日一字涨停**：信号日发出买入，执行日（隔日）一字板买不进
+    → 该份额度当日就是现金（不重分配给其他票）、不计收益。
+    这些建仓**根本没有成交**，所以不会出现在 trades 明细里（那里一行 = 一次买卖），
+    只有总数的话说不清"哪只票、哪天、为什么没买成" → 这里给逐条明细。
+    """
+    total = len(items)
+    # 按执行日倒序（新的在前），与成交明细的排序口径一致
+    ordered = sorted(items,
+                     key=lambda x: (str(x.get("date") or ""), str(x.get("code") or "")),
+                     reverse=True)
+    out = []
+    for it in ordered[:MAX_BUILD_FAILURES]:
+        code = str(it.get("code") or "")
+        out.append({
+            "code": code,
+            "name": names.get(code) or None,
+            "date": str(it.get("date") or ""),
+            "signal_date": str(it.get("signal_date") or ""),
+            "reason": str(it.get("reason") or ""),
+        })
+    return {"count": total, "shown": len(out),
+            "dropped": total - len(out), "items": out}
+
+
 def _feasibility_summary(trades: list[dict], n_checked: int,
-                         fill_blocked: dict | None = None) -> dict:
+                         fill_blocked: dict | None = None,
+                         build_failures: dict | None = None,
+                         sell_deferrals: dict | None = None) -> dict:
     """整手 / 涨跌停 / 停牌的可行性汇总（**独立于净值的一组指标**）。
 
     口径提醒：`equity` 已含「一字板买不进即空仓、跌停卖不出即延后清仓」；
@@ -354,6 +427,14 @@ def _feasibility_summary(trades: list[dict], n_checked: int,
         "blocked_counts": blocked,
         "fill_blocked": {"buy_blocked": int(fb.get("buy_blocked") or 0),
                          "sell_deferred": int(fb.get("sell_deferred") or 0)},
+        # 建仓失败（隔日一字涨停 → 买不进）：逐条明细 + 总数。
+        # 净值里已经含这个约束，这里只负责把"没买成的那些"说清楚。
+        "build_failures": build_failures or {"count": 0, "shown": 0,
+                                             "dropped": 0, "items": []},
+        # 清仓延后明细（隔日一字跌停 → 卖不出，顺延到开板日按收盘价卖出）：
+        # 与 build_failures 对称的一组。
+        "sell_deferrals": sell_deferrals or {"count": 0, "shown": 0,
+                                             "dropped": 0, "items": []},
         "note": "净值已含一字板约束：一字涨停买不进即空仓（该份额度当日为现金、"
                 "不重分配），一字跌停卖不出即延后清仓；整手/停牌仍只影响明细可行性",
     }

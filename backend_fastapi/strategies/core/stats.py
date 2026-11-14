@@ -50,6 +50,7 @@
 """
 from __future__ import annotations
 
+import bisect
 import math
 import warnings
 
@@ -206,6 +207,23 @@ def _is_limit_down(hi: float, lo: float, prev_close: float, thr: float) -> bool:
         return False
     _, dn = _limit_prices(prev_close, thr)
     return dn > 0 and hi <= dn
+
+
+def _close_at_or_before(rclose: pd.Series, raw_dates: list[str], day: str):
+    """day 当天（或之前最后一个有效交易日）的未复权收盘价。
+
+    卖出日停牌 → 当天没有 K 线，取该日之前最后一个有效收盘价
+    （与成交明细「退到最后一个有效交易日」的取价口径一致）。
+    """
+    if not day:
+        return None
+    i = bisect.bisect_right(raw_dates, day) - 1
+    if i < 0:
+        return None
+    try:
+        return float(rclose.iloc[i])
+    except (IndexError, TypeError, ValueError):
+        return None
 
 
 def _window(sl: pd.Series | np.ndarray, tail: int | None):
@@ -382,6 +400,14 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
     #   按"目标权重跳升"判定会漏掉这种连续买不进的情况，等于默认买进了。
     n_buy_blocked = 0        # 因一字涨停买不进、**根本没发生**的建仓次数
     n_sell_deferred = 0       # 因一字跌停卖不出、清零被延后的次数
+    # 建仓失败事件（隔日一字涨停 → 买不进）：**逐笔**记下来。
+    # 这些建仓根本没有成交，所以不会出现在 trades 明细里（那里一行 = 一次买卖），
+    # 只有总数的话报告说不清"哪只票、哪天、为什么没买成" → 单独给明细。
+    blocked_builds: list[dict] = []
+    # 清仓延后事件（隔日一字跌停 → 卖不出）：**逐笔**记下来。
+    # 与建仓失败对称：这些清仓没有在计划日成交（延后到开板那天才卖），
+    # trades 明细里看不出「本来是哪天要卖的、最后哪天以什么价卖的」。
+    deferred_sells: list[dict] = []
     if raw_by_code:
         for j, code in enumerate(codes):
             raw = raw_by_code.get(code)
@@ -409,6 +435,8 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
                 return (_is_limit_up(hi, lo, pc, thr) if up
                         else _is_limit_down(hi, lo, pc, thr))
 
+            pending_sell = -1        # 被一字跌停挡住、尚未卖掉的清仓日（-1 = 没有待处理清仓）
+            sell_events: list[dict] = []      # 本票的清仓延后事件（价格在循环后统一补）
             for t in range(T):
                 held = actual[t - 1] if t > 0 else 0.0
                 tgt = float(target[t])
@@ -417,7 +445,26 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
                         # 建仓：买不进就是空仓（不重分配给其他票）
                         if _blocked(t, True):
                             n_buy_blocked += 1
+                            blocked_builds.append({
+                                "code": code,
+                                # 执行日 = 权重生效那天（= 信号日的**隔日**）；
+                                # 信号日 = common[t-1]（t_b 日发出的权重 t_b+1 才生效）
+                                "date": common[t],
+                                "signal_date": common[t - 1] if t > 0 else "",
+                                "reason": "limit_up",
+                            })
                             continue           # actual[t] 保持 0
+                    if pending_sell >= 0:
+                        # 延后清仓期间策略又改主意（重新要这只票）→ 这次清仓**没发生**
+                        sell_events.append({
+                            "code": code,
+                            "planned_date": common[pending_sell],   # 原本要清仓那天
+                            "date": "",                              # 没卖出去
+                            "deferred_days": t - pending_sell,        # 被挡了几天
+                            "status": "cancelled",
+                            "reason": "limit_down",
+                        })
+                        pending_sell = -1
                     actual[t] = tgt             # 有仓或买得进 → 按目标权重持有
                 else:
                     if held <= _EPS:
@@ -425,8 +472,29 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
                     if _blocked(t, False):
                         actual[t] = held        # 卖不掉 → 继续持有原权重
                         n_sell_deferred += 1
+                        if pending_sell < 0:
+                            pending_sell = t    # 第一次被挡 → 记下「原本要清仓那天」
                         continue
                     actual[t] = 0.0             # 卖得掉 → 清零
+                    if pending_sell >= 0:
+                        # 延后到今天才卖得掉 → **实际卖出日 = 今天**（开板那天），
+                        # 卖出价 = 当天收盘价（权重模型：权重变化一律按收盘价成交）
+                        sell_events.append({
+                            "code": code,
+                            "planned_date": common[pending_sell],
+                            "date": common[t],
+                            "deferred_days": t - pending_sell,
+                            "status": "sold",
+                            "reason": "limit_down",
+                        })
+                        pending_sell = -1
+            # 卖出价（未复权收盘价）：实际卖出日停牌没有 K 线时，
+            # 取该日之前最后一个有效收盘价（与成交明细的取价口径一致）。
+            raw_dates = sorted(rcols.keys())
+            for ev in sell_events:
+                if ev.get("date"):
+                    ev["price"] = _close_at_or_before(rclose, raw_dates, ev["date"])
+            deferred_sells.extend(sell_events)
             W[:, j] = actual
 
     rate = commission + slippage
@@ -698,6 +766,13 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
         # 它不是新增的对比维度，只是把已进净值的约束**说清楚**。
         "fill_blocked": {"buy_blocked": n_buy_blocked,
                          "sell_deferred": n_sell_deferred},
+        # 建仓失败明细（隔日一字涨停 → 买不进）：**逐笔**事件，与上面的计数同源。
+        # 已在净值里生效（该份额度当日就是现金、不重分配），这里只负责"说清楚"。
+        "build_failures": blocked_builds,
+        # 清仓延后明细（隔日一字跌停 → 卖不出）：与 build_failures 对称的一组事件。
+        # status = "sold"（延后后实际卖出，带实际卖出日与卖出价）
+        #        / "cancelled"（延后期间策略又改主意继续持有 → 没卖）
+        "sell_deferrals": deferred_sells,
     })
 
 

@@ -88,6 +88,13 @@ namespace StockPool
         private int _stTradesTruncated;                             // 被上限截掉的笔数
         private Label _stTradesTip;                                 // 表头上方的口径/笔数说明
 
+        // 建仓失败（隔日一字涨停 → 买不进）：这些建仓**没成交**，所以不在「成交明细」
+        // 里（那里一行 = 一次买卖）。**不单开明细表**、也**不加说明行** —— 逐条列进
+        // 成交明细表，收益 0、备注「买不进」，表本身就说清楚了。
+        // 清仓延后（隔日一字跌停 → 卖不出，顺延到开板日卖出）同理：那笔是**真成交了**，
+        // 只是晚了几天 → 写进成交明细那一行的备注列（延后几天 + 计划清仓日）。
+
+
         // ④ 近期策略成果（最近 N 个交易日回测）
         private WheelValueBox _stRecentDays;
         private Label _stRecentStatus;
@@ -879,7 +886,11 @@ private void StRefreshCurStrategy()
             }
             _stTradesTotal = Math.Max(_stTradesData.Count, (int)StM(j, "trades_total"));
             _stTradesTruncated = Math.Max(0, (int)StM(j, "trades_truncated"));
-            StFillTradesRows(_stRecentGrid, _stTradesData);
+            // 建仓失败（隔日一字涨停买不进）→ 逐条列进表里（收益 0、备注「买不进」）；
+            // 清仓延后（隔日一字跌停卖不出）→ 写进成交行的备注列。
+            var rScope = j["scope"] as Dictionary<string, object>;
+            StFillTradesRows(_stRecentGrid, _stTradesData,
+                StBuildFailItems(rScope), StSellDeferNotes(rScope));
             _stRecentStatus.Text = "完成（最近 " + (int)_stRecentDays.Value + " 个交易日）";
             _stRecentStatus.ForeColor = C.DownSoft;
             // 破产截断：账户净值跌破阈值后强制空仓，结果里明确标出，避免被当成「正常回测」
@@ -2153,12 +2164,15 @@ private void StRefreshCurStrategy()
             }
             _stTradesTotal = Math.Max(_stTradesData.Count, (int)StM(j, "trades_total"));
             _stTradesTruncated = Math.Max(0, (int)StM(j, "trades_truncated"));
-            StFillTradesRows(_stTradesGrid, _stTradesData);
-            if (_stTradesTip != null) _stTradesTip.Text = StTradesTipText();
 
             // 参与只数改从 scope.codes_count 取（metrics.num_stocks 已废止 —— 它其实是
             // 回测池大小，不是持仓数，显示出来会被当成「持仓了这么多只」）
             var scope = j["scope"] as Dictionary<string, object>;
+            // 买不进的建仓（隔日一字涨停买不进）→ 逐条列进表里（收益 0、备注「买不进」）；
+            // 清仓延后（隔日一字跌停卖不出）→ 写进成交行的备注列。都不另开表、不加说明行。
+            StFillTradesRows(_stTradesGrid, _stTradesData,
+                StBuildFailItems(scope), StSellDeferNotes(scope));
+            if (_stTradesTip != null) _stTradesTip.Text = StTradesTipText();
             int doneCount = scope != null ? J.Int(scope["codes_count"]) : 0;
             _stResultStatus.Text = "回测完成（参与统计 " + doneCount + " 只）";
             _stResultStatus.ForeColor = C.DownSoft;
@@ -2324,6 +2338,88 @@ private void StRefreshCurStrategy()
             if (_stTradesTip != null) _stTradesTip.Text = StTradesTipText();
         }
 
+        /// <summary>取「买不进的建仓」明细（后端已按执行日倒序、最多 2000 条）。</summary>
+        private static List<Dictionary<string, object>> StBuildFailItems(
+            Dictionary<string, object> scope)
+        {
+            var outList = new List<Dictionary<string, object>>();
+            if (scope == null) return outList;
+            var feas = scope["feasibility"] as Dictionary<string, object>;
+            if (feas == null) return outList;
+            var bf = feas["build_failures"] as Dictionary<string, object>;
+            if (bf == null) return outList;
+            var items = bf["items"] as System.Collections.IList;
+            if (items == null) return outList;
+            foreach (var it in items)
+            {
+                var d = it as Dictionary<string, object>;
+                if (d != null) outList.Add(d);
+            }
+            return outList;
+        }
+
+        /// <summary>
+        /// 买不进的建仓 → 成交明细里的**零收益行**：收益 0、盈亏 0、无买卖价，
+        /// 备注「买不进」。日期用**执行日**（本该买入的那天）。
+        /// </summary>
+        private static Dictionary<string, object> StBuildFailRow(
+            Dictionary<string, object> it)
+        {
+            return new Dictionary<string, object> {
+                {"code", Convert.ToString(J.Get(it, "code"))},
+                {"name", Convert.ToString(J.Get(it, "name"))},
+                {"buy_date", Convert.ToString(J.Get(it, "date"))},
+                {"ret", 0.0},
+                {"pnl", 0.0},
+                {"note", "买不进"},
+                {"build_fail", true},
+            };
+        }
+
+        /// <summary>清仓延后逐条明细（后端已按实际卖出日倒序）。</summary>
+        private static List<Dictionary<string, object>> StSellDeferItems(
+            Dictionary<string, object> scope)
+        {
+            var outList = new List<Dictionary<string, object>>();
+            if (scope == null) return outList;
+            var feas = scope["feasibility"] as Dictionary<string, object>;
+            if (feas == null) return outList;
+            var sd = feas["sell_deferrals"] as Dictionary<string, object>;
+            if (sd == null) return outList;
+            var items = sd["items"] as System.Collections.IList;
+            if (items == null) return outList;
+            foreach (var it in items)
+            {
+                var d = it as Dictionary<string, object>;
+                if (d != null) outList.Add(d);
+            }
+            return outList;
+        }
+
+        /// <summary>
+        /// 延后信息 → 成交明细「备注」列。key = 代码|实际卖出日。
+        /// cancelled（延后期间改主意继续持有、最终没卖）**不挂行** —— 它没有成交，
+        /// 那一行不存在，这种条目直接略过。
+        /// </summary>
+        private static Dictionary<string, string> StSellDeferNotes(
+            Dictionary<string, object> scope)
+        {
+            var map = new Dictionary<string, string>();
+            foreach (var it in StSellDeferItems(scope))
+            {
+                if (Convert.ToString(J.Get(it, "status")) == "cancelled") continue;
+                string code = Convert.ToString(J.Get(it, "code"));
+                string day = Convert.ToString(J.Get(it, "date"));
+                string planned = Convert.ToString(J.Get(it, "planned_date"));
+                int days = (int)StM(it, "deferred_days");
+                string key = code + "|" + day;
+                string txt = "延后 " + days + " 天（计划清仓 " + planned + "）";
+                if (map.ContainsKey(key)) map[key] = map[key] + "、" + txt;
+                else map[key] = txt;
+            }
+            return map;
+        }
+
         /// <summary>历史结果页：刷新已保存报告列表。</summary>
         private void StHistRefresh()
         {
@@ -2420,6 +2516,7 @@ private void StRefreshCurStrategy()
         // 当成「一笔买入」，于是「同一天买好几只、多数是老票再买」看着像
         // 「每天只买一只」（实测 JWZZ 3 年日均买 4.78 笔）。
         private const int ST_TRADES_MAX = 5000;   // 表格渲染上限（与后端 stats.MAX_TRADES_RESPONSE 同值）
+        private const int ST_BUILD_FAIL_ROWS_MAX = 2000;  // 「买不进」行的渲染上限（与后端 MAX_BUILD_FAILURES 同值）
 
         /// <summary>成交明细表的列（回测结果页 / 近期策略成果页共用一份）。</summary>
         private static List<GridColumn> StTradesColumns()
@@ -2434,6 +2531,7 @@ private void StRefreshCurStrategy()
                 new GridColumn("收益", "ret", true),
                 new GridColumn("盈亏", "pnl", true),
                 new GridColumn("持有天数", "holding_days", true),
+                new GridColumn("备注", "note"),      // 买不进的建仓：备注「买不进」
             };
         }
 
@@ -2452,31 +2550,63 @@ private void StRefreshCurStrategy()
             return s;
         }
 
-        private void StFillTradesRows(StockGrid grid, List<Dictionary<string, object>> rows)
+        /// <summary>
+        /// 填成交明细。
+        /// · <paramref name="buildFails"/>：**买不进的建仓**（隔日一字涨停）—— 没成交，
+        ///   但"想买没买成"必须看得见 → 逐条列进**同一张表**，收益 0、备注「买不进」。
+        /// · <paramref name="tradeNotes"/>：**清仓延后**的笔（隔日一字跌停卖不出 →
+        ///   顺延到开板日卖出）—— 那笔是**真成交了**，只是晚了几天 → 在它那一行的
+        ///   备注列写明延后几天、计划清仓日。
+        /// </summary>
+        private void StFillTradesRows(StockGrid grid, List<Dictionary<string, object>> rows,
+                                      List<Dictionary<string, object>> buildFails = null,
+                                      Dictionary<string, string> tradeNotes = null)
         {
             if (grid == null) return;
             grid.Rows.Clear();
-            if (rows == null || rows.Count == 0) return;
 
             // 按买入日期倒序（新的在前）+ 只留最近 ST_TRADES_MAX 笔。
             // 后端已按这个口径内联裁过，这里再兜一次：历史报告走的是落盘版
             // （code 序、最多 2 万笔），不裁会让 UI 卡住（实测填 2 万行要 4.3 秒）。
-            var ordered = new List<Dictionary<string, object>>(rows);
+            var ordered = new List<Dictionary<string, object>>();
+            if (rows != null) ordered.AddRange(rows);
             ordered.Sort(delegate(Dictionary<string, object> a, Dictionary<string, object> b)
             {
                 return string.Compare(StTradeBuyDate(b), StTradeBuyDate(a), StringComparison.Ordinal);
             });
-            int n = Math.Min(ordered.Count, ST_TRADES_MAX);
+            if (ordered.Count > ST_TRADES_MAX)
+                ordered.RemoveRange(ST_TRADES_MAX, ordered.Count - ST_TRADES_MAX);
+
+            // 再把买不进的建仓加进来（后端已按执行日倒序 → 取最近若干条）。
+            if (buildFails != null)
+            {
+                int k = 0;
+                foreach (var it in buildFails)
+                {
+                    if (it == null) continue;
+                    if (k >= ST_BUILD_FAIL_ROWS_MAX) break;
+                    ordered.Add(StBuildFailRow(it));
+                    k++;
+                }
+                // 合并后统一按买入日期倒序（买不进的按**执行日**排）。
+                ordered.Sort(delegate(Dictionary<string, object> a, Dictionary<string, object> b)
+                {
+                    return string.Compare(StTradeBuyDate(b), StTradeBuyDate(a), StringComparison.Ordinal);
+                });
+            }
+            if (ordered.Count == 0) return;
 
             grid.SuspendLayout();
-            for (int i = 0; i < n; i++)
+            for (int i = 0; i < ordered.Count; i++)
             {
                 var d = ordered[i];
                 string code = Convert.ToString(J.Get(d, "code"));
                 string name = Convert.ToString(J.Get(d, "name"));
                 if (string.IsNullOrEmpty(name)) name = "—";
+                bool isFail = J.Get(d, "build_fail") != null;   // 买不进的建仓
                 string buyDate = StTradeBuyDate(d);
-                string sellDate = StTradeSellDate(d);
+                // 买不进的没有卖出日 → 显示「—」，别写「未平仓」（它压根没建仓）
+                string sellDate = isFail ? "—" : StTradeSellDate(d);
                 var buyPxObj = J.Get(d, "buy_price");
                 var sellPxObj = J.Get(d, "sell_price");
                 var retObj = J.Get(d, "ret");
@@ -2487,13 +2617,26 @@ private void StRefreshCurStrategy()
                 string retTxt = (retObj != null) ? J.Pct100Plain(J.Num(retObj)) : "—";
                 string pnlTxt = (pnlObj != null) ? J.Num(pnlObj).ToString("F0") : "—";
                 string daysTxt = (daysObj != null) ? J.Int(daysObj).ToString() : "—";
-                int ri = grid.Rows.Add(code, name, buyDate, buyPx, sellDate, sellPx, retTxt, pnlTxt, daysTxt);
+                string note = Convert.ToString(J.Get(d, "note"));
+                // 清仓延后的那一笔：备注写「延后 N 天（计划清仓 YYYY-MM-DD）」
+                if (string.IsNullOrEmpty(note) && tradeNotes != null)
+                {
+                    string nkey = code + "|" + Convert.ToString(J.Get(d, "sell_date"));
+                    string tn;
+                    if (tradeNotes.TryGetValue(nkey, out tn)) note = tn;
+                }
+                int ri = grid.Rows.Add(code, name, buyDate, buyPx, sellDate, sellPx,
+                    retTxt, pnlTxt, daysTxt, note);
                 var row = grid.Rows[ri];
                 row.DefaultCellStyle.SelectionBackColor = _cPanel;
                 row.DefaultCellStyle.SelectionForeColor = _cText;
-                // 盈亏着色（红涨绿跌）：收益、盈亏两列按正负上色
-                if (retObj != null) row.Cells[6].Style.ForeColor = (J.Num(retObj) >= 0) ? C.Up : C.Down;
-                if (pnlObj != null) row.Cells[7].Style.ForeColor = (J.Num(pnlObj) >= 0) ? C.Up : C.Down;
+                // 盈亏着色（红涨绿跌）：收益、盈亏两列按正负上色。
+                // 买不进的收益恒为 0 → 不着色（0 不是涨也不是跌）。
+                if (!isFail)
+                {
+                    if (retObj != null) row.Cells[6].Style.ForeColor = (J.Num(retObj) >= 0) ? C.Up : C.Down;
+                    if (pnlObj != null) row.Cells[7].Style.ForeColor = (J.Num(pnlObj) >= 0) ? C.Up : C.Down;
+                }
             }
             grid.ResumeLayout();
             grid.Fit(240, 620);

@@ -59,6 +59,14 @@ POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / 
                                        trades_total / trades_truncated）
                                        逐笔口径、两个上限与「为什么内联下发」详见
                                        strategies/ARCHITECTURE.md「逐笔明细的下发口径」
+                                       scope.feasibility.build_failures = **建仓失败明细**
+                                       （隔日一字涨停 → 买不进；该份额度当日为现金、不计收益，
+                                        这些建仓没有成交，故不在 trades 明细里；
+                                        展示层逐条列进成交明细表：收益 0、备注「买不进」）
+                                       scope.feasibility.sell_deferrals = **清仓延后明细**
+                                       （隔日一字跌停 → 卖不出；顺延到开板那天按**收盘价**卖出，
+                                        带计划清仓日 / 实际卖出日 / 卖出价 / 被挡天数；
+                                        展示层并进成交明细那一行的备注列，不另开表）
 ```
 
 测试：
