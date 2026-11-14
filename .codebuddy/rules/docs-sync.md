@@ -16,7 +16,7 @@ enabled: true
 - `docs/requirement.md` 仍让读者去 `market-sector.html` 找盘面页，
   而该页早已删除并迁进 launcher 原生页；整个需求文档里没有指标、策略回测、筹码、
   历史下载、RPS 池这些已上线功能。
-- `docs/CONTRIBUTING.md` 写「验证后合并到 main」，`git-safety.md` 写「禁止提交/推送到 main」——
+- `docs/CONTRIBUTING.md` 写「验证后合并到 main」，`git-workflow.md` 写「禁止提交/推送到 main」——
   不是重复，是**矛盾**，读哪份都会走偏。
 
 根因不是「忘了改」，是**没有把「改代码时必须同步哪些文档」写进会被强制想起的地方**。

@@ -197,19 +197,20 @@ C:\Users\Admin\Desktop\stockanaly-main\agent_dsh\.env         →  DEEPSEEK_API_
 
 **工程纪律**（改代码前必读，常驻加载）：
 
-- [.codebuddy/rules/project-structure.md](.codebuddy/rules/project-structure.md) — **目录结构权威地图**：四个部件、backend 分层与路由前缀、单一来源清单、改动同步矩阵
-- [.codebuddy/rules/add-indicator-strategy.md](.codebuddy/rules/add-indicator-strategy.md) — 新增指标 / 策略的规程
+- [.codebuddy/rules/engineering-standards.md](.codebuddy/rules/engineering-standards.md) — **全局技术规范**：选实现方式的优先级、抽象的判据、防守性改动的评估
+- [.codebuddy/rules/project-structure.md](.codebuddy/rules/project-structure.md) — **目录结构权威地图**：四个部件、backend 分层与路由前缀、单一来源清单
+- [.codebuddy/rules/backend-conventions.md](.codebuddy/rules/backend-conventions.md) — 后端约定：分层硬约束、插件包注册契约、口径的唯一实现处
+- [.codebuddy/rules/frontend-conventions.md](.codebuddy/rules/frontend-conventions.md) — 前端约定：控件文本不得当传参通道、隐藏≠清空
+- [.codebuddy/rules/git-workflow.md](.codebuddy/rules/git-workflow.md) — Git 工作流：提交/推送授权、分支规范、推送前影响面自检
 - [.codebuddy/rules/docs-sync.md](.codebuddy/rules/docs-sync.md) — 规则与说明文件的同步纪律
-- [.codebuddy/rules/cross-device-portability.md](.codebuddy/rules/cross-device-portability.md) — 跨设备可移植性
-- [.codebuddy/rules/git-safety.md](.codebuddy/rules/git-safety.md) — Git 提交与推送纪律
-- [.codebuddy/rules/launcher-ux.md](.codebuddy/rules/launcher-ux.md) — 启动器交互反馈
-- [.codebuddy/rules/powershell-authoring.md](.codebuddy/rules/powershell-authoring.md) — PowerShell 脚本写法
-- [.codebuddy/rules/engineering-discipline.md](.codebuddy/rules/engineering-discipline.md) — 动手前的通用工程纪律
+- [.codebuddy/rules/cross-device-portability.md](.codebuddy/rules/cross-device-portability.md) — 跨设备可移植性（脚本选型 / 编码 / 退出码 / 部署纪律）
 
 **说明文档**：
 
 - [docs/requirement.md](docs/requirement.md) — 功能范围现状
 - [docs/database.md](docs/database.md) — **数据库表结构权威**
+- [docs/engineering-standards.md](docs/engineering-standards.md) — 全局技术规范展开版与本项目佐例
+- [docs/launcher-ux.md](docs/launcher-ux.md) — 启动器交互反馈（Boot 遮罩 / 失败弹窗 / 重试）
 - [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — 版本号 / 备份策略
 - [docs/changelog.md](docs/changelog.md) — 版本变更日志（历史流水）
 - [backend_fastapi/README.md](backend_fastapi/README.md) — 后端接口与运维手册
@@ -217,7 +218,7 @@ C:\Users\Admin\Desktop\stockanaly-main\agent_dsh\.env         →  DEEPSEEK_API_
 
 ## 版本管理
 
-分支策略与提交规范见 [.codebuddy/rules/git-safety.md](.codebuddy/rules/git-safety.md)（**权威**）；
+分支策略与提交规范见 [.codebuddy/rules/git-workflow.md](.codebuddy/rules/git-workflow.md)（**权威**）；
 版本号与备份策略见 [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)。
 
 ## 注意事项
