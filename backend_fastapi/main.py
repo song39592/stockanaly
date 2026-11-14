@@ -245,6 +245,22 @@ try:
 except Exception as exc:                 # noqa: BLE001 - 预热失败不影响正常启动
     logger.debug("RPS 面板预热失败（不影响启动）：%s", exc)
 
+# 后台预热「全市场日 K 覆盖区间」聚合（约 1 秒）：单日策略页首次取日期上下文
+# 就要用它，而该接口在页面主路径上 —— 预热后首次打开策略页不必干等这一秒。
+try:
+    import features.download.service as _dl_service
+    _dl_service.warm_spans()
+except Exception as exc:                 # noqa: BLE001 - 预热失败不影响正常启动
+    logger.debug("覆盖区间预热失败（不影响启动）：%s", exc)
+
+# 后台预热交易日历（约 0.4 秒联网）：单日策略页要判「今天是不是交易日 / 收盘没有」，
+# 日历不可用时会退化成「按工作日」并进入 10 分钟冷却 —— 先预热掉这次网络往返。
+try:
+    from features.market import service as _market_service
+    _market_service.warm_trade_days()
+except Exception as exc:                 # noqa: BLE001 - 预热失败不影响正常启动
+    logger.debug("交易日历预热失败（不影响启动）：%s", exc)
+
 
 @app.get("/health")
 def health():

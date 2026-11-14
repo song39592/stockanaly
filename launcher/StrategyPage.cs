@@ -108,6 +108,13 @@ namespace StockPool
         private string _stRecoExecDate = "";     // 顺延后的真实执行日（非交易日→下一交易日）
         private bool _stRecoDateLoading;
         private bool _stRecoDateInit;           // 首次加载：把控件置为后端给的默认执行日
+        // 首次置值会触发 ValueChanged → 那次「按控件新值重查」是多余的
+        // （后端首次返回的上下文就是按默认执行日算的），用它抑制掉，省一次往返。
+        private bool _stRecoSkipValueChanged;
+        // 点「生成当前推荐」时上下文还没回来 → 不该让用户「点一次被拒、再点一次」：
+        // 记下意图，等日期上下文到位后自动续跑（_stRecoAutoRunRetry 限次，防跑飞）。
+        private bool _stRecoAutoRun;
+        private int _stRecoAutoRunRetry;
         // ⚠ 上下文与控件的**对应关系**：_stRecoExecDate 是异步回填的，填好之前它
         //   可能还停留在上一次的值上。记住它对应的是控件里的哪一天，提交时据此
         //   判断上下文是否已跟上 —— 否则会静默提交上一次的执行日，后端跑出同一份
@@ -911,7 +918,12 @@ private void StRefreshCurStrategy()
             // 后端仍会再校验一次，这里只是不让用户选到明显无意义的日子。
             _stRecoDate.MinDate = DateTime.Today.AddYears(-1);
             _stRecoDate.MaxDate = DateTime.Today.AddDays(10);
-            _stRecoDate.ValueChanged += delegate { StLoadRecoDates(); };
+            _stRecoDate.ValueChanged += delegate {
+                // 首次把控件置为默认执行日时的那次变更：响应里已经带着这一天的
+                // 上下文，不必再按新值重查一遍。
+                if (_stRecoSkipValueChanged) { _stRecoSkipValueChanged = false; return; }
+                StLoadRecoDates();
+            };
             _stRecoDateHint = Mute(Lbl("正在获取交易日信息…"));
             _stRecoDateHintBase = _stRecoDateHint.ForeColor;   // 提示行的常态色（异常时改红）
             AddRow(stack, Row(Lbl("目标执行日"), _stRecoDate, _stRecoDateHint));
@@ -919,9 +931,11 @@ private void StRefreshCurStrategy()
             AddRow(stack, Row(MiniBtn("生成当前推荐", delegate { StRunReco(); }, 130),
                 _stRecoStatus = Mute(Lbl("尚未生成"))));
 
-            _stRecoCards = StCardRow();
+            // 卡片行放宽上限：七张 140 宽的卡要排成一行（900 装不下 7×148=1036）。
+            _stRecoCards = StCardRow(1400);
             AddRow(stack, _stRecoCards);
 
+            // ---- 三张表保持纵向堆叠（用户要求「其他不需要动」）----
             TableLayoutPanel b1;
             var g1 = Group("买入（执行日建仓）", out b1);
             _stBuyGroup = g1;
@@ -973,7 +987,7 @@ private void StRefreshCurStrategy()
         /// <summary>
         /// 拉取「目标执行日」上下文：默认日期、当前选中日期对应的信号日、
         /// 该信号日数据是否齐。日期控件任选一天，所以每次变更都要重问后端
-        /// （交易日历与收盘时点只在后端判一次，前端不自己推）。
+        /// （交易日历与收盘时点只在后端判一次）。
         /// </summary>
         private void StLoadRecoDates()
         {
@@ -982,15 +996,23 @@ private void StRefreshCurStrategy()
             //    第二次的变更会被这里的 return 吃掉 → `_stRecoExecDate` 停留在上一次的
             //    执行日 → 点「生成当前推荐」提交的是旧日期 → 后端跑出同一份结果 →
             //    用户看到「表格没更新」（实测现象②）。改成「记下最新请求，取完再补一次」。
-            _stRecoDatePending = _stRecoDate.Value.ToString("yyyy-MM-dd");
+            //
+            // ⚠ **首次不带 target**：还不知道默认执行日，带 target=今天 会拿到
+            //    「今天若非交易日则顺延」的另一套语义，还得再取一次（实测两次往返，
+            //    用户干等一倍时间）。不带 target 时后端直接按**默认执行日**算好
+            //    exec / signal / 数据齐否，一次往返就够。
+            bool first = !_stRecoDateInit;
+            string atCall = _stRecoDate.Value.ToString("yyyy-MM-dd");
+            string picked = first ? "" : atCall;
+            _stRecoDatePending = atCall;
             if (_stRecoDateLoading) return;
             _stRecoDateLoading = true;
-            string picked = _stRecoDatePending;
             RunUi<Dictionary<string, object>>(
                 delegate
                 {
                     string body;
-                    string url = "http://127.0.0.1:8000/api/history/download/date-context?target=" + picked;
+                    string url = "http://127.0.0.1:8000/api/history/download/date-context"
+                        + (picked.Length > 0 ? "?target=" + picked : "");
                     if (!GetText(url, 20000, out body))
                         return null;
                     try { return J.Ser().Deserialize<Dictionary<string, object>>(body); }
@@ -1016,23 +1038,40 @@ private void StRefreshCurStrategy()
                         }
                         catch { }
                     }
-                    // 首次加载：把控件置为后端给的默认执行日（收盘前=今天，
-                    // 收盘后=下一交易日）。置值会再次触发 ValueChanged → 重新拉一次，
-                    // 用 _stRecoDateInit 抑制，避免「拉到响应又改控件」的乒乓。
-                    if (!_stRecoDateInit && def.Length > 0)
+                    // 取的过程中用户又改了日期 → 这次的结果对不上控件，丢掉并补取一次
+                    if (_stRecoDate.Value.ToString("yyyy-MM-dd") != atCall)
                     {
+                        // 首次请求途中用户已选了别的日期 → 认定「用户有明确选择」，
+                        // 后续一律按 target 查，别再拿默认执行日覆盖他的选择。
+                        if (first) _stRecoDateInit = true;
+                        StLoadRecoDates();
+                        return;
+                    }
+                    if (first)
+                    {
+                        // 首次：把控件置为后端给的默认执行日，并**直接用这份上下文**
+                        // （后端就是按这一天算的信号日与数据齐否，不用再问一遍）。
                         _stRecoDateInit = true;
+                        bool applied = false;
                         try
                         {
                             DateTime d = DateTime.Parse(def);
                             if (d >= _stRecoDate.MinDate && d <= _stRecoDate.MaxDate)
-                                _stRecoDate.Value = d;      // 触发再次加载（正常）
+                            {
+                                _stRecoSkipValueChanged = true;   // 设值会触发 ValueChanged
+                                _stRecoDate.Value = d;
+                                applied = true;
+                            }
                         }
                         catch { }
-                    }
-                    // 取的过程中日期又变了 → 这次的结果已经对不上控件，丢掉并补取一次
-                    if (_stRecoDatePending != picked)
-                    {
+                        _stRecoSkipValueChanged = false;   // 没触发（值相同）也别留给下一次真实变更
+                        if (applied)
+                        {
+                            _stRecoDatePending = def;
+                            StApplyRecoDateContext(j, def);
+                            return;
+                        }
+                        // 默认执行日不可用（越界）→ 退回按控件当前值重查
                         StLoadRecoDates();
                         return;
                     }
@@ -1053,6 +1092,13 @@ private void StRefreshCurStrategy()
             _stRecoPickedDate = picked ?? "";
             _stRecoCtxDate = picked ?? "";    // 记下这次上下文对应的是控件里的哪一天
             StRenderRecoDateHint();
+            // 用户刚才点过「生成当前推荐」但上下文还没到 → 现在自动续跑，
+            // 免得让人「点一次被拒、再点一次」。
+            if (_stRecoAutoRun)
+            {
+                _stRecoAutoRun = false;
+                StRunReco();
+            }
         }
 
         /// <summary>渲染提示行：信号日 → 执行日、数据齐否，以及「结果是否已过期」。</summary>
@@ -1122,12 +1168,27 @@ private void StRefreshCurStrategy()
             if (_stRecoExecDate.Length == 0 || _stRecoCtxDate != pickedNow)
             {
                 StJobRelease();               // 释放占位，别把闸门卡死
+                // ⚠ 别让用户「点一次被拒、再点一次」：上下文到位后**自动续跑**。
+                //    （此前只提示「请稍候再点」，用户不知道要点第几下，体验上
+                //    就成了「日期怎么这么难获取」。）
+                if (_stRecoAutoRunRetry < 3)
+                {
+                    _stRecoAutoRunRetry++;
+                    _stRecoAutoRun = true;
+                    StJobText("正在获取目标执行日信息，稍后自动运行", true);
+                    SetErr(_stRecoStatus, "正在获取目标执行日信息（" + pickedNow
+                        + "），稍后自动运行");
+                    StLoadRecoDates();         // 取到就自动续跑
+                    return;
+                }
                 StJobText("目标执行日信息还在刷新，请稍候再点「生成当前推荐」", true);
                 SetErr(_stRecoStatus, "目标执行日信息还在刷新（" + pickedNow
                     + "），请稍候再点「生成当前推荐」");
                 StLoadRecoDates();             // 立刻补取一次
                 return;
             }
+            _stRecoAutoRun = false;
+            _stRecoAutoRunRetry = 0;
             string targetDate = _stRecoExecDate;
             string signalDate = _stRecoSignalDate;
             // 第 24 项：与回测共用同一个数据新鲜度守卫。
@@ -1193,13 +1254,16 @@ private void StRefreshCurStrategy()
             }
             var s = (Dictionary<string, object>)j["summary"];
             _stRecoCards.Controls.Clear();
-            _stRecoCards.Controls.Add(StKpiCard("买入", J.Int(s["buy_count"]) + " 只"));
-            _stRecoCards.Controls.Add(StKpiCard("买入金额", J.Money(J.Num(s["buy_amount"]))));
-            _stRecoCards.Controls.Add(StKpiCard("卖出", J.Int(s["sell_count"]) + " 只"));
-            _stRecoCards.Controls.Add(StKpiCard("卖出金额", J.Money(J.Num(s["sell_amount"]))));
-            _stRecoCards.Controls.Add(StKpiCard("持股", J.Int(s["hold_count"]) + " 只"));
-            _stRecoCards.Controls.Add(StKpiCard("持股市值", J.Money(J.Num(s["hold_amount"]))));
-            _stRecoCards.Controls.Add(StKpiCard("合计浮盈亏", J.Money(J.Num(s["hold_pnl"]))));
+            // ⚠️ 卡片宽度收窄（140）是为了让**七张卡排一行**：原来 150×7 放不下，
+            // 「持股市值」「合计浮盈亏」被挤到第二行，页面因此高出一截（用户反馈：
+            // 「持股市值和浮动盈也放在一行里」）。
+            _stRecoCards.Controls.Add(StKpiCard("买入", J.Int(s["buy_count"]) + " 只", 140));
+            _stRecoCards.Controls.Add(StKpiCard("买入金额", J.Money(J.Num(s["buy_amount"])), 140));
+            _stRecoCards.Controls.Add(StKpiCard("卖出", J.Int(s["sell_count"]) + " 只", 140));
+            _stRecoCards.Controls.Add(StKpiCard("卖出金额", J.Money(J.Num(s["sell_amount"])), 140));
+            _stRecoCards.Controls.Add(StKpiCard("持股", J.Int(s["hold_count"]) + " 只", 140));
+            _stRecoCards.Controls.Add(StKpiCard("持股市值", J.Money(J.Num(s["hold_amount"])), 140));
+            _stRecoCards.Controls.Add(StKpiCard("合计浮盈亏", J.Money(J.Num(s["hold_pnl"])), 140));
             Skin(_stRecoCards);
 
             StFillRecoGrid(_stBuyGrid, j["buy"], false);
@@ -1395,14 +1459,14 @@ private void StRefreshCurStrategy()
             };
         }
 
-        private static FlowLayoutPanel StCardRow()
+        private static FlowLayoutPanel StCardRow(int maxWidth = 900)
         {
             var f = new FlowLayoutPanel();
             f.FlowDirection = FlowDirection.LeftToRight;
             f.WrapContents = true;
             f.AutoSize = true;
             f.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            f.MaximumSize = new Size(900, 0);
+            f.MaximumSize = new Size(maxWidth, 0);
             f.Margin = new Padding(0, 0, 0, 8);
             return f;
         }
@@ -2639,10 +2703,10 @@ private void StRefreshCurStrategy()
             return J.Pct100Plain(J.Num(v));
         }
 
-        private static Panel StKpiCard(string title, string value)
+        private static Panel StKpiCard(string title, string value, int width = 150)
         {
             var card = new Panel();
-            card.Width = 150;
+            card.Width = width;
             card.Height = 66;
             card.Margin = new Padding(0, 0, 8, 0);
             card.BorderStyle = BorderStyle.FixedSingle;

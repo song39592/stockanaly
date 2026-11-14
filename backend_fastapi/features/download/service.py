@@ -1018,28 +1018,28 @@ def _expected_data_day(grace_days: int = 0) -> str | None:
     return None
 
 
-def _market_has_closed_today() -> bool:
+def _market_has_closed_today(days: set[str] | None = None) -> bool:
     """今天是否已经收盘（非交易日直接算「已收盘」——今天本就没有新数据）。"""
     now = dt.datetime.now()
     try:
         from features.market.service import _a_share_is_trade_day
-        if not _a_share_is_trade_day(now):
+        if not _a_share_is_trade_day(now, days):
             return True
     except Exception:                           # noqa: BLE001 - 日历不可用则按时间判断
         pass
     return (now.hour, now.minute) >= (15, 0)
 
 
-def _is_trade_day(day: dt.date) -> bool:
-    """是否交易日：优先交易日历，取不到退化为「工作日」。"""
+def _is_trade_day(day: dt.date, days: set[str] | None = None) -> bool:
+    """是否交易日：优先交易日历，取不到退化为「工作日」。
+
+    `days` = 已取好的日历快照（一次请求内复用，避免重复联网）。
+    """
     try:
-        from features.market.service import _a_share_trade_days
-        days = _a_share_trade_days()
-    except Exception:                           # noqa: BLE001
-        days = set()
-    if days:
-        return day.isoformat() in days
-    return day.weekday() < 5
+        from features.market.service import _a_share_is_trade_day
+        return _a_share_is_trade_day(dt.datetime.combine(day, dt.time()), days)
+    except Exception:                           # noqa: BLE001 - 日历不可用按工作日退化
+        return day.weekday() < 5
 
 
 def _median_day(days: list[str]) -> str | None:
@@ -1057,26 +1057,43 @@ def _median_day(days: list[str]) -> str | None:
 
 # 覆盖区间与「陈旧度」都要用全库聚合，同一轮刷新里复用同一份结果：
 SPAN_CACHE_TTL = 60.0
-_span_cache: dict[str, tuple[float, dict[str, str]]] = {}
+_span_cache: tuple[float, dict[str, str], dict[str, str]] | None = None
 
 
-def _span_dates(kind: str, loader) -> dict[str, str]:
-    """`code_latest_dates` / `code_earliest_dates` 的带缓存包装。
+def _spans() -> tuple[dict[str, str], dict[str, str]]:
+    """(每只票最新日 K 日期, 每只票最早日 K 日期) —— **一次全表扫描**取全。
 
-    两者都是全表聚合（几千只 × 各年份分片），而「陈旧度」和「覆盖区间」
-    在一次刷新里都要用到 latest。缓存 TTL 很短：只为消掉同一次刷新里的
-    重复扫描，代价是下载过程中覆盖区间最多滞后 SPAN_CACHE_TTL 秒。
+    两端本来是两次独立的全表聚合（实测各 ~1.1 秒），而「单日策略日期上下文」
+    两个都要 → 白等一倍时间。合并成一次 `GROUP BY code` 后只剩一次扫描，
+    单独只要一端的调用点成本不变（同一趟扫描顺带算出另一端而已）。
+
+    缓存 TTL 很短：只为消掉同一次刷新里的重复扫描，代价是下载过程中
+    覆盖区间最多滞后 SPAN_CACHE_TTL 秒。
     """
-    hit = _span_cache.get(kind)
+    global _span_cache
     now = time.time()
-    if hit and now - hit[0] < SPAN_CACHE_TTL:
-        return hit[1]
+    if _span_cache and now - _span_cache[0] < SPAN_CACHE_TTL:
+        return _span_cache[1], _span_cache[2]
     try:
-        result = loader()
+        latest, earliest = price_store.code_date_spans()
     except Exception:                             # noqa: BLE001 - 聚合失败按无数据处理
-        return {}
-    _span_cache[kind] = (now, result)
-    return result
+        return {}, {}
+    _span_cache = (now, latest, earliest)
+    return latest, earliest
+
+
+def warm_spans() -> None:
+    """后台预热覆盖区间聚合（不阻塞调用方）。
+
+    单日策略页首次取「日期上下文」就要用这份聚合（一次全表扫描 ~1 秒），
+    而它在页面主路径上：预热掉这一秒，用户首次打开策略页就不用干等。
+    """
+    def _run():
+        try:
+            _spans()
+        except Exception:                         # noqa: BLE001 - 预热失败不影响正常请求
+            pass
+    threading.Thread(target=_run, name="span-warm", daemon=True).start()
 
 
 def _coverage_span() -> tuple[str | None, str | None]:
@@ -1087,8 +1104,7 @@ def _coverage_span() -> tuple[str | None, str | None]:
     也不用交集（交集会被那一只最短的票压到很窄）。因此两端各取**中位数**：
     一半股票比它早、一半比它晚，代表「典型水平」的覆盖边界。
     """
-    earliest = _span_dates("earliest", price_store.code_earliest_dates)
-    latest = _span_dates("latest", price_store.code_latest_dates)
+    latest, earliest = _spans()
     shared = set(earliest) & set(latest)
     if not shared:
         return None, None
@@ -1106,7 +1122,7 @@ def _downloaded_staleness() -> tuple[int, int, list[str], str | None]:
     最多让阈值偏松 4 天（长假后连续几个交易日都被判成「不陈旧」）。
     现改为按 `_expected_data_day()`给出的应有日期逐票判定。
     """
-    latest = _span_dates("latest", price_store.code_latest_dates)
+    latest, earliest = _spans()
     if not latest:
         return 0, 0, [], None
     expected = _expected_data_day()
@@ -1114,7 +1130,6 @@ def _downloaded_staleness() -> tuple[int, int, list[str], str | None]:
         # 交易日历与本地数据都给不出基准时，退回原先的自然日口径
         expected = (dt.date.today() - dt.timedelta(days=FRESHNESS_DAYS)).isoformat()
     expected_date = dt.date.fromisoformat(expected) if expected else None
-    earliest = _span_dates("earliest", price_store.code_earliest_dates)
     # 停牌 / 退市票长期落后是「补也补不到」，不计入陈旧，避免拖垮自动更新资格。
     #
     # ⚠️ 两套判定都要看（2026-11-09 实测）：
@@ -1240,21 +1255,34 @@ def _options_for(mode: str, *, source: str = SOURCE_ONLINE, start_date: str | No
     }
 
 
-def _prev_trade_day(day: dt.date) -> dt.date:
+def _trade_days_snapshot() -> set[str]:
+    """交易日历**快照**：整个请求只取一次，供所有交易日判定复用。
+
+    没有它时，一次 `trading_day_context` 会调十几次 `_is_trade_day`，
+    而每次都要问一遍日历 —— 网络不通时就是十几次 × 15 秒硬超时。
+    """
+    try:
+        from features.market.service import _a_share_trade_days
+        return _a_share_trade_days()
+    except Exception:                               # noqa: BLE001 - 日历不可用按工作日退化
+        return set()
+
+
+def _prev_trade_day(day: dt.date, days: set[str] | None = None) -> dt.date:
     """`day` 之前（不含）最近一个交易日；日历不可用时 `_is_trade_day` 退化为工作日。"""
     cur = day - dt.timedelta(days=1)
     for _ in range(14):
-        if _is_trade_day(cur):
+        if _is_trade_day(cur, days):
             return cur
         cur -= dt.timedelta(days=1)
     return day - dt.timedelta(days=1)
 
 
-def _next_trade_day(day: dt.date) -> dt.date:
+def _next_trade_day(day: dt.date, days: set[str] | None = None) -> dt.date:
     """`day` 之后（不含）最近一个交易日；日历不可用时 `_is_trade_day` 退化为工作日。"""
     cur = day + dt.timedelta(days=1)
     for _ in range(14):
-        if _is_trade_day(cur):
+        if _is_trade_day(cur, days):
             return cur
         cur += dt.timedelta(days=1)
     return day + dt.timedelta(days=1)
@@ -1292,11 +1320,16 @@ def trading_day_context(target: str | None = None) -> dict[str, Any]:
 
     `data_ready` 按信号日判定全市场覆盖率（与 `freshness` 同样的 1% 容忍，
     停牌/退市股不会误伤）。
+
+    ⚠️ 这个接口在**页面主路径**上（进策略页就要拿默认执行日），必须快：
+    交易日历**只取一次快照**、全库聚合**只扫一遍**，否则网络抖动时
+    前端 20 秒超时拿不到日期（实测：日历失败不冷却时这个接口要 165 秒）。
     """
+    days = _trade_days_snapshot()             # 一次快照，下面所有判定共用
     today = dt.date.today()
-    is_trade = _is_trade_day(today)
-    closed = _market_has_closed_today()
-    next_day = _next_trade_day(today)
+    is_trade = _is_trade_day(today, days)
+    closed = _market_has_closed_today(days)
+    next_day = _next_trade_day(today, days)
 
     # 默认执行日：收盘前=今天，收盘后/非交易日=下一交易日
     default_exec = today if (is_trade and not closed) else next_day
@@ -1310,14 +1343,14 @@ def trading_day_context(target: str | None = None) -> dict[str, Any]:
     # 选到非交易日（如周六）时**顺延到下一个交易日**再执行 —— 周末不开市，
     # 「周六执行」没有意义。（不是往前顺：往前会用更早的信号，跟「目标执行日
     # 之后的市场」对不上。）
-    if not _is_trade_day(exec_day):
-        exec_day = _next_trade_day(exec_day)
+    if not _is_trade_day(exec_day, days):
+        exec_day = _next_trade_day(exec_day, days)
     # 信号日 = 执行日**之前**的最近交易日（执行日当天的收盘数据要到收盘后才有，
     # 用它当信号会取到尚不存在的数据）。
-    signal_day = _prev_trade_day(exec_day)
+    signal_day = _prev_trade_day(exec_day, days)
     sig_iso = signal_day.isoformat()
 
-    latest = _span_dates("latest", price_store.code_latest_dates)
+    latest, earliest = _spans()                # 一次扫描同时给出两端
     total = len(latest)
     tolerance = max(5, int(total * 0.01))
     covered = sum(1 for v in latest.values() if str(v)[:10] >= sig_iso)
@@ -1325,18 +1358,17 @@ def trading_day_context(target: str | None = None) -> dict[str, Any]:
         "today": today.isoformat(),
         "is_trade_day": is_trade,
         "market_closed": closed,
-        "prev_trade_day": _prev_trade_day(today).isoformat(),
+        "prev_trade_day": _prev_trade_day(today, days).isoformat(),
         "next_trade_day": next_day.isoformat(),
         # 可选下界 = 库里最早有数据的交易日（多数票覆盖到的起点）。日期控件
         # 可以往回选历史日期，算那天的单日策略；早于它就没有行情可用。
-        "min_exec_date": _earliest_covered_day(
-            _span_dates("earliest", price_store.code_earliest_dates)),
+        "min_exec_date": _earliest_covered_day(earliest),
         "default_exec_date": default_exec.isoformat(),
         "exec_date": exec_day.isoformat(),
         "picked_date": (picked or default_exec).isoformat(),
         "signal_date": sig_iso,
-        "exec_is_trade_day": _is_trade_day(exec_day),
-        "picked_is_trade_day": _is_trade_day(picked or default_exec),
+        "exec_is_trade_day": _is_trade_day(exec_day, days),
+        "picked_is_trade_day": _is_trade_day(picked or default_exec, days),
         "covered": covered,
         "total": total,
         "data_ready": total > 0 and (total - covered) <= tolerance,
@@ -1955,7 +1987,7 @@ def tdx_status(path: str | None = None, coverage: bool = False) -> dict[str, Any
         # 本机通达信比**库里**最新落后几个交易日 —— 这是「缺口到底多大」的可执行口径
         # （通达信同步只能覆盖本地已有的日期，缺口必须用在线源补）。
         try:
-            latest_map = _span_dates("latest", price_store.code_latest_dates)
+            latest_map, _ = _spans()
             # ⚠️ 用**众数**（last_mode）而不是最大日期：常有「只有 1 只更新到今天、
             #    绝大多数停在昨天」的情况，按 max 比会得出「没有缺口」的错误结论。
             tdx_last = str(stats.get("last_mode") or stats.get("latest") or "")
