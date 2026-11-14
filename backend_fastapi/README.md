@@ -62,6 +62,9 @@ POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / 
                                        scope.feasibility.build_failures = **建仓失败明细**
                                        （隔日一字涨停 → 买不进；该份额度当日为现金、不计收益，
                                         这些建仓没有成交，故不在 trades 明细里）
+                                       scope.feasibility.sell_deferrals = **清仓延后明细**
+                                       （隔日一字跌停 → 卖不出；顺延到开板那天按**收盘价**卖出，
+                                        带计划清仓日 / 实际卖出日 / 卖出价 / 被挡天数）
 ```
 
 测试：

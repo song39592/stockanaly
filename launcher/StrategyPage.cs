@@ -94,6 +94,10 @@ namespace StockPool
         private Label _stBuildFailNote;
         private GroupBox _stBuildFailGroup;
         private StockGrid _stBuildFailGrid;
+        // 清仓延后（隔日一字跌停 → 卖不出，顺延到开板日卖出）：与建仓失败对称的一组。
+        private Label _stSellDeferNote;
+        private GroupBox _stSellDeferGroup;
+        private StockGrid _stSellDeferGrid;
 
         // ④ 近期策略成果（最近 N 个交易日回测）
         private WheelValueBox _stRecentDays;
@@ -697,6 +701,28 @@ private void StRefreshCurStrategy()
             AddRow(bfg, _stBuildFailGrid);
             AddRow(stack, _stBuildFailGroup);
             _stBuildFailGroup.Visible = false;
+
+            // 清仓延后标记：同样默认隐藏，有延后时才显示。
+            _stSellDeferNote = Mute(Lbl(""));
+            _stSellDeferNote.MaximumSize = new Size(900, 0);
+            _stSellDeferNote.Visible = false;
+            AddRow(stack, _stSellDeferNote);
+
+            TableLayoutPanel bsg;
+            _stSellDeferGroup = Group("清仓延后明细（隔日一字跌停 → 卖不出；顺延到开板那天按收盘价卖出）", out bsg);
+            _stSellDeferGrid = NewGrid(new List<GridColumn> {
+                new GridColumn("代码", "code") { IsCode = true, Jump = true },
+                NameColumn(),
+                new GridColumn("计划清仓日", "planned_date"),
+                new GridColumn("实际卖出日", "date"),
+                new GridColumn("卖出价", "price", true),
+                new GridColumn("被挡天数", "deferred_days", true),
+                new GridColumn("原因", "reason"),
+            });
+            StPlaceGrid(_stSellDeferGrid);
+            AddRow(bsg, _stSellDeferGrid);
+            AddRow(stack, _stSellDeferGroup);
+            _stSellDeferGroup.Visible = false;
 
             var chartHost = new Panel();
             chartHost.Height = 240;
@@ -2187,6 +2213,7 @@ private void StRefreshCurStrategy()
             // 回测池大小，不是持仓数，显示出来会被当成「持仓了这么多只」）
             var scope = j["scope"] as Dictionary<string, object>;
             StFillBuildFailures(scope);
+            StFillSellDeferrals(scope);
             int doneCount = scope != null ? J.Int(scope["codes_count"]) : 0;
             _stResultStatus.Text = "回测完成（参与统计 " + doneCount + " 只）";
             _stResultStatus.ForeColor = C.DownSoft;
@@ -2351,6 +2378,7 @@ private void StRefreshCurStrategy()
             if (_stTradesGrid != null) StFillTradesRows(_stTradesGrid, null);
             if (_stTradesTip != null) _stTradesTip.Text = StTradesTipText();
             StFillBuildFailures(null);          // 建仓失败标记一并清掉
+            StFillSellDeferrals(null);          // 清仓延后标记一并清掉
         }
 
         /// <summary>
@@ -2406,12 +2434,81 @@ private void StRefreshCurStrategy()
             _stBuildFailGroup.Visible = true;
         }
 
-        /// <summary>建仓失败原因 → 人话（后端给的是稳定的枚举值）。</summary>
+        /// <summary>成交受限原因 → 人话（后端给的是稳定的枚举值）。</summary>
         private static string StBuildFailReason(string reason)
         {
             if (reason == "limit_up") return "一字涨停（买不进）";
+            if (reason == "limit_down") return "一字跌停（卖不出）";
             if (string.IsNullOrEmpty(reason)) return "—";
             return reason;
+        }
+
+        /// <summary>
+        /// 填「清仓延后」标记：隔日一字跌停 → 卖不出 → 顺延到第一个能卖的日子
+        /// （开板那天）按**当天收盘价**成交。计划清仓日没成交，trades 明细里
+        /// 只看得见最终那一笔 → 这里把「本来哪天要卖、最后哪天什么价卖的」摆出来。
+        /// </summary>
+        private void StFillSellDeferrals(Dictionary<string, object> scope)
+        {
+            if (_stSellDeferNote == null || _stSellDeferGrid == null) return;
+            _stSellDeferNote.Visible = false;
+            _stSellDeferNote.Text = "";
+            _stSellDeferGroup.Visible = false;
+            _stSellDeferGrid.Rows.Clear();
+            if (scope == null) return;
+
+            var feas = scope["feasibility"] as Dictionary<string, object>;
+            if (feas == null) return;
+            var sd = feas["sell_deferrals"] as Dictionary<string, object>;
+            if (sd == null) return;
+            int count = (int)StM(sd, "count");
+            if (count <= 0) return;
+
+            var items = sd["items"] as System.Collections.IList;
+            _stSellDeferGrid.SuspendLayout();
+            if (items != null)
+            {
+                foreach (var it in items)
+                {
+                    var d = it as Dictionary<string, object>;
+                    if (d == null) continue;
+                    string code = Convert.ToString(J.Get(d, "code"));
+                    string name = Convert.ToString(J.Get(d, "name"));
+                    if (string.IsNullOrEmpty(name)) name = "—";
+                    string planned = Convert.ToString(J.Get(d, "planned_date"));
+                    string status = Convert.ToString(J.Get(d, "status"));
+                    string day = Convert.ToString(J.Get(d, "date"));
+                    // status=cancelled：延后期间策略又改主意继续持有 → 那笔没卖成
+                    if (status == "cancelled") day = "未卖出（策略改主意继续持有）";
+                    else if (string.IsNullOrEmpty(day)) day = "—";
+                    var pxObj = J.Get(d, "price");
+                    string px = (pxObj != null) ? J.Num(pxObj).ToString("F2") : "—";
+                    int days = (int)StM(d, "deferred_days");
+                    string reason = StBuildFailReason(Convert.ToString(J.Get(d, "reason")));
+                    int ri = _stSellDeferGrid.Rows.Add(code, name, planned, day, px,
+                        days.ToString(), reason);
+                    _stSellDeferGrid.Rows[ri].DefaultCellStyle.SelectionBackColor = _cPanel;
+                    _stSellDeferGrid.Rows[ri].DefaultCellStyle.SelectionForeColor = _cText;
+                }
+            }
+            _stSellDeferGrid.ResumeLayout();
+            _stSellDeferGrid.Fit(160, 620);
+
+            int shown = (int)StM(sd, "shown");
+            int dropped = (int)StM(sd, "dropped");
+            // 被挡天数（fill_blocked.sell_deferred 记的是**被挡的天数**，
+            // 这里是**延后的次数**：连着两天一字跌停 = 1 次延后、被挡 2 天）
+            var fb = feas["fill_blocked"] as Dictionary<string, object>;
+            int blockedDays = fb != null ? (int)StM(fb, "sell_deferred") : 0;
+            string txt = "⚠ 清仓延后 " + count + " 次";
+            if (blockedDays > count) txt += "（累计被挡 " + blockedDays + " 天）";
+            txt += "：计划清仓日一字跌停卖不出"
+                + " → 顺延到第一个能卖的日子（开板那天）按**当天收盘价**卖出"
+                + "（不是开盘价，也不是跌停价）。";
+            if (dropped > 0) txt += "（表内显示最近 " + shown + " 条，另有 " + dropped + " 条见回测报告文件）";
+            _stSellDeferNote.Text = txt;
+            _stSellDeferNote.Visible = true;
+            _stSellDeferGroup.Visible = true;
         }
 
         /// <summary>历史结果页：刷新已保存报告列表。</summary>
