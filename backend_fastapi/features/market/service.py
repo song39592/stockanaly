@@ -274,7 +274,9 @@ _MARKET_SESSIONS: dict[str, tuple[tuple[int, int], ...]] = {
 
 # ---- 交易日与夏令时：不引入时区库，规则自算 + 交易日历（每天拉一次） ----
 _TRADE_DAYS_CACHE: dict = {"day": None, "days": set(), "failed_at": 0.0}
-TRADE_DAYS_RETRY_SECONDS = 600      # 拉取失败后的冷却时长（秒）
+TRADE_DAYS_RETRY_SECONDS = 1800     # 拉取失败后的冷却时长（秒）：日历一天只变一次
+TRADE_DAYS_TIMEOUT = 30             # 抓取窗口（秒）：日历走 V8 全局锁，要留足排队时间
+_TRADE_DAYS_FETCHING = False        # 单飞：同一时刻只允许一个后台拉取线程
 
 
 def _nth_weekday(year: int, month: int, weekday: int, n: int) -> dt.date:
@@ -295,57 +297,104 @@ def _us_dst(now=None) -> bool:
     return start <= moment.date() < end
 
 
-def _a_share_trade_days() -> set[str]:
+def _store_trade_days(days: set[str]) -> None:
+    """把一次拉取结果写进缓存（空集 = 失败，顺带记下失败时刻）。"""
+    _TRADE_DAYS_CACHE["day"] = dt.date.today().isoformat()
+    _TRADE_DAYS_CACHE["days"] = days
+    _TRADE_DAYS_CACHE["failed_at"] = 0.0 if days else time.time()
+
+
+def _fetch_trade_days() -> set[str]:
+    """真正去拉一次交易日历（阻塞，最长 TRADE_DAYS_TIMEOUT）。
+
+    ⚠️ 这个接口走 py_mini_racer 的**全局串行锁**（`_V8_LOCK`，见 `_uses_v8`）：
+    后端此刻正在跑别的新浪接口时，日历要排队等锁 —— 这就是「同一台机器上
+    有时 2 秒取到、有时 8 秒取不到」的原因。所以窗口要给足（别用 8 秒那种
+    「一刀切」的小值：那会把「等锁」也砍掉，竞争一下就直接失败）。
+    """
+    try:
+        frame = _ak(ak.tool_trade_date_hist_sina, timeout=TRADE_DAYS_TIMEOUT)
+        if frame is not None and not getattr(frame, "empty", True):
+            return {str(item)[:10] for item in frame["trade_date"]}
+    except Exception:                               # noqa: BLE001 - 日历拿不到不影响行情
+        pass
+    return set()
+
+
+def _refresh_trade_days_async() -> None:
+    """后台补一次日历拉取（单飞：已在跑就不再起线程）。"""
+    global _TRADE_DAYS_FETCHING
+    if _TRADE_DAYS_FETCHING:
+        return
+    _TRADE_DAYS_FETCHING = True
+
+    def _run():
+        global _TRADE_DAYS_FETCHING
+        try:
+            _store_trade_days(_fetch_trade_days())
+        except Exception:                           # noqa: BLE001 - 后台拉取失败不影响服务
+            pass
+        finally:
+            _TRADE_DAYS_FETCHING = False
+
+    threading.Thread(target=_run, name="trade-days-refresh", daemon=True).start()
+
+
+def _a_share_trade_days(blocking: bool = True) -> set[str]:
     """A 股交易日历，**每天只拉一次**并缓存；取不到返回空集，由调用方退化为按星期判断。
 
     ⚠️ **失败也必须冷却**：拉不到时若每次调用都重试，一次接口调用里
-    `_is_trade_day` 会被调十几次，每次都重新联网等满 15 秒硬超时 → 整个接口
+    `_is_trade_day` 会被调十几次，每次都重新联网等满超时 → 整个接口
     拖成几分钟（实测网络不通时 `/date-context` 要 165 秒，前端 20 秒必然超时）。
-    故失败后 10 分钟内直接返回空集（退化为「工作日」口径），不再反复联网。
+    故失败后 30 分钟内直接返回空集（退化为「工作日」口径），不再反复联网。
+
+    `blocking=False`：**不等网络** —— 缓存里没有就返回空集并在后台补拉。
+    用于「在页面主路径上、不能被网络拖住」的场合（单日策略日期上下文）。
     """
     today = dt.date.today().isoformat()
     if _TRADE_DAYS_CACHE["day"] == today and _TRADE_DAYS_CACHE["days"]:
         return _TRADE_DAYS_CACHE["days"]
-    if (_TRADE_DAYS_CACHE["day"] == today
-            and time.time() - _TRADE_DAYS_CACHE["failed_at"] < TRADE_DAYS_RETRY_SECONDS):
+    cooling = (_TRADE_DAYS_CACHE["day"] == today
+               and time.time() - _TRADE_DAYS_CACHE["failed_at"] < TRADE_DAYS_RETRY_SECONDS)
+    if not blocking:
+        if not cooling:
+            _refresh_trade_days_async()            # 后台补，不阻塞调用方
         return set()
-    days: set[str] = set()
-    try:
-        # 日历是个小请求，给 8 秒窗口即可（默认 15 秒太长：它挡在页面主路径上）
-        frame = _ak(ak.tool_trade_date_hist_sina, timeout=8)
-        if frame is not None and not getattr(frame, "empty", True):
-            days = {str(item)[:10] for item in frame["trade_date"]}
-    except Exception:                               # noqa: BLE001 - 日历拿不到不影响行情
-        days = set()
-    _TRADE_DAYS_CACHE["day"] = today
-    _TRADE_DAYS_CACHE["days"] = days
-    _TRADE_DAYS_CACHE["failed_at"] = 0.0 if days else time.time()
+    if cooling:
+        return set()
+    days = _fetch_trade_days()
+    _store_trade_days(days)
     return days
 
 
 def warm_trade_days() -> None:
-    """后台预热交易日历（不阻塞调用方）。
+    """后台预热交易日历（失败重试 3 次，不阻塞调用方）。
 
     单日策略页与盘面页都要判「今天是不是交易日 / 收盘没有」，日历是**联网**取的：
-    放在启动后台预热里，页面首次用到时就不用干等那一次请求；网络不通时
-    预热会失败并进入冷却（见 `_a_share_trade_days`），页面退化为「按工作日」判定。
+    放在启动后台预热里，页面首次用到时就不用干等那一次请求。
+    重试是因为它要抢 V8 全局锁 —— 启动瞬间后端正忙着跑别的新浪接口时，
+    第一次很可能抢不到锁（实测 8 秒取不到），过几秒再试就成功了。
     """
     def _run():
-        try:
-            _a_share_trade_days()
-        except Exception:                           # noqa: BLE001 - 预热失败不影响正常请求
-            pass
+        for attempt in range(3):
+            days = _fetch_trade_days()
+            if days:
+                _store_trade_days(days)
+                return
+            if attempt < 2:
+                time.sleep(5)
     threading.Thread(target=_run, name="trade-days-warm", daemon=True).start()
 
 
 def _a_share_is_trade_day(moment, days: set[str] | None = None) -> bool:
     """某日是否 A 股交易日：以交易日历为准；日历不可用时退化为「工作日」。
 
-    `days` = **已取好的日历快照**：一次请求内复用同一份，避免重复联网
-    （不传则自行取，走 `_a_share_trade_days` 的当日缓存）。
+    `days` = **已取好的日历快照**：一次请求内复用同一份，避免重复联网。
+    不传时**不等网络**（只用缓存，缓存空就让后台补拉）—— 判定「今天是不是
+    交易日」在盘面页、策略页都在主路径上，不能被新浪接口的排队时间拖住。
     """
     if days is None:
-        days = _a_share_trade_days()
+        days = _a_share_trade_days(blocking=False)
     if days:
         return moment.date().isoformat() in days
     return moment.weekday() < 5

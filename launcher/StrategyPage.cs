@@ -115,6 +115,9 @@ namespace StockPool
         // 记下意图，等日期上下文到位后自动续跑（_stRecoAutoRunRetry 限次，防跑飞）。
         private bool _stRecoAutoRun;
         private int _stRecoAutoRunRetry;
+        // 后端这轮没拿到交易日历 → 过几秒补取一次（等后台把日历拉好）
+        private Timer _stRecoRefreshTimer;
+        private int _stRecoRefreshCount;
         // ⚠ 上下文与控件的**对应关系**：_stRecoExecDate 是异步回填的，填好之前它
         //   可能还停留在上一次的值上。记住它对应的是控件里的哪一天，提交时据此
         //   判断上下文是否已跟上 —— 否则会静默提交上一次的执行日，后端跑出同一份
@@ -1092,6 +1095,12 @@ private void StRefreshCurStrategy()
             _stRecoPickedDate = picked ?? "";
             _stRecoCtxDate = picked ?? "";    // 记下这次上下文对应的是控件里的哪一天
             StRenderRecoDateHint();
+            // 后端这轮没拿到交易日历（按「工作日」降级，节假日可能判错）→ 过几秒
+            // 补取一次：后台把日历拉好之后，日期就是准的了。
+            // （字段缺失按「就绪」处理：老后端没有这个字段。）
+            object calObj = J.Get(j, "calendar_ready");
+            bool calReady = !(calObj is bool) || (bool)calObj;
+            if (!calReady) StScheduleRecoDateRefresh();
             // 用户刚才点过「生成当前推荐」但上下文还没到 → 现在自动续跑，
             // 免得让人「点一次被拒、再点一次」。
             if (_stRecoAutoRun)
@@ -1099,6 +1108,23 @@ private void StRefreshCurStrategy()
                 _stRecoAutoRun = false;
                 StRunReco();
             }
+        }
+
+        /// <summary>稍后补取一次日期上下文（等后端后台把交易日历拉好）。</summary>
+        private void StScheduleRecoDateRefresh()
+        {
+            // 限次：日历始终拉不到时不能无限补取（每轮都会再排一次）
+            if (_stRecoRefreshTimer != null || _stRecoRefreshCount >= 3) return;
+            _stRecoRefreshCount++;
+            _stRecoRefreshTimer = new Timer();
+            _stRecoRefreshTimer.Interval = 3000;
+            _stRecoRefreshTimer.Tick += delegate
+            {
+                _stRecoRefreshTimer.Stop();
+                _stRecoRefreshTimer = null;
+                StLoadRecoDates();
+            };
+            _stRecoRefreshTimer.Start();
         }
 
         /// <summary>渲染提示行：信号日 → 执行日、数据齐否，以及「结果是否已过期」。</summary>
