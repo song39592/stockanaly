@@ -27,6 +27,10 @@
   * 筹码矩阵与价格**同复权口径**（都是前复权 qfq），由数据层保证；
   * `WINNER` 的分界口径（严格小于）与指标 `WIN`（筹码获利比例）**完全一致** ——
     两者都走 `formulas/winner.py` 同一份内核，所以「博弈强度」与「获利盘」对得上号。
+
+⚠️ **计算层已下沉到 `formulas/kl.py`**（指标与策略共用同一份）：
+本文件只做展示包装；策略侧要用 KL 时**直接引 `formulas.kl.kl_series`**，
+不要在这里另写一遍（两处各写一遍 = 将来两边算出两个数、两边都不报错）。
 """
 from __future__ import annotations
 
@@ -35,7 +39,7 @@ import pandas as pd
 
 from .base import ParamSpec, indicator, series_line
 from .data import chip_rows_of, code_of
-from formulas.winner import winner_fraction
+from formulas.kl import kl_series
 
 # 通达信原式里写死的两条阈值线
 BOJIE_HIGH = 80.0
@@ -63,10 +67,8 @@ def chip_kl(df: pd.DataFrame, *, ctx=None, formula: str = "tri_decay") -> dict:
     centers = frames.centers
     close = df["close"].astype(float).to_numpy()
     open_ = df["open"].astype(float).to_numpy()
-    # 两个分界各算一次获利盘比例（通达信口径：小数 0~1），再按原式取差乘 100
-    w_close = winner_fraction(rows, centers, close)
-    w_open = winner_fraction(rows, centers, open_)
-    kl = 100.0 * (w_close - w_open)
+    # 计算层在 `formulas/kl.py`（与策略侧共用同一份口径）：KL = 100*(WINNER(C)-WINNER(O))
+    kl = kl_series(rows, centers, open_, close)
     index = df.index
     return {"series": [
         series_line("KL", pd.Series(kl, index=index)),
