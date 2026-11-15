@@ -191,6 +191,9 @@ def _validate_module(mod_name: str, filename: str) -> dict:
         data.load_bars = real_bars
         if real_pool is not None:
             data.load_strong_pool = real_pool
+        # 冒烟跑的是假代码（TEST/TEST2…），策略里「数据不可得就跳过」会记下这些假票；
+        # 留着会污染运行期报告的 data_errors（看起来像真票被跳过）→ 清掉。
+        data.drain_skips()
 
     rec["status"] = "ok"
     rec["strategy_id"] = sid

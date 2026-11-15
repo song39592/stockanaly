@@ -191,6 +191,26 @@ def release_cache(codes: list[str], adjust: str | None = None,
     return len(drop)
 
 
+# ---- 策略层「跳过标的」的可见通道 ------------------------------------------
+# 策略逐票计算时若因数据不可得跳过某只票，**必须**记下来：
+# 否则「跳过」是静默的 —— 报告只说「参与统计 N 只」，读者看不到「另有 M 只没参与」，
+# 口径就自证不了。历史上筹码矩阵取不到就把整只票静默丢掉（报告里看不出少了谁），
+# 于是「同样区间、不同时间跑出完全不同的结果」也看不出原因。
+_SKIPS: list[str] = []
+
+
+def record_skip(code: str, reason: str) -> None:
+    """登记一只被跳过的标的及原因（编排层收进报告的 data_errors / scope.warnings）。"""
+    _SKIPS.append(f"{code}: {reason}")
+
+
+def drain_skips() -> list[str]:
+    """取走并清空已登记的跳过记录（编排层在跑完策略后调用一次）。"""
+    out = list(_SKIPS)
+    _SKIPS.clear()
+    return out
+
+
 UNIVERSE_MODES = ("interval_data", "pool_snapshot", "index_constituent")
 
 

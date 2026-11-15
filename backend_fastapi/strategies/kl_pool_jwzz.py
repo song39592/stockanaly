@@ -175,7 +175,10 @@ def kl_pool_jwzz(ctx, kl_threshold: float = 80.0, exit_ratio: float = 1.5,
             res = chip_formulas.compute_matrix(
                 code, formula_id=formula, start=fetch_start, end=end,
                 adjust="qfq", bins=nbin, offline=True)
-        except Exception:                    # noqa: BLE001 - 单只失败不拖垮整批
+        except Exception as exc:                # noqa: BLE001 - 单只失败不拖垮整批
+            # ⚠️ 不能静默 continue：跳过的票不参与本策略计算，
+            #    报告若不写明「少了谁」，同一区间不同时间跑出不同结果也无从解释。
+            data.record_skip(code, f"筹码矩阵不可得（{type(exc).__name__}: {exc}）")
             continue
         if res is None or not len(res.dates):
             continue

@@ -311,6 +311,11 @@ class _NeedsFullRebuild(Exception):
     pass
 
 
+class _NeedsNewData(Exception):
+    """增量续算取不到足够的新 K 线（缓存已追到本地最新），改用缓存里的全历史。"""
+    pass
+
+
 def _latest_data_date(code: str, adjust: str, period: str) -> "str | None":
     """该票最新可用交易日（来自价格分片库，复用现有数据库）。"""
     try:
@@ -374,8 +379,16 @@ def _build_incremental(code, formula_id, params_key, adjust, bins, period, offli
     """从 seed 续算「新增的天」，拼接历史前缀，返回 `(全历史 ChipResult, terminal)`。"""
     stored_edges = stored["edges"]
     next_start = _next_day(stored["last_date"])
-    inp = data.load_input(code, start=next_start, end=None, adjust=adjust, bins=bins,
-                          period=period, offline=offline)
+    try:
+        inp = data.load_input(code, start=next_start, end=None, adjust=adjust, bins=bins,
+                              period=period, offline=offline)
+    except RuntimeError as exc:
+        # 取数层在「新数据不足 2 根」时抛「行情数据不足」——
+        # 这**不是数据坏了**，而是缓存已经追到本地最新、没有可续算的新增段。
+        # 转成专用异常，由调用方回退到缓存里的全历史（见 _incremental_or_build）。
+        if "行情数据不足" in str(exc):
+            raise _NeedsNewData(str(exc)) from exc
+        raise
     span = float(stored_edges[-1]) - float(stored_edges[0])
     # 价格突破历史价格轴 → 无法复用历史 bin 边界，整体重建
     inp_lo, inp_hi = float(np.min(inp.low)), float(np.max(inp.high))
@@ -408,13 +421,26 @@ def _build_incremental(code, formula_id, params_key, adjust, bins, period, offli
     return full, terminal
 
 
+def _target_end(end, data_last):
+    """「缓存够用」的判定基准：请求的 end 晚于本地最后交易日时，按**本地最后交易日**算。
+
+    ⚠️ 不能直接用调用方给的 end：回测结束日常填成今天/周末（本地最后一根 K 线在那之前），
+    多要的日子本地**根本没数据**。若拿它跟缓存的 last_date 比，「缓存已是最新」会被
+    误判成「数据推进了」→ 走增量续算 → 增量取不到新 K 线 → 抛「行情数据不足」
+    → **整只票被丢掉**（实测：end=2026-11-13 能算，end=2026-11-14/15 直接抛错）。
+    """
+    if end and data_last:
+        return min(str(end)[:10], str(data_last)[:10])
+    return end or data_last
+
+
 def _incremental_or_build(code, formula_id, params_key, start, end, adjust, days, bins, period, offline):
     """先查增量持久层；未命中 / 数据推进时按「全量或增量」构建并回写。"""
     fid = formula_id or DEFAULT_FORMULA_ID
     cfg = (code, fid, int(bins), adjust, bool(offline), period, params_key)
     stored = chip_matrix_store.load(*cfg)
     data_last = _latest_data_date(code, adjust, period)
-    target_end = end or data_last
+    target_end = _target_end(end, data_last)
 
     def _persist(res, terminal):
         chip_matrix_store.save(*cfg, res=res, terminal_chips=terminal, last_date=res.dates[-1])
@@ -432,6 +458,10 @@ def _incremental_or_build(code, formula_id, params_key, start, end, adjust, days
             return _persist(res, terminal)
         except _NeedsFullRebuild:
             pass
+        except _NeedsNewData:
+            # 缓存已追到本地最新、没有可续算的新增段 → 直接用缓存里的全历史。
+            # 宁可少算最后一两根，也不要把整只票丢掉（丢掉 = 该票整段不进策略计算）。
+            return _slice_stored(stored, start, end, days)
     res, terminal = _build_matrix(code, fid, params_key, None, None, adjust, None, bins, period, offline)
     return _persist(res, terminal)
 
