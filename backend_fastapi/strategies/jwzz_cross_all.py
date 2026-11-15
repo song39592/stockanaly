@@ -36,7 +36,7 @@ import numpy as np
 
 from .core.base import strategy, ParamSpec, Signal
 from .core import data
-from formulas.jwzz import DEFAULT_PERIOD, jwzz_series, sma1_series
+from formulas.jwzz import DEFAULT_PERIOD, jwzz_panel
 
 
 @strategy(
@@ -67,92 +67,22 @@ def jwzz_cross_all(ctx, cost_period: int = DEFAULT_PERIOD, threshold: float = 95
     thr = float(threshold)
     smooth_n = max(0, int(smooth_period))
     pos = min(1.0, max(0.0, float(position)))
-    need = period + 1
 
     # 主动拉取所需字段（inputs=["close","volume","amount"]）；缓存命中，无额外 I/O
     bars = data.load_bars(ctx.codes, ctx.start, ctx.end,
                           fields=["close", "volume", "amount"], adjust=ctx.adjust)
 
-    # ---- 统一交易日轴（组合决策必须在同一天上做）----
-    seen: set[str] = set()
-    for df in bars.values():
-        for d in df.index:
-            seen.add(str(d)[:10])
-    if not seen:
+    # ---- 统一交易日轴 + 强势状态（**口径在 formulas/jwzz.py**，与本策略同源）----
+    # 穿越判定 / 状态机 / 停牌沿用 / 统一轴对齐都在公式层，
+    # 与 `jwzz_cross`、`jwzz_hold` 共用同一份实现 —— 各写一份 = 同一口径两个数、
+    # 两边都不报错。
+    panel = jwzz_panel(bars, period=period, threshold=thr, smooth_period=smooth_n)
+    if not panel.cols:
         return []
-    day_index = sorted(seen)
-    day_pos = {d: i for i, d in enumerate(day_index)}
-    T = len(day_index)
-
-    cols: list[str] = []
-    rows_bull: list[np.ndarray] = []
-    rows_strength: list[np.ndarray] = []
-
-    for code, df in bars.items():
-        if len(df) < need:
-            continue
-        # 计算层与指标同源（formulas.jwzz）
-        dev = jwzz_series(df, period)
-        raw = dev.to_numpy(dtype="float64")
-        finite = np.isfinite(raw)
-        if not finite.any():
-            continue
-        # 触发序列：默认用原始 JWZZ（用户原语义）；smooth_period > 0 时改用
-        # SMA(JWZZ, N, 1)（副图里的黄线 JW_M）—— 原始值在阈值附近会反复穿越，
-        # 实测持仓只有 1~2 天、交易成本吃掉大部分收益；用平滑线触发能显著减少
-        # 假突破（代价是进出场更迟）。
-        if smooth_n > 1:
-            arr = sma1_series(dev, smooth_n).to_numpy(dtype="float64")
-        else:
-            arr = raw
-        arr = np.where(finite, arr, np.nan)
-
-        # 穿越判定：当前 > 阈值 且（前值 ≤ 阈值 或 前值不可用=首个有效值）
-        prev = np.empty_like(arr)
-        prev[1:] = arr[:-1]
-        prev[0] = np.nan
-        up = (arr > thr) & ((prev <= thr) | ~np.isfinite(prev))
-        dn = (arr <= thr) & (prev > thr)
-
-        # 状态机：上穿置 True、下穿置 False；用「最后一次事件」向量化求解
-        ev = np.zeros(len(arr), dtype=np.int8)
-        ev[up] = 1
-        ev[dn] = -1
-        idxs = np.flatnonzero(ev)
-        state = np.zeros(len(arr), dtype=bool)
-        if idxs.size:
-            last = np.searchsorted(idxs, np.arange(len(arr)), side="right") - 1
-            # ⚠️ 必须只对「前面确实有事件」的位置赋值：last == -1 表示该位置之前
-            #    没有任何穿越事件（状态应为 False）。若直接 clip(-1 → 0) 取第一个事件，
-            #    会把「事件发生前」的日子全判成与首个事件同状态 —— 表现为
-            #    「偏离度还是负的却被当成强势买入」。
-            has_ev = last >= 0
-            state[has_ev] = ev[idxs[last[has_ev]]] > 0
-
-        idx = np.fromiter((day_pos[str(d)[:10]] for d in df.index),
-                          dtype=np.int64, count=len(df))
-        # 统一轴上的两行：-1/0 表示「该票当日无值」，停牌日沿用上一个有值状态
-        row_state = np.full(T, -1, dtype=np.int8)
-        row_val = np.zeros(T, dtype=np.float32)
-        row_state[idx[finite]] = state[finite].astype(np.int8)
-        row_val[idx[finite]] = arr[finite].astype(np.float32)
-        # 前向填充（停牌不清仓）：预热段之前无值 → 保持未持有
-        last_pos = np.maximum.accumulate(np.where(row_state >= 0, np.arange(T), -1))
-        valid = last_pos >= 0
-        if valid.any():
-            src = np.where(valid, last_pos, 0)
-            row_state = np.where(valid, row_state[src], -1).astype(np.int8)
-            row_val = np.where(valid, row_val[src], 0.0).astype(np.float32)
-
-        cols.append(code)
-        rows_bull.append(row_state > 0)
-        rows_strength.append(row_val)
-
-    if not cols:
-        return []
-
-    bull_m = np.stack(rows_bull, axis=0)             # C × T，bool（每票一行）
-    strength_m = np.stack(rows_strength, axis=0)     # C × T，float32
+    day_index = panel.days
+    cols = panel.cols
+    bull_m = panel.bull                             # C × T，bool（每票一行）
+    strength_m = panel.val                           # C × T，float32
 
     signals: list[Signal] = []
     held: set[str] = set()                          # ★ 自己维护持仓集合
