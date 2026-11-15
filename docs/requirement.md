@@ -64,6 +64,11 @@
   唯一例外：**买不进的建仓也逐条列在同一张表里**（隔日一字涨停 → 没成交 → 收益 0、
   备注「买不进」）；**清仓延后的那一笔**（隔日一字跌停 → 顺延到开板日卖出）在备注列
   写明延后天数与计划清仓日 —— 不单开明细表，避免几百行失败挤掉真正的结果。
+  内置策略（策略名即 id，插件化自动注册）：`jwzz_cross`（JWZZ 上穿/下穿，每日重选前 N）、
+  `jwzz_cross_all`（JWZZ 上穿/下穿，全量等权）、`jwzz_hold`（JWZZ 买入后持有到下穿，
+  槽位制：最多 N 只、单票固定仓位、每日按 JWZZ 排名买前 k 只、槽位满则当天买不进）、
+  `kl_pool_jwzz`（KL 入池 + JWZZ 买卖）、`scr90`、`macd`、`rps_score` 等；
+  策略口径与参数见 `backend_fastapi/strategies/ARCHITECTURE.md`。
 - **降级**：任一数据源失败只写 `errors` 字段，其余模块照常返回。
 
 ## 四、前端（frontend，原生 HTML/JS）
