@@ -68,6 +68,27 @@ _IMPOSSIBLE_RET = 0.5
 _BOARD_LIMIT = 0.20          # 创业板(30)/科创板(68) 涨跌停阈值
 _MAIN_LIMIT = 0.10           # 主板阈值（ST 自 2025-04 起也是 10%，见 _limit_pct）
 
+# 单股仓位上限的判定容差（相对）：必须**大于** float32 的表示误差（约 1.2e-7），
+# 否则「上限正好等于某个权重」时会因浮点表示差异被误判成超限。
+_CAP_TOL = 1e-6
+
+
+def cap_weight(value: float, cap: float | None) -> float:
+    """把一个**目标权重**压到单股仓位上限以内 —— 单股仓位上限的**唯一口径**。
+
+    语义：**只压低、绝不抬高**（上限比原权重大时原样返回）。
+    `cap` 为 None 或 ≤ 0 → 不限。
+
+    ⚠️ `compute` 里对权重矩阵用的是**向量化**版本（同容差 `_CAP_TOL`）；
+    单测 `test_position_cap` 断言两者结果一致 —— 两边口径漂移，
+    就会导致「回测净值」与「当日推荐金额」对不上同一套仓位。
+    """
+    if cap is None or cap <= 0.0:
+        return float(value)
+    if value > cap * (1.0 + _CAP_TOL):
+        return float(cap)
+    return float(value)
+
 # 逐笔明细**进 HTTP 响应**的上限（页面表格一行一笔成交）。
 # 全市场一次回测能到十几万笔（实测 15 万+ = 24 MB JSON、解析要 10 秒）——
 # 所以不能全量下发；而页面端实测 DataGridView 填 2 万行要 **4.3 秒**
@@ -306,6 +327,7 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
             lot_size: int = 100,
             tail: int | None = None,
             ruin_threshold: float | None = None,
+            position_cap: float | None = None,
             drop_warn_ratio: float = 0.5) -> dict:
     """按目标权重序列 + 收盘价序列，统计组合净值、指标与逐笔明细。
 
@@ -368,8 +390,28 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
     #    也就是说「除以 N」这个 bug 一直在**掩盖数据质量问题**，拆掉它必须补上防护。
     n_bad = 0
     bad_codes: set[str] = set()
+    # ---- 单股仓位上限（默认不限 = 按策略给的仓位执行）----
+    # 口径：策略给的**目标权重**逐票取 min(权重, 上限)；上限是「占组合净值比例」。
+    # ⚠️ 为什么截在这一步（权重矩阵是权重进入净值/成交/成本/明细的**唯一入口**）：
+    #    在这里截断 → 净值、严格成交模型（一字板买不进即空仓）、成本、胜率、逐笔明细
+    #    全部自动一致；在编排层改 positions 则要另外维护一套「被截断了多少」的统计与留痕。
+    # ⚠️ 截断只变小不变大 → `Σweight ≤ 1` 的硬约束不可能被破坏。
+    # ⚠️ 截断**必须留痕**：静默改权重 = 静默改数据（以为按策略仓位在跑、实际被压低，
+    #    却没人知道）→ 统计进 metrics，并在 flags 里给一条人读说明。
+    cap = None
+    if position_cap is not None and float(position_cap) > 0:
+        cap = min(1.0, float(position_cap))
+    capped_codes: set[str] = set()
+    capped_points = 0
     for j, code in enumerate(codes):
         w = positions_by_code[code].reindex(common).fillna(0.0).to_numpy(dtype=np.float32)
+        if cap is not None:
+            over = w > np.float32(cap) * (1.0 + _CAP_TOL)   # 容差与 cap_weight 一致
+            n_over = int(over.sum())
+            if n_over:
+                capped_codes.add(code)
+                capped_points += n_over
+                w = np.where(over, np.float32(cap), w)
         W[:, j] = w
         px = close_by_code[code].reindex(common).astype(float)
         r = px.pct_change()
@@ -578,6 +620,12 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
             f"（A 股不可能出现，判定为复权因子缺失/脏数据），涉及 {len(bad_codes)} 只票"
             f"（如 {sample}）。这些日按 0 收益计入，**净值与真实行情存在偏差**，"
             f"建议刷新对应股票的复权因子后重跑。")
+    if capped_points:
+        flags.append(
+            f"position_cap: 单股仓位上限 {cap:.2%} 生效 —— {len(capped_codes)} 只票的"
+            f"目标权重被压低（累计 {capped_points} 个「交易日×票」）。"
+            f"**实际单股仓位低于策略设定**，空出来的仓位就是现金，"
+            f"资金利用率随之下降（看 capital_utilization / avg_positions）。")
     total_return = float(nav[-1] / initial_capital - 1.0)
     # 成本吃光净值：必须**显式告警**，否则用户只看到 total_return=-100%，
     # 会误以为是策略或数据坏了，而真凶是换手率×费率。
@@ -734,6 +782,12 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
         "return_per_utilized_capital": rpu,
         "benchmark_return": bench_return,
         "alpha": alpha, "beta": beta, "ir": ir, "tracking_error": te,
+        # ---- 单股仓位上限（默认不限）----
+        # None = 不限（按策略给的仓位执行）；非 None 时是实际生效的占比上限。
+        # 被截断的规模一并给出 —— 静默改权重 = 静默改数据。
+        "position_cap": cap,
+        "position_capped_codes": len(capped_codes),
+        "position_capped_points": capped_points,
     }
 
     # 单票破产标记：某票累计收益使 (1+total_return) 跌破 ruin_threshold 时标 bankrupt。
