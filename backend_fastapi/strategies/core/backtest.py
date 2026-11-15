@@ -55,6 +55,9 @@ from . import base, data, stats
 
 _MIN_BARS = 30        # 少于此根数视为数据不足
 _WARMUP_BARS = 250    # 短窗口回测的指标预热根数（约一年，够 MACD 这类长周期策略）
+# data_errors 下发上限：**逐票**列出被跳过/失败的标的（前端按条数显示「跳过只数」，
+# 截断到 20 会把真实只数显示成 20）。上限之上的部分在 scope.warnings 里标明总数。
+_MAX_DATA_ERRORS = 2000
 
 def _load_names(codes: list[str]) -> dict[str, str]:
     """兼容别名：名称加载已下沉到 `data.load_names`（进程内 24h 缓存）。
@@ -63,6 +66,21 @@ def _load_names(codes: list[str]) -> dict[str, str]:
     `from strategies.core.backtest import _load_names` 引用；实现只此一份。
     """
     return data.load_names(codes)
+
+
+def _collect_skips(errors: list[str]) -> list[str]:
+    """把策略层登记的「跳过标的」并进 errors（汇总条排在首位）。
+
+    策略逐票计算时若因数据不可得跳过某只票（如筹码矩阵取不到），
+    报告必须写明「少了谁」——否则「参与统计 N 只」会让人以为样本就是 N 只，
+    而「同一区间不同时间跑出完全不同的结果」也无从解释。
+    """
+    skips = data.drain_skips()
+    if skips:
+        errors.insert(0, f"⚠️ {len(skips)} 只标的因数据不可得被跳过"
+                        f"（筹码矩阵等），逐票原因见 data_errors")
+        errors.extend(skips)
+    return skips
 
 
 def _prepare(codes: list[str], start: str | None, end: str | None,
@@ -192,7 +210,14 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
         except Exception:
             pass
     ctx = base.StrategyContext(codes=list(usable.keys()), start=start, end=end, adjust="hfq")
-    signals = base.run(strategy_id, ctx, params)
+    # 策略层跳过的标的（如筹码矩阵不可得）必须显式回传：
+    # 否则「少算了多少只」不可见 → 同一区间不同时间跑出不同结果也无从解释。
+    # run 前先 drain 一次：清掉上一次运行残留的记录（同进程连续跑多个策略时）。
+    data.drain_skips()
+    try:
+        signals = base.run(strategy_id, ctx, params)
+    finally:
+        _collect_skips(errors)
 
     close_by_code = {c: usable[c]["close"] for c in usable}
     positions = base.signals_to_positions(signals, close_by_code)
@@ -282,6 +307,10 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
     if window:
         warnings.append(f"short_window: 只统计最近 {window} 个交易日（区间被裁剪）")
     warnings.extend(errors[:20])
+    if len(errors) > _MAX_DATA_ERRORS:
+        # 截断必须标注：前端按 data_errors 的条数显示「跳过只数」，
+        # 不标注就会把截断后的条数当成真实只数。
+        warnings.append(f"data_errors 截断：共 {len(errors)} 条，仅下发前 {_MAX_DATA_ERRORS} 条")
 
     return {
         "ok": True,
@@ -330,7 +359,7 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
         "trades": trades_inline,
         "trades_total": trades_meta["total"],
         "trades_truncated": trades_meta["dropped"],
-        "data_errors": errors[:20],
+        "data_errors": errors[:_MAX_DATA_ERRORS],
     }
 
 
@@ -650,7 +679,12 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
         progress(-1, len(codes))     # 哨兵：进入不可细分的策略计算阶段
 
     ctx = base.StrategyContext(codes=list(usable.keys()), start=start, end=end, adjust="hfq")
-    signals = base.run(strategy_id, ctx, params)
+    # 同回测：策略层跳过的标的必须显式回传（否则「少了谁」不可见）
+    data.drain_skips()
+    try:
+        signals = base.run(strategy_id, ctx, params)
+    finally:
+        _collect_skips(errors)
     close_by_code = {c: _IdxOnly(ix) for c, ix in idx_by_code.items()}
     positions = base.signals_to_positions(signals, close_by_code)
     # 统一日期轴（各标的交易日的并集）：三档必须在**同一天**上比较 —— 见下方
@@ -858,7 +892,7 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
             "hold_amount": round(sum(x["amount"] for x in hold), 2),
             "hold_pnl": round(sum(x["pnl"] for x in hold), 2),
         },
-        "data_errors": errors[:20],
+        "data_errors": errors[:_MAX_DATA_ERRORS],
     }
 
 

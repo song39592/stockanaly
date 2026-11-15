@@ -33,6 +33,7 @@ import pandas as pd
 
 import chipformulas as chip_formulas
 from formulas import scr
+from .core import data
 from .core.base import strategy, ParamSpec, Signal, checkpoint
 
 
@@ -87,7 +88,10 @@ def scr90(ctx, top_n: int = 100, rebalance: int = 5, window: int = 250,
             res = chip_formulas.compute_matrix(
                 code, formula_id="tri_decay", start=fetch_start, end=end,
                 adjust=ctx.adjust, bins=bins, offline=True)
-        except Exception:                        # noqa: BLE001 - 单只失败不拖垮整批
+        except Exception as exc:                    # noqa: BLE001 - 单只失败不拖垮整批
+            # ⚠️ 不能静默 continue：跳过的票不参与选股，
+            #    报告若不写明「少了谁」，同一区间不同时间跑出不同结果也无从解释。
+            data.record_skip(code, f"筹码矩阵不可得（{type(exc).__name__}: {exc}）")
             continue
         s = scr.scr_series_pd(res)
         if win_start:

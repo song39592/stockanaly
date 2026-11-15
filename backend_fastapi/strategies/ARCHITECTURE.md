@@ -508,6 +508,31 @@ capital_utilization = mean_t( Σ_i w_i(t) )
 - 两者都取不到时：按上表返回 `None` + `benchmark_unavailable` flag，
   🔴 **不允许静默**。
 
+#### 修改点 ⑧：逐票跳过必须登记（`data.record_skip`）🔴
+
+策略逐票计算时，若某只票因**数据不可得**（筹码矩阵取不到、历史不足、缺流通股本等）
+被跳过，**必须**登记原因：
+
+```python
+try:
+    res = chip_formulas.compute_matrix(code, formula_id="tri_decay", ...)
+except Exception as exc:
+    data.record_skip(code, f"筹码矩阵不可得（{type(exc).__name__}: {exc}）")
+    continue
+```
+
+编排层（`backtest._collect_skips`）把这些记录收进报告的 `data_errors`（逐票），
+并在 `scope.warnings` 首位给一条**汇总**（跳过了多少只）。
+
+⚠️ **不允许静默 `continue`**：静默跳过会让「参与统计 N 只」变成假话 ——
+读者看不到「另有 M 只没参与」，于是「同一区间不同时间跑出完全不同的结果」
+既解释不了、也发现不了。
+
+> 实测事故：筹码矩阵缓存的增量判定曾把「缓存已是最新」误判成「数据推进了」，
+> 增量取不到新 K 线就抛「行情数据不足」，而策略用 `except Exception: continue`
+> 把它**静默**吞掉 → 绝大多数票被跳过 → KL 入池策略只交易到 **9 只**票，
+> 且三次运行的交易标的全不一样。修好判定后同一区间跑出稳定的全池结果。
+
 ## 交易明细日志 🆕
 
 `trades` 数组需支持**交易级归因**，单条结构：
@@ -608,6 +633,7 @@ JSON、解析要 10 秒；页面端实测 `DataGridView` 填 2 万行要 **4.3 �
 2. 用 `@strategy(...)` 声明 `inputs` / `params` / `outputs` / `requires_pool`；
    函数签名首参为 `ctx: StrategyContext`，其余为各 `ParamSpec` 同名参数：`def f(ctx, p1=.., p2=..) -> list[Signal]`；
 3. 函数体内用 `data.load_bars(ctx.codes, fields=inputs)` 主动拉取所需字段，逐标的计算；
+   **逐票跳过时必须 `data.record_skip(code, 原因)`**（见「修改点 ⑧」——静默跳过会让报告口径失真）；
 4. **自己维护 `held` 持仓集合**，每个调仓日输出**完整目标组合**
    （`weight ≥ 0`、`Σweight ≤ 1`），并附 `reason` / `meta`；
 5. 保存即生效（包加载时自动扫描注册，无需改任何其它文件）；
