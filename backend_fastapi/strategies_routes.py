@@ -122,6 +122,10 @@ class BacktestRequest(BaseModel):
     universe_mode: str = "interval_data"   # interval_data / pool_snapshot / index_constituent
     benchmark: Optional[str] = None        # 指数代码；不给则用「等权全池买入持有」作默认基准
     ruin_threshold: Optional[float] = None  # 组合净值跌破「该比例 × 初始资金」即破产截断；None=不截断，0.0=归零截断
+    # ---- 单股仓位上限（默认不限 = 按策略自己给的仓位执行）----
+    # 两个入口取**更严**的那个；都为空 → 不限 → 行为与改动前完全一致。
+    position_cap_pct: Optional[float] = None     # 占组合净值比例（0.05 = 5%）
+    position_cap_amount: Optional[float] = None   # 单股金额上限（元），按初始资金折算成占比
     # 单日策略的**目标执行日**（YYYY-MM-DD）。不给则按收盘前后自动选：
     # 收盘前=今天、收盘后=下一交易日。仅 /recommend 使用，回测忽略。
     target_date: Optional[str] = None
@@ -136,6 +140,33 @@ _CODE_ERR = {
 _guard = apiutil.guard
 
 
+def _resolve_position_cap(pct: float | None, amount: float | None,
+                         initial_capital: float) -> float | None:
+    """单股仓位上限：占比 与 金额 两个入口，**取更严的那个**；都没给 = 不限（None）。
+
+    口径：上限是「占**组合净值**比例」（0.05 = 5%），最终在统计层
+    （`stats.compute`）对策略给出的目标权重逐票取 min。
+
+    金额怎么折算：引擎的权重就是「占组合净值比例」，所以「每只投多少钱」
+    只能按**初始资金**折算（金额 / 初始资金 = 占比）。这与占比选项在初始
+    时点完全等价，只是「金额」更符合「我打算每只投多少钱」的直觉。
+
+    ⚠️ 真正的「金额恒定、净值涨了也不加仓」是**另一个语义**（自动减仓）：
+    权重会变成 `金额 / NAV`，净值一涨权重就降，统计层会把这种漂移当成
+    **卖出**而白付印花税+佣金 —— 与「省成本」的目标正好相反。
+    要那一档必须把交易派生与成本层从「权重差分」改成「金额差分」，
+    属于独立的引擎改造，本版**不做**。
+    """
+    limits = []
+    if pct is not None and float(pct) > 0:
+        limits.append(float(pct))
+    if amount is not None and float(amount) > 0 and initial_capital > 0:
+        limits.append(float(amount) / float(initial_capital))
+    if not limits:
+        return None
+    return min(1.0, min(limits))
+
+
 @router.post("/backtest")
 @_guard(code=_CODE_ERR)
 def do_backtest(req: BacktestRequest):
@@ -148,6 +179,9 @@ def do_backtest(req: BacktestRequest):
         min_commission=req.min_commission, lot_size=req.lot_size,
         benchmark=req.benchmark, window=req.window,
         universe_mode=req.universe_mode, ruin_threshold=req.ruin_threshold,
+        position_cap=_resolve_position_cap(req.position_cap_pct,
+                                           req.position_cap_amount,
+                                           req.initial_capital),
         scope_extra=scope_extra,
     )
     # 回测跑完**自动落盘一份报告**（策略 + 覆盖范围 + 指标 + 逐票汇总），
@@ -190,6 +224,9 @@ def do_backtest_start(req: BacktestRequest):
         min_commission=req.min_commission, lot_size=req.lot_size,
         benchmark=req.benchmark, window=req.window,
         universe_mode=req.universe_mode, ruin_threshold=req.ruin_threshold,
+        position_cap=_resolve_position_cap(req.position_cap_pct,
+                                           req.position_cap_amount,
+                                           req.initial_capital),
         codes_resolver=_resolve_codes_lazy,
     )
     if not out.get("ok"):
@@ -353,6 +390,9 @@ def do_recommend(req: BacktestRequest):
         req.strategy_id, req.params, [], req.start, signal_date,
         req.initial_capital, req.commission,
         execution_date=target, signal_date=signal_date,
+        position_cap=_resolve_position_cap(req.position_cap_pct,
+                                            req.position_cap_amount,
+                                            req.initial_capital),
         codes_resolver=_resolve_codes_lazy,
     )
     if not out.get("ok"):

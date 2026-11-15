@@ -16,7 +16,8 @@
     "scope": {"codes_count","requested","start","end",
               "initial_capital","commission","stamp_duty","slippage",
               "min_commission","lot_size","benchmark","universe_mode",
-              "equity_model","per_stock_truncated","feasibility","warnings"},
+              "equity_model","per_stock_truncated","feasibility","position_cap",
+              "warnings"},
               # feasibility.build_failures = 建仓失败明细（隔日一字涨停 → 买不进）：
               #   {count, shown, dropped, items[{code,name,date,signal_date,reason}]}
               #   这些建仓**没有成交**，所以不在 trades 明细里（那里一行 = 一次买卖）。
@@ -158,6 +159,7 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                  benchmark: str | None = None, window: int | None = None,
                  universe_mode: str = "interval_data",
                  ruin_threshold=None,
+                 position_cap: float | None = None,
                  scope_extra: dict | None = None,
                  progress=None) -> dict:
     """执行回测，返回标准化结果字典。异常由路由层转成错误响应。
@@ -252,7 +254,8 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                          slippage=slippage, min_commission=min_commission,
                          lot_size=lot_size, benchmark_close=bench_close,
                          raw_by_code=raw_by_code, signal_meta=sig_index, tail=window,
-                         ruin_threshold=ruin_threshold)
+                         ruin_threshold=ruin_threshold,
+                         position_cap=position_cap)
 
     trades: list[dict] = core.pop("trades", []) or []
     flags: list[str] = core.pop("flags", []) or []
@@ -345,6 +348,7 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
             "equity_model": "weight_strict_fill",
             "per_stock_truncated": trunc_info,
             "feasibility": feas,
+            "position_cap": position_cap,   # 生效的单股仓位上限（None=不限）
             "warnings": warnings,
         },
         "dates": core["dates"],
@@ -603,6 +607,7 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
                   lookback: int = 250, progress=None,
                   execution_date: str | None = None,
                   signal_date: str | None = None,
+                  position_cap: float | None = None,
                   baseline: dict | None = None) -> dict:
     """当前策略推荐：按**最新一日**的目标仓位给出买入 / 卖出 / 持股三档。
 
@@ -789,8 +794,12 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
         w = positions.get(code)
         hfq = hfq_bars.get(code)
         raw = raw_bars.get(code)
-        cur = target.get(code, 0.0)
-        prev = prev_w.get(code, 0.0)
+        # ⚠️ 单股仓位上限：推荐页与回测**必须同一口径** ——
+        #    「回测范围」页设了上限，推荐页给出的买入金额就得按上限算，
+        #    否则界面上的金额与回测里跑出来的仓位对不上（静默失真）。
+        #    口径实现唯一在 `stats.cap_weight`（与 compute 的向量化版同容差）。
+        cur = stats.cap_weight(target.get(code, 0.0), position_cap)
+        prev = stats.cap_weight(prev_w.get(code, 0.0), position_cap)
         b = base_hold.get(code) if use_ledger else None
         nm = names.get(code) or None
 
@@ -955,6 +964,7 @@ def start_reco_task(strategy_id: str, params: dict | None, codes: list[str],
                     commission: float = 0.0003,
                     execution_date: str | None = None,
                     signal_date: str | None = None,
+                    position_cap: float | None = None,
                     codes_resolver=None) -> dict:
     """启动一次后台推荐并**立即返回**；已有任务在跑时返回 ok=false（不排队）。
 
@@ -1048,6 +1058,7 @@ def start_reco_task(strategy_id: str, params: dict | None, codes: list[str],
                                    progress=_on_progress,
                                    execution_date=execution_date,
                                    signal_date=signal_date,
+                                   position_cap=position_cap,
                                    baseline=prev_result)
             except base.Cancelled:
                 with _RECO_LOCK:
@@ -1206,6 +1217,7 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
                benchmark: str | None = None, window: int | None = None,
                universe_mode: str = "interval_data",
                ruin_threshold=None,
+               position_cap: float | None = None,
                codes_resolver=None) -> dict:
     """启动一次后台回测并**立即返回**；已有任务在跑时返回 ok=false（不排队）。
 
@@ -1284,11 +1296,17 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
                     _BT_TASK["total"] = len(codes)
                     _BT_TASK["codes_count"] = len(codes)
             try:
+                # ⚠️ 全关键字传参：run_backtest 的位置参数已超过 10 个，
+                #   插一个参数就可能整体错位（类型对得上、值不对，最难查）。
                 out = run_backtest(strategy_id, params, codes, start, end,
-                                   initial_capital, commission, stamp_duty,
-                                   slippage, min_commission, lot_size,
-                                   benchmark, window, universe_mode,
-                                   ruin_threshold, scope_extra=scope_extra,
+                                   initial_capital=initial_capital,
+                                   commission=commission, stamp_duty=stamp_duty,
+                                   slippage=slippage, min_commission=min_commission,
+                                   lot_size=lot_size, benchmark=benchmark,
+                                   window=window, universe_mode=universe_mode,
+                                   ruin_threshold=ruin_threshold,
+                                   position_cap=position_cap,
+                                   scope_extra=scope_extra,
                                    progress=_on_progress)
             except base.Cancelled:
                 # 用户主动停止：**不是错误**。用 paused/cancelled 状态，

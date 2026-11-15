@@ -40,6 +40,8 @@ namespace StockPool
         private string _stScopeMask = "";
         private bool _stScopeLoading;
         private TextBox _stComm, _stBench;
+        // 单股仓位上限：两个入口取更严者（后端折算）；留空 = 不限 = 按策略自己给的仓位执行
+        private TextBox _stCapPct, _stCapAmt;
         private Label _stScopeHint;
         private DateTimePicker _stStart, _stEnd;
         // 回测范围的「口径说明」气泡：判定基准日 + 前视偏差声明 + 数据限制
@@ -557,6 +559,16 @@ private void StRefreshCurStrategy()
             _stComm.Text = "0.0003";
             AddRow(b, Row(Lbl("初始资金(元)"), _stCapital, Mute(Lbl("滚轮 1 万/格"))));
             AddRow(b, Row(Lbl("单边佣金比例"), _stComm, Mute(Lbl("如 0.0003 = 万三"))));
+            // 单股仓位上限：默认留空 = 不限（完全按策略自己给的仓位跑）。
+            // 填了之后策略给出的目标权重会被逐票压到这个上限以下（只压低、不抬高）。
+            _stCapPct = new TextBox();
+            _stCapPct.Width = 100;
+            _stCapAmt = new TextBox();
+            _stCapAmt.Width = 100;
+            // ⚠️ .NET Framework 4.x 的 TextBox 没有 PlaceholderText（那是 .NET 5+ 的），
+            //    「留空 = 不限」只能靠旁边的说明文字表达。
+            AddRow(b, Row(Lbl("单股仓位上限"), _stCapPct, Mute(Lbl("% 占组合净值")),
+                          Lbl("或金额(元)"), _stCapAmt, Mute(Lbl("留空=不限；两者取更严者"))));
             AddRow(stack, g3);
 
             var g4 = Group("基准对比", out b);
@@ -1493,7 +1505,38 @@ private void StRefreshCurStrategy()
                 { "commission", J.NumOr(_stComm.Text, 0.0003) },
                 { "benchmark", (_stBenchChk.Checked && _stBench.Text.Trim().Length > 0) ? _stBench.Text.Trim() : null },
                 { "ruin_threshold", ruinThreshold },
+                { "position_cap_pct", StCapPct() },
+                { "position_cap_amount", StCapAmt() },
             };
+        }
+
+        /// <summary>单股仓位上限（占组合净值比例）：界面填百分数，留空 = 不限。</summary>
+        private double? StCapPct()
+        {
+            string t = (_stCapPct == null ? "" : _stCapPct.Text).Trim();
+            if (t.Length == 0) return null;
+            double v = J.NumOr(t, 0.0);
+            return v > 0 ? (double?)(v / 100.0) : null;
+        }
+
+        /// <summary>单股金额上限（元）：留空 = 不限；后端按初始资金折算成占比，
+        /// 并与百分比上限**取更严的那个**。</summary>
+        private double? StCapAmt()
+        {
+            string t = (_stCapAmt == null ? "" : _stCapAmt.Text).Trim();
+            if (t.Length == 0) return null;
+            double v = J.NumOr(t, 0.0);
+            return v > 0 ? (double?)v : null;
+        }
+
+        /// <summary>结果头部的「单股上限」标注；没设上限就不显示（别让默认状态看起来像被限制过）。</summary>
+        private string StCapText()
+        {
+            double? p = StCapPct();
+            if (p != null) return " · 单股上限 " + p.Value.ToString("P1");
+            double? a = StCapAmt();
+            if (a != null) return " · 单股上限 " + a.Value.ToString("F0") + "元";
+            return "";
         }
 
         private static FlowLayoutPanel StCardRow(int maxWidth = 900)
@@ -1791,6 +1834,8 @@ private void StRefreshCurStrategy()
                 { "initial_capital", (double)_stCapital.Value },
                 { "commission", J.NumOr(_stComm.Text, 0.0003) },
                 { "benchmark", (_stBenchChk.Checked && _stBench.Text.Trim().Length > 0) ? _stBench.Text.Trim() : null },
+                { "position_cap_pct", StCapPct() },
+                { "position_cap_amount", StCapAmt() },
             };
 
             string start = StDate(_stStart) ?? "起点";
@@ -1802,7 +1847,8 @@ private void StRefreshCurStrategy()
             double cap = (double)_stCapital.Value;
             _stResultHeader.Text = "策略：" + J.StrOr(meta["name"], sid) + " · 范围：" + scope + " "
                 + start + "~" + end + " · 初始 " + (cap / 10000).ToString("F1") + "万 · 佣金 "
-                + J.NumOr(_stComm.Text, 0.0003).ToString("P4").Replace(" ", "");
+                + J.NumOr(_stComm.Text, 0.0003).ToString("P4").Replace(" ", "")
+                + StCapText();
 
             _stResultStatus.Text = "回测中：" + J.StrOr(meta["name"], sid) + "…（进度见顶部任务区）";
             _stResultStatus.ForeColor = _cSub;
