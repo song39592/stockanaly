@@ -90,6 +90,22 @@ def load_shuffle_variant():
     return ns["jwzz_cross_shuffle"]
 
 
+def _num(v, default=0.0):
+    """把 metrics 里可能是 list/None 的值收敛成标量。
+
+    为什么要有这层：metrics 里某个字段一旦被写成 list（历史上就发生过：
+    返回 dict 里 "trades" 键重复，笔数标量被逐笔列表覆盖），
+    格式化时会炸 "TypeError: must be real number, not list"，
+    **整轮实验白跑**（实测踩过）。这里统一兜住，别让一处脏数据毁掉一轮对照。
+    """
+    if isinstance(v, (list, tuple)):
+        v = v[0] if v else default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def run(pool, start, end, params=None, shuffle=None, strict=True):
     """跑一次回测（生产编排层）。
 
@@ -127,22 +143,25 @@ def run(pool, start, end, params=None, shuffle=None, strict=True):
 
     m = res["metrics"]
     return {
-        "ret": float(m.get("total_return") or 0.0),
-        "sharpe": float(m.get("sharpe") or 0.0),
-        "mdd": float(m.get("max_drawdown") or 0.0),
-        "util": float(m.get("capital_utilization") or 0.0),
-        "avg_pos": float(m.get("avg_positions") or 0.0),
-        "trades": float(m.get("num_trades_eff") or 0.0),
-        "hold": float(m.get("avg_holding_days") or 0.0),
-        "bench": float(m.get("benchmark_return") or 0.0),
-        "rpu": float(m.get("return_per_utilized_capital") or 0.0),
-        "turnover": float(m.get("turnover_annual") or 0.0),
-        "codes": int(res["scope"]["codes_count"]),
+        "ret": _num(m.get("total_return")),
+        "sharpe": _num(m.get("sharpe")),
+        "mdd": _num(m.get("max_drawdown")),
+        "util": _num(m.get("capital_utilization")),
+        "avg_pos": _num(m.get("avg_positions")),
+        "trades": _num(m.get("num_trades_eff")),
+        "hold": _num(m.get("avg_holding_days")),
+        "bench": _num(m.get("benchmark_return")),
+        "rpu": _num(m.get("return_per_utilized_capital")),
+        "turnover": _num(m.get("turnover_annual")),
+        "codes": int(_num(res["scope"]["codes_count"])),
         "feas": res["scope"].get("feasibility") or {},
         "warnings": res["scope"].get("warnings") or [],
         "equity": res.get("equity") or [],
         "dates": res.get("dates") or [],
-        "trades": res.get("trades") or [],
+        # ⚠️ 逐笔明细的键名**不能**叫 "trades"：上面已有同名的**笔数标量**
+        #    （num_trades_eff），重复键会让后者被静默覆盖 → 打印时炸
+        #    "TypeError: must be real number, not list"。
+        "trade_rows": res.get("trades") or [],
         "per_stock": res.get("per_stock") or [],
         "metrics": m,
     }

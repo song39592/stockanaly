@@ -67,6 +67,7 @@ enabled: true
 ## 五、指针
 
 - 展开与全部佐例 → `docs/backtest-credibility.md`
+- **JWZZ 系的结论与数字**（生产口径，唯一权威）→ `docs/jwzz-backtest-2026-11-16.md`
 - 对照实验脚本（**生产口径**，走编排层）→ `scripts/jwzz_prod_probe.py`
   （`--mode ab` / `shuffle` / `pool` / `period`）
 - ⚠️ `scripts/jwzz_shuffle_probe.py` 是**旧版放宽口径**脚本（直调 stats，

@@ -77,7 +77,7 @@ def check_determinism(r1, r2):
 
 def concentration(r):
     """收益集中度：逐笔 / 逐票 / 持有期 / 胜率。"""
-    trades = list(r["trades"] or [])
+    trades = list(r["trade_rows"] or [])
     closed = [t for t in trades if not t.get("open")]
     pnls = np.array([float(t.get("pnl") or 0.0) for t in trades], dtype=float)
     gross_win = float(pnls[pnls > 0].sum())
@@ -291,9 +291,9 @@ def main():
         for x in con["top_stocks"][:8]:
             print("    %-8s pnl=%12.0f  笔数=%s" % (x["code"], x["pnl"], x["trades"]))
 
-        codes = [t.get("code") for t in (r1["trades"] or []) if t.get("code")]
+        codes = [t.get("code") for t in (r1["trade_rows"] or []) if t.get("code")]
         close_by_code = load_close(codes, s, e)
-        st = scan_trades(r1["trades"] or [], close_by_code)
+        st = scan_trades(r1["trade_rows"] or [], close_by_code)
         print("\n[闸三-A] 逐笔 pnl 与单票价格走势的口径差（**不是造假检测**）")
         print("  可比笔=%d  合规(<=真实最大涨幅)=%d  超出=%d  跳过(无成交价)=%d"
               % (st["n_cmp"], st["n_ok"], st["n_over"], st["n_skip"]))
