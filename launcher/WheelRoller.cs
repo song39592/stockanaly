@@ -13,10 +13,22 @@ namespace StockPool
     /// 所以画的是一列可拨动的数字（上下淡出，中间一行加粗并带上下分隔线）。
     ///
     /// 交互：
-    ///   · 鼠标滚轮：每格一个 step（向上滚数值变大）
+    ///   · 鼠标滚轮：每格一个 step（**往下滚数值变大** —— 当成一张从上到下递增的列表翻）
     ///   · 拖动：按住中间一行上下拨，数字跟着走，松手吸附到最近一行
     ///   · 点击某一行：直接跳到那一行
     ///   · ↑↓ / PgUp / PgDn：微调
+    ///
+    /// ⚠️ 数字列排布：**小的在上、大的在下**（用户确认的正常习惯 —— 像一张从上到下
+    /// 递增的列表）。行号越大=数值越大=画得越靠下。
+    ///
+    /// ⚠️ 三种输入的语义**故意不同**，别当成 bug：
+    ///   · 鼠标滚轮 = **翻列表**（往下滚 → 看到下面 → 数值变大；数字列随之向上走，
+    ///     与普通可滚动区域「内容与滚轮反向」一致）；
+    ///   · ↑↓ / PgUp / PgDn = **数值微调**（↑ 变大，与所有数字控件一致；
+    ///     此时数字列向上走，与按键方向相同）；
+    ///   · 拖动 = **跟手**（往上拨 → 数值变大，数字列跟着手指走）。
+    /// 早先滚轮是「往上滚数值变大」，数字列却跟着滚轮一起往上跑 —— 与 Windows 上
+    /// 其它可滚动区域拧着，用户一看就觉得「方向反了」，现在按列表语义改正。
     ///
     /// 值域很大也没关系：只渲染当前值附近的几行，不把整个值域铺出来。
     /// </summary>
@@ -190,6 +202,7 @@ namespace StockPool
                     int row = first + k;
                     if (row < 0 || row > _totalRows) continue;
                     double dist = Math.Abs(row - _pos);
+                    // 小的在上：行号越大=数值越大=越靠下
                     float y = centerY + (float)(row - _pos) * RowH;
                     if (y < -RowH || y > Height + RowH) continue;
 
@@ -260,11 +273,15 @@ namespace StockPool
             base.OnMouseWheel(e);
             int n = e.Delta / 120;
             if (n == 0) return;
-            Nudge(n);
+            // 滚轮 = **翻列表**：往下滚（Delta<0）→ 看到下面更大的值 → 数值变大。
+            // 早先这里是 Nudge(n)（往上滚变大），数字列却跟着滚轮一起往上跑 ——
+            // 与 Windows 上其它可滚动区域（内容与滚轮反向）拧着 → 「方向反了」。
+            Nudge(-n);
         }
 
         private int RowAt(int y)
         {
+            // 与 OnPaint 的排布一致：小的在上 → 屏幕上方对应**更小**的行号
             int row = (int)Math.Round(_pos + (y - Height / 2.0) / RowH);
             if (row < 0) row = 0;
             if (row > _totalRows) row = _totalRows;
@@ -290,7 +307,8 @@ namespace StockPool
             if (Math.Abs(dy) > 3) _moved = true;
             if (!_moved) return;
 
-            double p = _dragStartPos - dy / RowH;   // 向上拨 = 数值变大
+            // 向上拨 = 数值变大（跟手：数字列跟着手指往上走，小在上 → 更大的值落进高亮带）
+            double p = _dragStartPos - dy / RowH;
             if (p < 0) p = 0;
             if (p > _totalRows) p = _totalRows;
             _pos = p;
