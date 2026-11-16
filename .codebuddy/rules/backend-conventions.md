@@ -59,4 +59,5 @@ enabled: true
 
 - 目录地图 / 路由前缀 / 单一来源全表 → `project-structure.md`
 - 实现方式的选择优先级 / 抽象判据 → `engineering-standards.md`
+- 回测 / 策略比对的可信度纪律（三道闸 + 两个必做对照）→ `backtest-credibility.md`
 - 接口字段变更必须同步前端消费端 → `docs-sync.md` 触发矩阵
