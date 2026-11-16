@@ -1,6 +1,21 @@
 # -*- coding: utf-8 -*-
 """同强势池打乱排序 —— 分离「集中度」与「选股质量」的判决性对照。
 
+🚨🚨🚨 **本脚本是「放宽口径」的旧版，产出数字一律不可引用** 🚨🚨🚨
+
+原因：本脚本**直调** `strategies.jwzz_cross` + `stats.compute`，绕过编排层
+（`backtest.run_backtest`），于是漏掉 `raw_by_code` → **严格成交模型**没生效
+（一字涨停买不进被当成买到了）。实测同一实验（全市场 2024 / top_n=10）：
+
+    放宽口径（本脚本）  8457.27% / 夏普 6.06
+    生产口径（正确）      182.65% / 夏普 1.86      ← 收益差 46 倍
+
+**要跑对照实验请用 `scripts/jwzz_prod_probe.py`（生产口径执行器）。**
+保留本脚本仅为复现「口径差异」这一教训，别拿它的数字做结论。
+
+---
+以下为原始说明（数字均属放宽口径）：
+
 问题：`jwzz_cross`（每日取 JWZZ 最强的前 N 只）在 2023-11~2026-11 跑出 11591%。
     这 115 倍到底来自「按 JWZZ 降序排序」这个动作，还是仅来自
     「用 10% 仓位集中持有少数几只妖股」？
@@ -114,9 +129,11 @@ def load_shuffle_variant():
     return wrapped
 
 
-def run(fn, pool, params=None, **extra):
-    ctx = base.StrategyContext(codes=list(pool), start=START, end=END, adjust="hfq")
-    bars = data.load_bars(pool, START, END, fields=["close", "volume", "amount"],
+def run(fn, pool, params=None, start=None, end=None, **extra):
+    s = start or START
+    e = end or END
+    ctx = base.StrategyContext(codes=list(pool), start=s, end=e, adjust="hfq")
+    bars = data.load_bars(pool, s, e, fields=["close", "volume", "amount"],
                           adjust="hfq")
     close_by_code = {c: bars[c]["close"] for c in bars if c in bars}
     kw = dict(cost_period=13, threshold=95.0, smooth_period=0, top_n=TOP_N,
@@ -136,6 +153,8 @@ def run(fn, pool, params=None, **extra):
         "avg_pos": float(m.get("avg_positions") or 0.0),
         "trades": float(m.get("num_trades_eff") or 0.0),
         "hold": float(m.get("avg_holding_days") or 0.0),
+        "bench": float(m.get("benchmark_return") or 0.0),
+        "alpha": float(m.get("alpha") or 0.0),
     }
 
 
@@ -173,6 +192,56 @@ def _mode_pool(args, t0):
     print("\nelapsed = %.1fs" % (time.time() - t0))
 
 
+def _mode_period(args, t0):
+    """换区间验证 —— 「是不是只在 2023~2026 这段行情有效」。
+
+    关键设计：**股票池固定不变**（同一批全市场票），只让时间窗口变 ——
+    这样区间之间的差异 100% 来自行情，不掺「池子变了」的混淆。
+
+    不用剔除口径（ST/次新/微盘）是有意的：那些特征依赖当前名单与当前股本，
+    在 2015 这类早年区间上判定本身就不可靠（上市日用「库里最早日K」近似，
+    会把老票误判成新股）。池子固定后，这些都不影响「跨区间可比性」。
+    """
+    periods = []
+    for item in str(args.periods).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        s, e = item.split(":")
+        periods.append((s, e))
+    pool = pick_pool(args.period_stocks)
+    print("=== 换区间验证：jwzz_cross top_n=%d（%d 只，池子固定）===" %
+          (TOP_N, len(pool)), flush=True)
+    print("    固定：策略 / 参数 / 成本模型 / **股票池**；只换时间窗口\n")
+    print("  %-26s %10s %8s %9s %10s %9s %8s" %
+          ("区间", "策略收益", "夏普", "回撤", "等权基准", "alpha", "笔数"))
+    rows = []
+    for s, e in periods:
+        try:
+            r = run(JC.jwzz_cross, pool, start=s, end=e)
+        except Exception as exc:
+            print("  %-26s 跳过（%s: %s）" % (s + "~" + e, type(exc).__name__, exc),
+                  flush=True)
+            continue
+        rows.append((s, e, r))
+        print("  %-26s %9.2f%% %8.2f %8.2f%% %9.2f%% %8.2f%% %8.0f" %
+              (s + "~" + e, r["ret"] * 100, r["sharpe"], r["mdd"] * 100,
+               r["bench"] * 100, r["alpha"], r["trades"]), flush=True)
+    if not rows:
+        print("  没有可统计的区间（本地日K 覆盖不足）")
+        return
+    sh = [r["sharpe"] for _, _, r in rows]
+    rt = [r["ret"] for _, _, r in rows]
+    print("\n  夏普：均值=%.2f  中位=%.2f  min=%.2f  max=%.2f" %
+          (sum(sh) / len(sh), sorted(sh)[len(sh) // 2], min(sh), max(sh)))
+    print("  收益：均值=%.2f%%  中位=%.2f%%  min=%.2f%%  max=%.2f%%" %
+          (sum(rt) / len(rt) * 100, sorted(rt)[len(rt) // 2] * 100,
+           min(rt) * 100, max(rt) * 100))
+    print("  → 若多数区间夏普 > 1 → alpha 跨行情成立；"
+          "若只有 2023~2026 高 → 行情依赖，该做市场状态过滤而非调参数")
+    print("\nelapsed = %.1fs" % (time.time() - t0))
+
+
 def main():
     global START, END, PICK_POOL
     import argparse
@@ -182,12 +251,22 @@ def main():
     ap.add_argument("--pool", type=int, default=PICK_POOL, help="对照池 K（降序前 K 只里随机取）")
     ap.add_argument("--start", default=START)
     ap.add_argument("--end", default=END)
-    ap.add_argument("--mode", choices=["shuffle", "pool"], default="shuffle",
-                    help="shuffle=打乱排序对照；pool=换股票池抽样看收益分布")
+    ap.add_argument("--mode", choices=["shuffle", "pool", "period"], default="shuffle",
+                    help="shuffle=打乱排序对照；pool=换股票池抽样看收益分布；"
+                         "period=换区间看行情依赖")
+    ap.add_argument("--periods", default=(
+        "2015-01-05:2015-12-31,2016-01-04:2016-12-30,2017-01-03:2017-12-29,"
+        "2018-01-02:2018-12-31,2019-01-02:2019-12-31,2020-01-02:2020-12-31,"
+        "2021-01-04:2021-12-31,2022-01-04:2022-12-30,2023-01-03:2023-12-29,"
+        "2024-01-02:2024-12-31,2025-01-02:2025-12-31,"
+        "2023-11-16:2026-11-16"),
+        help="mode=period 时要跑的区间（start:end, 逗号分隔）")
     ap.add_argument("--pool-seeds", default="1,2,3,4,5,6,7,8",
                     help="mode=pool 时要跑的股票池随机种子")
     ap.add_argument("--all-market", action="store_true",
                     help="mode=pool 时额外跑一次全市场口径作参照")
+    ap.add_argument("--period-stocks", type=int, default=0,
+                    help="mode=period 时股票池只数（0=全市场，池子固定不变）")
     args = ap.parse_args()
 
     START, END, PICK_POOL = args.start, args.end, args.pool
@@ -195,6 +274,8 @@ def main():
     t0 = time.time()
     if args.mode == "pool":
         return _mode_pool(args, t0)
+    if args.mode == "period":
+        return _mode_period(args, t0)
 
     pool = pick_pool(args.stocks)
     print("子集 %d 只 | 区间 %s ~ %s | top_n=%d | 对照池 K=%d" %
