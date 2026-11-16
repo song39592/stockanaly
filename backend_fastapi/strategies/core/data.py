@@ -244,6 +244,20 @@ def list_universe_codes(universe_mode: str = "interval_data",
     return sorted(price_store.code_latest_dates("raw").keys())
 
 
+def bar_counts(start: str | None = None, end: str | None = None,
+               adjust: str = "raw") -> dict[str, int]:
+    """区间内每只票的 K 线根数 {code: n} —— **取数事实，不做口径判断**。
+
+    给「这只票在区间内够不够数据」用：能否注入由**股票池层**（universe）据此判定，
+    编排层（backtest）不再自己判一遍 —— 同一口径只有一处，两边不会算出两个数。
+
+    缺 start 或 end → 返回空（区间未定的场景不做可用性判断）。
+    """
+    if not start or not end:
+        return {}
+    return price_store.count_bars(start, end, adjust)
+
+
 # ---------------------------------------------------------------- 名称 / 上市日 / 市值（原始数据）
 # 供 universe（股票池层）与 backtest（编排层）复用；这里只取数，不做「范围规则」判断。
 

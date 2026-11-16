@@ -9,7 +9,7 @@
   4. **卖出与买入分开一天**：昨日卖出腾出的槽位**当天不能用，次日才补**；
   5. **每日买入只数** `buys_per_day`：设成 2 就是每天买前 2；
   6. **整组重发**：调仓日必须输出全部持仓（少发一条 = 静默清仓）；
-  7. **Σweight ≤ 1**：单票仓位 × 槽位数超 1 直接报错，不静默归一；
+  7. **Σweight ≤ 1**：单票仓位**自动 = 1 / 槽位数**（不单独设），满槽恰好 100%；
   8. 面板口径：`bull` 停牌沿用上一有值状态、`dn` 只在有行情的日子产生、
      `bar` 标出当日是否有行情（停牌的票买不进去，不能占买入名额）。
 """
@@ -107,7 +107,7 @@ class TestJwzzHold(unittest.TestCase):
     def test_sum_weight_never_exceeds_one_and_slots_respected(self):
         bars = {f"C{i:02d}": _df([1.0] * 12 + [1.0 + 0.01 * i] * 18)
                 for i in range(1, 16)}
-        sig = _run(jwzz_hold_mod.jwzz_hold, bars, max_slots=10, position_each=0.1)
+        sig = _run(jwzz_hold_mod.jwzz_hold, bars, max_slots=10)
         days = _by_day(sig)
         for day, sigs in days.items():
             total = sum(s.weight for s in sigs.values())
@@ -138,7 +138,7 @@ class TestJwzzHold(unittest.TestCase):
             "BBB": _df([1.0] * 16 + [1.2] * 14),                # 16 起强势
         }
         sig = _run(jwzz_hold_mod.jwzz_hold, bars,
-                   max_slots=1, position_each=1.0, buys_per_day=1)
+                   max_slots=1, buys_per_day=1)
         days = _by_day(sig)
 
         # 索引 12：买入 AAA（占满唯一槽位）
@@ -160,7 +160,7 @@ class TestJwzzHold(unittest.TestCase):
             "BBB": _df([1.0] * 13 + [1.2] * 17),               # 13 起强势(200)，更强势
         }
         sig = _run(jwzz_hold_mod.jwzz_hold, bars,
-                   max_slots=1, position_each=1.0, buys_per_day=1)
+                   max_slots=1, buys_per_day=1)
         days = _by_day(sig)
         # AAA 还占着唯一槽位时，BBB 更强也买不进
         for day, sigs in days.items():
@@ -182,11 +182,33 @@ class TestJwzzHold(unittest.TestCase):
         self.assertEqual(days[DATES[12]]["BBB"].meta.get("rank"), 1)
         self.assertEqual(days[DATES[12]]["CCC"].meta.get("rank"), 2)
 
-    # ---------- 5. 参数护栏：单票仓位 × 槽位数 > 1 直接报错 ----------
-    def test_position_times_slots_over_one_raises(self):
+    # ---------- 5. 单票仓位自动 = 1 / 槽位数（不再单独设置） ----------
+    def test_position_is_auto_one_over_slots(self):
+        """单票仓位 = 1/槽位：10 槽 → 10%，20 槽 → 5%（用户不用、也配不出越界组合）。"""
         bars = {"AAA": _df([1.0] * 12 + [1.1] * 18)}
-        with self.assertRaises(ValueError):
-            _run(jwzz_hold_mod.jwzz_hold, bars, max_slots=10, position_each=0.2)
+        for slots, expect in ((10, 0.1), (20, 0.05), (4, 0.25), (1, 1.0)):
+            sig = _run(jwzz_hold_mod.jwzz_hold, bars, max_slots=slots)
+            days = _by_day(sig)
+            self.assertAlmostEqual(days[DATES[12]]["AAA"].weight, expect,
+                                   msg=f"槽位 {slots} 的单票仓位应为 {expect}")
+
+    def test_sum_weight_never_exceeds_one_for_any_slots(self):
+        """任意槽位数下同一事件日 Σweight ≤ 1（满槽恰好 100%，不满就是现金）。"""
+        for slots in (1, 3, 7, 10, 20, 49):
+            bars = {f"C{i:02d}": _df([1.0] * 12 + [1.0 + 0.01 * i] * 18)
+                    for i in range(1, 16)}
+            sig = _run(jwzz_hold_mod.jwzz_hold, bars, max_slots=slots)
+            for day, sigs in _by_day(sig).items():
+                total = sum(s.weight for s in sigs.values())
+                self.assertLessEqual(total, 1.0 + 1e-6,
+                                     f"槽位 {slots}：{day} Σweight={total}")
+
+    def test_position_each_param_removed(self):
+        """「单票仓位」不再是参数 —— 参数面板由 ParamSpec 生成，少一项就少一个输入框。"""
+        import inspect
+        params = inspect.signature(jwzz_hold_mod.jwzz_hold).parameters
+        self.assertNotIn("position_each", params)
+        self.assertIn("max_slots", params)
 
     # ---------- 6. 注册门槛：文件能通过校验（id==文件名/签名/Σweight/meta） ----------
     def test_passes_registry_validation(self):
