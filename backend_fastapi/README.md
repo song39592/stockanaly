@@ -76,6 +76,13 @@ POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / 
                                         window = **注入判定**结论（可注入只数 / 区间内行情不足
                                         剔除的只数 / 实际取数区间）。口径在股票池层
                                         （universe.filter_available），预览与实跑同一份实现
+                                       scope.exclusion.spec_version / spec_signature =
+                                        **统计口径版本与指纹**（口径改一次，同区间同策略结果
+                                        能差 10~30 倍 —— 没有这两个字段，两份报告无法自证
+                                        能不能比）；strategy.version = **策略算法版本**
+                                        （改了逻辑/参数默认值就 bump）。
+                                         三者随报告一起落盘，读结果文件即可比对；
+                                         复杂的抽象比对不在此处做
 ```
 
 测试：

@@ -129,6 +129,9 @@ def _summarize(report: dict) -> dict:
         "strategy_id": strat.get("id"),
         "strategy_name": strat.get("name"),
         "params": strat.get("params") or {},
+        # 策略算法版本：同一策略改了逻辑/默认值，靠这个字段区分两份报告
+        # （口径版本与指纹在下面的 exclusion 里，随范围口径一起落盘）
+        "strategy_version": strat.get("version"),
         "start": scope.get("start"),
         "end": scope.get("end"),
         "trading_days": scope.get("trading_days"),
@@ -257,6 +260,8 @@ def build_report(payload: dict) -> dict:
             "name": strat.get("name"),
             # 参数必须原样全记：参数变了就不是同一次实验，事后无法从指标反推
             "params": strat.get("params") or {},
+            # 策略算法版本：同一策略改了逻辑，两份报告靠这个字段区分
+            "version": strat.get("version"),
         },
         "scope": scope,
         "metrics": metrics,

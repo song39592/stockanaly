@@ -38,12 +38,24 @@ enabled: true
 
 | 口径 | 唯一权威 | 备注 |
 |---|---|---|
-| 范围口径（板块 / ST / 上市日 / 市值 / 判定基准日） | `strategies/core/universe.py` | spec 构造走 `universe.spec_from_request`；改口径的允许改动面 = 该文件（+ 需要新取数能力时的 `strategies/core/data.py`），前端与报告**不用动** |
+| 范围口径（板块 / ST / 上市日 / 市值 / 判定基准日） | `strategies/core/universe.py` | spec 构造走 `universe.spec_from_request`；改口径的允许改动面 = 该文件（+ 需要新取数能力时的 `strategies/core/data.py`），前端不用动；报告也不用手改（口径版本自动带，见下） |
 | 指标 / 策略共用的纯计算 | `formulas/` | 禁止在策略里把指标算法重写一遍 |
 | 日线标准列 / 复权缩放 | `core/bars_schema.py` | 新增量纲为「价」的列必须同时进 `PRICE_SCALED_COLUMNS` |
 
 **自检**：`cd backend_fastapi && python -m unittest test_conventions`
 （阈值唯一 / spec 唯一入口 / 分层不反向依赖 / 池子入口唯一）。
+
+### 口径与算法改了 → bump 版本（否则报告没法比）
+
+口径改一次（阈值 / 剔除特征 / 判定基准日），**同一区间、同一策略的结果能差 10~30 倍**
+（实测同区间 3839 笔 → 174645% 与 3418 笔 → 5569%）。报告不记版本 → 两份报告
+摆在一起无法判断能不能比，只能靠猜。
+
+- 统计口径 → 手工 bump `universe.SPEC_VERSION`；`universe.spec_signature()` 自动算指纹
+  （防「改了参数却忘了 bump」）。两者随报告落盘在 `scope.exclusion`。
+- 策略算法 / 参数默认值 → bump 该策略的 `version`（`@strategy(version=...)`），
+  落盘在 `strategy.version`。
+- **两份报告口径或策略版本不同 → 不可直接对比**，先对齐再说数字。
 
 ## 四、改后端代码之后
 

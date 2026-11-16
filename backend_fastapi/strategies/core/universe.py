@@ -44,6 +44,7 @@ universe（本文件）→ data（原始取数：基池 / 名称 / 上市日 / �
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import time
 
 from . import data
@@ -76,6 +77,37 @@ RECO_LOOKBACK = 250           # 推荐页默认回看的交易日数（缺区间
 _CACHE_TTL = 3600             # 秒；范围不变时的复用窗口
 _CACHE_MAX = 8                # 最多保留多少种范围（预览与回测不会互相挤掉）
 _cache: dict = {}             # key -> (codes, base_count, at, detail)
+
+# ---- 统计口径版本：口径变了就 bump ----------------------------------------
+# 为什么需要：注入判定口径改一次（阈值 / 剔除特征 / 判定基准日），同一区间、同一
+# 策略的结果能差 10~30 倍（实测 3839 笔 → 174645% 与 3418 笔 → 5569%），
+# 而报告过去不记版本 → 两份报告摆在一起，无从判断能不能比。
+SPEC_VERSION = "2026-11-16.b"
+
+
+def spec_signature() -> str:
+    """统计口径指纹（8 位）—— 把决定「池子构成与判定规则」的常量压成一个短串。
+
+    与 `SPEC_VERSION` 的分工：
+      · `SPEC_VERSION`   人工 bump，口径**语义**变了（如判定基准日从起点改成结束日）
+      · `spec_signature` 自动算，口径**参数**变了（有人改了 MIN_BARS 却忘了 bump）
+
+    ⚠️ 只覆盖**统计口径**（哪些票进池、怎么判）。**不覆盖**策略逻辑、行情数据、
+    成交可行性判定（隔日一字涨停买不进那类）—— 别把它当成「可复现」的保证。
+    """
+    payload = "|".join([
+        SPEC_VERSION,
+        f"MIN_BARS={MIN_BARS}",
+        f"WARMUP_BARS={WARMUP_BARS}",
+        f"IPO_DAYS={IPO_DAYS}",
+        f"SUB_NEW_DAYS={SUB_NEW_DAYS}",
+        f"MICRO_CAP={MICRO_CAP}",
+        f"EXCLUDE={','.join(CATEGORIES)}",
+        f"FWD={','.join(_FORWARD_LOOKING)}",
+        "ASOF=start",
+        "LISTING=earliest_bar",
+    ])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
 
 
 def _board_key(code: str) -> str:
@@ -430,6 +462,9 @@ def summary(spec: dict, force: bool = False) -> dict:
         "forward_looking": detail["forward_looking"],
         "listing_date_source": detail.get("listing_date_source"),
         "market_cap_meta": detail.get("market_cap_meta") or {},
+        # 口径版本与指纹：预览与回测报告**共用同一句**（同一份实现，不各写一套）
+        "spec_version": SPEC_VERSION,
+        "spec_signature": spec_signature(),
         "note": scope_note(detail),
     }
     return out
