@@ -65,8 +65,13 @@ def _resolve_codes(req: BacktestRequest):
       不重复扫描/联网。
     · use_all=False → 用 codes（自定义，兼容旧前端）。
 
-    返回 (codes, detail)。detail 含**每项剔除只数**与口径说明，
-    必须写进报告 scope —— 否则报告无法自证「这次到底剔了什么」。
+    返回 (codes, detail)。detail 含**每项剔除只数**与口径字段，必须写进报告 scope
+    —— 否则报告无法自证「这次到底剔了什么」。
+
+    ⚠️ 这里**不做**「区间内行情够不够 → 能不能注入」的判定：那个区间在运行时才定
+    （短窗口要向前预热、推荐页要回看），由编排层在定下区间后调
+    `universe.filter_available`（股票池层的唯一口径）。预览那边走
+    `universe.summary`，用同一个函数、同一个区间口径。
 
     ⚠️ spec 由股票池层构造（`universe.spec_from_request`）—— 路由层**不自己造 spec**，
     否则预览与实跑各造一份 → 改口径漏一处 → 界面显示与实跑不一致。
@@ -74,22 +79,24 @@ def _resolve_codes(req: BacktestRequest):
     if not req.use_all:
         return [str(c).strip() for c in (req.codes or []) if str(c).strip()], {}
     codes, detail = suniverse.build_detail(suniverse.spec_from_request(req))
-    detail = dict(detail)
-    detail["note"] = suniverse.scope_note(detail)
-    return codes, detail
+    return codes, dict(detail)
 
 
 @router.get("/universe/summary")
 def universe_summary(exclude: list[str] = Query(default=[]),
                      start: Optional[str] = Query(default=None),
                      end: Optional[str] = Query(default=None)):
-    """回测范围预览：基池数量 + 剔除后数量 + **每项剔除只数** + 口径说明。
+    """回测范围预览：基池数量 + 剔除后数量 + **每项剔除只数** + **可注入数量** + 口径说明。
 
-    供前端在勾选「排除特征」时实时显示「本地共 N 只 · 剔除后 M 只」。
+    供前端在勾选「排除特征」时实时显示「本地共 N 只 · 剔除后 M 只 · 可注入 K 只」。
 
     ⚠️ 必须与实跑用**同一个 spec**（含 start/end/as_of）：以前这里只传 exclude，
     实跑传 exclude+start/end/as_of → 两个不同的缓存键 → 各算各的 →
     界面显示「剔除后 = 基池」而实跑剔掉一千多只（用户以为没剔，其实剔了）。
+
+    ⚠️ 「可注入 K 只」= 剔除特征后、再按**区间内行情根数**核减后的数量
+    （<30 根算不出信号）。用的区间与实跑一致（短窗口同样向前扩展预热根），
+    所以这个数就是实跑参与统计的只数。
 
     ⚠️ spec 同样由股票池层构造（`universe.spec_from_request`），与实跑走同一入口。
     """

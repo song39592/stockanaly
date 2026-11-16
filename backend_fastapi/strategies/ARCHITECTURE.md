@@ -65,8 +65,11 @@
 回测范围 (codes / start / end / universe_mode)
         │
         ▼
-backtest.py   ① 读范围 + 抽样上限；预检取数（data.load_bars，缓存）
-        │      ② 过滤数据不足/不可交易的标的 → 构造 StrategyContext
+universe.py   ⓪ 判定「能不能注入给策略」：剔除特征 + 区间内行情根数
+        │      （**注入判定的唯一口径**：阈值 MIN_BARS、取数区间都在这一层）
+        ▼
+backtest.py   ① 定实际取数区间（universe.resolve_window）；预检取数（data.load_bars，缓存）
+        │      ② 构造 StrategyContext（取数失败的剔除并记入 data_errors）
         ▼
 <id>.py(策略)  ③ 主动拉取：data.load_bars(ctx.codes, fields=inputs)
         │      ④ 算信号 → list[Signal]（每条带 code + 目标权重 + meta）
@@ -90,10 +93,10 @@ stats.py      ⑥ hfq 收盘价 → 净值曲线与指标（与策略无关）
 | 文件 | 角色 | 职责 | 允许依赖 |
 | --- | --- | --- | --- |
 | `data.py` | **数据层** | `load_bars(codes, fields) -> {code: DataFrame}`、`list_universe_codes(universe_mode)`、`load_bars_raw_for(codes)`；原始分类数据 `load_names()` / `code_first_dates()` / `market_caps_at(as_of)`（**区间起点口径**，PIT —— 市值只有这一份口径，别再另写「最新市值」）；取数走 **`kline_service`**（全项目唯一的「取数 + 周期合样」出口）；包内**唯一**允许 `import price_store` 的地方 | `kline_service`、`price_store` |
-| `universe.py` | **股票池层** | `build_detail(spec)` 按规则（板块前缀/ST/上市日/市值）把基池筛成回测代码**并回传每项剔除只数与口径说明**；`summary(spec)` 给前端预览；**小型键值缓存**（最多 8 种范围），范围不变直接复用；**不依赖 backtest** | `data` |
+| `universe.py` | **股票池层** | `build_detail(spec)` 按规则（板块前缀/ST/上市日/市值）把基池筛成回测代码**并回传每项剔除只数与口径说明**；**注入判定的唯一口径**：`filter_available(codes, start, end)`（区间内根数 < `MIN_BARS` → 不可注入）、`resolve_window` / `resolve_lookback_window`（实际取数区间）；`summary(spec)` 给前端预览（= 剔除特征 + 注入判定，数字与实跑一致）；**小型键值缓存**（最多 8 种范围），范围不变直接复用；**不依赖 backtest** | `data` |
 | `base.py` | **契约层** | `@strategy` / `ParamSpec` / `Signal` / `StrategyContext`；`run()` 调策略、`signals_to_positions()` 信号→权重序列、**`diff_trades()` 权重→流水** | `data`（仅类型）、`pandas` |
 | `stats.py` | **统计引擎** | 目标权重序列 + hfq 收盘价 → 净值与指标；raw OHLCV → 可行性指标；**与策略完全解耦** | 仅 `numpy/pandas` |
-| `backtest.py` | **编排层** | 股票池 `codes` → 策略信号 → 统计，串起来并规范化返回（只消费 codes，**不感知范围规则**） | `data/base/stats` |
+| `backtest.py` | **编排层** | 股票池 `codes` → 策略信号 → 统计，串起来并规范化返回（**不感知范围规则**：注入判定与取数区间都问 `universe`） | `data/base/stats/universe` |
 | `<id>.py` | **策略实现** | 主动拉数（`data.load_bars`）+ 算信号 | `base`、`data` |
 
 > 策略文件**不得**直接读写数据库/文件/网络；取数只能走 `data`，统计只能走 `stats`。
@@ -115,6 +118,29 @@ codes, detail = universe.build_detail(spec)   # detail 含每项剔除只数与�
 - 键值缓存 key = 规范化 spec（模式/区间/基准日/排除项/阈值），最多 8 种范围，TTL 1h；
   `invalidate()` 可手动清空（如刚下载完新股数据后希望重建）。
 - 阈值默认：新股 ≤90 自然日、次新 90~365 自然日、微盘 ≤30 亿总市值，均可在 spec 覆盖。
+
+#### 注入判定（能不能注入给策略 / 什么区间能注入）🆕
+
+「这只票该不该注入给策略、在什么区间内能注入」是**一个**问题、一个答案 → 只在本层判：
+
+```python
+start, end = universe.resolve_window(start, end, window)   # 实际取数区间（唯一实现）
+codes, avail = universe.filter_available(codes, start, end) # 注入判定（唯一实现）
+```
+
+| 函数 | 职责 | 调用方 |
+|---|---|---|
+| `resolve_window(start, end, window)` | 回测实际取数区间（`window=N` → 向前扩展 `WARMUP_BARS` 根预热，否则 MACD 算不出信号） | `backtest.run_backtest` |
+| `resolve_lookback_window(start, end, lookback)` | 推荐页实际取数区间（缺任一端 → 最近 `lookback` 个交易日） | `backtest.run_recommend` |
+| `filter_available(codes, start, end)` | 区间内 K 线 < `MIN_BARS`（30）根 → **不可注入**；返回可注入名单 + 被剔除只数 | `backtest`（实跑）、`universe.summary`（预览） |
+
+⚠️ **为什么以前会算出两个数**：这道关原来在编排层（`backtest._prepare`：`len(df) < 30 → 丢票`），
+与「剔除特征」分属两个文件 → 实测同一区间「界面显示 4317 只、实跑 4314 只」。
+现在阈值、取数区间、剔除只数全在本层，编排层**只消费结论**（`_prepare` 只取数）。
+
+⚠️ **口径等价性（已实测）**：`price_store.count_bars` 的 `COUNT(*)` 与 `load_bars`
+的实际取数行数一致（复权只缩放价格、不改行数）—— 抽样 269 只（含根数不足的 22 只）
+逐只对拍 **0 处分歧**，「不可注入只数」两边完全相同 → **回测数值不变**。
 
 #### 判定基准日与前视偏差（**必读**）
 
@@ -412,7 +438,7 @@ sell_deferrals.items[] = **清仓延后逐条明细**（与 sell_deferred 同源
 
 | 模式 | 口径 | 说明 |
 |---|---|---|
-| `interval_data`（默认） | `universe = {code : 在 [start,end] 内有 ≥ _MIN_BARS 根行情}` | 含已退市但行情仍在库的票；仍不含"从未下载过"的票 |
+| `interval_data`（默认） | `universe = {code : 在 [start,end] 内有 ≥ universe.MIN_BARS 根行情}` | 含已退市但行情仍在库的票；仍不含"从未下载过"的票 |
 | `pool_snapshot` | 用 `pool_members` 的**时点**成分 | 最严格，`requires_pool=True` 的策略必须用这档 |
 | `index_constituent` | 历史指数成分股（中证全指等） | 最严格，**待接入**，见待办 |
 
@@ -694,9 +720,12 @@ d1 一字板买不进（当天空仓），d2 不再一字板就真的买进 d2�
 - `GET  /universe/summary` 回测范围预览。查询参数 `exclude`（**重复参数**形式
   `?exclude=a&exclude=b`）、`start`、`end`；返回 `base_count` / `filtered_count` /
   `excluded_count` / **`dropped`（每项剔除只数）** / `as_of` / `forward_looking` /
-  `note`（口径说明，含前视偏差声明）。
+  **`available_count`（可注入只数）** / **`skipped_insufficient`（区间内行情不足剔除只数）** /
+  **`window`（实际取数区间）** / `note`（口径说明，含前视偏差声明与可注入结论）。
   ⚠️ 必须与实跑用**同一个 spec**（含 `start`/`end`）——否则两边各算各的，
   界面显示与实跑不一致（曾经界面显示「剔除后 = 基池」而实跑剔掉一千多只）。
+  ⚠️ `available_count` 就是实跑参与统计的只数：注入判定与取数区间口径都在
+  `universe`（`filter_available` / `resolve_window`），预览与实跑用的是同一份实现。
 - `POST /backtest` 运行回测；`use_all=True` 且超过上限（800）时抽样并回传 `scope.sampled`
 
   🆕 **抽样必须可复现**：旧版"自动随机抽样"导致同一请求两次结果不同。

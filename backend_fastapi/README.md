@@ -53,7 +53,8 @@ POST /api/stock/valuation → 股票估值（简化 DCF：前 5 年 + 永续，�
                             股价（新浪）、总股本（腾讯）、期初净利润（东财，TTM 归母 → 年报扣非 → 年报归母）
                             net_profit_forecast 为可选，不传则三档按兜底 25% / 10% / 5% 计算
 GET  /api/stock/quote     → 按代码查名称与当前股价（供输入代码后即时确认，不拉财务数据）
-GET  /api/strategies/universe/summary → 回测范围预览（基池/剔除后只数 + 每项剔除只数 + 口径说明）
+GET  /api/strategies/universe/summary → 回测范围预览（基池/剔除后只数 + 每项剔除只数 +
+                                       **可注入只数**（= 实跑参与统计的只数）+ 口径说明）
                                        判定口径与字段含义详见 strategies/ARCHITECTURE.md「股票池层」
 POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / **trades 逐笔成交明细** /
                                        trades_total / trades_truncated）
@@ -71,6 +72,10 @@ POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / 
                                         筹码矩阵不可得等），上限 2000 条；被截断时
                                         scope.warnings 里注明总数。前端按条数显示「跳过只数」，
                                         故必须是逐票而非汇总（汇总会让计数失真）
+                                       scope.exclusion.available_count / skipped_insufficient /
+                                        window = **注入判定**结论（可注入只数 / 区间内行情不足
+                                        剔除的只数 / 实际取数区间）。口径在股票池层
+                                        （universe.filter_available），预览与实跑同一份实现
 ```
 
 测试：

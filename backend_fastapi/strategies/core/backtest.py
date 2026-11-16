@@ -3,11 +3,14 @@
 
 只负责「串起来」，本身不含策略算法，也不含净值/指标算法：
     1. 读回测范围（universe，不设标的上限，「全部本地」全量跑）；
-    2. 经 data.load_bars 做一次预检取数（逐标的缓存、并行读库，
-       策略/统计后续复用，零额外 I/O），过滤数据不足的标的并记录 data_errors；
-    3. 构造 StrategyContext 交给 base.run —— 策略内部自行拉取所需字段；
-    4. 经 base.signals_to_positions 把扁平信号（含 code）转成「目标仓位序列」；
-    5. 把收盘价交给 stats.compute 做净值与指标统计。
+    2. 定**实际取数区间**（universe.resolve_window：短窗口向前扩展预热根）并向股票池层
+       要「可注入名单」（universe.filter_available）—— **注入判定只有这一份口径**，
+       本模块不再自己判「根数够不够」；
+    3. 经 data.load_bars 做一次预检取数（逐标的缓存、并行读库，
+       策略/统计后续复用，零额外 I/O），取数失败的标的记入 data_errors；
+    4. 构造 StrategyContext 交给 base.run —— 策略内部自行拉取所需字段；
+    5. 经 base.signals_to_positions 把扁平信号（含 code）转成「目标仓位序列」；
+    6. 把收盘价交给 stats.compute 做净值与指标统计。
 
 返回结构（前后端契约，metrics.schema_version = 2）：
   {
@@ -17,7 +20,10 @@
               "initial_capital","commission","stamp_duty","slippage",
               "min_commission","lot_size","benchmark","universe_mode",
               "equity_model","per_stock_truncated","feasibility","position_cap",
-              "warnings"},
+              "exclusion","warnings"},
+              # scope.exclusion = 范围口径明细：剔除特征只数（dropped）+ **注入判定**
+              #   结论（available_count 可注入只数 / skipped_insufficient 区间内行情
+              #   不足剔除只数 / window 实际取数区间）—— 口径在股票池层。
               # feasibility.build_failures = 建仓失败明细（隔日一字涨停 → 买不进）：
               #   {count, shown, dropped, items[{code,name,date,signal_date,reason}]}
               #   这些建仓**没有成交**，所以不在 trades 明细里（那里一行 = 一次买卖）。
@@ -52,10 +58,12 @@ import json
 import threading
 import time
 
-from . import base, data, stats
+from . import base, data, stats, universe
 
-_MIN_BARS = 30        # 少于此根数视为数据不足
-_WARMUP_BARS = 250    # 短窗口回测的指标预热根数（约一年，够 MACD 这类长周期策略）
+# 「该不该注入给策略、在什么区间能注入」是**股票池层**（universe）的口径：
+# 阈值 `MIN_BARS`、取数区间（短窗口预热 / 推荐回看）、区间内根数统计全在那边。
+# 本模块**只消费结论**，不再自己判一遍 —— 两处各判一次必然算出两个数
+# （实测同一区间「界面显示 4317 只、实跑 4314 只」）。
 # data_errors 下发上限：**逐票**列出被跳过/失败的标的（前端按条数显示「跳过只数」，
 # 截断到 20 会把真实只数显示成 20）。上限之上的部分在 scope.warnings 里标明总数。
 _MAX_DATA_ERRORS = 2000
@@ -90,6 +98,10 @@ def _prepare(codes: list[str], start: str | None, end: str | None,
 
     回测与推荐共用——同一份底层缓存（data.load_bars 逐标的缓存），不重复 I/O。
     `progress(done, total)` 用于回测进度条（可选，不给就不报）。
+
+    ⚠️ 这里**只负责取数**，不再判「根数够不够」：那道关在股票池层
+    （`universe.filter_available`），编排层只消费它的结论。
+    以前两道关分属两个文件 → 界面显示的只数与实跑能差几只。
     """
     bars = data.load_bars(codes, start, end, fields=["close"], adjust=adjust,
                           progress=progress)
@@ -99,8 +111,6 @@ def _prepare(codes: list[str], start: str | None, end: str | None,
         df = bars.get(code)
         if df is None:
             errors.append(f"{code}: 取数失败或无行情")
-        elif len(df) < _MIN_BARS:
-            errors.append(f"{code}: 数据不足（<{_MIN_BARS} 根）")
         else:
             usable[code] = df
     return usable, errors
@@ -192,10 +202,11 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
     progress = _tick
 
     requested = len(codes)
-    if window and window > 0:
-        days = data.recent_trading_days(window + _WARMUP_BARS)
-        if len(days) >= window + 2:
-            start, end = days[0], days[-1]
+    # 取数区间（短窗口要向前多取预热根）—— **唯一实现**在股票池层：
+    # 注入判定与取数必须用同一个区间，否则两边算出两个「区间内根数」。
+    start, end = universe.resolve_window(start, end, window)
+    # 注入判定（能不能注入给策略）也在股票池层：编排层只消费结论，不再自己判。
+    codes, avail = universe.filter_available(codes, start, end)
 
     _require_pool(strategy_id, start, end)
 
@@ -305,8 +316,17 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
     # 以前只声明幸存者偏差，读者会误以为「已声明偏差 = 样本无问题」——
     # 而剔除特征其实是用今天的状态去筛整段历史。
     scope_extra = dict(scope_extra or {})
-    if scope_extra.get("note"):
-        warnings.append(str(scope_extra["note"]))
+    # 口径说明在这里**重建**一次：注入结论（可注入 N 只 / 因行情不足剔了多少只）
+    # 只有编排层知道 —— 实际取数区间是在这里定的。预览与报告共用
+    # `universe.scope_note` 这一句，别各处手写。
+    scope_extra.update({
+        "available_count": len(codes),
+        "skipped_insufficient": avail["insufficient"],
+        "window": avail["window"],
+    })
+    note = universe.scope_note(scope_extra)
+    if note:
+        warnings.append(note)
     if window:
         warnings.append(f"short_window: 只统计最近 {window} 个交易日（区间被裁剪）")
     warnings.extend(errors[:20])
@@ -344,6 +364,11 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                 "dropped": scope_extra.get("dropped") or {},
                 "as_of": scope_extra.get("as_of"),
                 "forward_looking": scope_extra.get("forward_looking") or [],
+                # 注入判定（股票池层给的结论）：可注入只数 / 因区间内行情不足剔掉的
+                # 只数 / 实际取数区间。预览与实跑用同一口径，数字必然一致。
+                "available_count": scope_extra.get("available_count"),
+                "skipped_insufficient": scope_extra.get("skipped_insufficient"),
+                "window": scope_extra.get("window"),
             },
             "equity_model": "weight_strict_fill",
             "per_stock_truncated": trunc_info,
@@ -645,10 +670,9 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
 
     progress = _rtick
 
-    if not start or not end:
-        days = data.recent_trading_days(lookback)
-        if len(days) >= 2:
-            start, end = days[0], days[-1]
+    # 取数区间：缺任一端 → 最近 lookback 个交易日（MACD 这类长周期策略只看几天
+    # 算不出信号）。**唯一实现**在股票池层 —— 取数与注入判定必须用同一个区间。
+    start, end = universe.resolve_lookback_window(start, end, lookback)
     # 单日策略：强制把 end 锁在信号日。上面的自动回看会把 end 推到「本地最新
     # 交易日」，收盘后当日数据部分入库时就会读到不完整的 K 线（未来函数）。
     # 必须在回看之后再覆盖，否则被它抹掉。
@@ -656,6 +680,14 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
         end = signal_date
 
     _require_pool(strategy_id, start, end)
+
+    errors: list[str] = []
+    # 注入判定（股票池层）：区间内行情不足的票不参与 —— 与回测同一口径。
+    codes, avail = universe.filter_available(codes, start, end)
+    if avail["insufficient"]:
+        # 推荐页没有 scope 字段可挂 → 写进 data_errors，让「少了谁」照样看得见。
+        errors.append(f"区间内行情不足（<{universe.MIN_BARS} 根）已剔除 "
+                      f"{avail['insufficient']} 只")
 
     # ---- 第 1 遍：分批预检，**只留日期索引**，不留行情本体----
     # 为什么分批（第 21 项实测）：`_prepare` 一次性把全市场 5585 只 × 250 天
@@ -667,7 +699,6 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
     # 为什么只留索引：`signals_to_positions` 只用 `close.index`（对齐信号日期），
     # **从不读价格**。所以这一步没必要留着整份 DataFrame。
     idx_by_code: dict[str, list[str]] = {}
-    errors: list[str] = []
     for i in range(0, len(codes), _RECO_BATCH):
         batch = codes[i:i + _RECO_BATCH]
         part, errs = _prepare(batch, start, end, progress=progress)
