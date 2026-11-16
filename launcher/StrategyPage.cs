@@ -1474,6 +1474,14 @@ private void StRefreshCurStrategy()
                     }
                     if (bits.Count > 0) txt += "（" + string.Join("、", bits) + "）";
                 }
+                // 「可注入 N 只」= 剔除特征后、再按**区间内行情根数**核减后的数量
+                // （根数不足算不出信号的票不参与）。它就是实跑参与统计的只数 ——
+                // 预览与实跑必须一致，否则界面在骗人。区间没定时后端给 null → 不显示。
+                object availObj = J.Get(j, "available_count");
+                if (availObj != null)
+                {
+                    txt += " · 可注入 " + (int)J.Num(availObj) + " 只";
+                }
                 _stScopeHint.Text = txt;
                 // 口径说明（判定基准日 / 前视偏差 / 数据限制）挂气泡
                 string note = J.StrOr(J.Get(j, "note"), "");
@@ -2222,13 +2230,22 @@ private void StRefreshCurStrategy()
             int doneCount = scope != null ? J.Int(scope["codes_count"]) : 0;
             _stResultStatus.Text = "回测完成（参与统计 " + doneCount + " 只）";
             _stResultStatus.ForeColor = C.DownSoft;
+            // 「区间内行情不足」剔掉的票数（股票池层的注入判定结论）——
+            // 不显示的话，读者会以为少掉的那几只「本来就不在池里」。
+            int skipped = 0;
+            var excl = scope != null ? scope["exclusion"] as Dictionary<string, object> : null;
+            if (excl != null) skipped = J.Int(J.Get(excl, "skipped_insufficient"));
+            if (skipped > 0)
+                _stResultStatus.Text = "回测完成（参与统计 " + doneCount
+                    + " 只，区间内行情不足剔除 " + skipped + " 只）";
             object errs;
             if (j.TryGetValue("data_errors", out errs))
             {
                 var el = errs as System.Collections.IList;
                 if (el != null && el.Count > 0)
                     _stResultStatus.Text = "回测完成（参与统计 " + doneCount
-                        + " 只，" + el.Count + " 只数据缺失/跳过）";
+                        + " 只，" + el.Count + " 只数据缺失/跳过"
+                        + (skipped > 0 ? "，区间内行情不足剔除 " + skipped + " 只" : "") + "）";
             }
         }
 

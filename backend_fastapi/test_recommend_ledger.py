@@ -107,11 +107,15 @@ def _next_trade_day(sig_day):
 
 
 def _run(signals, end, exec_date, baseline=None):
+    # ⚠️ `bar_counts` 必须打桩：注入判定在股票池层（universe.filter_available），
+    #    它按**区间内行情根数**判定 —— 合成票不在真实库里，不打桩会被判成
+    #    「行情不足」而全部剔掉（连取数都轮不到）。
     with mock.patch.object(backtest.base, "run", return_value=signals), \
          mock.patch.object(backtest.data, "load_bars", side_effect=_bars), \
          mock.patch.object(backtest.data, "load_names", return_value={}), \
          mock.patch.object(backtest, "next_trading_day", _next_trade_day), \
-         mock.patch.object(backtest, "_MIN_BARS", 2):     # 合成行情只有几根 K 线
+         mock.patch.object(backtest.data, "bar_counts",
+                           return_value={c: 100 for c in CODES}):
         return backtest.run_recommend(
             SID, {}, list(CODES), DATES[0], end,
             execution_date=exec_date, signal_date=end, baseline=baseline,

@@ -27,8 +27,18 @@
   · 板块 → 代码前缀（与时间无关）。
 「每项剔除了多少只」必须回传并写进报告 —— 否则读者无从判断这个净值跑在什么样本上。
 
+## 注入判定（**该不该注入给策略 / 什么区间能注入**）
+「这只票能不能注入给策略、在什么区间内能注入」是**一个**问题、一个答案，
+所以判定只在本文件做：
+  · 剔除特征（板块 / ST / 新股 / 次新股 / 微盘）→ `_apply_exclusions`；
+  · 区间内行情够不够（根数 < `MIN_BARS` 算不出信号）→ `filter_available`；
+  · 「实际取哪段区间」（短窗口要向前预热、推荐页要回看）→ `resolve_window` /
+    `resolve_lookback_window`。
+编排层（`backtest`）**只消费本层的结论**，不再自己判一遍 ——
+以前两道关分属两个文件，实测同一区间「界面显示 4317 只、实跑 4314 只」。
+
 ## 分层
-universe（本文件）→ data（原始取数：基池 / 名称 / 上市日 / 市值）。
+universe（本文件）→ data（原始取数：基池 / 名称 / 上市日 / 市值 / 区间根数）。
 **不依赖 backtest**，避免「编排层 ↔ 股票池层」反向依赖。
 """
 from __future__ import annotations
@@ -57,6 +67,11 @@ _FORWARD_LOOKING = ("st", "star_st")
 IPO_DAYS = 90                 # 上市 ≤90 自然日 = 新股
 SUB_NEW_DAYS = 365            # 90 < 上市 ≤365 自然日 = 次新股
 MICRO_CAP = 3_000_000_000     # 总市值 ≤30 亿 = 微盘股
+
+# ---- 注入判定的阈值（属**股票池层**语义：编排层只消费，不再自己判一遍）----
+MIN_BARS = 30                 # 区间内 K 线 < 这么多根 = 数据不足，不可注入
+WARMUP_BARS = 250             # 短窗口回测的指标预热根数（约一年，够 MACD 这类长周期策略）
+RECO_LOOKBACK = 250           # 推荐页默认回看的交易日数（缺区间时用）
 
 _CACHE_TTL = 3600             # 秒；范围不变时的复用窗口
 _CACHE_MAX = 8                # 最多保留多少种范围（预览与回测不会互相挤掉）
@@ -144,6 +159,8 @@ def spec_from_request(req, universe_mode: str | None = None) -> dict:
         "end": _get("end"),
         "as_of": _get("start"),                 # 判定基准日 = 区间起点
         "exclude": list(_get("exclude") or []),
+        # 只统计最近 N 个交易日时的窗口扩展：注入判定与取数要用同一个区间
+        "window": _get("window"),
     }
     for key in ("ipo_days", "sub_new_days", "micro_cap"):
         v = _get(key)
@@ -230,6 +247,66 @@ def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str,
     return [c for c in base if c not in drop], dropped, extra
 
 
+def resolve_window(start: str | None, end: str | None,
+                   window: int | None = None) -> tuple[str | None, str | None]:
+    """回测**实际取数区间** —— 唯一实现。
+
+    `window=N`（只统计最近 N 个交易日）时，取数窗口要额外向前多取 `WARMUP_BARS` 根
+    （策略指标如 MACD 需要历史预热，5 根本算不出信号）。
+
+    这个改写必须**只发生在一处**：注入判定（本层）与取数（编排层）要用同一个区间 ——
+    否则「区间内数据够不够」两边算出两个数。
+    """
+    if window and window > 0:
+        n = int(window)
+        days = data.recent_trading_days(n + WARMUP_BARS)
+        if len(days) >= n + 2:
+            return days[0], days[-1]
+    return start, end
+
+
+def resolve_lookback_window(start: str | None, end: str | None,
+                            lookback: int = RECO_LOOKBACK) -> tuple[str | None, str | None]:
+    """推荐页的**实际取数区间** —— 唯一实现（与 `resolve_window` 同类）。
+
+    缺任一端 → 取最近 `lookback` 个交易日（MACD 这类长周期策略只看几天算不出信号）。
+
+    为什么也要收进本层：**注入判定与取数要用同一个区间**。编排层按这个区间取数、
+    也按同一个区间判「能不能注入」；两处各算一遍 → 必然算出两个区间 →
+    「界面说 N 只、实跑 M 只」。
+    """
+    if not start or not end:
+        days = data.recent_trading_days(int(lookback or RECO_LOOKBACK))
+        if len(days) >= 2:
+            return days[0], days[-1]
+    return start, end
+
+
+def filter_available(codes: list[str], start: str | None,
+                     end: str | None) -> tuple[list[str], dict]:
+    """区间内行情不足的票**不可注入** —— 注入判定的唯一入口。
+
+    口径：区间内 K 线根数 < `MIN_BARS` 的票不参与回测（策略算不出信号、
+    持仓期也填不满）。
+
+    以前这道关在编排层（`backtest._prepare`），与「剔除特征」分属两个文件 →
+    界面显示的只数与实跑能差几只，同一区间两次跑也可能不一样。
+    现在统一在这里判：编排层只消费本层的结论。
+
+    返回 `(可注入的代码, 明细)`；明细 = `{"insufficient": 被剔除只数,
+    "window": [start, end]}`。**只数必须回传** —— 否则读者看到的样本
+    与实跑参与的样本对不上号。
+    """
+    if not codes:
+        return [], {"insufficient": 0, "window": [start, end]}
+    if not start or not end:
+        # 区间未定 → 无法判断数据够不够（口径不猜）：全部放行，由取数层兜底。
+        return list(codes), {"insufficient": 0, "window": [start, end]}
+    counts = data.bar_counts(start, end)
+    keep = [c for c in codes if counts.get(c, 0) >= MIN_BARS]
+    return keep, {"insufficient": len(codes) - len(keep), "window": [start, end]}
+
+
 def build_detail(spec: dict, force: bool = False) -> tuple[list[str], dict]:
     """返回 (代码列表, 范围明细)。**股票池层的唯一入口**（命中缓存直接返回，
     force=True 强制重建）。
@@ -244,9 +321,11 @@ def build_detail(spec: dict, force: bool = False) -> tuple[list[str], dict]:
     明细含：基池/剔除后数量、**每项剔除只数**、判定基准日 as_of、
     以及哪些特征只能用「当前状态」判定（含前视偏差）。
 
-    预览与回测报告**共用这一份**：以前预览只传 `exclude`、实跑还传
-    `start/end/as_of` → 两个不同的缓存键 → 各算各的 → 界面显示「剔除后 = 基池」
-    而实跑剔掉一千多只。现在两边用同一个 spec，数字必然一致。
+    ⚠️ 本函数只管**剔除特征**（ST / 板块 / 新股 / 微盘）。
+    「区间内行情够不够 → 能不能注入」（`filter_available`）**不在这里**：
+    它要按**实际取数区间**判，而那个区间在运行时才定（短窗口要向前预热、
+    推荐页要回看）—— 由编排层在定下区间后调用 `filter_available`，
+    预览走 `summary`（同一个函数、同一个区间口径）。
     """
     key = _spec_key(spec)
     now = time.time()
@@ -284,39 +363,67 @@ def build_detail(spec: dict, force: bool = False) -> tuple[list[str], dict]:
 def scope_note(detail: dict) -> str:
     """范围口径说明（一段话）—— 预览与回测报告**共用同一句**，别各处手写。
 
-    必须点明四件事：
+    必须点明五件事：
       ① 每项剔除了多少只（否则读者不知道「勾了剔除」到底做了什么）；
       ② 判定基准日 = 区间起点（微盘按该日市值、新股/次新股按该日起算）；
       ③ 哪些判定用的是「当前状态」→ 含前视偏差（数据源不提供历史 ST 名单）；
-      ④ 两条数据限制：股本只有当前值、上市日只能拿「库里最早日K」近似。
+      ④ 两条数据限制：股本只有当前值、上市日只能拿「库里最早日K」近似；
+      ⑤ **最终可注入多少只**（区间内行情不足的又扣掉多少只）—— 读者看到的
+         必须与实跑参与统计的只数一致。
+
+    `detail` 里没有 `base_count`（自定义代码池：没做特征剔除）时，①②④ 整段略去，
+    只留注入结论 —— 不能拿「基池 None 只」这种话糊弄读者。
     """
     detail = detail or {}
-    dropped = detail.get("dropped") or {}
-    as_of = detail.get("as_of") or "-"
-    bits = [f"{FEATURE_LABELS.get(k, k)} {v}" for k, v in dropped.items() if v]
-    detail_txt = "、".join(bits) if bits else "无"
-    txt = (f"范围口径：基池 {detail.get('base_count')} 只 → 剔除后 "
-           f"{detail.get('filtered_count')} 只（剔除明细：{detail_txt}）；"
-           f"判定基准日 = 区间起点 {as_of}"
-           f"（微盘按该日市值 ≤{int(MICRO_CAP / 1e8)} 亿、新股/次新股按该日起算上市天数）")
+    parts: list[str] = []
+    base = detail.get("base_count")
+    if base is not None:
+        dropped = detail.get("dropped") or {}
+        bits = [f"{FEATURE_LABELS.get(k, k)} {v}" for k, v in dropped.items() if v]
+        detail_txt = "、".join(bits) if bits else "无"
+        as_of = detail.get("as_of") or "-"
+        parts.append(
+            f"范围口径：基池 {base} 只 → 剔除后 {detail.get('filtered_count')} 只"
+            f"（剔除明细：{detail_txt}）；判定基准日 = 区间起点 {as_of}"
+            f"（微盘按该日市值 ≤{int(MICRO_CAP / 1e8)} 亿、新股/次新股按该日起算上市天数）")
+    avail = detail.get("available_count")
+    if avail is not None:
+        insufficient = detail.get("skipped_insufficient") or 0
+        parts.append(f"再按区间内行情核减（<{MIN_BARS} 根不可注入 {insufficient} 只）"
+                     f"→ **可注入 {avail} 只**")
     fwd = [FEATURE_LABELS.get(k, k) for k in (detail.get("forward_looking") or [])]
     if fwd:
-        txt += (f"；⚠️ {'、'.join(fwd)} 按**当前**名单判定（数据源不提供历史名单，"
-                f"无法还原历史 → 含前视偏差）")
-    if detail.get("listing_date_source") == "earliest_bar":
-        txt += "；⚠️ 上市日以「库里最早日K」近似：历史未拉全的老票会被误判成新股/次新股（剔除偏多）"
+        parts.append(f"⚠️ {'、'.join(fwd)} 按**当前**名单判定（数据源不提供历史名单，"
+                     f"无法还原历史 → 含前视偏差）")
+    ex = set(detail.get("exclude") or [])
+    if detail.get("listing_date_source") == "earliest_bar" and (ex & {"ipo", "sub_new"}):
+        parts.append("⚠️ 上市日以「库里最早日K」近似：历史未拉全的老票会被误判成新股/次新股（剔除偏多）")
     cap_meta = detail.get("market_cap_meta") or {}
     if cap_meta.get("shares_source") == "latest":
-        txt += "；⚠️ 微盘判定用的**股本是当前值**（数据源不提供历史股本，只有价格回到区间起点）"
-    return txt
+        parts.append("⚠️ 微盘判定用的**股本是当前值**（数据源不提供历史股本，只有价格回到区间起点）")
+    return "；".join(parts)
 
 
 def summary(spec: dict, force: bool = False) -> dict:
-    """回测范围预览：基池数量 + 剔除后数量 + **每项剔除只数** + 口径说明。"""
+    """回测范围预览：基池 / 剔除后 / **可注入** 数量 + 每项剔除只数 + 口径说明。
+
+    「可注入」用的是**与实跑同一个区间**（`resolve_window`：短窗口会向前扩展
+    预热根）—— 预览显示的只数必须等于实跑参与统计的只数，否则界面在骗人。
+    """
     codes, detail = build_detail(spec, force=force)
+    detail = dict(detail)
+    start, end = resolve_window(spec.get("start"), spec.get("end"),
+                                spec.get("window"))
+    keep, avail = filter_available(codes, start, end)
+    detail["available_count"] = len(keep) if (start and end) else None
+    detail["skipped_insufficient"] = avail["insufficient"]
+    detail["window"] = avail["window"]
     out = {
         "base_count": detail["base_count"],
         "filtered_count": detail["filtered_count"],
+        "available_count": detail["available_count"],
+        "skipped_insufficient": detail["skipped_insufficient"],
+        "window": detail["window"],
         "excluded_count": detail["excluded_count"],
         "dropped": detail["dropped"],
         "as_of": detail["as_of"],

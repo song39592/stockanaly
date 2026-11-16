@@ -610,6 +610,47 @@ def bulk_latest_close(ttl: int = 3600) -> dict[str, float]:
 _CLOSE_AT_CACHE: dict = {}
 
 
+# 「区间内根数」缓存：{(start, end, adjust): {"at": ts, "map": {code: n}}}
+_BAR_COUNT_CACHE: dict = {}
+
+
+def count_bars(start: str, end: str, adjust: str = "raw", ttl: int = 600) -> dict[str, int]:
+    """每只票在 [start, end] 区间内的 K 线根数 {code: n}。
+
+    给「这只票在区间内够不够数据」提供**事实**；口径判断（够不够、算不算可注入）
+    属股票池层（`strategies/core/universe.py`），这里不做任何取舍。
+
+    ⚠️ 行数口径与 `load_bars` 一致：复权只缩放价格、不改行数（见 `load_bars`）。
+    但**不做指纹校验**（`list_bars` 会逐票校验）→ 被判定为「被篡改」的票这里仍会计数，
+    而上层取数时会拒绝它 —— 两边最终都不参与，不影响结果。
+    """
+    start = str(start or "")[:10]
+    end = str(end or "")[:10]
+    if not start or not end:
+        return {}
+    store_adj = _store_adjust(adjust)
+    key = (start, end, store_adj)
+    now = time.time()
+    ent = _BAR_COUNT_CACHE.get(key)
+    if ent and now - ent["at"] < ttl:
+        return ent["map"]
+    out: dict[str, int] = {}
+    y0, y1 = int(start[:4]), int(end[:4])
+    for year in _shard_years():
+        if year < y0 or year > y1:
+            continue
+        with db.connect(db.bars_db(year)) as conn:
+            for row in conn.execute(
+                "SELECT code, COUNT(*) AS n FROM daily_bars "
+                "WHERE adjust=? AND trade_date>=? AND trade_date<=? GROUP BY code",
+                (store_adj, start, end),
+            ):
+                code = row["code"]
+                out[code] = out.get(code, 0) + int(row["n"])
+    _BAR_COUNT_CACHE[key] = {"at": now, "map": out}
+    return out
+
+
 def bulk_close_at(day: str, lookback_days: int = 90, ttl: int = 3600) -> dict[str, float]:
     """每只票在 day（含）之前**最近一个交易日**的收盘价 {code: close}（raw 口径）。
 
