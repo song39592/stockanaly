@@ -95,9 +95,9 @@ stats.py      ⑥ hfq 收盘价 → 净值曲线与指标（与策略无关）
 | `data.py` | **数据层** | `load_bars(codes, fields) -> {code: DataFrame}`、`list_universe_codes(universe_mode)`、`load_bars_raw_for(codes)`；原始分类数据 `load_names()` / `code_first_dates()` / `market_caps_at(as_of)`（**区间起点口径**，PIT —— 市值只有这一份口径，别再另写「最新市值」）；取数走 **`kline_service`**（全项目唯一的「取数 + 周期合样」出口）；包内**唯一**允许 `import price_store` 的地方 | `kline_service`、`price_store` |
 | `universe.py` | **股票池层** | `build_detail(spec)` 按规则（板块前缀/ST/上市日/市值）把基池筛成回测代码**并回传每项剔除只数与口径说明**；**注入判定的唯一口径**：`filter_available(codes, start, end)`（区间内根数 < `MIN_BARS` → 不可注入）、`resolve_window` / `resolve_lookback_window`（实际取数区间）；`summary(spec)` 给前端预览（= 剔除特征 + 注入判定，数字与实跑一致）；**小型键值缓存**（最多 8 种范围），范围不变直接复用；**不依赖 backtest** | `data` |
 | `base.py` | **契约层** | `@strategy` / `ParamSpec` / `Signal` / `StrategyContext`；`run()` 调策略、`signals_to_positions()` 信号→权重序列、**`diff_trades()` 权重→流水** | `data`（仅类型）、`pandas` |
-| `stats.py` | **统计引擎** | 目标权重序列 + hfq 收盘价 → 净值与指标；raw OHLCV → 可行性指标；**与策略完全解耦** | 仅 `numpy/pandas` |
+| `stats.py` | **统计引擎** | 目标权重序列 + hfq 收盘价 → 净值与指标；raw OHLCV → 可行性指标；**与策略完全解耦** | 仅 `numpy/pandas`、`core.limit_price`（涨跌停口径的唯一实现） |
 | `backtest.py` | **编排层** | 股票池 `codes` → 策略信号 → 统计，串起来并规范化返回（**不感知范围规则**：注入判定与取数区间都问 `universe`） | `data/base/stats/universe` |
-| `<id>.py` | **策略实现** | 主动拉数（`data.load_bars`）+ 算信号 | `base`、`data` |
+| `<id>.py` | **策略实现** | 主动拉数（`data.load_bars`）+ 算信号 | `base`、`data`、`core.limit_price`（涨跌停/炸板口径） |
 
 > 策略文件**不得**直接读写数据库/文件/网络；取数只能走 `data`，统计只能走 `stats`。
 > `stats.py` 不 import 任何策略，也不直接取数，可单独复用与单元测试。
@@ -393,7 +393,13 @@ class Signal:
 | **退市** | 行情终止且不在当前代码表 | 按最后收盘价计提，标 `delisted: true` | ✅（末值仍在序列内） |
 | **新股/ST** | 上市日期、ST 标识 | 上市 N 日内过滤；ST 涨跌幅单独判定 | ❌ |
 
-> ⚠️ **涨跌停幅度是分时段的，暂未精确实现**（见 `stats._limit_pct`）：
+> ⚠️ **涨跌停口径的唯一实现已下沉到 `core/limit_price.py`**（幅度 / 涨停价 / 一字板 /
+> 炸板）：统计层（可行性判定 + 严格成交模型）与策略层（`jwzz_cross_safe` 的
+> 「跳过炸板买入」）共用同一份 —— 两处各写一份就是「同一口径两个数、两边都不报错」。
+> `stats._limit_pct` / `_limit_prices` / `_is_limit_up` / `_is_limit_down` 是**旧名转出**，
+> 改口径请改 `core/limit_price.py`。
+>
+> ⚠️ **涨跌停幅度是分时段的，暂未精确实现**（见 `core/limit_price.py`）：
 > ST 自 2025-04 起由 5% 改为 10%（现行口径一律按 10% 处理，跨 2025-04 的区间早期会偏松）、
 > 北交所 30% 未覆盖、本地行情无 ST 标识与上市日期字段。
 > ⚠️ **买卖方向各判各的**：一字跌停时**买入是能成交的**（板上是卖单），一字涨停时
@@ -713,6 +719,31 @@ panel.bar    # C×T 当日是否有行情（停牌为 False → 不能占掉一�
 d1 一字板买不进（当天空仓），d2 不再一字板就真的买进 d2。
 （见 `stats.py`「严格成交模型」段：判定基于**实际持仓**而非目标权重跳升，
 否则连续两天一字板会被误当成买进了。）
+
+## 🆕 策略 `jwzz_cross_safe`：JWZZ 上穿/下穿 + **跳过炸板买入**
+
+**它是 `jwzz_cross` + 一条买入限制**（选股口径、卖出规则、权重、换手全部同源）：
+
+> 买入日当天**涨停开盘、盘中炸板**（突破失败）的票 → **这一笔不买**。
+
+对应用户的实盘规则：「隔夜单挂着，第二天涨停开盘却炸板 → 开盘没成交 → 单子作废」。
+新增一个策略而不是改 `jwzz_cross`：**基线不动**，两条规则可以直接对照回测。
+
+口径（逐条写死，避免两边算的不是一件事）：
+
+| 项 | 规则 |
+|---|---|
+| 判定落点 | **买入日 = 信号日**。本引擎是「**信号日收盘成交**」（`w_{t-1}` 承担第 `t` 日收益），不是「次日开盘成交」→ 策略在信号日收盘已看得到当天的 open/low → **无前视** |
+| 涨停开盘 | `open ≥ 涨停价 × (1 − 0.2%)`（容差吸收交易所涨停价取整到分的误差） |
+| 盘中炸板 | `low < open`（涨停开盘时开盘价就是涨停价 → 跌破开盘价 == 跌破涨停价） |
+| 一字板 | **不算炸板**：它不是「没成交」而是**根本买不进**，由引擎的严格成交模型处理（该份额度当日为现金），两处**不重复拦截**（否则「买不进」会被误记成「策略放弃」，归因错位） |
+| 影响面 | **只影响买入，不影响卖出**：已持有的票不会因为当天炸板被踢出组合 |
+| 名额 | 炸板票**占住自己的名额、后面的候选不递补** → 那个名额**留成现金**；权重分母仍是**名额数**（不是实际持仓数）→ Σw < 1 的差额即现金。与引擎的严格成交模型同一口径（「一字涨停买不进 → 该份额度当日就是现金、不重分配给其他票」） |
+| 留痕 | 当天放弃的笔数记在信号 `meta.skipped_broken`；**即使组合没变也发一次整组**（权重不变 → 引擎 diff 无交易、不花钱），否则这次放弃在报告里彻底看不见 |
+| 开关 | `skip_broken_limit_up`（0/1，默认 **1**）；置 0 时与 `jwzz_cross` **逐条信号完全一致**（单测 `test_limit_patterns` 有断言） |
+
+⚠️ 口径实现（涨停幅度 / 涨停价 / 一字板 / 炸板）在 **`core/limit_price.py`** ——
+与统计层的可行性判定同一份；改一处即两处生效。
 
 ## HTTP 接口（`strategies_routes.py`，前缀 `/api/strategies`）
 - `GET  ""` 策略清单（含 `inputs/outputs/params/requires_pool`）

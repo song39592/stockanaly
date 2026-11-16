@@ -40,7 +40,7 @@ backend_fastapi/
   main.py              入口：单实例锁 → 迁移/建表/指纹/签名 → 容错挂载 11 组路由 → /health
   apiutil.py           统一错误体 {ok, detail, error:{code,message}}（全仓生效）
   indicators_routes.py / strategies_routes.py（顶层，未搬）
-  core/                21 个基础设施模块 —— 依赖图底部，不依赖任何业务包
+  core/                22 个基础设施模块 —— 依赖图底部，不依赖任何业务包
   features/            7 个业务子包：chip/download/history/market/mentor/stock/system
                        子包内按 routes.py（HTTP）/ service.py（业务）/ store.py（持久化）分层
   indicators/          插件包 @indicator —— 扫目录自动注册，**id 与文件名无关**
@@ -99,6 +99,7 @@ scripts/               check-docs.ps1 —— 文档一致性自检（链接 / �
 | 完整性签名 + 密钥密封 | `core/crypto.py` + `core/dpapi.py` | `core/db.py`、`features/system/integrity.py` |
 | 日志 | `core/logutil.py` | 全仓 |
 | 指标 / 策略共用的纯计算 | `formulas/` | `indicators/*`、`strategies/*` |
+| 涨跌停幅度 / 涨停价 / 一字板 / **炸板**判定（统计层 + 策略层共用） | `core/limit_price.py` | `strategies/core/stats.py`（可行性判定 + 严格成交模型）、`strategies/jwzz_cross_safe.py`（跳过炸板买入）。⚠️ 既存第二份：`features/stock/profile.py` 的涨停连板统计自带一份（**含北交所 30%**，本模块不含）—— 默认范围剔除北交所 → 回测不受影响 |
 | 指标数值基准 | `indicators/_golden.json` | `test_indicators_golden.py` |
 | 回测范围口径（剔除规则 / 判定基准日 / 市值） | `strategies/core/universe.py` | `strategies_routes.py`（只调 `spec_from_request`） |
 | 数据库表结构 | `docs/database.md` | 建表代码在 `core/db.py` / `core/price_store.py` |
@@ -120,6 +121,8 @@ scripts/               check-docs.ps1 —— 文档一致性自检（链接 / �
 ## 六、单一来源模块的坑（对应第四节的行）
 
 - `core/bars_schema.py` —— ⚠️ 新增量纲为「价」的列（如成交额）时，必须同时加进 `PRICE_SCALED_COLUMNS`。
+- `core/limit_price.py` —— 涨跌停口径（幅度 / 涨停价 / 一字板 / 炸板）在**统计层与策略层**的唯一实现：
+  统计层的可行性判定与策略层的「跳过炸板买入」共用它；**别在策略里再抄一份涨停判定**。
 - `core/registry_scan.py` —— **判据各包自理**（指标的 id 与文件名无关、策略与公式必须相同），
   机械动作共用这一份；新增第四套注册机制时复用它，不要照抄。
 - `core/tdx_reader.py` —— ⚠️ `detect()` 必须**轻量**（秒级，被「目录是否可用」的热路径反复调用）；

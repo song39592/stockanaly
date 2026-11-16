@@ -57,6 +57,16 @@ import warnings
 import numpy as np
 import pandas as pd
 
+# 涨跌停口径的**唯一实现**在 core/limit_price.py（统计层的可行性判定与
+# 策略层的「炸板不买」共用同一份）。这里按旧名转出，调用点与单测
+# （stats._limit_prices / stats._is_limit_up …）都保持不变。
+from core.limit_price import (
+    is_limit_down as _is_limit_down,
+    is_limit_up as _is_limit_up,
+    limit_pct as _limit_pct,
+    limit_prices as _limit_prices,
+)
+
 SCHEMA_VERSION = 2
 _TRADING_DAYS = 252.0      # 年化折算：固定日线，见模块 docstring
 _EPS = 1e-12
@@ -65,8 +75,7 @@ _EPS = 1e-12
 # 与 ST 板的特殊情形，同时足够宽松、不会误杀真实行情。
 # 实测本地库因复权因子缺失出现过 -88% ~ -96% 的假跌幅（详见 compute 里的说明）。
 _IMPOSSIBLE_RET = 0.5
-_BOARD_LIMIT = 0.20          # 创业板(30)/科创板(68) 涨跌停阈值
-_MAIN_LIMIT = 0.10           # 主板阈值（ST 自 2025-04 起也是 10%，见 _limit_pct）
+# 涨跌停幅度常量（BOARD_LIMIT / MAIN_LIMIT）在 core/limit_price.py —— 那里是唯一实现。
 
 # 单股仓位上限的判定容差（相对）：必须**大于** float32 的表示误差（约 1.2e-7），
 # 否则「上限正好等于某个权重」时会因浮点表示差异被误判成超限。
@@ -168,66 +177,20 @@ def _native(series: pd.Series):
     return [_fin(v) for v in series.values]
 
 
-def _limit_pct(code: str) -> float:
-    """该代码所属板块的涨跌停阈值（**现行口径**：主板 10%、双创 20%）。
-
-    ⚠️ 涨跌停幅度是**分时段**的，这里暂未实现，两处已知缺口（别当成"已处理"）：
-      1. **ST**：2025-04 起 ST/*ST 的日涨跌幅已由 5% 统一为 10%（与主板一致），
-         但 2025-04 之前是 5%。本地行情没有「是否 ST」的标识字段，要按时间段
-         精确判定需要额外数据源。当前一律按 10% 处理，**回测区间跨越 2025-04 时，
-         早期一段的涨跌停判定会偏松**（5% 的板会被当成 10% 的板）。
-      2. **北交所**（8xx/43x）：幅度是 30%，本函数未覆盖 → 按主板 10% 处理，
-         北交所票的一字板会判不出来。
-    默认回测范围若含 ST 票，以上偏差会体现为"买不进"笔数偏少。
-
-    另：涨跌停作用于**原始价**，hfq 会平滑除权跳空、掩盖真实涨跌停，
-    故可行性判定一律用 raw。
-    """
-    c = str(code)
-    if c.startswith(("300", "301", "688", "689")):
-        return _BOARD_LIMIT
-    return _MAIN_LIMIT
-
-
-def _limit_prices(prev_close: float, thr: float) -> tuple[float, float]:
-    """按昨收算涨停价 / 跌停价（四舍五入到分，与交易所口径一致）。
-
-    交易所的涨跌停价 = round(昨收 × (1 ± 幅度), 2)。直接用「收盘涨跌幅 ≥ 幅度」
-    判定不准：昨收 10.00 的涨停价是 11.00，而 9.8% 的涨幅阈值对应 10.98，
-    中间那 0.02 的缝隙会把「最低价 10.99（盘中开过板、买得到）」的票误判成一字板。
-    按**价比对**更贴实盘。
-    """
-    if prev_close <= 0:
-        return (0.0, 0.0)
-    return (round(prev_close * (1.0 + thr), 2), round(prev_close * (1.0 - thr), 2))
-
-
-def _is_limit_up(hi: float, lo: float, prev_close: float, thr: float) -> bool:
-    """当天是否**一字涨停**（买不进）：`low >= 涨停价`。
-
-    含义是「全天最低价都在涨停价」—— 没有任何低于涨停价的成交机会，
-    挂涨停价单只能排队、买不到。
-
-    ⚠️ 旧写法是「high == low 且 |收盘涨跌幅| ≥ 幅度」，买卖两侧共用**绝对值**涨跌幅，
-    造成**一字跌停的买入被标成涨停**（跌停板上买单是能成交的，买得到）。
-    实测 jwzz top_n=1 有 23 笔「一字跌停」被误标成买不进，占买入金额 7.3%。
-    """
-    if prev_close <= 0:
-        return False
-    up, _ = _limit_prices(prev_close, thr)
-    return up > 0 and lo >= up
-
-
-def _is_limit_down(hi: float, lo: float, prev_close: float, thr: float) -> bool:
-    """当天是否**一字跌停**（卖不出）：`high <= 跌停价`。
-
-    含义是「全天最高价都在跌停价」—— 没有任何高于跌停价的成交机会。
-    与 _is_limit_up 对称：卖出侧只看跌停，涨停时卖出是完全能成交的。
-    """
-    if prev_close <= 0:
-        return False
-    _, dn = _limit_prices(prev_close, thr)
-    return dn > 0 and hi <= dn
+# ---------------------------------------------------------------- 涨跌停口径
+# ⚠️ **唯一实现已下沉到 `core/limit_price.py`**：
+#    涨跌停幅度 / 涨停价 / 一字板判定 既被本模块（可行性判定 + 严格成交模型）用，
+#    也被策略层的「涨停开盘但炸板 → 放弃买入」过滤用 —— 两处各写一份就是
+#    「同一口径两个数、两边都不报错」。
+#    上面按旧名（`_limit_pct` / `_limit_prices` / `_is_limit_up` / `_is_limit_down`）
+#    转出，调用点与单测都保持不变；改口径请改 `core/limit_price.py`。
+#
+#    口径要点（详见该文件）：幅度按板块（主板 10%、双创 20%）；
+#    涨停价 = round(昨收 × (1 ± 幅度), 2)；一字涨停 = 全天最低价 ≥ 涨停价（买不进）；
+#    一字跌停 = 全天最高价 ≤ 跌停价（卖不出）；买卖方向各判各的。
+#    ⚠️ 已知缺口：ST 2025-04 前的 5%、北交所 30% 未覆盖。
+#    ⚠️ 涨跌停作用于**原始价**，hfq 会平滑除权跳空、掩盖真实涨跌停，
+#    故本模块的可行性判定一律用 raw。
 
 
 def _close_at_or_before(rclose: pd.Series, raw_dates: list[str], day: str):
