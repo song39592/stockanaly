@@ -21,15 +21,18 @@
 2. **买入候选**：当日 `JWZZ > 阈值` **且当日有行情**、**昨日未持有**的票，
    按 JWZZ **降序**排列（相同值按代码序，保证可复现）。
    - 「当日有行情」是硬条件：停牌的票买不进去，不能占掉一次买入名额。
-   - 「昨日未持有」：已持有的票不再加仓（单票仓位固定 10%）。
+   - 「昨日未持有」：已持有的票不再加仓（单票仓位 = 1 / 槽位数，不再单独设）。
 3. **买几只**：每日最多买 `buys_per_day` 只（默认 1；设成 2 就是每天买前 2），
    且**受剩余槽位约束**（空位不足就少买）。
 4. **槽位**：最多同时持有 `max_slots` 只（默认 10）。
    空位 = `max_slots − 昨日持仓数` —— **昨日卖出腾出的槽位当天不能用、次日才补**
    （卖出与买入分开一天，更接近实盘：卖出资金次日才可再投）。
    **槽位满且没有票下穿 → 当天买不进**（这是策略规则，不是错误）。
-5. **仓位**：每只固定 `position_each`（默认 10% = 占组合净值比例）。
-   不足 10 只时，剩余部分是**现金**（引擎口径：Σweight < 1 的差额即现金）。
+5. **仓位**：**单票仓位自动 = 1 / `max_slots`**（占组合净值比例）——
+   10 个槽位 → 每只 10%；20 个槽位 → 每只 5%。**不再让用户单独设仓位**：
+   一旦仓位与槽位分成两个参数，就可能配出「0.1 × 20 = 200%」这种越界组合，
+   跑起来才报错（引擎契约：同一事件日 Σweight ≤ 1）。
+   不满槽位时，剩余部分是**现金**（引擎口径：Σweight < 1 的差额即现金）。
 
 ## 「买不进」有两层，含义不同
 
@@ -63,7 +66,7 @@ from formulas.jwzz import DEFAULT_PERIOD, jwzz_panel
     name="JWZZ 持有到下穿",
     category="趋势",
     description="每日买入 JWZZ 最高的一只（可设每日买入只数，N=2 时买前 2），"
-                "单票固定仓位；只有 JWZZ 下穿阈值才卖出；"
+                "单票仓位=1/槽位数（不满槽位留现金）；只有 JWZZ 下穿阈值才卖出；"
                 "持仓槽位满且没有票下穿时，当天买不进。",
     inputs=["close", "volume", "amount"],
     outputs="目标权重向量(组合占比) + 因子值(meta)",
@@ -75,16 +78,15 @@ from formulas.jwzz import DEFAULT_PERIOD, jwzz_panel
                    label="触发阈值(‰)"),
         ParamSpec("smooth_period", "int", 0, min=0, max=250,
                    label="平滑周期(0=原始JWZZ；>0需把阈值调低约5倍)"),
-        ParamSpec("max_slots", "int", 10, min=1, max=100, label="持仓槽位数"),
-        ParamSpec("position_each", "float", 0.1, min=0.01, max=1.0,
-                   label="单票仓位(占组合净值)"),
+        ParamSpec("max_slots", "int", 10, min=1, max=100,
+                   label="最大持仓槽位(单票仓位=1/槽位数)"),
         ParamSpec("buys_per_day", "int", 1, min=1, max=20,
                    label="每日买入只数(按JWZZ排名取前N)"),
     ],
 )
 def jwzz_hold(ctx, cost_period: int = DEFAULT_PERIOD, threshold: float = 95.0,
               smooth_period: int = 0, max_slots: int = 10,
-              position_each: float = 0.1, buys_per_day: int = 1) -> list:
+              buys_per_day: int = 1) -> list:
     codes = [str(c).strip() for c in (ctx.codes or []) if str(c).strip()]
     if not codes:
         return []
@@ -92,15 +94,11 @@ def jwzz_hold(ctx, cost_period: int = DEFAULT_PERIOD, threshold: float = 95.0,
     thr = float(threshold)
     smooth_n = max(0, int(smooth_period))
     slots = max(1, int(max_slots))
-    w_each = float(position_each)
+    # 单票仓位 = 1 / 槽位数（**不单独设**）：满槽时 Σweight 恰好 = 1，
+    # 不满槽时 < 1（差额即现金）→ **不可能**再配出「Σweight > 1」的越界组合。
+    # 以前仓位与槽位是两个参数，0.1 × 20 = 2.0 这类组合只能等跑起来才报错。
+    w_each = 1.0 / slots
     n_buy = max(1, int(buys_per_day))
-    # 组合权重口径下同一事件日 Σweight 必须 ≤ 1：超了直接报错，
-    # **不静默归一化**（静默归一会把「参数配错」变成「半仓运行」，极难排查）。
-    if w_each * slots > 1.0 + 1e-6:
-        raise ValueError(
-            f"单票仓位 {w_each} × 持仓槽位 {slots} = {w_each * slots:.4f} > 1，"
-            f"会超出组合权重上限（同一事件日 Σweight 必须 ≤ 1）。"
-            f"请把单票仓位调低或减少槽位数。")
 
     # 主动拉取所需字段（inputs=["close","volume","amount"]）；缓存命中，无额外 I/O
     bars = data.load_bars(ctx.codes, ctx.start, ctx.end,
