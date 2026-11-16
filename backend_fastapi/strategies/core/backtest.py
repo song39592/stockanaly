@@ -15,7 +15,7 @@
 返回结构（前后端契约，metrics.schema_version = 2）：
   {
     "ok": True,
-    "strategy": {"id","name","params"},
+    "strategy": {"id","name","params","version"},
     "scope": {"codes_count","requested","start","end",
               "initial_capital","commission","stamp_duty","slippage",
               "min_commission","lot_size","benchmark","universe_mode",
@@ -24,6 +24,10 @@
               # scope.exclusion = 范围口径明细：剔除特征只数（dropped）+ **注入判定**
               #   结论（available_count 可注入只数 / skipped_insufficient 区间内行情
               #   不足剔除只数 / window 实际取数区间）—— 口径在股票池层。
+              # scope.exclusion.spec_version / spec_signature = **统计口径版本与指纹**：
+              #   口径改一次（阈值 / 剔除特征 / 判定基准日），同一区间同一策略的结果
+              #   能差 10~30 倍 —— 没有这两个字段，两份报告无法自证能不能比。
+              # strategy.version = 策略算法版本（改了逻辑/默认值就 bump）。
               # feasibility.build_failures = 建仓失败明细（隔日一字涨停 → 买不进）：
               #   {count, shown, dropped, items[{code,name,date,signal_date,reason}]}
               #   这些建仓**没有成交**，所以不在 trades 明细里（那里一行 = 一次买卖）。
@@ -341,6 +345,8 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
             "id": strategy_id,
             "name": base.REGISTRY[strategy_id].name,
             "params": params or {},
+            # 策略算法版本：改了逻辑/默认值就 bump，报告里能看出两次不是同一版
+            "version": base.REGISTRY[strategy_id].version,
         },
         "scope": {
             "codes_count": len(usable),
@@ -369,6 +375,10 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                 "available_count": scope_extra.get("available_count"),
                 "skipped_insufficient": scope_extra.get("skipped_insufficient"),
                 "window": scope_extra.get("window"),
+                # 统计口径版本 + 指纹：口径改了（阈值/剔除特征/基准日），
+                # 同一区间的结果能差 10~30 倍 —— 没有这两个字段，两份报告无法自证可比。
+                "spec_version": universe.SPEC_VERSION,
+                "spec_signature": universe.spec_signature(),
             },
             "equity_model": "weight_strict_fill",
             "per_stock_truncated": trunc_info,
@@ -905,6 +915,8 @@ def run_recommend(strategy_id: str, params: dict | None, codes: list[str],
             "id": strategy_id,
             "name": base.REGISTRY[strategy_id].name,
             "params": params or {},
+            # 策略算法版本（与回测同一份口径）
+            "version": base.REGISTRY[strategy_id].version,
         },
         "date": date or end,
         # 路由层按「目标执行日」反推后传入 → 结果如实回显用户选的那一天；

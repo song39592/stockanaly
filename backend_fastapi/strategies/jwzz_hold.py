@@ -71,6 +71,8 @@ from formulas.jwzz import DEFAULT_PERIOD, jwzz_panel
     inputs=["close", "volume", "amount"],
     outputs="目标权重向量(组合占比) + 因子值(meta)",
     requires_pool=False,
+    # v2：单票仓位改为「1/槽位数」（不满槽位留现金），移除了 v1 的 position_each 参数
+    version="2",
     params=[
         ParamSpec("cost_period", "int", DEFAULT_PERIOD, min=2, max=250,
                    label="成本EMA周期"),

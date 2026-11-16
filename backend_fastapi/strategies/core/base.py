@@ -119,14 +119,19 @@ class StrategyMeta:
     func: Callable
     requires_pool: bool = False   # 是否依赖股票池历史（pool_members）；编排层据此做覆盖预检
     pool_warmup: int = 0          # 回测起点前需有多少天历史养状态（streak 连续性）
+    version: str = "1"            # 策略算法版本：改了算法或参数默认值就 bump（报告落盘可见）
 
 
 def strategy(id: str, name: str, category: str, description: str = "",
              inputs: list[str] | None = None,
              outputs: str = "目标权重向量 + 因子值(meta)",
              params: list[ParamSpec] | None = None,
-             requires_pool: bool = False, pool_warmup: int = 0):
-    """装饰器：把策略登记进 REGISTRY。id 必须唯一，重复会抛 ValueError。"""
+             requires_pool: bool = False, pool_warmup: int = 0,
+             version: str = "1"):
+    """装饰器：把策略登记进 REGISTRY。id 必须唯一，重复会抛 ValueError。
+
+    `version` = 策略算法版本：改了信号逻辑或参数默认值就 bump，落进报告可查。
+    """
     if id in REGISTRY:
         raise ValueError(f"策略 id 重复: {id}")
 
@@ -136,6 +141,7 @@ def strategy(id: str, name: str, category: str, description: str = "",
             inputs=list(inputs or ["close"]), outputs=outputs,
             params=params or [], func=func,
             requires_pool=requires_pool, pool_warmup=pool_warmup,
+            version=version,
         )
         return func
     return deco
@@ -155,6 +161,8 @@ def list_strategies() -> list[dict]:
             "params": [dc.asdict(p) for p in meta.params],
             "requires_pool": meta.requires_pool,
             "pool_warmup": meta.pool_warmup,
+            # 策略算法版本：改了逻辑/参数默认值就 bump，前端将来要显示不用再改后端
+            "version": meta.version,
         })
     out.sort(key=lambda x: (x["category"], x["id"]))
     return out
