@@ -22,9 +22,9 @@
     │  │    └ pool_members                │   │  factors.db    复权参考数据     │ │
     │  │  stock_events                    │   │    ├ adjust_factors           │ │
     │  │  event_sync_state                │   │    └ dividends                │ │
-    │  │  sync_jobs                       │   └───────────────────────────────┘ │
-    │  │  _meta  ← 完整性签名（每个库都有）  │                                     │
-    │  └──────────────────────────────────┘                                     │
+    │  │  sync_jobs                       │   │  indices.db   **指数**日K       │ │
+    │  │  _meta  ← 完整性签名（每个库都有）  │   │    └ index_bars              │ │
+    │  └──────────────────────────────────┘   └───────────────────────────────┘ │
     │                                                                            │
     │  _digests（每个日K分片库各一张）← 按股指纹，读写时校验，可定位被改动的个股      │
     │                                                                          │
@@ -142,6 +142,37 @@ qfq(t, as_of) = raw(t) × hfq_factor(t) ÷ hfq_factor(as_of)
 - `as_of` 是**复权基准日**，缺省为区间内最后一个交易日（等价于数据源的常规前复权）。
 - **回测必须传回测起点**作为基准：这样历史价格不含未来信息，且同一段历史每次回测结果一致。
 - 库里只存一份原始价，比存三套复权价**节省约 2/3 空间**（5000 只 × 10 年：2.5 GB vs 7.4 GB）。
+
+### 3.4 指数行情：`bars/indices.db`
+
+**指数不是股票**，所以单独一张表（`index_bars`）、单独一个库文件。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `code` | TEXT PK | **带市场前缀**的指数代码：`sh000001` / `sz399001` / `sh000300` / `sh000852` / `sh000985` |
+| `trade_date` | TEXT PK | `YYYY-MM-DD` |
+| `open/high/low/close` | REAL | 指数点位（**不复权**：指数没有除权除息） |
+| `volume` / `amount` | REAL | 成交量 / 成交额 |
+| `change_pct` | REAL | 当日涨跌幅 |
+| `source` | TEXT | 数据来源（东方财富 / 新浪），便于排查混源偏差 |
+| `fetched_at` | TEXT | 抓取时间 |
+
+另有 `_index_digests`（按股指纹，与日 K 的 `_digests` **同一套算法**：`_checksum` + HMAC，
+只是参与字段与存储表不同）——读取即校验，不一致抛 `UntrustedDataError`。
+
+**为什么不能塞进 `daily_bars`**（三条硬理由）：
+
+| 理由 | 后果 |
+|---|---|
+| `daily_bars` 主键是 `(code, trade_date, adjust)`，**没有品种字段** | 上证指数 `000001` 与平安银行 `000001` 主键完全相同 → `INSERT OR REPLACE` 互相覆盖 |
+| `list_universe_codes()` 直接返回 `daily_bars` 的全部 code | 指数会被当成**一只股票**进回测池（主板前缀、ST/微盘过滤都过得了，甚至可能被选股选中） |
+| 指数没有复权概念（`adjust` 列无意义），也没有换手率/振幅 | 列集与个股不同，混在一张表里 schema 不齐 |
+
+代价：多一个库文件。收益：品种边界是**物理**的，不靠「代码长什么样」的隐式约定。
+
+**拉取**：`python scripts/download_indices.py`（默认拉全历史；`--list` 看清单与本地跨度；
+`--refetch` 全量重抓）。数据源：东财 `index_zh_a_hist` → 东财 `stock_zh_index_daily_em`
+→ 新浪 `stock_zh_index_daily`。
 
 ## 四、实验室库 `mentor_lab.db`
 

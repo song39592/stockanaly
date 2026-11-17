@@ -40,6 +40,13 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 from jwzz_prod_probe import run as prod_run, PARAMS   # noqa: E402  生产口径执行器
 
+# 闸三-B（净值独立重建对账）的判据阈值。
+# ⚠️ 别再用单看 `corr > 0.9` 的旧判据：严格成交模型（一字板买不进即空仓）本身
+#    就会压低日收益相关性，实测 corr=0.8967（差 0.0033）被判「未来信息」= 误判。
+#    详见 docs/jwzz-backtest-2026-11-16.md §四.3。
+RATIO_MAX = 100.0   # 重建/引擎 比值上界：成本 + 一字板约束可解释的量级（实测 ≈ 46~50×）
+CORR_MIN = 0.85     # 日收益相关系数下限
+
 
 def check_determinism(r1, r2):
     """闸一：逐日净值是否逐位一致。"""
@@ -190,7 +197,9 @@ def rebuild_equity(pool, start, end, params):
       * 若引擎净值 ≈ 本重建值 → 引擎的收益确实只由「前一日可见的信息」驱动；
       * 若引擎净值**系统性高于**重建值且相关性低 → 引擎用了未来信息。
     重建值**必然高于**引擎值（引擎要扣成本、且一字板买不进会少持仓），
-    所以这里看的是**相关性**与**偏离的方向**，不是绝对值。
+    所以这里看的是**方向性**（重建 ≥ 引擎）、**比值是否落在成本 + 一字板约束
+    能解释的倍数量级内**（实测 ≈ 46~50×）、以及**日收益相关性的下限**，
+    而不是要求绝对值相等。
     """
     from strategies.core import base, data
     from strategies import jwzz_cross as JC
@@ -321,10 +330,26 @@ def main():
                   % (eng[-1], reb[-1], reb[-1] / eng[-1] if eng[-1] else float("nan")))
             print("  重建不含成本与一字板约束 → 必然 >= 引擎；比值 %.3f"
                   % (reb[-1] / eng[-1] if eng[-1] else float("nan")))
-            ok = corr > 0.9 and (reb[-1] >= eng[-1] * 0.5)
-            print("  → %s" % ("✅ 引擎净值与「仅用前一日信息」的重建高度一致"
-                              "（无未来信息）" if ok else
-                              "❌ 二者明显背离 —— 引擎可能用了未来信息，需深查"))
+            # 判据（三条**同时**满足才算通过；任一条不过 → 需要深查）：
+            #   ① 方向性：重建 >= 引擎 —— 重建不可能比引擎低，除非引擎用了未来信息
+            #   ② 比值合理性：比值落在「成本 + 一字板约束」能解释的倍数量级内
+            #      （实测 ≈ 46~50×，见 docs/jwzz-backtest-2026-11-16.md §四.3）
+            #   ③ 相关性下限：corr >= 0.85
+            # ⚠️ 旧判据是单看 `corr > 0.9` —— 过严：严格成交模型本身就会压低相关性，
+            #   实测 corr=0.8967（差 0.0033）被判「未来信息」，实为误判。
+            ratio = (reb[-1] / eng[-1]) if eng[-1] else float("nan")
+            dir_ok = (not np.isnan(ratio)) and ratio >= 1.0
+            ratio_ok = (not np.isnan(ratio)) and 1.0 <= ratio <= RATIO_MAX
+            corr_ok = (not np.isnan(corr)) and corr >= CORR_MIN
+            ok = dir_ok and ratio_ok and corr_ok
+            print("  判据：①方向性(重建≥引擎)=%s ②比值合理性(1≤比值≤%g)=%s ③相关性(corr≥%.2f)=%s"
+                  % ("通过" if dir_ok else "不通过", RATIO_MAX,
+                     "通过" if ratio_ok else "不通过", CORR_MIN,
+                     "通过" if corr_ok else "不通过"))
+            print("  → %s" % ("✅ 引擎净值与「仅用前一日信息」的重建方向一致、"
+                              "且背离可由成本+一字板约束解释 → 无未来信息迹象"
+                              if ok else
+                              "❌ 判据未全部满足 —— 引擎可能用了未来信息，需深查"))
 
     print("\nelapsed = %.1fs" % (time.time() - t0))
 

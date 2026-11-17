@@ -745,6 +745,57 @@ d1 一字板买不进（当天空仓），d2 不再一字板就真的买进 d2�
 ⚠️ 口径实现（涨停幅度 / 涨停价 / 一字板 / 炸板）在 **`core/limit_price.py`** ——
 与统计层的可行性判定同一份；改一处即两处生效。
 
+## 🆕 策略 `jwzz_cross_timing`：JWZZ 选股 + **大盘状态择时**
+
+**它是 `jwzz_cross` + 一层「仓位开关」**（选股口径、卖出规则、权重口径全部同源）：
+
+> 大盘在 MA 之上 → 按 `position` / `top_n` 正常持仓；
+> 大盘跌破 MA → 按 `down_position` / `down_top_n` 降仓或空仓。
+
+为什么**新建策略**而不是给 `jwzz_cross` 加参数：改的是**算法**不是调参 → 独立 id 才能与
+基线并排对照、基线一行不动；`strategy.version` 不同 → 报告里能看出是两套算法，
+不会拿两套口径的数字直接比。先例：`jwzz_cross_safe`（同样是「基线 + 一条规则」的变体）。
+
+口径（逐条写死，见 `strategies/jwzz_cross_timing.py`）：
+
+| 项 | 规则 |
+|---|---|
+| 状态判定 | `state[t] = close[t-1] > MA(ma_period)[t-1]` —— **无前视**（决策日 t 只用 ≤ t-1 的信息） |
+| MA 窗口 | `MA(period)[t-1] = mean(close[t-period .. t-1])`（含 t-1，不含 t） |
+| 序列来源 | `market_code`：`sh000001` / `sh000300` / `sh000852` / `sh000985` / `pool` |
+| `pool` | 回测池等权指数 —— **内生**（池子涨 → 看多 → 买这池子里的票）且**随回测池变化** → 只作对照；实盘与横向对比用真指数 |
+| 空仓 | 给当期全部持仓发 `weight=0` → 引擎 diff 出**卖出** → 真付换手成本（不发 0 的话权重被前向填充，「空仓」变成「减仓」） |
+| 状态切换当天 | **必须重发整组**（哪怕成分没变）：权重变了才算得出买卖 |
+
+⚠️ **指数没落盘 → 直接抛错**，不静默降级：否则「择时没生效」会被读成「择时没用」。
+拉取：`python scripts/download_indices.py`（独立表 `index_bars`，见 `docs/database.md` §3.4）。
+
+### 「大盘状态」口径为什么住在 `formulas/market.py`
+
+这套口径被**两处**用到：① 统计层的默认基准（等权全池买入持有）② 择时策略的市场状态。
+两处各写一份 → 同一口径两个数、两边都不报错。故下沉到中立内核包 `formulas/`
+（依赖方向恒为「指标 → formulas ← 策略」）：
+
+| 函数 | 作用 |
+|---|---|
+| `equal_weight_returns(R)` | 等权组合日收益（逐日对全成分取算术平均，NaN 按 0 计入）—— `stats.py` 的默认基准用它 |
+| `pool_index_from_closes(closes)` | 由收盘价矩阵算等权池指数的日收益（先 pct_change → 归零 → 再平均，顺序不能换） |
+| `pool_index_series(closes)` | 等权池指数的净值曲线 |
+| `trend_state(close, period, lag=1)` | **无前视**趋势判定（`lag=0` 只用于事后画图，驱动仓位就是前视） |
+| `align_to_days(series, days)` | 对齐到交易日轴（在「原序列 ∪ 目标轴」的并集上先 ffill，否则序列开头会变成一串 NaN） |
+
+## 🆕 指数取数通道（`strategies/core/data.py`）
+
+策略包内的指数取数只有一个出口，与个股行情分开：
+
+| 函数 | 作用 |
+|---|---|
+| `load_index(code, start, end, fields)` | 读某条指数的日 K（独立表 `index_bars`），返回 `DataFrame[日期]`；取不到返回 `None`（**调用方必须显式报错**） |
+| `index_codes()` | 本地已落盘的指数代码 |
+| `load_benchmark(code, start, end)` | **基准收盘序列**：先查指数库、再查个股库 —— 回测的 `benchmark` 参数既可填指数代码也可填个股代码，路由收敛在数据层一处 |
+
+⚠️ 指数**不在** `list_universe_codes()` 里（它只查个股日 K 表）→ 指数永远不会进回测池。
+
 ## HTTP 接口（`strategies_routes.py`，前缀 `/api/strategies`）
 - `GET  ""` 策略清单（含 `inputs/outputs/params/requires_pool`）
 - `GET  /codes` 本地已下载股票代码（按 `universe_mode` 过滤）

@@ -159,6 +159,75 @@ def load_bars(codes, start: str | None = None, end: str | None = None,
     return out
 
 
+# ---- 指数（独立表）---------------------------------------------------
+# 指数**不是股票**：落在独立表 `index_bars`（`bars/indices.db`），code 带市场前缀
+# （sh000001 / sh000852），与个股的 6 位裸数字**永不冲突**
+# （`000001` 既是上证指数也是平安银行 → 混存会撞主键、还会被当成股票进回测池）。
+#
+# 策略取指数只能走本模块 —— 策略文件不得直接读库、不得自己写 SQL。
+_INDEX_CACHE: dict = {}
+
+
+def load_index(code: str, start: str | None = None, end: str | None = None,
+               fields: list[str] | None = None) -> pd.DataFrame | None:
+    """读取某条指数的日 K（index = 交易日期）。
+
+    返回 None = 「库里没有这条指数 / 这段区间没有数据」。
+    ⚠️ 调用方**必须**据此显式报错，不允许静默当成「今天没有信号」——
+    静默降级会让「择时没生效」看起来像「择时没用」。
+    """
+    key = str(code).strip()
+    if not key:
+        return None
+    cols = [c for c in (fields or ["close"]) if c]
+    ckey = (key, start, end, tuple(cols))
+    if ckey in _INDEX_CACHE:
+        return _INDEX_CACHE[ckey]
+    rows = price_store.list_index_bars(key, start=start, end=end, fields=cols)
+    if not rows:
+        _INDEX_CACHE[ckey] = None
+        return None
+    frame = pd.DataFrame(rows)
+    frame["trade_date"] = frame["trade_date"].astype(str).str[:10]
+    frame = frame.set_index("trade_date", drop=True).sort_index()
+    keep = [c for c in cols if c in frame.columns]
+    df = frame[keep] if keep else frame
+    _INDEX_CACHE[ckey] = df
+    return df
+
+
+def index_codes() -> list[str]:
+    """本地已落盘的指数代码（升序）。"""
+    try:
+        return price_store.index_codes()
+    except Exception:                    # noqa: BLE001 - 库还没建时返回空
+        return []
+
+
+def load_benchmark(code: str, start: str | None = None,
+                   end: str | None = None) -> pd.Series | None:
+    """基准收盘序列：**先查指数库，再查个股库**。
+
+    为什么合一：回测的 `benchmark` 参数既可能填**指数代码**（sh000001），
+    也可能填**个股代码**（拿某只票当基准）。两条取数路径不同（指数在独立表、
+    个股在按年分片的日 K 表），但对上层是同一件事 → 路由收敛在数据层一处，
+    路由层与编排层不再各自判断「这个 code 是什么品种」。
+    """
+    key = str(code).strip()
+    if not key:
+        return None
+    if key in index_codes():
+        frame = load_index(key, start=start, end=end, fields=["close"])
+        if frame is None or frame.empty:
+            return None
+        return frame["close"].astype(float)
+    bars = load_bars([key], start, end, fields=["close"], adjust="hfq")
+    frame = bars.get(key)
+    if frame is None or frame.empty:
+        return None
+    return frame["close"].astype(float)
+
+
 def release_cache(codes: list[str], adjust: str | None = None,
                   start: str | None = None, end: str | None = None) -> int:
     """释放指定标的在**逐标的缓存**里的条目，返回释放条数。

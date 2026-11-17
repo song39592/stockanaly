@@ -38,6 +38,19 @@ qfq_factor」「指标不落库」同理——只存不可变数据，派生的�
     history_routes ─┐
     indicators/data ─┼─→ kline_service ─→ price_store / periods
     chip_formulas   ─┘（经 indicators.data）
+
+## 指数（`indices.is_index_code` 为真时走另一张表）
+
+指数**不是股票**：代码带市场前缀（`sh000001`），落在独立表 `index_bars`
+（独立库 `bars/indices.db`）。本层按 `core/indices.py` 的判定分流：
+
+| code | 取数表 | 复权 |
+|---|---|---|
+| `600000`（裸 6 位） | `daily_bars` | qfq / hfq / raw 照旧 |
+| `sh000001`（带前缀） | `index_bars` | **无复权**（指数没有除权除息，原始值即最终值；`adjust` 参数被忽略） |
+
+这样「指标算的是哪根 K 线」与「用户看到的 K 线」对指数也保持同源 ——
+指标包（`indicators/data.py`）统一走本层，不用知道自己取的是指数还是个股。
 """
 from __future__ import annotations
 
@@ -46,7 +59,7 @@ from functools import lru_cache
 from typing import Any
 
 import pandas as pd
-from . import price_store
+from . import indices, price_store
 from .jsonutil import json_safe
 from .periods import normalize, resample_bars
 
@@ -67,8 +80,14 @@ def resample(bars: list[dict[str, Any]], period: str) -> list[dict[str, Any]]:
 @lru_cache(maxsize=128)
 def _frame(code: str, start: str | None, end: str | None, adjust: str,
            period: str, fields: tuple | None = None) -> pd.DataFrame | None:
-    rows = price_store.load_bars(code, adjust=adjust, start=start, end=end,
-                                 fields=list(fields) if fields else None)
+    if indices.is_index_code(code):
+        # 指数走独立表（index_bars / bars/indices.db），**不做复权**：
+        # 指数没有除权除息，原始值即最终值 → adjust 参数在这里没有意义。
+        rows = price_store.list_index_bars(code, start=start, end=end,
+                                            fields=list(fields) if fields else None)
+    else:
+        rows = price_store.load_bars(code, adjust=adjust, start=start, end=end,
+                                     fields=list(fields) if fields else None)
     if not rows:
         return None
     if period != "day":
@@ -89,6 +108,8 @@ def get_bars(code: str, start: str | dt.date | None = None,
 
     参数：
       adjust  qfq（默认，展示）/ hfq（回测）/ raw
+              ⚠️ **指数代码（带市场前缀，如 `sh000001`）忽略该参数**：
+              指数走独立表 `index_bars`，无复权概念 → 拿到的就是原始值。
       period  day / week / month（周线 / 月线读取时现算）
       fields  第 22 项：只要这些行情列，下推到 SQL 少读几列、pandas 少建几个
               数组。给 None（默认）时行为与从前一致。**注意**：`trade_date`

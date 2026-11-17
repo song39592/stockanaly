@@ -25,6 +25,7 @@ namespace StockPool
             kLayout.RowCount = 2;
             kLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));   // K 线
             kLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 178f));  // 右侧筹码分布窗口
+            _stockKlineLayout = kLayout;      // 指数模式要把这一列收成 0（见 StockApplyIndexMode）
             kLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // 指标勾选 / 筹码公式下拉
             kLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));  // 图表撑满
             klinePage.Controls.Add(kLayout);

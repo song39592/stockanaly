@@ -458,9 +458,11 @@ def refresh_stock_meta() -> dict:
 
 
 def init_db() -> None:
-    """建齐股价相关表：当前年份的日 K 分片 + 因子库。"""
+    """建齐股价相关表：当前年份的日 K 分片 + 因子库 + 指数库。"""
     with db.connect(db.bars_db(dt.date.today().year)) as conn:
         _ensure_bars_table(conn)
+    with db.connect(db.INDEX_DB) as conn:
+        _ensure_index_table(conn)
     with db.connect(db.FACTORS_DB) as conn:
         _ensure_lockup_table(conn)
         _ensure_stock_meta_table(conn)
@@ -951,6 +953,263 @@ def list_bars(code: str, start: str | None = None, end: str | None = None,
             rows.extend(dict(row) for row in conn.execute(sql + " ORDER BY trade_date", params))
     rows.sort(key=lambda item: item["trade_date"])
     return rows
+
+
+# --------------------------------------------------------------------------- #
+# 指数行情（独立表、独立库）—— 指数**不是股票**
+# --------------------------------------------------------------------------- #
+# 为什么单独一张表，而不是塞进 daily_bars：
+#   ① daily_bars 的主键是 (code, trade_date, adjust)，**没有品种字段** → 上证指数
+#      000001 与平安银行 000001 主键完全相同，混存会 `INSERT OR REPLACE` 互相覆盖；
+#   ② `strategies/core/data.py::list_universe_codes` 直接返回 daily_bars 的**全部**
+#      code —— 指数若在里面，会被当成一只**股票**进回测池（`_board_key("000001")`
+#      判成主板，ST / 微盘过滤都过得了，甚至可能被选股选中去下单）；
+#   ③ 指数没有复权概念（`adjust` 列无意义）、也没有换手率 / 振幅 → 列集与个股不同。
+# 代价：多一个库文件。收益：品种边界是**物理**的，不靠「代码长什么样」的隐式约定。
+#
+# code 命名空间：统一带市场前缀（`sh000001` / `sz399001` / `sh000300`），
+# 与个股的 6 位裸数字**永不冲突**。
+_INDEX_TABLE = """
+CREATE TABLE IF NOT EXISTS index_bars (
+  code       TEXT NOT NULL,          -- 带市场前缀，如 sh000001
+  trade_date TEXT NOT NULL,
+  open REAL, high REAL, low REAL, close REAL,
+  volume REAL, amount REAL,
+  change_pct REAL,
+  fetched_at TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(code, trade_date)
+) WITHOUT ROWID;
+"""
+_INDEX_INSERT = """INSERT OR REPLACE INTO index_bars(
+  code,trade_date,open,high,low,close,volume,amount,change_pct,fetched_at,source)
+  VALUES(?,?,?,?,?,?,?,?,?,?,?)"""
+
+# 指数的按股指纹：与个股**同一套算法**（`_checksum` + `crypto.sign`），
+# 只是参与字段与存储表不同 —— 不另写一份校验逻辑（那才会「两个数、两边都不报错」）。
+_INDEX_DIGEST_SQL = """
+CREATE TABLE IF NOT EXISTS _index_digests (
+  code       TEXT NOT NULL PRIMARY KEY,
+  rows       INTEGER NOT NULL,
+  first_date TEXT NOT NULL,
+  last_date  TEXT NOT NULL,
+  checksum   TEXT NOT NULL,
+  version    INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+) WITHOUT ROWID;
+"""
+_INDEX_DIGEST_FIELDS = ("trade_date", "open", "high", "low", "close",
+                        "volume", "amount", "change_pct", "source")
+# 指纹算法版本：参与字段或序列化方式一变就必须 +1（否则新旧摘要无法比对）
+_INDEX_DIGEST_VERSION = 1
+
+
+def _ensure_index_table(conn) -> None:
+    conn.execute(_INDEX_TABLE)
+    conn.execute(_INDEX_DIGEST_SQL)
+
+
+def _index_digest_rows(conn, code: str):
+    return list(conn.execute(
+        "SELECT " + ",".join(_INDEX_DIGEST_FIELDS) +
+        " FROM index_bars WHERE code=? ORDER BY trade_date", (code,)))
+
+
+def refresh_index_digest(conn, code: str) -> dict[str, Any]:
+    """重算并写入某条指数的指纹。"""
+    conn.execute(_INDEX_DIGEST_SQL)
+    rows = _index_digest_rows(conn, code)
+    if not rows:
+        conn.execute("DELETE FROM _index_digests WHERE code=?", (code,))
+        return {"code": code, "rows": 0}
+    item = {
+        "code": code,
+        "rows": len(rows),
+        "first_date": rows[0]["trade_date"],
+        "last_date": rows[-1]["trade_date"],
+        "checksum": _checksum(rows),
+        "version": _INDEX_DIGEST_VERSION,
+        "updated_at": db.now_iso(),
+    }
+    conn.execute("""INSERT OR REPLACE INTO _index_digests
+      (code,rows,first_date,last_date,checksum,version,updated_at)
+      VALUES(:code,:rows,:first_date,:last_date,:checksum,:version,:updated_at)""", item)
+    return {"code": code, "rows": len(rows)}
+
+
+def verify_index_digest(conn, code: str) -> dict[str, Any]:
+    """比对指数指纹；不一致说明数据被改动过（调用方据此拒绝返回）。"""
+    conn.execute(_INDEX_DIGEST_SQL)
+    recorded = conn.execute("SELECT * FROM _index_digests WHERE code=?", (code,)).fetchone()
+    rows = _index_digest_rows(conn, code)
+    if recorded is None:
+        return {"code": code, "ok": not rows, "recorded": None,
+                "actual_rows": len(rows),
+                "reason": "缺少指纹记录" if rows else ""}
+    problems: list[str] = []
+    stored_version = recorded["version"] if "version" in recorded.keys() else 0
+    if stored_version != _INDEX_DIGEST_VERSION:
+        problems.append("指纹算法版本 v%d → 需升级到 v%d"
+                        % (stored_version, _INDEX_DIGEST_VERSION))
+    elif recorded["rows"] != len(rows):
+        problems.append("行数 %s → %s" % (recorded["rows"], len(rows)))
+    elif recorded["checksum"] != _checksum(rows):
+        problems.append("内容指纹不一致")
+    return {"code": code, "ok": not problems, "recorded": dict(recorded),
+            "actual_rows": len(rows), "reason": "；".join(problems)}
+
+
+def upsert_index_bars(code: str, bars: list[dict[str, Any]],
+                       source: str = "") -> int:
+    """写入某条指数的日 K（同日覆盖）。
+
+    与个股的 `upsert_bars` 的差别：
+      * **不按年分片**（指数序列短：一条 30 年也就 7500 行，单表足够）；
+      * **没有 adjust 口径**（指数没有复权概念）；
+      * **不做 OHLC 一致性校验**（`_bad_bar` 那套是给个股用的：它挡的是
+        「字段错位 / 脏夹具」；指数数据源字段少、偶有缺失是常态，
+        校验过严会把整条指数挡在门外 —— 但**价格必须为正**这一条保留）。
+    """
+    key = str(code).strip()
+    if not key:
+        return 0
+    fetched_at = db.now_iso()
+    rows = []
+    for bar in bars:
+        day = str(bar.get("date") or bar.get("trade_date") or "")[:10]
+        if not day:
+            continue
+        close = bar.get("close")
+        try:
+            close = float(close)
+        except (TypeError, ValueError):
+            continue
+        if not (close > 0) or math.isnan(close) or math.isinf(close):
+            continue                     # 指数收盘价必须为正，否则整条序列不可用
+        rows.append((key, day, bar.get("open"), bar.get("high"), bar.get("low"),
+                     close, bar.get("volume"), bar.get("amount"),
+                     bar.get("change_pct"), fetched_at, source))
+    if not rows:
+        return 0
+    with db.connect(db.INDEX_DB) as conn:
+        _ensure_index_table(conn)
+        conn.executemany(_INDEX_INSERT, rows)
+        refresh_index_digest(conn, key)
+    return len(rows)
+
+
+def list_index_bars(code: str, start: str | None = None, end: str | None = None,
+                     fields: list[str] | None = None,
+                     verify: bool = True) -> list[dict[str, Any]]:
+    """读取某条指数的日 K（按日期升序）。
+
+    `verify=True`（默认）时先比对按股指纹：不一致就抛 `UntrustedDataError`，
+    与个股行情同一口径（错误数据不可接受）。
+    """
+    key = str(code).strip()
+    if not key:
+        return []
+    if fields:
+        want = [c.strip() for c in fields if c and c.strip()]
+        cols = [c for c in ("trade_date",) if c not in want]
+        cols += [c for c in want if c not in cols]
+        select = ",".join(cols)
+    else:
+        select = "*"
+    sql = f"SELECT {select} FROM index_bars WHERE code=?"
+    params: list[Any] = [key]
+    if start:
+        sql += " AND trade_date>=?"
+        params.append(str(start)[:10])
+    if end:
+        sql += " AND trade_date<=?"
+        params.append(str(end)[:10])
+    with db.connect(db.INDEX_DB) as conn:
+        _ensure_index_table(conn)
+        if verify:
+            check = verify_index_digest(conn, key)
+            if not check["ok"]:
+                raise UntrustedDataError(key, check["reason"] or "指纹不一致")
+        rows = [dict(row) for row in conn.execute(sql + " ORDER BY trade_date", params)]
+    return rows
+
+
+def overwrite_index_bars(code: str, bars: list[dict[str, Any]],
+                         source: str = "") -> dict[str, int]:
+    """用给定数据**整体替换**某条指数的日 K（修复「历史区间被改动」用）。
+
+    与个股 `overwrite_bars` 同一思路：写入后删除「不在新数据日期集合内」的旧行，
+    只有整体替换才能还原被改动过的历史区间（增量同步碰不到老日期）。
+    先写后删：中途失败也不会出现「删了却没补上」的空窗。
+    """
+    key = str(code).strip()
+    if not key:
+        return {"written": 0, "removed": 0}
+    written = 0
+    with db.connect(db.INDEX_DB) as conn:
+        _ensure_index_table(conn)
+        payload = []
+        for bar in bars:
+            day = str(bar.get("date") or bar.get("trade_date") or "")[:10]
+            if not day:
+                continue
+            close = bar.get("close")
+            try:
+                close = float(close)
+            except (TypeError, ValueError):
+                continue
+            if not (close > 0) or math.isnan(close) or math.isinf(close):
+                continue
+            payload.append((key, day, bar.get("open"), bar.get("high"), bar.get("low"),
+                            close, bar.get("volume"), bar.get("amount"),
+                            bar.get("change_pct"), db.now_iso(), source))
+        if payload:
+            conn.executemany(_INDEX_INSERT, payload)
+            written = len(payload)
+            days = sorted({row[1] for row in payload})
+            placeholders = ",".join("?" * len(days))
+            removed = conn.execute(
+                f"DELETE FROM index_bars WHERE code=? AND trade_date NOT IN ({placeholders})",
+                (key, *days)).rowcount
+        else:
+            removed = conn.execute("DELETE FROM index_bars WHERE code=?", (key,)).rowcount
+        refresh_index_digest(conn, key)
+    return {"written": written, "removed": removed}
+
+
+def index_codes() -> list[str]:
+    """本地已落盘的指数代码（升序）。"""
+    if not db.INDEX_DB.exists():
+        return []
+    with db.connect(db.INDEX_DB) as conn:
+        _ensure_index_table(conn)
+        return [row["code"] for row in conn.execute(
+            "SELECT DISTINCT code FROM index_bars ORDER BY code")]
+
+
+def index_date_spans() -> dict[str, tuple[str, str]]:
+    """每条指数的 (最早日, 最近日)。"""
+    out: dict[str, tuple[str, str]] = {}
+    if not db.INDEX_DB.exists():
+        return out
+    with db.connect(db.INDEX_DB) as conn:
+        _ensure_index_table(conn)
+        for row in conn.execute(
+                "SELECT code, MIN(trade_date) AS f, MAX(trade_date) AS l "
+                "FROM index_bars GROUP BY code ORDER BY code"):
+            out[row["code"]] = (row["f"], row["l"])
+    return out
+
+
+def index_bar_count(code: str) -> int:
+    """某条指数的日 K 根数。"""
+    if not db.INDEX_DB.exists():
+        return 0
+    with db.connect(db.INDEX_DB) as conn:
+        _ensure_index_table(conn)
+        row = conn.execute("SELECT COUNT(*) AS n FROM index_bars WHERE code=?",
+                           (str(code).strip(),)).fetchone()
+    return int(row["n"]) if row else 0
 
 
 # --------------------------------------------------------------------------- #

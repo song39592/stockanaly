@@ -243,9 +243,15 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
     bench_close = None
     if benchmark:
         try:
-            bmd = data.load_bars([benchmark], start, end, fields=["close"], adjust="hfq")
-            if benchmark in bmd and len(bmd[benchmark]) >= 2:
-                bench_close = bmd[benchmark]["close"]
+            # 基准既可以是**指数代码**（sh000001，在独立表 index_bars 里），
+            # 也可以是**个股代码** —— 路由收敛在数据层一处（data.load_benchmark），
+            # 编排层不再自己判断「这个 code 是什么品种」。
+            series = data.load_benchmark(benchmark, start, end)
+            if series is not None and len(series) >= 2:
+                bench_close = series
+            else:
+                errors.append(f"基准 {benchmark}: 取不到行情"
+                              f"（指数未落盘？用 scripts/download_indices.py 拉取）")
         except Exception as exc:
             errors.append(f"基准 {benchmark}: {exc}")
 

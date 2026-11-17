@@ -10,6 +10,8 @@
   - 日 K：东方财富 `stock_zh_a_hist`，失败降级腾讯 `stock_zh_a_hist_tx`
   - 复权因子：新浪 `stock_zh_a_daily(adjust="hfq-factor")`
   - 除权除息明细：新浪 `stock_history_dividend_detail`
+  - **指数**：东方财富 `index_zh_a_hist`，失败降级东财 / 新浪的指数日 K
+    （落盘到**独立表** `index_bars` —— 指数不是股票，见 `price_store` 的指数段）
 """
 from __future__ import annotations
 
@@ -303,6 +305,121 @@ def refetch_bars(code: str, adjust: str = "raw") -> dict[str, Any]:
         "removed": result["removed"], "start": bars[0]["date"], "end": bars[-1]["date"],
         "source": source, "adjust": store_adjust, "rejected": rejected,
     }
+
+
+# --------------------------------------------------------------------------- #
+# 指数（独立表）—— 指数不是股票：取数、命名空间、落盘都走自己的一条路
+# --------------------------------------------------------------------------- #
+# 指数代码 = **带市场前缀**的符号（sh000001 / sz399001 / sh000300 / sh000852），
+# 与个股的 6 位裸数字永不冲突（`000001` 既是上证指数也是平安银行 —— 混用会撞主键）。
+#
+# 数据源（akshare 1.18 实测可用）：
+#   ① 东财 `index_zh_a_hist`          —— 用**纯 6 位**代码（000001 / 000300 / 000852）
+#   ② 东财 `stock_zh_index_daily_em`  —— 用带前缀符号
+#   ③ 新浪 `stock_zh_index_daily`      —— 用带前缀符号，**不接受日期参数**（取全历史后本地过滤）
+INDEX_CATALOG: dict[str, dict[str, str]] = {
+    "sh000001": {"symbol": "000001", "name": "上证指数", "kind": "沪市全市场"},
+    "sz399001": {"symbol": "399001", "name": "深证成指", "kind": "深市宽基"},
+    "sh000300": {"symbol": "000300", "name": "沪深300", "kind": "大盘蓝筹"},
+    "sh000852": {"symbol": "000852", "name": "中证1000", "kind": "小盘宽基"},
+    "sh000985": {"symbol": "000985", "name": "中证全指", "kind": "全市场"},
+}
+
+
+def index_catalog() -> dict[str, dict[str, str]]:
+    """可用指数清单（代码 → 说明）。"""
+    return dict(INDEX_CATALOG)
+
+
+def _index_df_ok(df) -> bool:
+    return df is not None and not getattr(df, "empty", True)
+
+
+def fetch_index(code: str, start: dt.date, end: dt.date) -> tuple[list[dict[str, Any]], str, list[str]]:
+    """抓取某条指数的日 K（**只抓不写库** —— 写库由调用方负责）。
+
+    与 `fetch_daily` 的差别：指数没有复权口径，也没有「一字板」这类个股约束。
+    """
+    key = str(code).strip()
+    meta = INDEX_CATALOG.get(key)
+    if not meta:
+        raise ValueError("未知指数代码：%s（可用：%s）"
+                         % (code, "、".join(sorted(INDEX_CATALOG))))
+    sym6 = meta["symbol"]
+    sd, ed = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+
+    def _em_hist(t):
+        return _ak(ak.index_zh_a_hist, symbol=sym6, period="daily",
+                   start_date=sd, end_date=ed, timeout=t)
+
+    def _em_daily(t):
+        return _ak(ak.stock_zh_index_daily_em, symbol=key,
+                   start_date=sd, end_date=ed, timeout=t)
+
+    def _sina(t):
+        return _ak(ak.stock_zh_index_daily, symbol=key, timeout=t)
+
+    order = [("东方财富", _em_hist), ("东方财富(日线)", _em_daily), ("新浪财经", _sina)]
+    source, frame = first_ok(order, budget=_DAILY_BUDGET, per_call=_DAILY_PER_SOURCE,
+                              is_ok=_index_df_ok)
+    bars = normalize_bars(frame)
+    if not bars:
+        raise NoDataError("指数数据源未返回日 K：%s" % key)
+    # 新浪接口不接受日期参数 → 它给的是全历史，这里按请求区间**本地过滤**
+    lo, hi = start.isoformat(), end.isoformat()
+    bars = [b for b in bars if lo <= str(b.get("date") or "")[:10] <= hi]
+    if not bars:
+        raise NoDataError("指数 %s 在 %s ~ %s 区间内无数据" % (key, lo, hi))
+    return bars, source, []
+
+
+def sync_index(code: str, start: dt.date | None = None,
+               end: dt.date | None = None) -> dict[str, Any]:
+    """同步某条指数的日 K。
+
+    `start` 为空时**增量**：只抓「库内最新日之后真正新增的交易日」，不回拉重叠
+    （与个股 `sync_bars` 同一口径）。首次同步（库里没有这条指数）从 1990-01-01
+    起拉**全历史** —— 指数序列短（一条 30 年约 7500 根），一次拉完最省事，
+    也避免以后为了补早年再动历史行。
+    """
+    key = str(code).strip()
+    today = dt.date.today()
+    stop = end or today
+    if start is not None:
+        begin = start
+    else:
+        span = price_store.index_date_spans().get(key)
+        if span and span[1]:
+            begin = dt.date.fromisoformat(span[1]) + dt.timedelta(days=1)
+        else:
+            begin = dt.date(1990, 1, 1)
+    if begin > stop:
+        return {"code": key, "count": 0, "start": None, "end": None,
+                "source": None, "skipped": True}
+    bars, source, _ = fetch_index(key, begin, stop)
+    count = price_store.upsert_index_bars(key, bars, source=source)
+    return {"code": key, "count": count, "start": bars[0]["date"],
+            "end": bars[-1]["date"], "source": source, "skipped": False}
+
+
+def refetch_index(code: str) -> dict[str, Any]:
+    """**全量重抓**某条指数并整体替换库中数据（指纹校验失败后的修复路径）。
+
+    与个股 `refetch_bars` 同一思路：增量同步碰不到历史行，只有整体替换才能还原
+    被改动的历史区间。**先抓取、后写入**：数据源失败时抛错，库中原数据保持不动。
+    """
+    key = str(code).strip()
+    existing = price_store.list_index_bars(key, verify=False)
+    today = dt.date.today()
+    if existing:
+        start = dt.date.fromisoformat(existing[0]["trade_date"]) - dt.timedelta(days=OVERLAP_DAYS)
+    else:
+        start = dt.date(1990, 1, 1)
+    bars, source, _ = fetch_index(key, start, today)
+    result = price_store.overwrite_index_bars(key, bars, source=source)
+    return {"code": key, "before": len(existing), "after": result["written"],
+            "removed": result["removed"], "start": bars[0]["date"],
+            "end": bars[-1]["date"], "source": source}
 
 
 def sync_all_adjusts(code: str, start: dt.date | None = None,

@@ -50,12 +50,12 @@ namespace StockPool
             RunUi<Dictionary<string, object>>(
                 delegate
                 {
-                    string url = "http://127.0.0.1:8000/api/history/stock/" + code
-                           + "?refresh=" + (refresh ? "true" : "false")
-                           + "&period=" + (string.IsNullOrEmpty(_stockPeriod) ? "day" : _stockPeriod);
+                    string url = StockHistoryUrl(code, refresh);
                     string resp = VRequest(url, null);
-                    return new JavaScriptSerializer()
-                        .Deserialize<Dictionary<string, object>>(resp);
+                    // ⚠️ 必须用 J.Ser()（放开 MaxJsonLength）：指数全历史日线响应约 4.3 MB，
+                    //   而 JavaScriptSerializer 默认上限 2 MB —— 超了会抛
+                    //   「字符串的长度超过了 maxJsonLength 属性设置的值」，界面直接打不开。
+                    return J.Ser().Deserialize<Dictionary<string, object>>(resp);
                 },
                 delegate(Dictionary<string, object> j) { StockRenderHistory(j); },
                 delegate(Exception ex) { StockFail("请求失败：" + ex.Message); },
@@ -170,8 +170,12 @@ bool ok = J.IsOk(j);
             // 指标随周期重算（周线要配周线 MA，不能沿用日线序列）；
             // 换股票 / 刷新 / 切周期都会走到这里，顺带也避免了指标残留上一只票。
             if (_stockCurrent != null) StockLoadIndicators(_stockCurrent);
-            StockRenderTimeline(spanList);
-            StockRenderEvents(events);
+            // 指数没有入池轨迹 / 消息面（那两页在指数模式下已藏起来）→ 不渲染两张空表
+            if (!_stockIsIndex)
+            {
+                StockRenderTimeline(spanList);
+                StockRenderEvents(events);
+            }
 
             // 状态：「更新至 …」栏与「前复权日K · …」统计文字已按需求移除，
             // 仅当有同步失败时在状态位提示，否则清空。

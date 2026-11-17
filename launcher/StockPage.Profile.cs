@@ -357,6 +357,7 @@ bool ok = J.IsOk(j);
         private void StockLoadChip(string code)
         {
             if (string.IsNullOrEmpty(code) || _stockChip == null) return;
+            if (_stockIsIndex) return;          // 指数没有筹码（筹码来自个股的股东分布）
             int round = _stockRound;
             _stockChip.SetStatus("筹码计算中…", false);
             string adjust = string.IsNullOrEmpty(_stockAdjust) ? "qfq" : _stockAdjust;

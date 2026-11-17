@@ -15,6 +15,7 @@ import uuid
 from typing import Any
 
 from features.history import store as history_store
+from core import indices
 from core import kline_service
 from core import price_service
 from core import price_store
@@ -394,5 +395,109 @@ def stock_detail(code: str, start: str | None = None, end: str | None = None,
         "repaired": repaired,
         "events": history_store.list_events(code),
         "pool": history_store.pool_history(code),
+        "sync": sync_result,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 指数（指数不是股票：独立表 index_bars / 独立库 bars/indices.db）
+# --------------------------------------------------------------------------- #
+def indices_overview() -> dict[str, Any]:
+    """指数清单（前端搜索联想用）。
+
+    两部分合在一起：
+
+    * `available` —— 本地 `index_bars` 里**真的落盘**的（能立刻画 K 线）；
+    * 其余 —— `core/indices.py` 的常用清单里有、本地还没有的
+      （前端标「未下载」，点更新即现拉：`price_service.sync_index` 首次会拉全历史）。
+
+    名称一律取自 `core/indices.py`（唯一清单）→ 前端不硬编码，避免两份清单漂移。
+    """
+    local = price_store.index_codes()
+    spans = price_store.index_date_spans()
+    items: list[dict[str, Any]] = []
+    for code in local:
+        span = spans.get(code, ("", ""))
+        items.append({
+            "code": code,
+            "name": indices.index_name(code) or code,
+            "bars": price_store.index_bar_count(code),
+            "start": span[0],
+            "end": span[1],
+            "available": True,
+        })
+    local_set = set(local)
+    for code, name in indices.COMMON_INDICES:
+        if code in local_set:
+            continue
+        items.append({"code": code, "name": name, "bars": 0,
+                      "start": "", "end": "", "available": False})
+    items.sort(key=lambda x: (not x["available"], x["code"]))
+    return {"items": items}
+
+
+def index_detail(code: str, start: str | None = None, end: str | None = None,
+                 refresh: bool = False, period: str = "day") -> dict[str, Any]:
+    """指数详情：K 线（原始价）+ 名称；**与 `stock_detail` 同构**。
+
+    同构的意义：前端**同一段渲染代码**就能画指数 K 线（`bars` / `bars_raw` /
+    `pool.spans` / `events` 字段名与形状完全一致），不必为指数另写一套。
+
+    差异只有三处（都是「指数本来就没有」的东西，不是特例分支）：
+
+    * `adjust` 恒为 `"raw"` —— 指数没有除权除息，**没有复权价这个概念**；
+    * `events` / `pool` 恒为空 —— 指数不在股票池里，也没有公告消息面；
+    * `bars` 与 `bars_raw` 相同 —— 同上（没有「复权价」可给）。
+
+    取数走 `kline_service.get_bars`（**唯一出口**，与个股同一份合样逻辑）；
+    它内部按 `core/indices.py` 的判定走独立表 `index_bars`。
+    """
+    key = indices.normalize_code(code)
+    if not indices.is_index_code(key):
+        raise ValueError(f"不是有效的指数代码：{code}")
+
+    untrusted: str | None = None
+    repaired: dict[str, Any] | None = None
+    sync_result: dict[str, Any] | None = None
+
+    if refresh:
+        # 增量补最新交易日（库里没有这条指数时，sync_index 会从 1990 起拉全历史）。
+        try:
+            sync_result = price_service.sync_index(key)
+        except Exception as exc:                      # noqa: BLE001 - 网络失败不应让已有图消失
+            sync_result = {"code": key, "count": 0,
+                           "errors": [f"指数同步失败：{exc}"]}
+        # 同步写进了新行 → kline_service 的取数缓存已过期，必须清（否则读到旧序列）
+        kline_service.clear_cache()
+
+    try:
+        frame = kline_service.get_bars(key, start=start, end=end,
+                                       adjust="raw", period=period)
+    except price_store.UntrustedDataError as exc:
+        untrusted = str(exc)
+        # 指纹不一致 → 全量重抓并整体替换（增量碰不到历史行，同个股思路）
+        try:
+            repaired = price_service.refetch_index(key)
+            kline_service.clear_cache()
+            frame = kline_service.get_bars(key, start=start, end=end,
+                                           adjust="raw", period=period)
+            untrusted = None
+        except Exception as exc2:                     # noqa: BLE001
+            untrusted = f"{untrusted}；重抓失败：{exc2}"
+            frame = None
+
+    bars = kline_service.to_records(frame) if frame is not None else []
+    return {
+        "code": key,
+        "name": indices.index_name(key),
+        "adjust": "raw",
+        "period": period,
+        "bars": bars,
+        "bars_raw": bars,
+        "untrusted": bool(untrusted),
+        "untrusted_reason": untrusted,
+        "repaired": repaired,
+        "events": [],
+        "pool": {"spans": []},
         "sync": sync_result,
     }
