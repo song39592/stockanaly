@@ -20,7 +20,7 @@
               "initial_capital","commission","stamp_duty","slippage",
               "min_commission","lot_size","benchmark","universe_mode",
               "equity_model","per_stock_truncated","feasibility","position_cap",
-              "exclusion","warnings"},
+              "limit_open_policy","exclusion","warnings"},
               # scope.exclusion = 范围口径明细：剔除特征只数（dropped）+ **注入判定**
               #   结论（available_count 可注入只数 / skipped_insufficient 区间内行情
               #   不足剔除只数 / window 实际取数区间）—— 口径在股票池层。
@@ -48,6 +48,12 @@
                # 上限 stats.MAX_TRADES_RESPONSE 笔，按买入日期倒序取最近的；
                # trades_total = 真实总笔数，trades_truncated = 被丢掉的笔数
                #（截断必须标注，否则等于静默改数据）。
+    "limit_open": {"policy","canceled_builds","canceled_weight"},
+              # 「涨停开盘应对」三档的**命中统计**（全局生效）：
+              #   canceled_builds = 因撤单而**没发生**的建仓次数
+              #   canceled_weight = 这些建仓涉及的目标权重合计
+              #   ⚠️ 与 feasibility.fill_blocked.buy_blocked（**一字板物理买不进**）
+              #     分开归因：一个是策略主动放弃，一个是市场物理约束。
     "data_errors": [str, ...]                  # 跳过/失败的标的说明
   }
 
@@ -63,6 +69,7 @@ import threading
 import time
 
 from . import base, data, stats, universe
+from core.limit_price import POLICY_KEEP, POLICIES, POLICY_LABELS
 
 # 「该不该注入给策略、在什么区间能注入」是**股票池层**（universe）的口径：
 # 阈值 `MIN_BARS`、取数区间（短窗口预热 / 推荐回看）、区间内根数统计全在那边。
@@ -174,6 +181,7 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                  universe_mode: str = "interval_data",
                  ruin_threshold=None,
                  position_cap: float | None = None,
+                 limit_open_policy: str = POLICY_KEEP,
                  scope_extra: dict | None = None,
                  progress=None) -> dict:
     """执行回测，返回标准化结果字典。异常由路由层转成错误响应。
@@ -276,7 +284,8 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                          lot_size=lot_size, benchmark_close=bench_close,
                          raw_by_code=raw_by_code, signal_meta=sig_index, tail=window,
                          ruin_threshold=ruin_threshold,
-                         position_cap=position_cap)
+                         position_cap=position_cap,
+                         limit_open_policy=limit_open_policy)
 
     trades: list[dict] = core.pop("trades", []) or []
     flags: list[str] = core.pop("flags", []) or []
@@ -390,6 +399,8 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
             "per_stock_truncated": trunc_info,
             "feasibility": feas,
             "position_cap": position_cap,   # 生效的单股仓位上限（None=不限）
+            # 「涨停开盘应对」三档（全局生效）：口径与命中统计见 core/limit_price.py
+            "limit_open_policy": limit_open_policy,
             "warnings": warnings,
         },
         "dates": core["dates"],
@@ -404,6 +415,12 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
         "trades": trades_inline,
         "trades_total": trades_meta["total"],
         "trades_truncated": trades_meta["dropped"],
+        # 「涨停开盘应对」的**命中统计**（单独一组，好让报告回答
+        # 「这个条件拦掉了多少笔、值多少钱」）：
+        #   · 口径在 core/limit_price.py（与统计层同一份）
+        #   · 撤单是**策略主动放弃**，与「一字板买不进」（物理约束）分开归因
+        #   · 「值多少钱」用**两个独立回测范围**对照得出（引擎不做影子账本）
+        "limit_open": core.get("limit_open") or {},
         "data_errors": errors[:_MAX_DATA_ERRORS],
     }
 
@@ -1267,6 +1284,7 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
                universe_mode: str = "interval_data",
                ruin_threshold=None,
                position_cap: float | None = None,
+               limit_open_policy: str = POLICY_KEEP,
                codes_resolver=None) -> dict:
     """启动一次后台回测并**立即返回**；已有任务在跑时返回 ok=false（不排队）。
 
@@ -1355,6 +1373,7 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
                                    window=window, universe_mode=universe_mode,
                                    ruin_threshold=ruin_threshold,
                                    position_cap=position_cap,
+                                   limit_open_policy=limit_open_policy,
                                    scope_extra=scope_extra,
                                    progress=_on_progress)
             except base.Cancelled:

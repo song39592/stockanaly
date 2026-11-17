@@ -80,6 +80,25 @@ MAIN_LIMIT = 0.10         # 主板（ST 自 2025-04 起也是 10%）
 # 炸板判定的相对容差（见模块 docstring）
 BROKEN_TOL = 0.002        # 0.2%
 
+# ---- 「涨停开盘应对」三档（全局生效；回测范围里切换）----
+#   keep   不撤单：涨停开盘照常建仓（现状）
+#   cancel 撤单：涨停开盘当日不建仓（该份额度当日为现金、不重分配）
+#   reseal 涨停条件单：炸板票只有「收盘仍封住涨停价」才进，否则撤单
+POLICY_KEEP = "keep"
+POLICY_CANCEL = "cancel"
+POLICY_RESEAL = "reseal"
+POLICIES = (POLICY_KEEP, POLICY_CANCEL, POLICY_RESEAL)
+POLICY_LABELS = {
+    POLICY_KEEP: "不撤单（照常买入）",
+    POLICY_CANCEL: "撤单（涨停开盘不买）",
+    POLICY_RESEAL: "涨停条件单（炸板后回封才进）",
+}
+
+# limit_open_action 的结论
+ACT_NA = "na"            # 当日不涉及涨停开盘 → 与本条件无关
+ACT_BUY = "buy"          # 可以建仓
+ACT_CANCEL = "cancel"    # 撤单 → 当日不建仓
+
 
 def limit_pct(code: str) -> float:
     """该代码所属板块的涨跌停阈值（**现行口径**：主板 10%、双创 20%）。
@@ -155,6 +174,57 @@ def limit_up_open_broke(open_: float, low: float, prev_close: float,
     return bool(low < open_ * (1.0 - 1e-9))
 
 
+def limit_open_action(open_: float, high: float, low: float, close: float,
+                      prev_close: float, thr: float,
+                      policy: str = POLICY_KEEP,
+                      tol: float = BROKEN_TOL) -> str:
+    """「涨停开盘」当日的应对结论：`ACT_NA` / `ACT_BUY` / `ACT_CANCEL`。
+
+    判定（raw 价，昨收 = 该票自己上一根 K 线的收盘）：
+      * 涨停开盘：`open ≥ 涨停价 × (1 − tol)`
+      * 炸板：`low < 涨停价`（盘中打开过涨停价）
+      * 收盘仍封住：`close ≥ 涨停价`（涨停价取整到分，容差半分钱）
+
+    三档（policy）：
+      * `keep`（不撤单）：涨停开盘 → `ACT_BUY`（照常建仓；一字板仍由引擎的物理拦截处理）
+      * `cancel`（撤单）：涨停开盘 → `ACT_CANCEL`（当日不建仓）
+      * `reseal`（涨停条件单，一次回封就进）：炸板票只有**收盘仍封住涨停价**才 `ACT_BUY`，
+        否则 `ACT_CANCEL`；一字板（没炸板）→ `ACT_BUY`（引擎物理拦截买不进）
+
+    ⚠️ **日线口径的限制**：`涨停开盘` 的票 `high` **恒等于涨停价**（开盘价就是当日
+    最高价之一）→ 日线**分不出**「炸板后回封过」与「炸板后再没回去」，更分不出
+    「盘中第一次回封」的时刻（本项目无分钟级数据）。
+    故 `reseal` 取**日线下唯一可判的近似**：收盘仍封住涨停价。
+    此时引擎的**收盘成交价 = 涨停价**，与实盘「回封瞬间成交」的价格**一致**；
+    代价是实盘里「回封过又打开、收盘没封住」的票会撤单（方向偏保守，已知近似误差）。
+
+    ⚠️ 一字板（开盘 = 最低 = 涨停价）在本函数里返回 `ACT_BUY`：
+    它是**物理买不进**（板上全是买单），由引擎的严格成交模型拦截，
+    不该被记成「策略主动撤单」（归因要分开）。
+    """
+    if prev_close <= 0:
+        return ACT_NA
+    up, _ = limit_prices(prev_close, thr)
+    if up <= 0:
+        return ACT_NA
+    if not (open_ >= up * (1.0 - tol)):
+        return ACT_NA                      # 没涨停开盘 → 与本条件无关
+    # ⚠️ 一字板优先于 policy 分支：全天封死 → 一律 ACT_BUY，
+    #   由引擎的严格成交模型按**物理买不进**拦截（归因归 buy_blocked）。
+    #   若让 cancel 档先返回 ACT_CANCEL，就会把「板上全是买单、根本买不到」
+    #   记成「策略主动放弃」—— 两件事不同，报告口径不能混。
+    if low >= up * (1.0 - 1e-9):
+        return ACT_BUY                     # 全天封死（一字板）→ 引擎物理拦截
+    if policy == POLICY_CANCEL:
+        return ACT_CANCEL
+    if policy == POLICY_KEEP:
+        return ACT_BUY
+    # reseal：炸板 → 只有收盘仍封住涨停价才进（= 日线下「回封」的可判近似）
+    if close >= up - 0.005:
+        return ACT_BUY
+    return ACT_CANCEL
+
+
 def broken_limit_up_panel(bars: dict[str, pd.DataFrame], codes: list[str],
                            days: list[str], tol: float = BROKEN_TOL) -> np.ndarray:
     """把 `{code: OHLC}` 算成「统一交易日轴」上的**炸板矩阵**（C×T bool）。
@@ -205,6 +275,8 @@ def broken_limit_up_panel(bars: dict[str, pd.DataFrame], codes: list[str],
 
 __all__ = [
     "BOARD_LIMIT", "MAIN_LIMIT", "BROKEN_TOL",
+    "POLICY_KEEP", "POLICY_CANCEL", "POLICY_RESEAL", "POLICIES", "POLICY_LABELS",
+    "ACT_NA", "ACT_BUY", "ACT_CANCEL",
     "limit_pct", "limit_prices", "is_limit_up", "is_limit_down",
-    "limit_up_open_broke", "broken_limit_up_panel",
+    "limit_up_open_broke", "limit_open_action", "broken_limit_up_panel",
 ]

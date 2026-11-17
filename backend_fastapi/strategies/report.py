@@ -26,6 +26,9 @@
 - scope：**覆盖范围** —— 请求标的数 / 实际参与标的数 / 区间 / 交易日数 /
   初始资金 / 佣金 / 基准，外加「谁被跳过、为什么」
 - metrics：收益、夏普、最大回撤等（stats.compute 的原始输出）
+- limit_open：「涨停开盘应对」三档的命中统计（撤单拦掉几笔、涉及多少目标权重）
+  —— **必须落盘**：事后只看到收益数字，看不出这一档拦掉了什么，
+  就没法回答「这个条件值多少钱」（口径见 core/limit_price.py）
 - per_stock：逐票汇总（全市场 5000+ 只会让文件大到不可读，故**只留前 500**，
   并在 per_stock_truncated 里如实标注截掉多少）
 - data_errors：取数 / 基准异常
@@ -145,6 +148,12 @@ def _summarize(report: dict) -> dict:
         "benchmark": scope.get("benchmark"),
         "universe_mode": scope.get("universe_mode"),
         "equity_model": scope.get("equity_model"),
+        # ---- 「涨停开盘应对」（三档，全局生效）----
+        # 档位必须进索引：横向比两份报告的收益差时，得先确认**是不是同一档**
+        # （否则差异里混着这个条件的功劳）。撤单笔数一并带上，好定位差异来源。
+        "limit_open_policy": scope.get("limit_open_policy"),
+        "limit_open_canceled_builds": _num(
+            (report.get("limit_open") or {}).get("canceled_builds")),
         # ---- 范围口径（剔除明细 + 判定基准日）----
         # 不落这一组，报告就无法自证「这次到底剔了什么」——两份报告看起来
         # 同策略同区间，池子却不同，只能靠猜。
@@ -265,6 +274,10 @@ def build_report(payload: dict) -> dict:
         },
         "scope": scope,
         "metrics": metrics,
+        # 「涨停开盘应对」的命中统计（口径见 core/limit_price.py）：
+        # 撤单拦掉了几笔、涉及多少目标权重。**必须落盘** —— 事后翻报告时
+        # 只看到收益数字，看不出这一档到底拦掉了什么，就没法回答「这个条件值多少钱」。
+        "limit_open": payload.get("limit_open") or {},
         # 净值序列：留着才能画图 / 算自定义指标，5000 只票的 equity 也就几万个点
         "dates": dates,
         "equity": payload.get("equity"),
