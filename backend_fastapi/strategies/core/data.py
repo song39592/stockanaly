@@ -470,8 +470,11 @@ def load_bars_raw_for(codes, start: str | None = None,
     # high/low/close/volume 供严格成交模型与整手/停牌可行性判定（见 stats.compute
     # 的「严格成交模型」段与 _feasibility）：一字板的判定用**最低价/最高价**与
     # 涨跌停价比对，**不再需要 open**（旧的「顺延至次日开盘价买入」口径已废弃）。
+    # ⚠️ open 是为「**涨停开盘应对**」加的（keep / cancel / reseal 三档，见
+    #    core/limit_price.py）：要判「开盘是否在涨停价」必须有开盘价。
+    #    多一列的代价：raw 取数本来就只取权重变动过的票（百量级），可忽略。
     return load_bars(codes, start, end,
-                     fields=["high", "low", "close", "volume"], adjust="raw")
+                     fields=["open", "high", "low", "close", "volume"], adjust="raw")
 
 
 def load_pool_members(start: str | None = None,

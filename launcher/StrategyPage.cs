@@ -42,6 +42,9 @@ namespace StockPool
         private TextBox _stComm, _stBench;
         // 单股仓位上限：两个入口取更严者（后端折算）；留空 = 不限 = 按策略自己给的仓位执行
         private TextBox _stCapPct, _stCapAmt;
+        // 「涨停开盘应对」三档（全局生效，只作用于回测）：下拉框项序 → 后端 policy key
+        private ComboBox _stLimitOpen;
+        private static readonly string[] StLimitOpenKeys = { "keep", "cancel", "reseal" };
         private Label _stScopeHint;
         private DateTimePicker _stStart, _stEnd;
         // 回测范围的「口径说明」气泡：判定基准日 + 前视偏差声明 + 数据限制
@@ -582,6 +585,26 @@ private void StRefreshCurStrategy()
             _stBenchChk.CheckedChanged += delegate { _stBench.Enabled = _stBenchChk.Checked; };
             AddRow(b, Row(_stBenchChk, _stBench, Mute(Lbl("留空则不对比；指数可能无本地数据）"))));
             AddRow(stack, g4);
+
+            // ---- 「涨停开盘应对」：隔夜单在涨停开盘时怎么办（全局生效，只作用于回测）----
+            // 口径在 backend_fastapi/core/limit_price.py，三档：
+            //   不撤单（照常买入）/ 撤单（涨停开盘当日不买）/ 涨停条件单（炸板后回封才进）。
+            // ⚠️ 撤单 = **该份额度当日为现金、不重分配给其他票**（与「一字涨停买不进」
+            //    同一口径，但归因不同：一个是策略主动放弃，一个是市场物理约束）。
+            var g5 = Group("涨停开盘应对", out b);
+            _stLimitOpen = new ComboBox();
+            _stLimitOpen.DropDownStyle = ComboBoxStyle.DropDownList;
+            _stLimitOpen.FlatStyle = FlatStyle.Flat;
+            _stLimitOpen.Width = 250;
+            _stLimitOpen.Items.AddRange(new string[] {
+                "不撤单（照常买入）",
+                "撤单（涨停开盘当日不买）",
+                "涨停条件单（炸板后回封才进）",
+            });
+            _stLimitOpen.SelectedIndex = 0;
+            AddRow(b, Row(Lbl("隔夜单涨停开盘时"), _stLimitOpen,
+                Mute(Lbl("全局生效；撤单 = 该份额度当日为现金、不重分配"))));
+            AddRow(stack, g5);
 
             StLoadScopePrefs();      // 恢复上次的股票池筛选
         }
@@ -1515,6 +1538,7 @@ private void StRefreshCurStrategy()
                 { "ruin_threshold", ruinThreshold },
                 { "position_cap_pct", StCapPct() },
                 { "position_cap_amount", StCapAmt() },
+                { "limit_open_policy", StLimitOpenPolicy() },
             };
         }
 
@@ -1535,6 +1559,25 @@ private void StRefreshCurStrategy()
             if (t.Length == 0) return null;
             double v = J.NumOr(t, 0.0);
             return v > 0 ? (double?)v : null;
+        }
+
+        /// <summary>「涨停开盘应对」当前档位（keep / cancel / reseal）。
+        /// 下拉框项序与 StLimitOpenKeys 一一对应；取不到就回落到「不撤单」。</summary>
+        private string StLimitOpenPolicy()
+        {
+            int i = (_stLimitOpen == null) ? 0 : _stLimitOpen.SelectedIndex;
+            if (i < 0 || i >= StLimitOpenKeys.Length) return StLimitOpenKeys[0];
+            return StLimitOpenKeys[i];
+        }
+
+        /// <summary>结果头部的「涨停开盘应对」标注；默认档（不撤单）不显示
+        /// （别让默认状态看起来像被限制过）。</summary>
+        private string StLimitOpenText()
+        {
+            string p = StLimitOpenPolicy();
+            if (p == "keep") return "";
+            if (p == "cancel") return " · 涨停开盘撤单";
+            return " · 涨停条件单（回封才进）";
         }
 
         /// <summary>结果头部的「单股上限」标注；没设上限就不显示（别让默认状态看起来像被限制过）。</summary>
@@ -1844,6 +1887,7 @@ private void StRefreshCurStrategy()
                 { "benchmark", (_stBenchChk.Checked && _stBench.Text.Trim().Length > 0) ? _stBench.Text.Trim() : null },
                 { "position_cap_pct", StCapPct() },
                 { "position_cap_amount", StCapAmt() },
+                { "limit_open_policy", StLimitOpenPolicy() },
             };
 
             string start = StDate(_stStart) ?? "起点";
@@ -1856,7 +1900,7 @@ private void StRefreshCurStrategy()
             _stResultHeader.Text = "策略：" + J.StrOr(meta["name"], sid) + " · 范围：" + scope + " "
                 + start + "~" + end + " · 初始 " + (cap / 10000).ToString("F1") + "万 · 佣金 "
                 + J.NumOr(_stComm.Text, 0.0003).ToString("P4").Replace(" ", "")
-                + StCapText();
+                + StCapText() + StLimitOpenText();
 
             _stResultStatus.Text = "回测中：" + J.StrOr(meta["name"], sid) + "…（进度见顶部任务区）";
             _stResultStatus.ForeColor = _cSub;
@@ -2247,6 +2291,15 @@ private void StRefreshCurStrategy()
                         + " 只，" + el.Count + " 只数据缺失/跳过"
                         + (skipped > 0 ? "，区间内行情不足剔除 " + skipped + " 只" : "") + "）";
             }
+            // 「涨停开盘应对」的命中统计：撤单拦掉了多少笔（**与「买不进」分开**）。
+            // 只在真撤了单时才显示 —— 默认档显示「0 次」只会让人以为被限制过。
+            var lo = j["limit_open"] as Dictionary<string, object>;
+            if (lo != null)
+            {
+                int loCanceled = (int)StM(lo, "canceled_builds");
+                if (loCanceled > 0)
+                    _stResultStatus.Text += " · 涨停开盘撤单 " + loCanceled + " 次";
+            }
         }
 
         // ---------------- 历史结果（加载已保存的回测报告） ----------------
@@ -2401,7 +2454,8 @@ private void StRefreshCurStrategy()
             if (_stTradesTip != null) _stTradesTip.Text = StTradesTipText();
         }
 
-        /// <summary>取「买不进的建仓」明细（后端已按执行日倒序、最多 2000 条）。</summary>
+        /// <summary>取「没成交的建仓」明细（后端已按执行日倒序、最多 2000 条）。
+        /// 含两种 reason：limit_up（物理买不进）/ limit_open_cancel（策略主动撤单）。</summary>
         private static List<Dictionary<string, object>> StBuildFailItems(
             Dictionary<string, object> scope)
         {
@@ -2424,17 +2478,22 @@ private void StRefreshCurStrategy()
         /// <summary>
         /// 买不进的建仓 → 成交明细里的**零收益行**：收益 0、盈亏 0、无买卖价，
         /// 备注「买不进」。日期用**执行日**（本该买入的那天）。
+        /// ⚠️ 备注按 reason 分：limit_up = 物理买不进（一字板）；
+        ///    limit_open_cancel = **策略主动撤单**（涨停开盘应对）。
+        ///    两者都是「没成交」，但归因不同 —— 混成同一句话就看不出是市场约束还是自己撤的。
         /// </summary>
         private static Dictionary<string, object> StBuildFailRow(
             Dictionary<string, object> it)
         {
+            string reason = Convert.ToString(J.Get(it, "reason"));
+            string note = (reason == "limit_open_cancel") ? "涨停开盘撤单" : "买不进";
             return new Dictionary<string, object> {
                 {"code", Convert.ToString(J.Get(it, "code"))},
                 {"name", Convert.ToString(J.Get(it, "name"))},
                 {"buy_date", Convert.ToString(J.Get(it, "date"))},
                 {"ret", 0.0},
                 {"pnl", 0.0},
-                {"note", "买不进"},
+                {"note", note},
                 {"build_fail", true},
             };
         }
@@ -2594,7 +2653,7 @@ private void StRefreshCurStrategy()
                 new GridColumn("收益", "ret", true),
                 new GridColumn("盈亏", "pnl", true),
                 new GridColumn("持有天数", "holding_days", true),
-                new GridColumn("备注", "note"),      // 买不进的建仓：备注「买不进」
+                new GridColumn("备注", "note"),      // 买不进的建仓：「买不进」/「涨停开盘撤单」
             };
         }
 

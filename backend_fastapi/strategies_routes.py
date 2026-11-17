@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 import apiutil
 import strategies
+from core.limit_price import POLICIES, POLICY_KEEP
 import strategies.core.backtest as backtest
 import strategies.core.data as sdata
 import strategies.core.registry as registry
@@ -133,6 +134,10 @@ class BacktestRequest(BaseModel):
     # 两个入口取**更严**的那个；都为空 → 不限 → 行为与改动前完全一致。
     position_cap_pct: Optional[float] = None     # 占组合净值比例（0.05 = 5%）
     position_cap_amount: Optional[float] = None   # 单股金额上限（元），按初始资金折算成占比
+    # ---- 「涨停开盘应对」三档（全局生效；口径见 core/limit_price.py）----
+    # keep=不撤单（现状）/ cancel=撤单（涨停开盘当日不建仓）/
+    # reseal=涨停条件单（炸板后收盘仍封板才进，否则撤单）
+    limit_open_policy: Optional[str] = None
     # 单日策略的**目标执行日**（YYYY-MM-DD）。不给则按收盘前后自动选：
     # 收盘前=今天、收盘后=下一交易日。仅 /recommend 使用，回测忽略。
     target_date: Optional[str] = None
@@ -145,6 +150,20 @@ _CODE_ERR = {
 }
 
 _guard = apiutil.guard
+
+
+def _resolve_limit_open_policy(value: str | None) -> str:
+    """「涨停开盘应对」三档：取值校验 + 默认（不撤单 = 现状）。
+
+    ⚠️ **只给回测用**，推荐页不适用：实盘的撤单时点是**次日开盘**（那时才知道开没开板），
+    而推荐页给的是「明早买什么」的清单 —— 撤单要在明早做，不能在今天就替你决定。
+    """
+    if value is None or value == "":
+        return POLICY_KEEP
+    v = str(value).strip().lower()
+    if v not in POLICIES:
+        raise ValueError("涨停开盘应对只能取 " + "/".join(POLICIES))
+    return v
 
 
 def _resolve_position_cap(pct: float | None, amount: float | None,
@@ -189,6 +208,7 @@ def do_backtest(req: BacktestRequest):
         position_cap=_resolve_position_cap(req.position_cap_pct,
                                            req.position_cap_amount,
                                            req.initial_capital),
+        limit_open_policy=_resolve_limit_open_policy(req.limit_open_policy),
         scope_extra=scope_extra,
     )
     # 回测跑完**自动落盘一份报告**（策略 + 覆盖范围 + 指标 + 逐票汇总），
@@ -234,6 +254,7 @@ def do_backtest_start(req: BacktestRequest):
         position_cap=_resolve_position_cap(req.position_cap_pct,
                                            req.position_cap_amount,
                                            req.initial_capital),
+        limit_open_policy=_resolve_limit_open_policy(req.limit_open_policy),
         codes_resolver=_resolve_codes_lazy,
     )
     if not out.get("ok"):

@@ -41,6 +41,7 @@ enabled: true
 | 范围口径（板块 / ST / 上市日 / 市值 / 判定基准日） | `strategies/core/universe.py` | spec 构造走 `universe.spec_from_request`；改口径的允许改动面 = 该文件（+ 需要新取数能力时的 `strategies/core/data.py`），前端不用动；报告也不用手改（口径版本自动带，见下） |
 | 指标 / 策略共用的纯计算 | `formulas/` | 禁止在策略里把指标算法重写一遍 |
 | 日线标准列 / 复权缩放 | `core/bars_schema.py` | 新增量纲为「价」的列必须同时进 `PRICE_SCALED_COLUMNS` |
+| 涨跌停 / 涨停开盘应对（三档） | `core/limit_price.py` | 回测范围页选、**全局生效**；撤单（策略主动放弃）与一字板买不进（物理约束）**分开归因**，禁止在策略层另写一份 |
 
 **自检**：`cd backend_fastapi && python -m unittest test_conventions`
 （阈值唯一 / spec 唯一入口 / 分层不反向依赖 / 池子入口唯一）。

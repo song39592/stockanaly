@@ -83,6 +83,16 @@ POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / 
                                         （改了逻辑/参数默认值就 bump）。
                                          三者随报告一起落盘，读结果文件即可比对；
                                          复杂的抽象比对不在此处做
+                                       scope.limit_open_policy + **limit_open** =
+                                        「涨停开盘应对」三档（keep 不撤单 / cancel 撤单 /
+                                        reseal 涨停条件单，**全局生效**，只作用于回测）。
+                                        limit_open.canceled_builds / canceled_weight =
+                                        因撤单而**没发生**的建仓次数与涉及的目标权重合计。
+                                        ⚠️ 与 scope.feasibility.fill_blocked.buy_blocked
+                                        （**一字板物理买不进**）分开归因：一个是策略主动放弃，
+                                        一个是市场物理约束；逐条明细在
+                                        scope.feasibility.build_failures 里，
+                                        reason = limit_up（买不进）/ limit_open_cancel（撤单）
 ```
 
 测试：

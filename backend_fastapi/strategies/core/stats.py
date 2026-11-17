@@ -61,8 +61,12 @@ import pandas as pd
 # 策略层的「炸板不买」共用同一份）。这里按旧名转出，调用点与单测
 # （stats._limit_prices / stats._is_limit_up …）都保持不变。
 from core.limit_price import (
+    ACT_CANCEL as _ACT_CANCEL,
+    POLICY_KEEP as _POLICY_KEEP,
+    POLICY_LABELS as _POLICY_LABELS,
     is_limit_down as _is_limit_down,
     is_limit_up as _is_limit_up,
+    limit_open_action as _limit_open_action,
     limit_pct as _limit_pct,
     limit_prices as _limit_prices,
 )
@@ -294,6 +298,7 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
             tail: int | None = None,
             ruin_threshold: float | None = None,
             position_cap: float | None = None,
+            limit_open_policy: str = _POLICY_KEEP,
             drop_warn_ratio: float = 0.5) -> dict:
     """按目标权重序列 + 收盘价序列，统计组合净值、指标与逐笔明细。
 
@@ -305,10 +310,15 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
                          成本模型（**全部进 equity**，口径见模块 docstring）
       benchmark_close    指数收盘价（可选）。**不给也会输出默认基准**：
                          等权全池买入持有（零数据依赖、与策略同池）
-      raw_by_code        {code: DataFrame[high,low,close,volume]}（**未复权**），
-                         只用于整手/涨跌停/停牌的可行性判定，不进净值；
+      raw_by_code        {code: DataFrame[open,high,low,close,volume]}（**未复权**），
+                         只用于整手/涨跌停/停牌/**涨停开盘应对**的可行性判定，不进净值；
                          调用方应只传**权重变动过**的 code（见 backtest.py）
       lot_size           每手股数，0 = 不做整手约束
+      limit_open_policy 「涨停开盘应对」三档（见 core/limit_price.py）：
+                         keep=不撤单（现状）/ cancel=撤单（涨停开盘当日不建仓）/
+                         reseal=涨停条件单（炸板后收盘仍封板才进，否则撤单）。
+                         **全局生效**（所有策略同一套口径），撤单=该份额度当日为现金、
+                         不重分配给其他票（与「一字涨停买不进」同一口径）。
       tail               只统计**最后 N 个交易日**（短窗口）
       drop_warn_ratio    持仓数骤降超过此比例记 WARNING
 
@@ -408,6 +418,8 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
     #   按"目标权重跳升"判定会漏掉这种连续买不进的情况，等于默认买进了。
     n_buy_blocked = 0        # 因一字涨停买不进、**根本没发生**的建仓次数
     n_sell_deferred = 0       # 因一字跌停卖不出、清零被延后的次数
+    n_buy_canceled = 0       # 因「涨停开盘应对」策略撤单、**根本没发生**的建仓次数
+    canceled_weight = 0.0    # 被撤单的建仓涉及的目标权重合计（Σw，可跨日累加）
     # 建仓失败事件（隔日一字涨停 → 买不进）：**逐笔**记下来。
     # 这些建仓根本没有成交，所以不会出现在 trades 明细里（那里一行 = 一次买卖），
     # 只有总数的话报告说不清"哪只票、哪天、为什么没买成" → 单独给明细。
@@ -427,6 +439,8 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
             rclose = raw["close"]
             rhi = raw["high"]
             rlo = raw["low"]
+            # open 只为「涨停开盘应对」用（keep/cancel/reseal）；缺列 → 判不了 → 不撤单
+            ropen = raw["open"] if "open" in getattr(raw, "columns", []) else None
             thr = _limit_pct(code)
             target = W[:, j].copy()      # 策略目标权重
             actual = np.zeros(T, dtype=np.float32)   # 实际持仓权重（成交之后）
@@ -442,6 +456,29 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
                 hi, lo = float(rhi.iloc[i]), float(rlo.iloc[i])
                 return (_is_limit_up(hi, lo, pc, thr) if up
                         else _is_limit_down(hi, lo, pc, thr))
+
+            def _cancel_by_policy(t: int) -> bool:
+                """t 日是否因「涨停开盘应对」策略而撤单（当日不建仓）。
+
+                口径在 `core/limit_price.py`（与统计层同一份）：
+                  keep   不撤单（现状）
+                  cancel 涨停开盘一律撤单
+                  reseal 炸板票只有「收盘仍封住涨停价」才进，否则撤单
+                ⚠️ 与「一字涨停买不进」**分开归因**：一字板是**物理约束**（板上全是买单），
+                策略撤单是**主动放弃** —— 两者的报告口径不能混。
+                """
+                if limit_open_policy == _POLICY_KEEP or ropen is None:
+                    return False
+                i = rcols.get(common[t])
+                if i is None or i == 0:
+                    return False
+                pc = float(rclose.iloc[i - 1])
+                if pc <= 0:
+                    return False
+                act = _limit_open_action(float(ropen.iloc[i]), float(rhi.iloc[i]),
+                                         float(rlo.iloc[i]), float(rclose.iloc[i]),
+                                         pc, thr, limit_open_policy)
+                return act == _ACT_CANCEL
 
             pending_sell = -1        # 被一字跌停挡住、尚未卖掉的清仓日（-1 = 没有待处理清仓）
             sell_events: list[dict] = []      # 本票的清仓延后事件（价格在循环后统一补）
@@ -462,6 +499,20 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
                                 "reason": "limit_up",
                             })
                             continue           # actual[t] 保持 0
+                        # 「涨停开盘应对」：策略撤单 → 当日不建仓。
+                        # 口径与上面的一字板**一致**：该份额度当日就是现金、
+                        # **不重分配给其他票**（引擎的每日重试保留：次日不再涨停开盘则自动补上）。
+                        if _cancel_by_policy(t):
+                            n_buy_canceled += 1
+                            canceled_weight += float(tgt)
+                            blocked_builds.append({
+                                "code": code,
+                                "date": common[t],
+                                "signal_date": common[t - 1] if t > 0 else "",
+                                "reason": "limit_open_cancel",
+                                "weight": float(tgt),
+                            })
+                            continue           # actual[t] 保持 0（该份额度当日为现金）
                     if pending_sell >= 0:
                         # 延后清仓期间策略又改主意（重新要这只票）→ 这次清仓**没发生**
                         sell_events.append({
@@ -592,6 +643,12 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
             f"目标权重被压低（累计 {capped_points} 个「交易日×票」）。"
             f"**实际单股仓位低于策略设定**，空出来的仓位就是现金，"
             f"资金利用率随之下降（看 capital_utilization / avg_positions）。")
+    if limit_open_policy != _POLICY_KEEP and n_buy_canceled:
+        flags.append(
+            "limit_open: 涨停开盘应对 = " + str(_POLICY_LABELS.get(limit_open_policy, limit_open_policy))
+            + " —— " + str(n_buy_canceled) + " 次建仓主动撤单（涉及目标权重合计 "
+            + format(canceled_weight, ".3f") + "）。这些建仓没有成交，该份额度当日就是现金、"
+            "不重分配给其他票（与一字涨停买不进同一口径，但归因不同：一个是物理买不到，一个是策略放弃）。")
     total_return = float(nav[-1] / initial_capital - 1.0)
     # 成本吃光净值：必须**显式告警**，否则用户只看到 total_return=-100%，
     # 会误以为是策略或数据坏了，而真凶是换手率×费率。
@@ -787,6 +844,11 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
         # 它不是新增的对比维度，只是把已进净值的约束**说清楚**。
         "fill_blocked": {"buy_blocked": n_buy_blocked,
                          "sell_deferred": n_sell_deferred},
+        # 「涨停开盘应对」三档（全局生效）：**单独统计**，好让报告回答
+        # 「这个条件拦掉了多少笔、值多少钱」（对照用两个独立回测范围，见 backtest）。
+        "limit_open": {"policy": limit_open_policy,
+                       "canceled_builds": n_buy_canceled,
+                       "canceled_weight": round(float(canceled_weight), 6)},
         # 建仓失败明细（隔日一字涨停 → 买不进）：**逐笔**事件，与上面的计数同源。
         # 已在净值里生效（该份额度当日就是现金、不重分配），这里只负责"说清楚"。
         "build_failures": blocked_builds,
