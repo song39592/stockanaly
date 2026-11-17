@@ -124,7 +124,7 @@ namespace StockPool
                     string body;
                     if (!PostJson("http://127.0.0.1:8000/api/indicators/batch", json, 120000, out body) || string.IsNullOrEmpty(body))
                         return;
-                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body);
+                    var j = J.Ser().Deserialize<Dictionary<string, object>>(body);
                     var itemsResp = J.Arr(J.Get(j, "items"));
                     Log("指标", string.Format("{0} [IND] HTTP返回 round={1} items={2}", _stamp(), round, itemsResp == null ? 0 : itemsResp.Count));
                     var dates = (_stockKline != null) ? _stockKline.GetDates() : new List<string>();

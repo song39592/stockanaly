@@ -27,8 +27,11 @@ namespace StockPool
         // 个股页不再保留顶部输入框；以下只保留展示用字段。
         private Button _stockRefresh;
         private Label _stockName, _stockHint, _stockStatus, _stockValStatus, _stockIndStatus;
+        private Label _stockNameCap;        // 「当前个股 / 当前指数」标题（指数模式下改文案）
+        private Label _stockAdjustCap;      // 「复权」标签（指数无复权 → 一起藏）
         private KLineChart _stockKline;
         private ChipPanel _stockChip;                      // K 线右侧的筹码分布窗口
+        private TableLayoutPanel _stockKlineLayout;        // K 线页布局（指数模式要把筹码列宽收成 0）
         // 筹码模型不再用下拉框：与主图 / 副图指标一致，由右下角输入框键入**索引名**切换
         // （候选来自 /api/chip/dist/formulas，见 StockLoadChipFormulas）。
         private string _stockChipFormulaId = null;         // 当前筹码公式 id（null = 用后端默认 tri_decay）
@@ -222,7 +225,8 @@ namespace StockPool
             TableLayoutPanel b0;
             var g0 = Group("查询", out b0);
             _stockName = Mute(Lbl(""));
-            AddRow(b0, Row(Lbl("当前个股"), _stockName));
+            _stockNameCap = Lbl("当前个股");
+            AddRow(b0, Row(_stockNameCap, _stockName));
 
             _stockHint = Mute(Lbl("敲任意数字 / 字母 → 右下角输入框：6 位代码打开个股；输指标英文代码（ma / cyc / macd / rsi / rps）回车切换主图 / 副图指标"));
 
@@ -326,7 +330,8 @@ namespace StockPool
             foreach (Button b in _stockRangeMap.Keys) rangeRow.Controls.Add(b);
             rangeRow.Controls.Add(Mute(Lbl("周期")));
             foreach (Button b in _stockPeriodMap.Keys) rangeRow.Controls.Add(b);
-            rangeRow.Controls.Add(Mute(Lbl("复权")));
+            _stockAdjustCap = Mute(Lbl("复权"));
+            rangeRow.Controls.Add(_stockAdjustCap);
             foreach (Button b in _stockAdjustMap.Keys) rangeRow.Controls.Add(b);
             rangeRow.Controls.Add(_stockRefresh);
             rangeRow.Controls.Add(_stockStatus);
@@ -351,6 +356,15 @@ namespace StockPool
         {
             code = (code ?? "").Trim();
             _quickActiveCode = code;                    // 记入激活字段，供异步守卫使用（与输入框文本解耦）
+
+            // 指数代码（sh000001 这类：市场前缀 + 6 位数字）→ 指数模式，
+            // 像个股一样看 K 线（指数没有的东西由指数模式藏起来，见 StockPage.Index.cs）。
+            if (StockIsIndexCode(code))
+            {
+                StockOpenIndex(code);
+                return;
+            }
+
             if (!Regex.IsMatch(code, "^[0-9]{6}$"))
             {
                 // 非 6 位代码：当作「指标名称 / id」尝试切换主图 / 副图指标
@@ -409,6 +423,12 @@ namespace StockPool
                 _stockHint.Tag = "muted";
                 _stockHint.ForeColor = C.Flat;
                 _stockHint.Text = "数据加载中…";
+            }
+            // 从指数切回个股：恢复个股专属页签 / 复权按钮（指数模式把它们藏了）
+            if (_stockIsIndex)
+            {
+                _stockIsIndex = false;
+                StockApplyIndexMode();
             }
             _stockCurrent = code;
             // 切换股票：先把上一只的 K线 / 指标 / 筹码清掉，否则异步加载期间
@@ -488,7 +508,9 @@ namespace StockPool
                 StockRefreshIndicatorList();
                 StockLoadChipFormulas();
                 // 打开上次的个股：仅在还没打开任何票时，避免覆盖用户刚做的操作
-                if (_stockCurrent == null && !string.IsNullOrEmpty(ls.code) && Regex.IsMatch(ls.code, "^[0-9]{6}$"))
+                // （指数代码也认：上次在看上证指数，重启后仍回到指数）
+                if (_stockCurrent == null && !string.IsNullOrEmpty(ls.code)
+                    && (Regex.IsMatch(ls.code, "^[0-9]{6}$") || StockIsIndexCode(ls.code)))
                 {
                     StockOpen(ls.code);
                 }
@@ -503,6 +525,9 @@ namespace StockPool
         /// </summary>
         private void StockEnsureFresh(string code, Action then)
         {
+            // 指数：新鲜度检查走的是**个股**下载通道（/api/history/download/freshness），
+            // 对指数不适用 → 直接放行。指数的「更新」走 /api/history/index/{code}?refresh=true。
+            if (_stockIsIndex) { Ui(then); return; }
             System.Threading.Tasks.Task.Run(delegate
             {
                 bool need = false;
@@ -547,6 +572,9 @@ namespace StockPool
         {
             if (_stockCurrent != code) return;      // 期间又切了别的票就作废
             StockLoadHistory(code, false);
+            // 指数：只有 K 线（+ 指标叠加）有意义 —— 个股专属的筹码 / 基本信息 / 板块 /
+            // 估值 / 扫雷 / AI 全部不请求（页签也已藏起来，见 StockApplyIndexMode）。
+            if (_stockIsIndex) return;
             StockLoadChipFormulas();   // 每次打开同步公式清单（后端可能刚加过公式）
             StockLoadChip(code);
             StockLoadBasic(code);      // 基本信息（行业 / 市值 / 前十大股东 / 涨停连板）

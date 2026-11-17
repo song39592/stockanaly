@@ -162,7 +162,8 @@ qfq(t, as_of) = raw(t) × hfq_factor(t) ÷ hfq_factor(as_of)
     ├── mentor_lab.db      大佬策略实验室
     ├── bars/
     │   ├── bars_YYYY.db   日K 原始价，按年分片（5000 只约 250 MB/年）
-    │   └── factors.db     复权因子 + 除权除息明细（全量，行数少）
+    │   ├── factors.db     复权因子 + 除权除息明细（全量，行数少）
+    │   └── indices.db     **指数**日K（独立表：指数不是股票，不进回测池）
     └── chip/              SCR 选股数据（raw 原始文件、processed 计算结果、meta.json）
 ```
 
@@ -199,7 +200,14 @@ Windows 下由 DPAPI 密封（绑定本机 + 当前用户，不提供恢复码�
 POST /api/history/pool/import       保存每日股票池并可启动行情同步
 GET  /api/history/sync/{job_id}     查询后台同步进度
 GET  /api/history/stock/{code}      查询个股 K线、消息和入池轨迹
+GET  /api/history/indices           指数清单（code / 中文名 / 本地是否已落盘）
+GET  /api/history/index/{code}      查询指数 K线（原始价、无复权；与个股接口同构）
 ```
+
+**指数不是股票**：代码带市场前缀（`sh000001` / `sz399001`），落在独立表 `index_bars`
+（独立库 `bars/indices.db`，见 `core/indices.py`）。个股接口仍只收裸 6 位数字 ——
+两者语义不同（个股有股本 / 消息面 / 入池轨迹，指数都没有），别混在一个接口里。
+指数接口的 `refresh=true` 会增量补最新交易日（本地没有该指数时从 1990 起拉全历史）。
 
 ## 八、历史数据遍历下载（`download_*.py` + `tdx_reader.py`）
 

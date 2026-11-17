@@ -6,6 +6,7 @@
     state/stock_history.db  主库：股票池快照、消息面、同步任务（体积小）
     bars/factors.db     复权因子与除权除息明细（全量，行数少）
     bars/bars_YYYY.db   日 K 原始价，**按年分片**（单文件可控，便于备份与归档）
+    bars/indices.db     **指数**日 K（独立库：指数不是股票，不能混进个股日 K 表）
 
 行情（`price_store`）与股票池历史（`history_store`）共用一条连接实现，
 因此连接参数、PRAGMA 调优与完整性钩子集中在这里。
@@ -28,6 +29,10 @@ DATA_DIR = config.DATA_DIR
 DB_PATH = config.STATE_DIR / "stock_history.db"      # 持久化状态统一放 state/
 BARS_DIR = DATA_DIR / "bars"
 FACTORS_DB = BARS_DIR / "factors.db"
+# 指数行情：**独立库**。指数不是股票 —— code 命名空间（sh000001）与个股重叠
+# （000001 既是上证指数也是平安银行），且指数没有复权/换手概念，
+# 混进 daily_bars 会撞主键、还会被当成股票进回测池。详见 price_store 的指数段。
+INDEX_DB = BARS_DIR / "indices.db"
 
 # 入库格式版本：任何影响表结构或字段语义的改动都应递增，启动时比对并提示迁移
 SCHEMA_VERSION = "1"

@@ -108,6 +108,21 @@ namespace StockPool
                 _pages.Add(page);
             }
 
+            /// <summary>显示 / 隐藏某个页签按钮。
+            ///
+            /// 用途：**指数模式**下藏起个股专属页（基本信息 / 记录·消息 / 估值 / 扫雷 / AI 分析 /
+            /// 偏好设置）—— 那些页对指数没有意义，显示空表会被当成「数据丢了」，
+            /// 不如直接藏起来。
+            ///
+            /// ⚠️ 隐藏的是**按钮**，页面本身仍在 `_pages` 里（`Select` 仍能选中它，
+            ///   只是用户点不到）。所以调用方在切到指数时还要确保当前选中的是 K 线页。
+            /// </summary>
+            public void SetTabVisible(int index, bool visible)
+            {
+                if (index < 0 || index >= _btns.Count) return;
+                _btns[index].Visible = visible;
+            }
+
             /// <summary>加一个二级页：内容面板由本控件新建，用 Stack 纵向堆叠（盘面 / 策略形态）。</summary>
             public void Add(string title, Action<TableLayoutPanel> build)
             {

@@ -284,6 +284,18 @@ seed 1..8 → 31531% / 40957% / 22939% / 19341% / 16562% / 40470% / 7339% / 4001
   - `--mode period`：股票池固定、只换时间窗口（行情依赖）
   - 对照组靠 monkeypatch `base.run` 接入 → **编排层其余部分一字不改**
   - **结果不落盘**，只打印
+- **`scripts/jwzz_timing_probe.py`** —— 同上口径，**专测「大盘状态择时」策略**
+  （`jwzz_cross_timing`）：`--mode scan`（大盘序列 × MA 周期 × 下跌仓位扫描）/
+  `--mode determinism`（闸一：两次跑净值逐位比对）/`--mode segment`（跨 3 段一致性）/
+  `--mode pool`（换池重复）/`--mode shuffle`（同池打乱排序）
+  - ⚠️ 它的股票池**故意不剔除 ST / *ST**（那份名单要联网取，**取不到时静默降级** →
+    同一个 spec 在不同时间会跑出不同的池子：实测 4101 只 vs 3975 只）→ 池子确定、可复现
+- **`scripts/jwzz_market_state.py`** —— 只读**产品跑出的报告**（日净值 + 逐笔）做
+  「大盘状态 × top_n」分析（beta/alpha 分解、rank 边际收益曲线、额度填充率分组），
+  **不重跑回测**；跨口径自动校验，不同版直接退出
+- **`scripts/download_indices.py`** —— 指数日K落盘（独立表 `index_bars`）：
+  `--list` 看清单与本地跨度 / 默认拉全历史 / `--refetch` 全量重抓
+  ⚠️ 指数**不进回测池**（独立库 + code 命名空间隔离）
 - ⚠️ **`scripts/jwzz_shuffle_probe.py` 是旧版放宽口径脚本**（直调 stats，漏严格成交模型）
   —— 其收益数字**不可引用**，保留只为对照口径差异
 - **`scripts/jwzz_audit.py`** —— 审计器：引擎确定性（逐位比对净值）+ 收益集中度

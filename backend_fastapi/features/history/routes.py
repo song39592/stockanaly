@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from features.history import service as history_service
 from features.history import store as history_store
+from core import indices
 from core.periods import normalize
 
 import indicators.rps_data as rps_data
@@ -72,6 +73,46 @@ def get_stock_history(code: str, start: str | None = None, end: str | None = Non
                                                            period=period)}
     except Exception as exc:  # noqa: BLE001 - 转换为可读接口错误
         raise HTTPException(status_code=500, detail=f"个股历史加载失败：{exc}")
+
+
+@router.get("/indices")
+def list_indices():
+    """指数清单（前端搜索联想用）。
+
+    返回 `items[]`：`{code, name, bars, start, end, available}`。
+    `available=true` 表示本地 `index_bars` 里已落盘（能立刻画 K 线）；
+    `false` 表示在常用清单里但本地还没有 —— 点「更新」即现拉。
+    """
+    try:
+        return {"ok": True, **history_service.indices_overview()}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"指数清单读取失败：{exc}")
+
+
+@router.get("/index/{code}")
+def get_index_history(code: str, start: str | None = None, end: str | None = None,
+                      refresh: bool = False, period: str = "day"):
+    """指数详情：K 线（原始价，**无复权**）+ 名称。
+
+    指数**不是股票**（代码带市场前缀，落在独立表 `index_bars`），所以**另开一个
+    路由**，不塞进 `/stock/{code}`：那条路由的 6 位数字校验、消息面、股票池轨迹
+    都是个股语义，混在一起会让「哪些字段对指数有意义」变得含糊。
+
+    返回结构与 `/stock/{code}` **同构**（bars / bars_raw / pool / events …），
+    前端同一段渲染代码即可画指数 K 线。
+    """
+    if not indices.is_index_code(code):
+        raise HTTPException(status_code=400,
+                            detail="指数代码形如 sh000001（市场前缀 + 6 位数字）")
+    try:
+        period = normalize(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    try:
+        return {"ok": True, **history_service.index_detail(code, start, end, refresh,
+                                                           period=period)}
+    except Exception as exc:  # noqa: BLE001 - 转换为可读接口错误
+        raise HTTPException(status_code=500, detail=f"指数历史加载失败：{exc}")
 
 
 @router.get("/pool/rps")

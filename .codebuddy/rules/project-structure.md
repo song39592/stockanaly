@@ -69,7 +69,7 @@ scripts/               check-docs.ps1 —— 文档一致性自检（链接 / �
 |---|---|
 | `/api/indicators` | 技术指标（清单 / compute / batch / diagnose） |
 | `/api/strategies` | 策略回测（清单 / 校验 / 推荐 / 回测 / 报告 / 成交） |
-| `/api/history` | 股票池历史与 K 线 |
+| `/api/history` | 股票池历史与 K 线（个股 `/stock/{code}`；指数 `/index/{code}` + 清单 `/indices`） |
 | `/api/history/download` | 历史数据下载（任务 / 队列 / 通达信） |
 | `/api/chip/scr` | SCR 选股 |
 | `/api/chip/rank` | SCR90 周榜 |
@@ -94,6 +94,7 @@ scripts/               check-docs.ps1 —— 文档一致性自检（链接 / �
 | 行情取数 + 周期合样 | `core/kline_service.py` | `indicators/data.py`、`strategies/core/data.py` |
 | 日→周/月 合样 | `core/periods.py` | `core/kline_service.py`、`indicators/rps_data.py` |
 | 行情存储与复权现算 | `core/price_store.py` | `core/price_service.py`、`core/kline_service.py` |
+| 指数清单 + 「是不是指数」判定 | `core/indices.py` | `core/kline_service.py`（取数分流）、`features/history/routes.py`（校验）、前端搜索联想（清单走 `/api/history/indices`，不硬编码） |
 | 通达信本地日线读取 | `core/tdx_reader.py` | `core/price_service.py`、`features/download/service.py` |
 | 数据目录解析 / 迁移 | `core/config.py` / `core/storage.py` | `main.py`、`features/system/routes.py` |
 | 完整性签名 + 密钥密封 | `core/crypto.py` + `core/dpapi.py` | `core/db.py`、`features/system/integrity.py` |
@@ -125,6 +126,9 @@ scripts/               check-docs.ps1 —— 文档一致性自检（链接 / �
   统计层的可行性判定与策略层的「跳过炸板买入」共用它；**别在策略里再抄一份涨停判定**。
 - `core/registry_scan.py` —— **判据各包自理**（指标的 id 与文件名无关、策略与公式必须相同），
   机械动作共用这一份；新增第四套注册机制时复用它，不要照抄。
+- `core/indices.py` —— 指数**不是股票**：code 带市场前缀（`sh000001`），落独立表 `index_bars`。
+  「是不是指数」的判定只此一份；前端只做**形态**镜像（清单与名称一律走 `/api/history/indices`），
+  别在 C# 里再抄一份清单 —— 两份清单迟早漂移。
 - `core/tdx_reader.py` —— ⚠️ `detect()` 必须**轻量**（秒级，被「目录是否可用」的热路径反复调用）；
   全量覆盖度走 `coverage_stats()`（并发全扫 + 结果缓存），**不要**把全扫塞进 `detect()`。
   覆盖度里的「最新日」以**众数**（`last_mode`）为准而非最大日期 —— 刚下载完日线时常见

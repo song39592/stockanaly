@@ -66,6 +66,9 @@ from core.limit_price import (
     limit_pct as _limit_pct,
     limit_prices as _limit_prices,
 )
+# 「等权全池」这条基准口径的**唯一实现**在中立内核包 formulas/market.py
+# （择时类策略算「大盘状态」时用的是同一份 —— 两处各写一份 = 同一口径两个数）。
+from formulas.market import equal_weight_returns
 
 SCHEMA_VERSION = 2
 _TRADING_DAYS = 252.0      # 年化折算：固定日线，见模块 docstring
@@ -639,7 +642,8 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
     rpu = (total_return / utilization) if utilization > 1e-9 else None
 
     # ---- 基准：默认等权全池买入持有 ----
-    bench = R.mean(axis=1)                     # 与策略同池，零额外数据依赖
+    # 口径在 formulas/market.py（与择时策略共用同一份「等权池」定义）
+    bench = equal_weight_returns(R)                # 与策略同池，零额外数据依赖
     equity_bench = float(initial_capital) * np.cumprod(1.0 + bench)
     bench_return = float(equity_bench[-1] / initial_capital - 1.0)
 

@@ -210,10 +210,34 @@ namespace StockPool
             foreach (var o in _stockChipOpts)
                 if (o.Name.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0
                  || o.Id.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0) _stockSugMatches.Add(o);
+            // 指数（sh000001 / 上证指数…）：清单在后端 /api/history/indices，
+            // 前端不硬编码清单（两份清单迟早漂移）。本地过滤，取到清单后重画下拉。
+            foreach (var o in _stockIndexOpts)
+                if (o.Code.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0
+                 || o.Name.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0)
+                    _stockSugMatches.Add(new IndOpt
+                    {
+                        Id = o.Code,
+                        Name = (o.Name == "" ? o.Code : o.Name),
+                        Raw = "INDEX"
+                    });
             if (_stockSugMatches.Count > 0) StockSugRender(); else StockSugHide();
 
             // 2) 股票匹配（异步、防抖）：停顿 250ms 才打后端，避免逐键重拉
             if (_stockSugTimer != null) { _stockSugTimer.Stop(); _stockSugTimer.Start(); }
+
+            // 3) 指数清单（异步）：首次输入时取一次，回来后自动补进下拉
+            if (!_stockIndexListLoaded)
+            {
+                StockLoadIndexList(delegate
+                {
+                    Ui(delegate
+                    {
+                        if (_quickSearch == null || !_quickSearch.Visible) return;
+                        StockSugUpdate();          // 清单已到 → 重画下拉（指数候选出现）
+                    });
+                });
+            }
         }
 
         /// <summary>异步拉取股票匹配（代码 / 中文名 / 拼音全拼 / 拼音首字母）并并入下拉，由防抖定时器触发。</summary>
@@ -266,6 +290,7 @@ namespace StockPool
             {
                 string tag;
                 if (o.Raw == "STOCK") tag = "（股票）";
+                else if (o.Raw == "INDEX") tag = "（指数）";
                 else if (o.Raw != null) tag = "（筹码）";
                 else
                 {
@@ -306,6 +331,15 @@ namespace StockPool
                 string code = m.Id;
                 StockSugHide();
                 OpenStock(code);                                // 统一打开个股（含切到个股页）
+                HideQuickSearch();
+                _stockStrip.Select(0);
+                return;
+            }
+            if (m.Raw == "INDEX")
+            {
+                string code = m.Id;
+                StockSugHide();
+                OpenIndex(code);                                // 指数模式：像个股一样看 K 线
                 HideQuickSearch();
                 _stockStrip.Select(0);
                 return;
