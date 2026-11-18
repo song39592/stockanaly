@@ -46,6 +46,15 @@ namespace StockPool
         public Dictionary<string, string> Palette = new Dictionary<string, string>();
         public WindowData Window = new WindowData();
         public int? DownloadStartYear = null;
+        /// <summary>下载页「仅补最新」勾选状态。
+        /// <para><b>三态</b>：null = 用户从未显式选过（默认增量；但起始年份被改到
+        /// 比已覆盖起点更早时，会自动切完整下载并把结果记下来）。
+        /// true = 用户明确只要增量（此后不再自动切换）；false = 明确要完整下载。</para>
+        /// <para>它决定「起始年份生不生效」：勾选时按定义只补库内最新日之后的新增，
+        /// 起始年份不参与；取消勾选才是完整下载（按起始年份补齐更早历史）。
+        /// 属于用户的下载意图，必须跨会话保留，否则每次进页面都退回默认值、
+        /// 用户改好的起始年份又被静默吞掉。</para></summary>
+        public bool? DownloadIncremental = null;
         public string EnvPython = "";
         public string EnvNode = "";
         public Dictionary<string, object> CustomThemes = new Dictionary<string, object>();

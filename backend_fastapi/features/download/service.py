@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import shutil
 import threading
 import time
@@ -203,26 +204,62 @@ def _normalize_codes(raw: Any) -> list[str]:
 # 下载范围
 # --------------------------------------------------------------------------- #
 # 全市场代码表的取数预算（秒）。两个源原本各 timeout=90 且串行 -> 最坏 180s，
-# 而本函数在下载接口的同步路径上。正常情况下首个源即命中（实测 1~2s），
-# 预算给到 20s 已留 10 倍余量（bug-02）。
-_UNIVERSE_BUDGET = 20.0
+# 而本函数在下载接口的同步路径上。
+#
+# ⚠️ **实测（2026-11-18）**：`stock_info_a_code_name` 要翻 **18 页**，耗时随数据源
+# 状态剧烈波动：冷启动 27~36 秒，被限流时实测 **167 秒**。原来的 20s 预算会让
+# **后端每次重启后的第一次调用必然超时**（用户看到「股票清单获取失败：A 股代码
+# 列表获取失败（数据源无响应）」，而数据源其实好好的）；后续调用命中 akshare 的
+# 进程内缓存，0.1 秒就返回 → 表现为「第一次点开始失败，再点一次就好」。
+#
+# ⭐ 真正的解法是**别在关键路径上取**（见 `_universe_codes`）：清单缓存在库里，
+# 调度器后台刷新，用户的点击几乎总是命中缓存 → 这里是兜底的冷路径预算。
+_UNIVERSE_BUDGET = 60.0
 _UNIVERSE_PER_SOURCE = 90.0
 
+# 全市场代码表的缓存（存 download_settings 表，随数据目录走）。
+# 清单本身低频变动（新股上市 / 退市），12 小时刷一次足够。
+_UNIVERSE_CACHE_KEY = "universe_codes"
+_UNIVERSE_CACHE_TTL = 12 * 3600.0
 
-def _universe_codes() -> list[str]:
-    """取全市场 A 股代码（akshare；两个来源任一可用即可）。
 
-    ⚠️ 两个源各自 `timeout=90` 且**串行** → 最坏 180s。本函数在
-    `/api/history/download/*` 的**同步路径**上被调用（`_resolve_codes(scope="all")`），
-    启动器一侧超时有限，故用公共件把整条链压进 `_UNIVERSE_BUDGET`（bug-02）。
-    降级语义不变：两个源都取不到仍抛 RuntimeError，由调用方转成可读错误。
+def _cached_universe_codes(allow_stale: bool = False) -> dict[str, Any] | None:
+    """库里缓存的全市场代码表（`{codes, at, source, ttl}`）；没有或已过期返回 None。
+
+    `allow_stale=True` 时忽略有效期（网络取不到时的兜底）。
     """
+    raw = download_store.get_setting(_UNIVERSE_CACHE_KEY, "")
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+        codes = [str(c) for c in (payload.get("codes") or [])]
+        at = float(payload.get("at") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if not codes:
+        return None
+    ttl = float(payload.get("ttl") or _UNIVERSE_CACHE_TTL)
+    if not allow_stale and (time.time() - at) > ttl:
+        return None
+    return {"codes": codes, "at": at, "source": str(payload.get("source") or ""), "ttl": ttl}
+
+
+def _store_universe_codes(codes: list[str], source: str = "network",
+                          ttl: float = _UNIVERSE_CACHE_TTL) -> None:
+    download_store.set_setting(_UNIVERSE_CACHE_KEY, json.dumps(
+        {"codes": codes, "at": time.time(), "source": source, "ttl": ttl},
+        ensure_ascii=False))
+
+
+def _fetch_universe_codes(budget: float = _UNIVERSE_BUDGET) -> list[str]:
+    """联网取全市场 A 股代码（akshare；两个来源任一可用即可）。"""
     sources = []
     for name in ("stock_info_a_code_name", "stock_zh_a_spot_em"):
         func = getattr(ak, name, None)
         if func is not None:
             sources.append((name, lambda t, _fn=func: _ak(_fn, timeout=t)))
-    _, frame = first_ok(sources, budget=_UNIVERSE_BUDGET, per_call=_UNIVERSE_PER_SOURCE,
+    _, frame = first_ok(sources, budget=budget, per_call=_UNIVERSE_PER_SOURCE,
                         is_ok=lambda df: df is not None and not getattr(df, "empty", True))
     if frame is None:
         raise RuntimeError("A 股代码列表获取失败（数据源无响应，或 akshare 未提供该接口）")
@@ -232,6 +269,64 @@ def _universe_codes() -> list[str]:
     if code_column is None:
         raise RuntimeError("A 股代码列表里找不到代码列")
     return _normalize_codes(list(frame[code_column]))
+
+
+def _universe_codes() -> list[str]:
+    """取全市场 A 股代码：**缓存优先**，联网兜底，再兜底到本地主数据表。
+
+    ⚠️ 为什么不让用户等网络：本函数在下载接口的**同步路径**上
+    （`_resolve_codes(scope="all")` → `/start`），启动器一侧超时有限
+    （`/start` 120s、`/universe` 90s），而清单取数实测 27~36 秒、被限流时能到
+    **167 秒**、数据源整体不可达时会直接 SSL 失败 → 慢一点就报
+    「任务启动失败：A 股代码列表获取失败（数据源无响应）」，而数据源其实是好的、只是慢。
+
+    清单本身是**低频变动**的数据（新股上市 / 退市），兜底顺序：
+    1. 缓存（网络取的一份，12 小时有效）→ 零网络、毫秒级；
+    2. 联网取（60s 预算）→ 成功就更新缓存；
+    3. 联网失败 + 有陈旧缓存 → 用陈旧缓存（最多差 12 小时的几只票），打印缓存年龄；
+    4. 连缓存都没有 → 用**本地主数据表**（`stock_meta`，刷新成功后它就等于那份
+       在市清单）→ 宁可多带几只已退市的票，也不能让「开始下载」整个用不了；
+       有效期按 1 小时算（短），网络恢复后很快换回准确清单；
+    5. 什么都没有 → 明确报错，不静默给个空清单。
+    """
+    cached = _cached_universe_codes()
+    if cached is not None:
+        return cached["codes"]
+    try:
+        codes = _fetch_universe_codes()
+    except RuntimeError as exc:
+        stale = _cached_universe_codes(allow_stale=True)
+        if stale is not None:
+            age_h = (time.time() - stale["at"]) / 3600.0
+            print(f"[download] 全市场清单联网取数失败（{exc}），"
+                  f"改用 {age_h:.1f} 小时前的缓存（{len(stale['codes'])} 只）")
+            return stale["codes"]
+        local = price_store.all_stock_codes()
+        if local:
+            print(f"[download] 全市场清单联网取数失败（{exc}），"
+                  f"改用本地主数据表（{len(local)} 只，可能含已退市的票）")
+            _store_universe_codes(local, source="local", ttl=3600.0)
+            return local
+        raise
+    _store_universe_codes(codes, source="network")
+    return codes
+
+
+def _refresh_universe_cache_async() -> None:
+    """后台刷新代码表缓存（调度器调用）：慢的网络调用不占用户的同步路径。"""
+    if _cached_universe_codes() is not None:
+        return
+
+    def worker() -> None:
+        try:
+            # 后台线程没人等 → 预算放宽到 300s（被限流时实测要 167s，
+            # 用同步路径那 60s 的预算会永远取不到，缓存就永远是陈旧的）
+            codes = _fetch_universe_codes(budget=300.0)
+            _store_universe_codes(codes, source="network")
+        except Exception:                         # noqa: BLE001 - 刷新失败不影响调度
+            pass
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def _resolve_codes(scope: str, source: str = SOURCE_ONLINE) -> list[str]:
@@ -425,24 +520,6 @@ def _ensure_disk_space(count: int, mode: str, source: str = SOURCE_ONLINE,
             f"请清理磁盘，或改用「当前股票池」等更小的范围（也可把起始日期改晚一点）。")
 
 
-def _no_older_history(code: str, split: dt.date) -> bool:
-    """这只股票在分界点之前**本来就没有**数据（上市晚于分界点的新股）。
-
-    用库里「最早一条」来判断，而不是看「数据源返回空」——后者跟网络超时长得一模一样，
-    误判会把**抓漏的历史**当成「本来就没有」，属于静默的数据缺口，不可接受。
-    """
-    try:
-        earliest = price_store.earliest_bar_date(code, "raw")
-    except Exception:                             # noqa: BLE001
-        return False                              # 读不到就按「有历史」处理，照常抓
-    if not earliest:
-        return False                              # 库里没数据：无从判断，照常抓
-    try:
-        return dt.date.fromisoformat(str(earliest)[:10]) > split
-    except (TypeError, ValueError):
-        return False
-
-
 def _is_suspended(code: str, expected: dt.date | str | None, *,
                   latest: str | None = None, earliest: str | None = None) -> bool:
     """长期无新交易日（停牌 / 退市）：库里有过正常历史、但最新日远落后于应有日。
@@ -450,7 +527,7 @@ def _is_suspended(code: str, expected: dt.date | str | None, *,
     用来把这类票和「今天还没出 / 数据源延迟 / 新股上市晚」区分开：前者补也补不到，
     调用方应直接算完成、不记失败、不占限速额度。判定结合了「最新日落后幅度」
     （`SUSPENDED_GAP_DAYS`）与「是否曾有正常交易历史」（`SUSPENDED_HISTORY_MIN_DAYS`），
-    后者用 earliest 排除上市不久的新股（新股由 `_no_older_history` 处理）。
+    后者用 earliest 排除上市不久的新股。
 
     `expected` 兼容 str / date：调用方多传 `_expected_data_day()` 的返回值（字符串），
     此处统一解析成 `dt.date` 再比较，避免 `date >= str` 的 TypeError。
@@ -487,7 +564,7 @@ def _is_suspended(code: str, expected: dt.date | str | None, *,
 def _failed_like_suspended(runtime: "_Runtime", code: str, message: str) -> bool:
     """取数彻底失败（已耗尽重试）时，用「失败模式」而非「时间落后」判定停牌 / 退市。
 
-    满足：①这只票**有正常历史**（排除新股，新股的失败由 `_no_older_history` 另处处理）；
+    满足：①这只票**有正常历史**（排除新股：库里一条都没有的票本就没有历史）；
     ②**同期全局错误率正常**——若已落定项里失败占比偏高，说明是数据源 / 网络整体故障
     （全体都取不到），此时不能把任何个股标成停牌（会掩盖真正的故障、还误放过了该重试的票）。
     命中则视为该票自身停牌 / 退市，标记后不计入失败、不刷屏、后续也不再被当作需补。
@@ -761,10 +838,14 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
             # 本机通达信是唯一来源：有几年的日线就同步几年，不联网补更早的历史
             _import_tdx_bars(_tdx_root(options), code)
         else:
-            # 上市晚于分界点的新股：这一阶段本来就没有数据，直接算完成（不算失败）
-            if phase == 2 and stop is not None and _no_older_history(code, stop):
-                download_store.finish_code(task_id, seq, ok=True)
-                return
+            # 「更早段」= 补库里还缺的那段更早历史（阶段 2）。
+            # ⚠️ 这里**不能**再用「库内最早日 > 缺口起点」来判断「这只票本来就没有
+            # 更早历史」—— 缺口起点本身就是「库内最早日 − 1 天」算出来的，那个判断
+            # **恒为真** → 更早段被整体跳过，任务报「完成」但历史一条没补
+            # （实测：起始年份 2020、库里最早 2021-08-02，任务 5580 只全绿完成，
+            #   而库内最早仍是 2021-08-02）。
+            # 正确做法是**实际抓一次**：抓不到 → 这只票在缺口段确实没有交易
+            # （上市更晚 / 数据源没有更早的数据）→ 算完成，不算失败、不算停牌。
             runtime.limiter.acquire()
             bars = price_service.sync_all_adjusts(code, start=begin, end=stop)
             errors.extend(bars.get("errors") or [])
@@ -786,6 +867,21 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
         if runtime.stop.is_set():
             return
         message = f"{type(exc).__name__}: {exc}"
+        if phase == 2 and mode == MODE_FULL:
+            # **更早段**（补「库里还缺的更早历史」）取不到数据 = 这只票在缺口段
+            # 本来就没有交易（上市更晚 / 数据源没有更早的历史）→ 这一阶段算完成。
+            # ⚠️ 不算失败、也**不标停牌**：这只票的近段数据是好的（阶段 1 已落定），
+            # 标成停牌会让它被后续自动更新 / 闲时任务排除掉，等于凭空丢票。
+            # ⚠️ 但**全局故障**（数据源整体不可用）时不能这么判：那时「都取不到」
+            # 是故障不是事实 → 按普通失败走重试路径，别把故障当成「本来就没有」。
+            if runtime.error_rate() < GLOBAL_FAIL_RATE:
+                runtime.note_ok()
+                download_store.finish_code(task_id, seq, ok=True)
+                return
+            runtime.note_fail()
+            download_store.finish_code(task_id, seq, ok=False, error=message)
+            download_store.record_error(task_id, code, message)
+            return
         if _failed_like_suspended(runtime, code, message):
             stock_status.set_status(code, stock_status.STATUS_SUSPENDED, reason=message)
             download_store.finish_code(task_id, seq, ok=True, suspended=True)
@@ -1680,9 +1776,24 @@ def _scheduler_tick() -> None:
         from core import price_store as _ps
         if _ps.stock_meta_count() == 0 or download_store.get_setting(
                 "stock_meta_refreshed_at", "") != today:
-            _ps.refresh_stock_meta()
-            download_store.set_setting("stock_meta_refreshed_at", today)
+            result = _ps.refresh_stock_meta()
+            # ⚠️ 刷新**失败**时不登记「今天已刷新」——登记了就会整天不再重试，
+            # 主数据（也就包括全市场代码表）会一直停在旧值（实测：库里 5931 条
+            # 含已退市的票，而当下在市只有 5580 只）。
+            if not result.get("error"):
+                download_store.set_setting("stock_meta_refreshed_at", today)
+                # 这次刷新拿到的就是「全市场在市代码清单」→ 直接存成下载用的缓存
+                # （同一个接口，省一次慢调用；口径与网络清单一致）
+                codes = _ps.all_stock_codes()
+                if codes:
+                    _store_universe_codes(codes)
     except Exception:                         # noqa: BLE001 - 主数据刷新失败不影响调度
+        pass
+    # 全市场代码表缓存：过期就在**后台线程**刷新（联网可能要 30~170 秒，
+    # 不能占住调度线程、更不能占住用户点「开始下载」的同步路径）
+    try:
+        _refresh_universe_cache_async()
+    except Exception:                         # noqa: BLE001 - 刷新失败不影响调度
         pass
     if stored.get("auto_update") == "1":
         # 日线自动更新**全天都会尝试**：库里还落后于「应有交易日」就补，不限于
@@ -1825,7 +1936,14 @@ def _stamp_span(options: dict[str, Any], codes: list[str],
     创建任务时算一次写进 options，轮询时零成本；老任务没有这两个键就回退成
     「仅补最近」（前端已兼容）。
 
-    完整历史任务不做任何事（它的窗口就是 options.start_date ~ 今天）。
+    终点用「应有交易日」而不是自然日：任务创建于昨日或创建时尚未收盘，
+    写死的 today 会比实际下载目标少一天，造成「请求区间停在 10-19 而非 10-20」
+    的展示错误。
+
+    **没有新增可补时**（库里最新日已追到应有交易日）不编区间，改写 `span_note`：
+    如实说「已最新」，不要显示成起止颠倒的假区间。
+
+    完整历史任务不做任何事（它的窗口就是 options.start_date ~ 应有交易日）。
     """
     if str(options.get("mode") or MODE_FULL) != MODE_INCREMENTAL:
         return
@@ -1860,11 +1978,20 @@ def _stamp_span(options: dict[str, Any], codes: list[str],
         begin = start if begin is None or start < begin else begin
     if begin is None:                       # 全都没下过：就是从头拉，不编区间
         return
+    end = expected or dt.date.today().isoformat()
+    # ⚠️ **起止颠倒的假区间**：库里最新日已经追到「应有交易日」时，本轮其实
+    # **没有新增交易日可补** —— 增量窗口是「最新日 + 1 → 应有交易日」，而今天
+    # 还没收盘时「应有交易日」= 昨天，于是 begin(明天) > end(昨天)。
+    # 照原样显示就是「2026-11-18 ~ 2026-11-17」这种倒过来的区间，看着像
+    # 「要下今天（还没收盘）的数据」→ 这里如实说「无新增」，不给假区间。
+    if begin.isoformat() > end:
+        options["span_begin"] = ""
+        options["span_end"] = end
+        options["span_note"] = "已最新：无新增交易日可补"
+        return
     options["span_begin"] = begin.isoformat()
-    # 终点用「应有交易日」，不要用创建任务时的 dt.date.today() 写死：任务创建于
-    # 昨日或创建时尚未收盘，都会让写死的 end 比实际下载目标（_expected_data_day）
-    # 少一天，造成「请求区间停在 10-19 而非 10-20」的展示错误。
-    options["span_end"] = _expected_data_day() or dt.date.today().isoformat()
+    options["span_end"] = end
+    options.pop("span_note", None)
 
 
 def _backfill_spans() -> None:
@@ -1877,7 +2004,7 @@ def _backfill_spans() -> None:
         options = task.get("options") or {}
         if str(options.get("mode") or MODE_FULL) != MODE_INCREMENTAL:
             continue
-        if options.get("span_begin"):
+        if options.get("span_begin") or options.get("span_note"):
             continue
         if task["status"] not in ("running", "queued", "paused"):
             continue
@@ -1894,9 +2021,12 @@ def _backfill_spans() -> None:
 def _requested_span(task: dict[str, Any]) -> tuple[str | None, str | None]:
     """这个任务**请求下载的时间段**（下载页展示用），空值表示不限。
 
-    完整历史：从 options 里的起始日到今天；
+    完整历史：从 options 里的起始日到「应有交易日」；
     增量：创建时由 `_stamp_span` 算好的并集窗口（逐票其实是从各自库内最新
     日期前推的重叠段，展示的是这些窗口的并集）。
+
+    终点用「应有交易日」而不是自然日：今天还没收盘时并不存在今天的日线，
+    显示到今天会被读成「要下今天的数据」（而今天不可能有）。
     """
     options = task.get("options") or {}
     if str(options.get("kind") or KIND_BARS) == KIND_LOCKUP:
@@ -1908,11 +2038,32 @@ def _requested_span(task: dict[str, Any]) -> tuple[str | None, str | None]:
         # 终点随「应有交易日」动态刷新，不用创建任务时写死的 span_end：
         # 任务创建于昨日 / 创建时尚未收盘都会让写死的 end 比实际下载目标少一天。
         end = _expected_data_day() or str(options.get("span_end") or "")
+        # 起止颠倒（起点 > 终点）不在这里吞掉：交给 `_requested_note` 判成
+        # 「已最新、无新增可补」，并由 `_decorate` 清掉这个假区间。
         return begin, end
     begin = _option_date(options, "start_date")
     if begin is None:
         return None, None
-    return begin.isoformat(), dt.date.today().isoformat()
+    return begin.isoformat(), _expected_data_day() or dt.date.today().isoformat()
+
+
+def _requested_note(task: dict[str, Any], begin: str | None, end: str | None) -> str:
+    """请求区间的补充说明（下载页展示用）。
+
+    增量任务的区间是「库内最新日 + 1 → 应有交易日」：库里最新日已经追到应有
+    交易日时，起点会**大于**终点（今天还没收盘时：起点=明天、终点=昨天），
+    这不是「区间」，而是「本轮没有新增交易日可补」——如实说出来，别显示成
+    「2026-11-18 ~ 2026-11-17」这种起止颠倒的假区间。
+    """
+    options = task.get("options") or {}
+    note = str(options.get("span_note") or "")
+    if note:
+        return note
+    if str(options.get("mode") or MODE_FULL) != MODE_INCREMENTAL:
+        return ""
+    if begin and end and begin > end:
+        return "已最新：无新增交易日可补"
+    return ""
 
 
 def _decorate(task: dict[str, Any]) -> dict[str, Any]:
@@ -1921,7 +2072,27 @@ def _decorate(task: dict[str, Any]) -> dict[str, Any]:
     task["remaining"] = download_store.remaining(task["id"])
     task["failures"] = download_store.failures(task["id"])
     task["kind"] = str((task.get("options") or {}).get("kind") or KIND_BARS)
+    # ---- 阶段感知的进度（两轮任务：先近后远）----
+    # 股票级 completed 只在**两个阶段都落定**后才 +1，而队列顺序是「先把所有股票
+    # 的近期段跑完，再跑历史段」→ 第一轮跑完时股票级计数仍是 0，进度条长时间停在
+    # 0.0%，看着像卡死（实测 954 只已就位，界面仍显示「已处理 0 / 共 5580、0.0%」）。
+    # 这里把**真实完成度**（按阶段行计）单独给出，前端用它画进度条与百分比。
+    phases = int((task.get("options") or {}).get("phases") or 1)
+    progress = download_store.phase_progress(task["id"])
+    task["phases"] = phases
+    task["phase_settled"] = progress["settled"]
+    task["phase_total"] = task["total"] * phases
+    task["phase1_settled"] = progress["phase1"]
+    task["phase2_settled"] = progress["phase2"]
+    task["phase_percent"] = round(
+        progress["settled"] * 100.0 / max(1, task["total"] * phases), 1)
+    # 当前跑到第几轮（两轮任务：第一轮未跑完就是 1，否则 2）
+    task["current_phase"] = 1 if (phases > 1 and progress["phase1"] < task["total"]) else phases
     requested_begin, requested_end = _requested_span(task)
+    task["requested_note"] = _requested_note(task, requested_begin, requested_end)
+    if requested_begin and requested_end and requested_begin > requested_end:
+        # 起止颠倒 = 不是区间，是「无新增可补」→ 清掉区间，只留说明
+        requested_begin = requested_end = None
     task["requested_begin"] = requested_begin
     task["requested_end"] = requested_end
     # 增量任务的区间是「各票窗口的并集」，前端要据此换一种说法

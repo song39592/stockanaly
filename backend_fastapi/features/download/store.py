@@ -390,6 +390,35 @@ def remaining(task_id: str) -> int:
     return int(row["n"] or 0)
 
 
+def phase_progress(task_id: str) -> dict[str, int]:
+    """各阶段的落定进度（下载页进度条用，按「阶段行」而不是「股票只」计）。
+
+    ## 为什么要有这个
+
+    完整历史任务分两轮（先近后远），一只股票排**两行**队列，而股票级的
+    `completed` 只在**两个阶段都落定**后才 +1 —— 于是「先近后远」的第一轮跑完时，
+    股票级计数仍是 0，进度条长时间停在 0.0%，看起来像卡死（实测一轮下来
+    954 只已就位，界面仍显示「已处理 0 / 共 5580、进度 0.0%」）。
+
+    这里按**阶段行**统计真实的完成度：每只股票每个阶段各算一份，
+    `settled / rows` 就是真实进度（两轮任务 rows = 只数 × 2）。
+    """
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT phase, COUNT(*) AS n FROM download_codes "
+            "WHERE task_id=? AND status IN ('done','failed','suspended') GROUP BY phase",
+            (task_id,)).fetchall()
+    out = {"settled": 0, "phase1": 0, "phase2": 0}
+    for row in rows:
+        n = int(row["n"] or 0)
+        out["settled"] += n
+        if int(row["phase"] or 1) == 1:
+            out["phase1"] = n
+        else:
+            out["phase2"] = n
+    return out
+
+
 def failures(task_id: str, limit: int = 200) -> list[dict[str, Any]]:
     """失败清单（代码 + 原因），供前端展示与「重试失败项」。
 
