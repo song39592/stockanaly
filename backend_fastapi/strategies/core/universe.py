@@ -69,6 +69,33 @@ IPO_DAYS = 90                 # 上市 ≤90 自然日 = 新股
 SUB_NEW_DAYS = 365            # 90 < 上市 ≤365 自然日 = 次新股
 MICRO_CAP = 3_000_000_000     # 总市值 ≤30 亿 = 微盘股
 
+# ---- ST 名称名单的**覆盖率下限**（判定「这份名单够不够用」）----
+# 名单只覆盖一部分票时，没覆盖的票会被当成「非 ST」放进来 → 与「名单整个没取到」
+# 一样是降级，只是没那么显眼。低于这个比例 → 中止（见 ScopeDataUnavailable）。
+NAME_COVERAGE_MIN = 0.95
+
+
+class ScopeDataUnavailable(RuntimeError):
+    """剔除特征所需的**外部数据**取不到 → 口径无法兑现 → **明确中止**。
+
+    ## 为什么必须中止，而不是降级（这是实测踩出来的坑）
+
+    勾了「剔除 ST / \*ST」，但 ST 名称名单（akshare 全市场表）联网取不到时，
+    旧实现**静默降级**成「一只 ST 都没剔」→
+
+    * 报告的「剔除明细」里只是**没有 st 这一项** → 看起来像「本来就没有 ST」；
+    * 口径指纹（`spec_signature`）只压常量 → **算不出差别**；
+    * 于是两份报告 `spec_version` / `spec_signature` 完全相同，
+      一个池 4101 只（没剔 ST）、一个池 3975 只（剔了 ST），收益差 5%
+      却「看起来同口径」→ 结论直接失效。
+
+    ## 正确做法
+
+    **中止 + 给可操作的下一步**（取消该剔除项 / 恢复网络后重试）。
+    取不到名单**不是**「没有 ST」，而是「不知道谁是 ST」—— 两者不能混。
+    """
+
+
 # ---- 注入判定的阈值（属**股票池层**语义：编排层只消费，不再自己判一遍）----
 MIN_BARS = 30                 # 区间内 K 线 < 这么多根 = 数据不足，不可注入
 WARMUP_BARS = 250             # 短窗口回测的指标预热根数（约一年，够 MACD 这类长周期策略）
@@ -82,7 +109,11 @@ _cache: dict = {}             # key -> (codes, base_count, at, detail)
 # 为什么需要：注入判定口径改一次（阈值 / 剔除特征 / 判定基准日），同一区间、同一
 # 策略的结果能差 10~30 倍（实测 3839 笔 → 174645% 与 3418 笔 → 5569%），
 # 而报告过去不记版本 → 两份报告摆在一起，无从判断能不能比。
-SPEC_VERSION = "2026-11-16.b"
+#
+# 2026-11-18.a：ST / *ST 剔除所需名单**取不到时从「静默降级」改成「中止」**
+#   （旧口径会悄悄一只 ST 都没剔 → 报告与指纹都看不出，池子差 126 只、收益差 5%
+#   却「看起来同口径」）。旧口径产出的报告一律视为**旧口径**，不可与新报告对比。
+SPEC_VERSION = "2026-11-18.a"
 
 
 def spec_signature() -> str:
@@ -102,6 +133,7 @@ def spec_signature() -> str:
         f"IPO_DAYS={IPO_DAYS}",
         f"SUB_NEW_DAYS={SUB_NEW_DAYS}",
         f"MICRO_CAP={MICRO_CAP}",
+        f"NAME_COVERAGE_MIN={NAME_COVERAGE_MIN}",
         f"EXCLUDE={','.join(CATEGORIES)}",
         f"FWD={','.join(_FORWARD_LOOKING)}",
         "ASOF=start",
@@ -202,7 +234,10 @@ def spec_from_request(req, universe_mode: str | None = None) -> dict:
 
 
 def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str, int], dict]:
-    """基池剔除 exclude 里的特征。各特征独立计算、取并集；数据缺失时静默降级。
+    """基池剔除 exclude 里的特征。各特征独立计算、取并集。
+
+    ⚠️ **依赖外部数据**的特征（ST / \*ST 要联网取名单）**取不到就中止**
+    （`ScopeDataUnavailable`），不静默降级 —— 理由见该异常类的 docstring。
 
     返回 (剩余代码, 每项剔除只数)。**只数必须回传** —— 否则读者无法判断
     「勾了剔除」到底剔掉了什么（界面曾长期显示「剔除后 = 基池数」，而实跑
@@ -224,6 +259,8 @@ def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str,
 
     drop: set = set()
     dropped: dict[str, int] = {}
+    st_cov: float | None = None      # ST 名单覆盖率（None = 本次没用到名单）
+    st_covered: int = 0
 
     def _hit(feature: str, codes) -> None:
         if codes:
@@ -237,7 +274,29 @@ def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str,
 
     # ST / *ST：名称（akshare 全市场表，24h 缓存）—— **当前**名单，无法还原历史
     if ex & {"st", "star_st"}:
+        # ⚠️ 顺序要紧：**先取**（取数失败会把原因记进 `names_source_status`），
+        #    再判可用性 —— 反过来会得到「未知原因」，等于没告诉用户到底怎么了。
         names = data.load_names(base)
+        status = data.names_source_status()
+        if not status.get("ok"):
+            raise ScopeDataUnavailable(
+                "剔除 ST/*ST 需要联网取当前名称名单（akshare 全市场表），本次取不到"
+                f"（{status.get('error') or '未知原因'}）。已中止本次回测 —— "
+                "继续跑等于「勾了剔除却一只没剔」，报告里的剔除明细会看起来像"
+                "「本来就没有 ST」，口径指纹也算不出差别。\n"
+                "→ 下一步：(1) 恢复网络后重试；(2) 在回测范围里**取消**『剔除 ST / *ST』"
+                "再跑（口径会变：报告会明确写出剔除明细里没有 ST）。"
+            )
+        st_covered = sum(1 for c in base if names.get(c))
+        st_cov = (st_covered / len(base)) if base else 1.0
+        if st_cov < NAME_COVERAGE_MIN:
+            raise ScopeDataUnavailable(
+                f"ST 名称名单只覆盖 {st_covered}/{len(base)} 只"
+                f"（{st_cov:.1%} < {NAME_COVERAGE_MIN:.0%}）→ 没覆盖的票会被当成"
+                "「非 ST」放进来，与「名单整个没取到」一样是降级，已中止本次回测。\n"
+                "→ 下一步：(1) 稍后重试（名单是全市场表，冷启动要 ~50s）；"
+                "(2) 在回测范围里**取消**『剔除 ST / *ST』再跑。"
+            )
         hit_st: list[str] = []
         hit_star_st: list[str] = []
         for code in base:
@@ -275,7 +334,14 @@ def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str,
         _hit("micro", [c for c in base
                        if caps.get(c) is not None and caps[c] <= micro_cap])
 
-    extra = {"market_cap_meta": cap_meta} if "micro" in ex else {}
+    extra: dict = {}
+    if "micro" in ex:
+        extra["market_cap_meta"] = cap_meta
+    if st_cov is not None:
+        # 名单覆盖率要落进报告：读者要知道「有几只票没有名称记录、
+        # 因此没参与 ST 判定」（覆盖不足到会中止，但 95%~100% 之间的漏网要写明）。
+        extra["st_name_coverage"] = round(st_cov, 4)
+        extra["st_name_covered"] = st_covered
     return [c for c in base if c not in drop], dropped, extra
 
 
@@ -372,6 +438,7 @@ def build_detail(spec: dict, force: bool = False) -> tuple[list[str], dict]:
     codes, dropped, extra = _apply_exclusions(base, spec)
     ex = sorted(set(spec.get("exclude") or []))
     as_of_d = _as_of_date(spec)
+    st_status = data.names_source_status()
     detail = {
         "base_count": len(base),
         "filtered_count": len(codes),
@@ -384,8 +451,29 @@ def build_detail(spec: dict, force: bool = False) -> tuple[list[str], dict]:
         # 上市日只能拿「库里最早日K」近似 —— 历史未拉全的老票会被误判成
         # 新股/次新股（剔除偏多）。误差方向必须写出来，不能让读者自己猜。
         "listing_date_source": "earliest_bar",
+        # ST 名单的可用性（取不到时本次若勾了 ST 剔除会**中止**，
+        # 所以跑到这里说明名单可用；仍要落盘，让读者知道判定依据是哪份表）
+        "st_names": {"ok": bool(st_status.get("ok")), "size": st_status.get("size"),
+                     "source": st_status.get("source")},
     }
     detail.update(extra or {})
+    # ---- 池子**结果**指纹：补 `spec_signature` 只压常量的缺口 -------------------
+    # `spec_signature` 覆盖不到**运行时**差异（ST 名单这次取到没有、区间端点、
+    # 基准日、实际剔了多少只）→ 曾出现两份报告指纹完全相同、实际池子差 126 只、
+    # 收益差 5% 却「看起来同口径」的情况。这个指纹把这些都压进去：
+    # 两份报告一比 `pool_signature`，不同就知道**池子真的不同**，别再靠猜。
+    detail["pool_signature"] = hashlib.sha256("|".join([
+        f"v={SPEC_VERSION}",
+        f"start={spec.get('start') or ''}",
+        f"end={spec.get('end') or ''}",
+        f"as_of={as_of_d.isoformat()}",
+        f"exclude={','.join(ex)}",
+        f"base={len(base)}",
+        f"kept={len(codes)}",
+        "dropped=" + ",".join(f"{k}:{dropped[k]}" for k in sorted(dropped)),
+        f"st_names_ok={1 if st_status.get('ok') else 0}",
+        f"st_cov={extra.get('st_name_coverage', '')}",
+    ]).encode("utf-8")).hexdigest()[:8]
     _cache[key] = (codes, len(base), now, detail)
     if len(_cache) > _CACHE_MAX:
         _cache.pop(min(_cache, key=lambda k: _cache[k][2]), None)  # 丢掉最旧的
@@ -428,6 +516,17 @@ def scope_note(detail: dict) -> str:
         parts.append(f"⚠️ {'、'.join(fwd)} 按**当前**名单判定（数据源不提供历史名单，"
                      f"无法还原历史 → 含前视偏差）")
     ex = set(detail.get("exclude") or [])
+    # 「没剔 ST」必须**显式写出来**：读者看到剔除明细里没有 ST，第一反应是
+    # 「本来就没有 ST」—— 而真相可能是「名单没取到所以没剔」（旧口径的静默降级
+    # 就是这么骗人的：两份报告指纹相同、池子却差 126 只）。现在勾了取不到会中止，
+    # 但「用户主动取消了该剔除项」同样要写在报告里，读者才分得清这两种情况。
+    if not (ex & {"st", "star_st"}):
+        parts.append("ST/*ST **未剔除**（本次未勾选该特征；若勾选但名称名单取不到，"
+                     "系统会**中止**回测并提示，绝不静默跳过）")
+    cov = detail.get("st_name_coverage")
+    if cov is not None and cov < 1.0:
+        parts.append(f"⚠️ ST 名称名单只覆盖 {cov:.1%} → 未覆盖的票**未参与 ST 判定**"
+                     f"（按非 ST 处理）")
     if detail.get("listing_date_source") == "earliest_bar" and (ex & {"ipo", "sub_new"}):
         parts.append("⚠️ 上市日以「库里最早日K」近似：历史未拉全的老票会被误判成新股/次新股（剔除偏多）")
     cap_meta = detail.get("market_cap_meta") or {}
@@ -465,6 +564,11 @@ def summary(spec: dict, force: bool = False) -> dict:
         # 口径版本与指纹：预览与回测报告**共用同一句**（同一份实现，不各写一套）
         "spec_version": SPEC_VERSION,
         "spec_signature": spec_signature(),
+        # 池子**结果**指纹 + ST 名单可用性：预览与报告都要能看见，
+        # 否则「同指纹不同池」又要靠人肉比（实测踩过两次）。
+        "pool_signature": detail.get("pool_signature"),
+        "st_names": detail.get("st_names"),
+        "st_name_coverage": detail.get("st_name_coverage"),
         "note": scope_note(detail),
     }
     return out
