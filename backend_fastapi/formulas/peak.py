@@ -200,17 +200,26 @@ def right_decay_end(pct: np.ndarray, tol: float = 0.5,
     return out
 
 
-def top_price_peak_indices(pct: np.ndarray, min_pct: float = 0.0) -> np.ndarray:
+def top_price_peak_indices(pct: np.ndarray, min_pct: float = 0.0,
+                            min_ratio: float = 0.1) -> np.ndarray:
     """逐帧求「**位置最靠上**的那座峰」的峰顶分箱索引（没有则 -1）。
 
-    判据是「**位置**」而不是「高度」：在价格轴上找**局部极大值**
+    判据是「**位置**」而不是「胖瘦」：在价格轴上找**局部极大值**
     （占比不低于左邻、且高于右邻），取其中**价格最高**的那一个 ——
     哪怕它比别的山矮得多（这正是与「峰位价」的区别：峰位价取的是最**胖**的山）。
-
     等价说法：从最高价往低价走，遇到的**第一座山**的峰顶。
 
-    `min_pct`（%）：峰的最小占比门槛，用来排除价格轴高端由噪声造成的
-    零星小峰；默认 0 = 只要占比 > 0 就算峰。
+    ⚠️ **「不看胖瘦」不等于「不看噪声」**：筹码分布的高价端常挂着**极细的残留
+    尖刺**（占比 0.0000x%，来自早被换手稀释掉的历史持仓）。只看位置会把它们
+    选成「位置最高的峰」→ 画出来的价位**远高于当日真实的筹码密集区**
+    （实测 601595 / 2026-07-14：选到 37.81，而那天收盘才 15.83）。
+
+    故加**相对高度门槛** `min_ratio`：该峰占比须 ≥ 本帧**主峰**占比的
+    `min_ratio` 倍（默认 10%）才算一座「山」。主峰自身恒满足门槛，候选不会为空。
+    `min_pct`（%）是另一道**绝对**下限；两道门槛取更严的。
+    两道门槛都只用来把噪声挡在外面，**不参与「挑哪座山」**（那只看位置）。
+
+    `min_ratio` 给 0 = 退回「完全不看高度」（会选到残留尖刺，仅供对照）。
     """
     pct = np.asarray(pct, dtype=float)
     if pct.ndim != 2:
@@ -228,7 +237,10 @@ def top_price_peak_indices(pct: np.ndarray, min_pct: float = 0.0) -> np.ndarray:
     mid = P[:, 1:-1]
     # NaN 参与比较恒为 False —— 无需额外掩码，NaN 邻居自然不会造出「峰」。
     is_peak = (mid >= P[:, :-2]) & (mid > P[:, 2:]) & valid[:, 1:-1]
-    is_peak &= (mid > float(min_pct))
+    # 相对门槛：本帧主峰占比 × min_ratio（主峰自身恒满足 → 候选不会为空）
+    peak_max = np.nanmax(P, axis=1)
+    is_peak &= mid >= peak_max[:, None] * max(0.0, float(min_ratio))
+    is_peak &= mid > float(min_pct)
     rev = is_peak[:, ::-1]
     has = rev.any(axis=1)
     first = np.argmax(rev, axis=1)          # 反向的第一个 True = 最靠右的峰
@@ -237,19 +249,22 @@ def top_price_peak_indices(pct: np.ndarray, min_pct: float = 0.0) -> np.ndarray:
 
 
 def top_price_peak_price_series(pct: np.ndarray, centers: np.ndarray,
-                                 min_pct: float = 0.0) -> np.ndarray:
+                                 min_pct: float = 0.0,
+                                 min_ratio: float = 0.1) -> np.ndarray:
     """逐帧返回「**位置最靠上的**那座筹码峰」的**峰顶价位**。
 
     与 `peak_band_series` / 峰位价（COST）是**不同的点**：
       - 峰位价：最**胖**的那座山（占比最高）的峰顶；
-      - 本函数：**位置最高**的那座山（哪怕很矮）的峰顶。
+      - 本函数：**位置最高**的那座山（哪怕比别的山矮）的峰顶。
     两者在同一张筹码分布图上可以是完全不同的两个价位。
+
+    噪声门槛见 `top_price_peak_indices`（`min_ratio` 相对主峰、`min_pct` 绝对）。
 
     没有峰（整帧无有效占比）的帧 → NaN（不画）。
     """
     pct = np.asarray(pct, dtype=float)
     centers = np.asarray(centers, dtype=float)
-    idx = top_price_peak_indices(pct, min_pct)
+    idx = top_price_peak_indices(pct, min_pct, min_ratio)
     out = np.full(pct.shape[0], np.nan)
     ok = idx >= 0
     if ok.any():
