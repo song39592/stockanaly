@@ -153,12 +153,24 @@ def _year_of(trade_date: str) -> int:
 
 
 def _shard_years() -> list[int]:
-    """已存在的日 K 分片年份（升序）。"""
+    """已存在的日 K 分片年份（升序）。
+
+    只认**真的有 `daily_bars` 表**的分片：`db.connect()` 对不存在的路径会顺手
+    创建空壳库（8KB、只有 `_meta`），只按文件名 glob 会把空壳当分片 → 读路径
+    查 `daily_bars` 直接报「no such table」（空壳的成因见 test_support.
+    isolate_data_dir 的说明）。判定见 `db.is_bars_shard`。
+    """
     # 用 db.BARS_DIR 而非模块级拷贝：便于测试临时切换数据目录
     if not db.BARS_DIR.exists():
         return []
-    years = [int(m.group(1)) for path in db.BARS_DIR.glob("bars_*.db")
-             if (m := re.fullmatch(r"bars_(\d{4})\.db", path.name))]
+    years = []
+    for path in db.BARS_DIR.glob("bars_*.db"):
+        m = re.fullmatch(r"bars_(\d{4})\.db", path.name)
+        if not m:
+            continue
+        if not db.is_bars_shard(path):
+            continue
+        years.append(int(m.group(1)))
     return sorted(years)
 
 

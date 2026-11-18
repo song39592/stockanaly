@@ -14,6 +14,9 @@
   - 分发布局（`kind="dist"`）也声明 `panel="main"`：仅表示「共用主图价格轴」，但由
     专用热力图渲染器绘制（时间×价格色温），永不进通用 line/bar 面板——这是对被删
     `right` 的替代：分布不再有独立纵轴面板，而是复用 K 线价格轴。
+  - 水平阶梯线（`kind="hline"`）：同样是 `panel="main"`，但每个日期画一段**水平线**
+    （step line）而非折线 —— 用于「价位参考线」这类必须保持水平的叠加
+    （如筹码峰右沿价位）。数据与 `line` 同构。
 
 **为什么没有 "right"（右侧面板）—— 这是刻意收回，不是遗漏。**
 它曾作为枚举值预留，但承诺了一个本层给不出的东西。右侧窗口（筹码峰）是
@@ -60,7 +63,10 @@ from .context import CalcContext
 REGISTRY: dict[str, "IndicatorMeta"] = {}
 
 VALID_PANELS = ("main", "lower", "none")      # 无 "right"，理由见模块 docstring
-VALID_KINDS = ("line", "bar", "dist", "marker")  # dist=分发布局；marker=主图箭头信号（+1/-1/0）
+VALID_KINDS = ("line", "bar", "dist", "marker", "hline")
+#   dist   = 分发布局（时间×价格色温）
+#   marker = 主图箭头信号（+1/-1/0，锚在 K 线外侧）
+#   hline  = 主图水平阶梯线（价位参考线，见 series_hline）
 
 # 注入参数：由 compute() 传给指标函数，**不是用户可调参数**，故不进 ParamSpec。
 # 目前只有 `ctx`（计算上下文，见 context.CalcContext）。
@@ -103,6 +109,19 @@ def series_marker(name: str, data) -> dict:
     与 line/bar 一样按日期对齐，前端按序号调 DrawIcon 渲染，不画折线。
     """
     return {"name": name, "kind": "marker", "data": data}
+
+
+def series_hline(name: str, data) -> dict:
+    """构造一条「水平阶梯线」序列（标准化输出单元）。
+
+    与 `series_line` 的差别在**渲染语义**，不在数据：line 把相邻两点连成折线，
+    hline 则**每个日期画一段水平线**（step line）—— 用于「价位参考线」这类
+    必须保持水平、只在换值时才跳变的叠加（如筹码峰右沿价位）。
+
+    数据与 line 完全同构（按日期对齐的一维数值，NaN 表示缺失），
+    故序列化与价格轴取值逻辑与 line 共用；前端按 `kind` 选渲染图元。
+    """
+    return {"name": name, "kind": "hline", "data": data}
 
 
 def series_dist(name: str, axis, data, side: str = "right") -> dict:

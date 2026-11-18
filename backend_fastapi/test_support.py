@@ -1,7 +1,9 @@
 """测试签名必须使用临时配置，不能访问或改写用户的密钥。"""
 import os
+from pathlib import Path
 from unittest.mock import patch
 import crypto
+import db
 
 
 def isolate_crypto(case, base):
@@ -12,6 +14,29 @@ def isolate_crypto(case, base):
     ):
         context.start()
         case.addCleanup(context.stop)
+
+
+def isolate_data_dir(case, base):
+    """把全局数据目录指向临时目录，并在用例结束后**恢复原值**。
+
+    ⚠️ **必须恢复**：`db.DATA_DIR / DB_PATH / BARS_DIR / FACTORS_DB` 是**模块级
+    全局量**。不恢复的话，后续用例会继承**已被删除**的临时目录 →
+    `db.connect()` 会在那里重建「空壳分片库」（只有 `_meta`、没有 `daily_bars`）
+    → 读路径查 `daily_bars` 报「no such table」；完整性校验报「缺少数据表」；
+    Windows 上还会因文件被占用删不掉临时目录（WinError 32 / 145）。
+    实测：不恢复时约一半概率偶发失败（与业务代码无关的**测试基建**问题）。
+    """
+    base = Path(base)
+    snapshot = (db.DATA_DIR, db.DB_PATH, db.BARS_DIR, db.FACTORS_DB)
+    db.DATA_DIR = base
+    db.DB_PATH = base / "history.db"
+    db.BARS_DIR = base / "bars"
+    db.FACTORS_DB = db.BARS_DIR / "factors.db"
+
+    def _restore():
+        db.DATA_DIR, db.DB_PATH, db.BARS_DIR, db.FACTORS_DB = snapshot
+
+    case.addCleanup(_restore)
 
 
 def require_data_isolation(store, base):

@@ -7,17 +7,14 @@ import pandas as pd
 import db
 import price_service
 import price_store
-from test_support import isolate_crypto, require_data_isolation
+from test_support import isolate_crypto, isolate_data_dir, require_data_isolation
 
 
 class PriceStoreTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         isolate_crypto(self, Path(self.tmp.name))
-        db.DATA_DIR = Path(self.tmp.name)
-        db.DB_PATH = Path(self.tmp.name) / "history.db"
-        db.BARS_DIR = Path(self.tmp.name) / "bars"
-        db.FACTORS_DB = db.BARS_DIR / "factors.db"
+        isolate_data_dir(self, Path(self.tmp.name))
         require_data_isolation(price_store, Path(self.tmp.name))
         price_store.init_db()
 
@@ -70,6 +67,35 @@ class PriceStoreTest(unittest.TestCase):
 
         # 最新日期取自分片
         self.assertEqual(price_store.latest_bar_date("000001"), "2026-01-05")
+
+    def test_empty_shard_file_is_not_treated_as_shard(self):
+        """空壳分片库（只有 _meta、没有 daily_bars）不得被当成真分片。
+
+        `db.connect()` 对不存在的路径会**顺手创建**一个空 sqlite 文件（8KB）。
+        若枚举分片时只按文件名 glob，这个空壳会被当成真分片 → 读取路径去查
+        它的 `daily_bars` → 「no such table」崩掉（实测偶发：取决于同目录里
+        有没有别的分片先被读到）。空壳是「根本不是分片」，不是「损坏的分片」。
+        """
+        price_store.upsert_bars("000001", [
+            {"date": "2026-09-01", "close": 10.0},
+        ], "raw", validate=False)
+
+        # 造一个空壳：connect 会建文件并写 _meta，但没有 daily_bars 表
+        with db.connect(db.bars_db(2023)):
+            pass
+        self.assertTrue((db.BARS_DIR / "bars_2023.db").exists())
+
+        # 枚举分片必须跳过空壳
+        self.assertNotIn(2023, price_store._shard_years())
+        # 读取必须正常，且只带出真分片里的数据
+        bars = price_store.list_bars("000001")
+        self.assertEqual([b["trade_date"] for b in bars], ["2026-09-01"])
+
+        # 清掉空壳，免得临时目录删除时文件仍被占用（Windows: WinError 32）
+        for suffix in ("", "-wal", "-shm"):
+            p = db.BARS_DIR / f"bars_2023.db{suffix}"
+            if p.exists():
+                p.unlink()
 
     def test_adjust_calculation(self):
         """复权价现算：hfq = raw × factor；qfq 以 as_of 为基准（基准日不同结果不同）。"""

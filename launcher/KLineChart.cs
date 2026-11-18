@@ -11,7 +11,7 @@ namespace StockPool
     internal sealed class ChartSeries
     {
         public string Name;
-        public string Kind;          // "line" | "bar"
+        public string Kind;          // "line" | "bar" | "hline" | "marker" | "dist"
         public List<double> Data;    // 与 K 线等长（按日期对齐），NaN 表示缺失
         public Color Color;
         public float Width = 1.4f;   // 线宽（通达信 LINETHICK2 → 2f）
@@ -689,6 +689,42 @@ namespace StockPool
                             int y0 = plotBottom;
                             int top = Math.Min(y, y0), hh = Math.Max(1, Math.Abs(y - y0));
                             g.FillRectangle(br, (int)(x - bodyW / 2), top, (int)bodyW, hh);
+                        }
+                    }
+                }
+                else if (s.Kind == "hline")
+                {
+                    // 水平阶梯线（价位参考线）：每个日期画一段**水平线**，只在换值时才跳变。
+                    // 与 line 的区别：line 把相邻两点连成折线（价位一变线就斜），
+                    // hline 每段都保持水平 —— 用于「某个价位在哪」这类参考线
+                    // （如筹码峰右沿价位）。
+                    using (var pen = new Pen(s.Color, s.Width > 0 ? s.Width : 1.4f))
+                    {
+                        bool hasPrev = false;
+                        double prevV = 0;
+                        int prevEdge = 0;
+                        for (int i = 0; i < n; i++)
+                        {
+                            int gi = wstart + i;
+                            if (gi >= s.Data.Count) { hasPrev = false; continue; }
+                            double v = s.Data[gi];
+                            if (double.IsNaN(v)) { hasPrev = false; continue; }
+                            int x = (int)xOf(i);
+                            int y = (int)yOf(v);
+                            if (hasPrev)
+                            {
+                                // 跳变：前一水平段的右端 → 当前水平段的左端，补一段竖线。
+                                // prevEdge 正是两段的接缝处（上一段画到它、当前段从它开始）；
+                                // 值没变时这条线长度为 0，画了也无副作用。
+                                g.DrawLine(pen, prevEdge, (int)yOf(prevV), prevEdge, y);
+                            }
+                            int x1 = (i + 1 < n) ? (int)xOf(i + 1) : (int)(xOf(i) + slot);
+                            if (x1 > LeftPad + plotW) x1 = LeftPad + plotW;
+                            if (x1 < x) x1 = x;
+                            g.DrawLine(pen, x, y, x1, y);
+                            hasPrev = true;
+                            prevV = v;
+                            prevEdge = x1;
                         }
                     }
                 }

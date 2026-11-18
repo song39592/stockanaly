@@ -257,8 +257,8 @@ def ma(df: pd.DataFrame, periods=None) -> dict:
 | `dates` | string[] | 交易日，与 K 线完全同序 |
 | `series` | array | 该指标的 1..N 条序列 |
 | `series[].name` | string | 序列名（如图例 MA5） |
-| `series[].kind` | "line"\|"bar"\|"dist" | 线 / 柱 / 分发布局（前端据此选渲染方式） |
-| `series[].data` | number[]\|null | `line`/`bar`：与 `dates` 等长，NaN→null |
+| `series[].kind` | "line"\|"bar"\|"hline"\|"dist"\|"marker" | 线 / 柱 / 水平阶梯线 / 分发布局 / 图标信号（前端据此选渲染方式） |
+| `series[].data` | number[]\|null | `line`/`bar`/`hline`/`marker`：与 `dates` 等长，NaN→null |
 | `series[].style` | object | **可选**：该序列的颜色 / 线宽（`{"color":"#RRGGBB","width":1.4}`）；<br>**没有这个字段**表示该指标未声明样式，前端回退到自己的既有规则 |
 | `series[].axis` | number[] | **仅 `dist`**：价格分箱中心（长度=bins），与日期无关 |
 | `series[].side` | "left"\|"right" | **仅 `dist`**：镜像方向（固定筹码负侧 / 强换手正侧） |
@@ -268,7 +268,7 @@ def ma(df: pd.DataFrame, periods=None) -> dict:
 
 | panel | 放什么（**按量纲选，不按指标名选**） | series 构成 |
 |---|---|---|
-| **main** 主图叠加 | 与价格**同量纲**的序列（均线 / 通道 / 成本线…）—— 只有同量纲才能与 K 线共用价格轴 | 多条 `line` |
+| **main** 主图叠加 | 与价格**同量纲**的序列（均线 / 通道 / 成本线…）—— 只有同量纲才能与 K 线共用价格轴 | 多条 `line`（折线）；**价位参考线**用 `hline`（每日期一段水平线） |
 | **lower** 下方副图 | 与价格**不同量纲**的序列（比率 / 摆动 / 偏离度…）—— 相对量纲绝不能上主图 | 可混合 `line` 与 `bar`（柱状信号用 `bar`） |
 | **none** | 能算、能枚举、**不显示**（供导出 / 内部复用 / 暂不开放） | 任意 |
 | **main** 分发布局 | 「按**价格**分箱的直方图」类 | `kind="dist"`，由**专用热力图渲染器**绘制（时间×价格色温），永不进通用 line/bar 面板 |
@@ -297,7 +297,9 @@ lowerPanels: Series[][]          // 每个 lower 指标一组，纵向堆叠成�
 
 **路由与渲染规则**：
 1. 按响应的 `panel` 字段分发：`main`→`mainPanel`；`lower`→`lowerPanels` 追加一组。
-2. 按 `series[].kind` 选渲染图元：`line` 画折线，`bar` 画柱（如 MACD 柱）；
+2. 按 `series[].kind` 选渲染图元：`line` 画折线，`bar` 画柱（如 MACD 柱），
+   `hline` 画**水平阶梯线**（每个日期一段水平线，换值处竖直跳变）——
+   用于「价位参考线」这类必须保持水平的叠加（如筹码峰右沿价位）；
    `dist` 走**专用价格轴共享热力图渲染器**（y=价格复用 K 线 `priceToY`、x=时间、色温表强度），不进 line/bar 分支。
 3. `data` 按 `dates` 与主图 K 线对齐（同序等长，null 留空）。
 4. 新增指标**无需改前端渲染代码**，只要后端注册并标好 `panel`、输出符合 §6.1(e) 的结构
@@ -389,7 +391,7 @@ lowerPanels: Series[][]          // 每个 lower 指标一组，纵向堆叠成�
 
 | 延伸量的性质 | panel | 说明 |
 |---|---|---|
-| **价格量纲**（平均成本、峰位价…） | `main` | 能与 K 线共用价格轴 |
+| **价格量纲**（平均成本、峰位价、密集区上沿…） | `main` | 能与 K 线共用价格轴 |
 | **比率 / 占比**（获利比例、集中度…） | `lower` | 相对量纲，独立 y 轴 |
 | **纯中间量**（换手率等） | `none` | 能算、能枚举、**不显示**（供导出 / 内部复用） |
 
@@ -409,8 +411,8 @@ lowerPanels: Series[][]          // 每个 lower 指标一组，纵向堆叠成�
 > ⚠️ **指标与策略必须复用同一份计算，不得各写一遍**：若一个延伸量同时被「副图指标」
 > 与「策略选股」使用（如 PEAKB：副图 `chip_peak_band` 与 `strategies/peak_top.py`、
 > `peak_thresh.py` 都消费它），其**纯计算**必须抽到**中立内核包** `backend_fastapi/formulas/`
-> 下的内核模块（`formulas/peak.py` 的 `peak_band` / `peak_band_series`、
-> `formulas/scr.py` 的 `scr_series`）：
+> 下的内核模块（`formulas/peak.py` 的 `peak_band` / `peak_band_series` /
+> `top_price_peak_price_series`、`formulas/scr.py` 的 `scr_series`）：
 > 指标 import 它只做**展示包装**，策略 import 它做**横截面选股**。这样「副图显示」与
 > 「策略选股」同源、可逐日直接对照，不会因两处各实现一遍而悄悄漂移。受禁的仍是指标
 > 文件 import 筹码包的**取数 / 矩阵构造**模块（防循环依赖）；纯 numpy 的计算内核无副作用，

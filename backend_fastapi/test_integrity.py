@@ -1,4 +1,5 @@
 import os
+import gc
 import sqlite3
 import tempfile
 import time
@@ -10,7 +11,7 @@ import db
 import history_store
 import integrity
 import price_store
-from test_support import isolate_crypto, require_data_isolation
+from test_support import isolate_crypto, isolate_data_dir, require_data_isolation
 
 
 class IntegrityTest(unittest.TestCase):
@@ -18,10 +19,10 @@ class IntegrityTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         base = Path(self.tmp.name)
         isolate_crypto(self, base)
-        db.DATA_DIR = base
-        db.DB_PATH = base / "history.db"
-        db.BARS_DIR = base / "bars"
-        db.FACTORS_DB = db.BARS_DIR / "factors.db"
+        # 数据目录指向临时目录，**用例结束后恢复原值**（见 isolate_data_dir）：
+        # 不恢复会让后续用例继承已删除的目录 → db.connect 在那里重建空壳分片库
+        # → 读路径崩、完整性校验误报「缺少数据表」、临时目录删不掉。
+        isolate_data_dir(self, base)
         require_data_isolation(price_store, Path(self.tmp.name))
         crypto.ENV_PATH = base / ".env"          # 隔离：不要写真实的 .env
         crypto._key = None
@@ -35,6 +36,22 @@ class IntegrityTest(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("DATA_SECRET", None)
         crypto._key = None
+        self._cleanup_tmp()
+
+    def _cleanup_tmp(self):
+        """删临时目录。
+
+        本文件里模拟「外部工具改动」用的是**裸 `sqlite3.connect`**（没有 with，
+        也不会被 close），句柄要等 GC 才释放 → Windows 上 rmtree 会报
+        WinError 32 / 145「目录不是空的」。删不掉就回收 + 重试几次。
+        """
+        for _ in range(6):
+            try:
+                self.tmp.cleanup()
+                return
+            except OSError:
+                gc.collect()
+                time.sleep(0.2)
         self.tmp.cleanup()
 
     def test_clean_database_passes(self):

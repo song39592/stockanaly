@@ -60,6 +60,69 @@ def bars_db(year: int) -> Path:
     return BARS_DIR / f"bars_{year}.db"
 
 
+# 分片探测缓存（见 is_bars_shard）：key = (路径, mtime_ns, 大小)。
+# 只缓存「有效分片」；空壳每次重探（WAL 下写库不改主库 mtime/size，
+# 缓存否定结论会把刚写好的分片误判成空壳）。
+_SHARD_PROBE: dict[tuple[str, int, int], bool] = {}
+_SHARD_PROBE_MAX = 512
+# 小于这个大小才值得探测：sqlite 空壳 8KB，真分片含 daily_bars 表至少几页。
+_SHARD_MIN_SIZE = 16 * 1024
+
+
+def is_bars_shard(path: Path) -> bool:
+    """该文件是否是**有效的日 K 分片**（含 `daily_bars` 表）。
+
+    为什么需要它：`connect()` 对不存在的路径会**顺手创建一个空 sqlite 文件**
+    （8KB、只有 `_meta`、没有 `daily_bars`）。若枚举分片时只按文件名 glob，
+    这种空壳会被当成真分片 → 读路径查 `daily_bars` 直接报「no such table」
+    （实测偶发，且**同一个目录里另一个分片被正常读取时**才暴露）。
+
+    探测**只读**打开（不改文件、不写 `_meta`）：探测动作本身若改动文件，
+    会被完整性校验判成「外部工具改动」。
+
+    探测不了（文件被锁 / 格式异常 / 只读模式读不了 WAL）→ **保守当作有效分片**：
+    宁可让读路径报「数据不可信」，也不要静默漏掉一整年数据。
+
+    ⚠️ **只探测「小到不可能含表」的文件**：空壳只有 8KB（sqlite 头 + 一页空
+    schema），而真分片是几十上百 MB。因此大于 `_SHARD_MIN_SIZE` 的文件
+    **直接放行、不开句柄** —— 探测要开文件句柄，在 Windows 上会与并发写抢锁
+    （实测偶发 WinError 32：临时目录删不掉 / 指纹写不上）。
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return True
+    if st.st_size >= _SHARD_MIN_SIZE:
+        return True
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    hit = _SHARD_PROBE.get(key)
+    if hit is not None:
+        return hit
+    ok = _probe_bars_shard(path)
+    if ok:
+        if len(_SHARD_PROBE) >= _SHARD_PROBE_MAX:
+            _SHARD_PROBE.clear()
+        _SHARD_PROBE[key] = True
+    return ok
+
+
+def _probe_bars_shard(path: Path) -> bool:
+    """实际探测（只读打开 → 查 sqlite_master 里有没有 daily_bars 表）。"""
+    try:
+        conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    except (sqlite3.Error, ValueError):
+        return True
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='daily_bars'"
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return True
+    finally:
+        conn.close()
+
+
 def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
