@@ -377,6 +377,21 @@ def stock_meta_count() -> int:
         return 0
 
 
+def all_stock_codes() -> list[str]:
+    """本地主数据表里的全部 A 股代码（`stock_meta`）。
+
+    `stock_meta` 由 `refresh_stock_meta()` 每天刷新，数据源是 `stock_zh_a_spot_em`
+    （当前在市的 A 股清单）——**刷新成功后它就等于那份清单本身**（退市的会被
+    DELETE 掉），所以它同时是「全市场代码表」的本地副本：读它零网络。
+    """
+    try:
+        with db.connect(db.FACTORS_DB) as conn:
+            rows = conn.execute("SELECT code FROM stock_meta").fetchall()
+        return [str(row["code"]).strip() for row in rows if str(row["code"]).strip()]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def search_stocks(query: str, limit: int = 50) -> list[dict]:
     """按代码 / 中文名 / 拼音全拼 / 拼音首字母检索（前端拼音首字母匹配预留接口）。"""
     q = (query or "").strip().lower()

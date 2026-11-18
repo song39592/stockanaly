@@ -1,5 +1,6 @@
 """设置持久化与下载控制回归：临时目录，禁止真实网络与后台线程。"""
 import datetime as dt
+import json
 import os
 import subprocess
 import sys
@@ -246,10 +247,13 @@ class DownloadSettingsTests(unittest.TestCase):
                           return_value={"000001": "2026-11-14"}), \
              patch.object(service.stock_status, "is_suspended_like", return_value=False):
             service._stamp_span(options, ["000001"])
-        self.assertEqual(options["span_begin"], "2026-11-15")
-        self.assertEqual(options["span_end"], "2026-11-17")
-        self.assertEqual(service._requested_span({"options": options}),
-                         ("2026-11-15", "2026-11-17"))
+            self.assertEqual(options["span_begin"], "2026-11-15")
+            self.assertEqual(options["span_end"], "2026-11-17")
+            # ⚠️ `_requested_span` 要在 patch 生效期间断言：它会**实时**取
+            # 「应有交易日」，离开 patch 后拿到的是真值（今天 11-18 已收盘成交易日，
+            # 真值就变成 11-18，断言会假失败）。
+            self.assertEqual(service._requested_span({"options": options}),
+                             ("2026-11-15", "2026-11-17"))
 
     def test_full_span_end_is_expected_trade_day_not_today(self):
         """完整下载的终点是「应有交易日」：今天还没收盘时不该显示要下今天的数据。"""
@@ -271,7 +275,14 @@ class DownloadSettingsTests(unittest.TestCase):
         self.assertIn("无新增", view["requested_note"])
 
     def test_full_phase2_fills_earlier_gap_from_start_year(self):
-        """起始年份早于库里已有起点时，阶段 2 只补「起始日 → 库内最早-1」这段缺口。"""
+        """起始年份早于库里已有起点时，阶段 2 必须**真的去抓**缺口段。
+
+        ⚠️ 这条曾经打了 `_no_older_history` 的假桩（返回 False）才通过 ——
+        而那个判断在真实代码里是**恒真**的（缺口起点就是「库内最早日 − 1 天」，
+        拿库内最早日跟它比当然更大）→ 更早段被整体跳过，任务报「完成」
+        但历史一条没补（实测：起始 2020、库里最早 2021-08-02，5580 只全绿，
+        库内最早仍是 2021-08-02）。这里**不桩任何判断**，走真实逻辑。
+        """
         runtime = Mock()
         runtime.stop.is_set.return_value = False
         runtime.options = {"mode": service.MODE_FULL, "start_date": "2020-01-01",
@@ -279,13 +290,96 @@ class DownloadSettingsTests(unittest.TestCase):
                            "with_reference": False}
         with patch.object(service, "_skip_if_covered", return_value=False), \
              patch.object(service.price_store, "earliest_bar_date", return_value="2021-08-02"), \
-             patch.object(service, "_no_older_history", return_value=False), \
              patch.object(service.price_service, "sync_all_adjusts", return_value={}) as sync, \
-             patch.object(download_store, "finish_code"):
+             patch.object(download_store, "finish_code") as finish:
             service._download_one("test", runtime, {"code": "000001", "seq": 0, "phase": 2})
         sync.assert_called_once()
         self.assertEqual(sync.call_args.kwargs["start"], dt.date(2020, 1, 1))
         self.assertEqual(sync.call_args.kwargs["end"], dt.date(2021, 8, 1))
+        finish.assert_called_once()
+
+    def test_full_phase2_empty_result_counts_as_done_not_failure(self):
+        """更早段抓不到数据 = 这只票在缺口段本来就没有交易 → 算完成，
+        **不算失败、也不标停牌**（它近段数据是好的，标停牌会让它被后续任务排除）。"""
+        runtime = Mock()
+        runtime.stop.is_set.return_value = False
+        runtime.error_rate.return_value = 0.0
+        runtime.options = {"mode": service.MODE_FULL, "start_date": "2020-01-01",
+                           "split_date": "2023-11-18", "source": service.SOURCE_ONLINE,
+                           "with_reference": False}
+        with patch.object(service, "_skip_if_covered", return_value=False), \
+             patch.object(service.price_store, "earliest_bar_date", return_value="2021-08-02"), \
+             patch.object(service.price_service, "sync_all_adjusts",
+                          side_effect=service.price_service.NoDataError("无数据")), \
+             patch.object(service.stock_status, "set_status") as set_status, \
+             patch.object(download_store, "finish_code") as finish, \
+             patch.object(download_store, "record_error") as record_error:
+            service._download_one("test", runtime, {"code": "000001", "seq": 0, "phase": 2})
+        finish.assert_called_once()
+        self.assertTrue(finish.call_args.kwargs.get("ok"))
+        self.assertFalse(finish.call_args.kwargs.get("suspended"))
+        set_status.assert_not_called()          # 不许标停牌
+        record_error.assert_not_called()        # 不许记失败
+
+    def test_full_phase2_global_outage_is_not_treated_as_no_history(self):
+        """全局故障（数据源整体不可用）时，更早段取不到数据要按**失败**处理，
+        不能当成「本来就没有」——否则一次故障就把更早历史永久跳过。"""
+        runtime = Mock()
+        runtime.stop.is_set.return_value = False
+        runtime.error_rate.return_value = 0.9      # 远高于 GLOBAL_FAIL_RATE
+        runtime.options = {"mode": service.MODE_FULL, "start_date": "2020-01-01",
+                           "split_date": "2023-11-18", "source": service.SOURCE_ONLINE,
+                           "with_reference": False}
+        with patch.object(service, "_skip_if_covered", return_value=False), \
+             patch.object(service.price_store, "earliest_bar_date", return_value="2021-08-02"), \
+             patch.object(service.price_service, "sync_all_adjusts",
+                          side_effect=service.price_service.NoDataError("无数据")), \
+             patch.object(download_store, "finish_code") as finish, \
+             patch.object(download_store, "record_error") as record_error:
+            service._download_one("test", runtime, {"code": "000001", "seq": 0, "phase": 2})
+        finish.assert_called_once()
+        self.assertFalse(finish.call_args.kwargs.get("ok"))
+        record_error.assert_called_once()
+
+    def test_universe_codes_use_cache_without_network(self):
+        """命中缓存时**不联网**（清单取数实测 27~36 秒、被限流时 167 秒，
+        不能占住用户点「开始下载」的同步路径）。"""
+        service._store_universe_codes(["000001", "600000"])
+        with patch.object(service, "_fetch_universe_codes") as fetch:
+            codes = service._universe_codes()
+        fetch.assert_not_called()
+        self.assertEqual(codes, ["000001", "600000"])
+
+    def test_universe_codes_fall_back_to_stale_cache_when_network_fails(self):
+        """联网取数失败时用陈旧缓存兜底（不静默：走的是同一份缓存，只是过期）。"""
+        service._store_universe_codes(["000001"])
+        # 把缓存时间改旧 → 过期
+        payload = json.loads(download_store.get_setting(service._UNIVERSE_CACHE_KEY, ""))
+        payload["at"] = time.time() - 30 * 3600
+        download_store.set_setting(service._UNIVERSE_CACHE_KEY,
+                                   json.dumps(payload, ensure_ascii=False))
+        with patch.object(service, "_fetch_universe_codes",
+                          side_effect=RuntimeError("数据源无响应")):
+            codes = service._universe_codes()
+        self.assertEqual(codes, ["000001"])
+
+    def test_universe_codes_raise_when_no_cache_and_network_fails(self):
+        """既没缓存又取不到 → 明确报错，不静默给个空清单。"""
+        with patch.object(service, "_fetch_universe_codes",
+                          side_effect=RuntimeError("数据源无响应")), \
+             patch.object(service.price_store, "all_stock_codes", return_value=[]):
+            with self.assertRaises(RuntimeError):
+                service._universe_codes()
+
+    def test_universe_codes_fall_back_to_local_meta_when_nothing_else(self):
+        """缓存没有 + 联网不通 → 用本地主数据表：宁可多带几只已退市的票，
+        也不能让「开始下载」整个用不了（数据源整体不可达时实测会 SSL 失败）。"""
+        with patch.object(service, "_fetch_universe_codes",
+                          side_effect=RuntimeError("数据源无响应")), \
+             patch.object(service.price_store, "all_stock_codes",
+                          return_value=["000001", "600000"]):
+            codes = service._universe_codes()
+        self.assertEqual(codes, ["000001", "600000"])
 
     def test_two_phase_progress_is_counted_by_stage_rows(self):
         """两轮任务：股票级计数在「两个阶段都落定」前是 0，
