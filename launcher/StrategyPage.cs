@@ -1465,15 +1465,36 @@ private void StRefreshCurStrategy()
             RunUi<Dictionary<string, object>>(delegate
             {
                 string body;
-                if (!GetText("http://127.0.0.1:8000/api/strategies/universe/summary" + q, 20000, out body))
-                    return null;
+                // ⚠️ GetText 在 4xx 时**仍会把响应体读进 body**（只是返回 false）。
+                //    后端「剔除所需的外部数据取不到」时给的是 400 + detail 文案
+                //    （见 universe.ScopeDataUnavailable）—— 这段文案必须显示出来：
+                //    丢了它，用户只看到「共 N 只」，会以为剔除没生效、或者根本没剔。
+                GetText("http://127.0.0.1:8000/api/strategies/universe/summary" + q, 20000, out body);
+                if (string.IsNullOrEmpty(body)) return null;
                 try { return J.Ser().Deserialize<Dictionary<string, object>>(body); }
                 catch { return null; }
             }, delegate(Dictionary<string, object> j)
             {
-                if (j == null || !J.IsOk(j))
+                if (j == null)
                 {
                     _stScopeHint.Text = "共 " + _stLocalCodeCount + " 只";
+                    return;
+                }
+                if (!J.IsOk(j))
+                {
+                    // 后端**明确中止**（口径无法兑现，如 ST 名称名单取不到）→
+                    // detail 原样显示，**含可操作的下一步**（取消勾选 ST / 恢复网络）。
+                    string det = J.StrOr(J.Get(j, "detail"), "");
+                    if (string.IsNullOrEmpty(det))
+                    {
+                        var errObj = J.Map(J.Get(j, "error"));
+                        if (errObj != null) det = J.StrOr(J.Get(errObj, "message"), "");
+                    }
+                    _stScopeHint.Text = string.IsNullOrEmpty(det)
+                        ? "⚠ 范围预览失败（后端未给出原因）"
+                        : "⚠ " + det.Replace("\n", " ");
+                    _stScopeHint.ForeColor = C.UpErr;
+                    _stScopeTip.SetToolTip(_stScopeHint, _stScopeHint.Text);
                     return;
                 }
                 int baseN = (int)J.Num(J.Get(j, "base_count"));
@@ -1506,6 +1527,7 @@ private void StRefreshCurStrategy()
                     txt += " · 可注入 " + (int)J.Num(availObj) + " 只";
                 }
                 _stScopeHint.Text = txt;
+                _stScopeHint.ForeColor = C.Flat;      // 恢复正常色（上次是错误态的红色）
                 // 口径说明（判定基准日 / 前视偏差 / 数据限制）挂气泡
                 string note = J.StrOr(J.Get(j, "note"), "");
                 _stScopeTip.SetToolTip(_stScopeHint,
@@ -1513,6 +1535,7 @@ private void StRefreshCurStrategy()
             }, delegate(Exception ex2)
             {
                 _stScopeHint.Text = "共 " + _stLocalCodeCount + " 只";
+                _stScopeHint.ForeColor = C.Flat;
             }, null);
         }
 

@@ -394,6 +394,15 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                 # 同一区间的结果能差 10~30 倍 —— 没有这两个字段，两份报告无法自证可比。
                 "spec_version": universe.SPEC_VERSION,
                 "spec_signature": universe.spec_signature(),
+                # **池子结果指纹**：spec_signature 只压常量，覆盖不到运行时差异
+                # （ST 名单这次取到没有 / 区间端点 / 实际剔了多少只）→ 曾出现两份报告
+                # 指纹完全相同、实际池子差 126 只、收益差 5% 却「看起来同口径」。
+                # 这个指纹把这些都压进去：两份报告一比，不同就知道池子真的不同。
+                "pool_signature": scope_extra.get("pool_signature"),
+                # ST 名单可用性 + 覆盖率（名单取不到 → 本次已中止，不会跑到这里；
+                # 覆盖率 95%~100% 的漏网要写明：那些票没参与 ST 判定）
+                "st_names": scope_extra.get("st_names"),
+                "st_name_coverage": scope_extra.get("st_name_coverage"),
             },
             "equity_model": "weight_strict_fill",
             "per_stock_truncated": trunc_info,

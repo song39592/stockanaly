@@ -56,6 +56,9 @@ GET  /api/stock/quote     → 按代码查名称与当前股价（供输入代�
 GET  /api/strategies/universe/summary → 回测范围预览（基池/剔除后只数 + 每项剔除只数 +
                                        **可注入只数**（= 实跑参与统计的只数）+ 口径说明）
                                        判定口径与字段含义详见 strategies/ARCHITECTURE.md「股票池层」
+                                       ⚠️ 勾了「剔除 ST/*ST」但名称名单**取不到 / 覆盖不足**时
+                                       → **HTTP 400 + 可操作提示**（取消该剔除项或恢复网络），
+                                       不会静默降级成「一只没剔」（见 universe.ScopeDataUnavailable）
 POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / **trades 逐笔成交明细** /
                                        trades_total / trades_truncated）
                                        逐笔口径、两个上限与「为什么内联下发」详见
@@ -83,6 +86,15 @@ POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / 
                                         （改了逻辑/参数默认值就 bump）。
                                          三者随报告一起落盘，读结果文件即可比对；
                                          复杂的抽象比对不在此处做
+                                       scope.exclusion.pool_signature = **池子结果指纹**
+                                        （as_of + 区间起止 + 每项剔除只数 + 池大小 +
+                                         ST 名单可用性）。spec_signature 只压常量，
+                                        覆盖不到运行时差异 → 曾出现两份报告指纹相同、
+                                        池子差 126 只、收益差 5% 却「看起来同口径」；
+                                        比 pool_signature 不同 = 池子真的不同
+                                       scope.exclusion.st_names / st_name_coverage =
+                                        ST 名称名单来源与覆盖率（<100% 说明有票未参与
+                                         ST 判定，按非 ST 处理）
                                        scope.limit_open_policy + **limit_open** =
                                         「涨停开盘应对」三档（keep 不撤单 / cancel 撤单 /
                                         reseal 涨停条件单，**全局生效**，只作用于回测）。
