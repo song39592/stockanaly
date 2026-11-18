@@ -22,6 +22,7 @@ namespace StockPool
         private int _dlTabIndex = -1;
         private ComboBox _dlYear;         // 起始年份（只精确到年，统一按该年 1 月 1 日）
         private Label _dlHint;
+        private Label _dlModeNote;        // 当前下载模式 + 起始年份到底起什么作用
         private CheckBox _dlReference;
         private ProgressBar _dlBar;
         private Label _dlStatus;
@@ -34,6 +35,8 @@ namespace StockPool
         private GroupBox _dlLockupGroup;         // 锁仓系数区块（有日K数据才显示）
         private Label _dlLockupNote;
         private Button _dlLockupBtn;        private bool _dlSettingsLoading;          // 程序回填控件值时抑制保存事件
+        private bool _dlFilling;            // 下载页控件回填中（不算用户操作：不保存、不改模式）
+        private string _dlCoverBegin = "";  // 库里已覆盖的起点（多数票），用于判断「要不要补更早历史」
         private GroupBox _dlTdxGroup;             // 本地通达信区块（配置有效才显示）
         private Label _dlTdxNote;
         private Button _dlTdxBtn;
@@ -73,16 +76,25 @@ namespace StockPool
             _dlYear.DropDownStyle = ComboBoxStyle.DropDownList;
             _dlYear.Width = 74;
             for (int year = thisYear; year >= 1990; year--) _dlYear.Items.Add(year.ToString());
-            _dlYear.SelectedItem = (thisYear - 5).ToString();     // 默认最近 5 年（进入页面时按 settings.json 覆盖）
+            // 默认最近 5 年。⚠️ 这一句会触发 SelectedIndexChanged —— 必须抑制：
+            // 否则**每次打开页面都会把用户存的起始年份覆盖成默认值**（改过 2020
+            // 的用户一进页面就被改回 2021，还立刻存盘）。真正的回填在 DlOnEnter。
+            _dlFilling = true;
+            try { _dlYear.SelectedItem = (thisYear - 5).ToString(); }
+            finally { _dlFilling = false; }
             _dlYear.SelectedIndexChanged += delegate
             {
                 int y;
-                if (_dlYear != null && int.TryParse(Convert.ToString(_dlYear.SelectedItem), out y))
+                if (!_dlFilling && _dlYear != null && int.TryParse(Convert.ToString(_dlYear.SelectedItem), out y))
                 {
                     UserSettings.Current.DownloadStartYear = y;
                     UserSettings.Save();
+                    // 改了起始年份 = 对「历史起点」有要求 → 起始年份只在完整下载下生效，
+                    // 这里自动取消「仅补最新」，免得点了开始才发现起始年份被吞了。
+                    DlApplyHistoryFill();
+                    DlUpdateHint();
                 }
-                DlUpdateHint();
+                DlUpdateModeNote();
             };
             _dlHint = Mute(Lbl("预计：—"));
             AddRow(b1, Row(Lbl("起始年份"), _dlYear, _dlHint));
@@ -95,10 +107,23 @@ namespace StockPool
             _dlIncremental = Check("仅补最新（增量模式：只补库内最新日之后的新增，不重下已有区间）", true);
             _dlIncremental.CheckedChanged += delegate
             {
-                if (_dlYear != null) _dlYear.Enabled = !_dlIncremental.Checked;
-                DlUpdateHint();
+                // 勾选状态要持久化：它决定「起始年份生不生效」= 这次要不要补历史，
+                // 是用户的下载意图，不该每次进页面都退回默认值。
+                if (!_dlFilling)
+                {
+                    UserSettings.Current.DownloadIncremental = _dlIncremental.Checked;
+                    UserSettings.Save();
+                    DlUpdateHint();
+                }
+                DlUpdateModeNote();
             };
             AddRow(b1, Row(_dlIncremental));
+            // 模式说明：把「起始年份在哪种模式下生效」写在脸上，避免用户以为改了却被吞。
+            _dlModeNote = Mute(Lbl(""));
+            _dlModeNote.AutoSize = false;
+            _dlModeNote.Width = 700;
+            _dlModeNote.Height = 34;
+            AddRow(b1, Row(_dlModeNote));
             AddRow(b1, Row(Mute(Lbl("不勾「仅补最新」则为完整下载（先近后远）：起始年份决定历史起点，"
                 + "用于首次建库或补齐更早历史；库里已覆盖的窗口会自动跳过，不重复下载。"))));
             AddRow(b1, Row(Mute(Lbl("默认最近 5 年，够 MA60 / RPS 等现有分析用；"
@@ -191,6 +216,7 @@ namespace StockPool
             AddRow(stack, g4);
 
             p.Controls.Add(stack);
+            DlUpdateModeNote();
             DlUpdateHint();
             DlRenderButtons("", 0);
             return p;
@@ -199,11 +225,63 @@ namespace StockPool
         /// <summary>界面只选到「年」，统一按该年 1 月 1 日作为起始日。</summary>
         private string DlStartDate()
         {
-            int year;
-            if (_dlYear == null || !int.TryParse(Convert.ToString(_dlYear.SelectedItem), out year))
-                year = DateTime.Today.Year - 5;
-            if (UserSettings.Current.DownloadStartYear.HasValue) year = UserSettings.Current.DownloadStartYear.Value;
+            // 以**下拉框**为准（它是界面上的唯一真相），设置文件只作回填来源 ——
+            // 之前是「设置文件覆盖下拉框」，两者一旦不同步就按下拉框的旧值走。
+            int year = 0;
+            if (_dlYear != null) int.TryParse(Convert.ToString(_dlYear.SelectedItem), out year);
+            if (year < 1990)
+                year = UserSettings.Current.DownloadStartYear ?? (DateTime.Today.Year - 5);
             return year.ToString("0000") + "-01-01";
+        }
+
+        /// <summary>
+        /// 用户选的起始年份是否要求「补更早历史」。
+        /// 判据两条，缺一不可：
+        /// ① 起始年份是**用户显式选过**的（`DownloadStartYear` 有值）——默认值
+        ///    「最近 5 年」只是「够用」的粗略提示，不是精确要求；否则默认 5 年
+        ///    与库里已覆盖 5 年多的起点一比，每次下载都会被判成「要补历史」。
+        /// ② 该年份早于库里已覆盖的起点（真的还有更早历史没下）。
+        /// </summary>
+        private bool DlNeedsHistoryFill()
+        {
+            if (!UserSettings.Current.DownloadStartYear.HasValue) return false;
+            // 覆盖情况未知（还没取到 cover_begin）时**不擅自改**用户的模式，只靠说明提示。
+            if (string.IsNullOrEmpty(_dlCoverBegin)) return false;
+            return string.CompareOrdinal(DlStartDate(), _dlCoverBegin) < 0;
+        }
+
+        /// <summary>
+        /// 起始年份要求补更早历史时自动切到完整下载。
+        /// 原因：起始年份**只在完整下载下生效**（增量模式按定义只补库内最新日之后的新增），
+        /// 不切的话用户改完年份点开始，跑的还是「只补最近」——起始年份被静默吞掉。
+        /// 用户**明确**勾了「仅补最新」时不动他的选择。
+        /// </summary>
+        private void DlApplyHistoryFill()
+        {
+            if (_dlFilling || _dlIncremental == null || !_dlIncremental.Checked) return;
+            if (UserSettings.Current.DownloadIncremental == true) return;   // 用户明确只要增量
+            if (!DlNeedsHistoryFill()) return;
+            _dlIncremental.Checked = false;      // 触发 CheckedChanged → 持久化 + 刷新说明
+        }
+
+        /// <summary>把「当前模式 + 起始年份到底起什么作用」写清楚（避免用户以为起始年份被吞了）。</summary>
+        private void DlUpdateModeNote()
+        {
+            if (_dlModeNote == null) return;
+            string start = DlStartDate();
+            if (_dlIncremental != null && _dlIncremental.Checked)
+            {
+                _dlModeNote.Text = string.Format(
+                    "当前：仅补最新 —— 只追库内最新日之后的新增交易日，不下载更早历史；"
+                    + "起始年份 {0} 在此模式下不生效（要补 {0} 起的历史请取消勾选）。",
+                    start.Substring(0, 4));
+            }
+            else
+            {
+                _dlModeNote.Text = string.Format(
+                    "当前：完整下载（先近后远）—— 起始年份 {0} 决定历史起点，"
+                    + "会补齐库里还缺的更早历史；已足量的整只跳过，近期段带 14 天重叠回拉。", start);
+            }
         }
 
         /// <summary>拉一次 /universe，把「多少只 · 多大 · 磁盘可用多少」显示出来。</summary>
@@ -221,7 +299,9 @@ namespace StockPool
                 string resp;
                 try
                 {
-                    if (!Probe(DlApi + "/universe" + query, 30000, out resp))
+                    // 超时给足 90s：后端冷启动取全市场代码清单实测要 27~36 秒
+                    // （akshare 翻 18 页），按 30s 探会被误判成「预估失败」。
+                    if (!Probe(DlApi + "/universe" + query, 90000, out resp))
                     {
                         Ui(delegate { if (round == _dlHintRound) _dlHint.Text = "预估失败，请检查后端后刷新"; });
                         return;
@@ -272,6 +352,9 @@ namespace StockPool
             }
             // 范围 / 并发 / 限速都不再暴露给界面：范围固定全市场，并发与限速用后端默认值（4 / 4）。
             // 模式由「仅补最新」勾选框决定：勾选=增量（只补新增、不重下已有区间）；不勾=完整下载（补历史）。
+            // 起始年份早于已覆盖起点时在这里再判一次（覆盖情况可能是改年份之后才取到的），
+            // 否则用户点了开始才发现起始年份被静默吞掉。
+            DlApplyHistoryFill();
             var body = new Dictionary<string, object>();
             body["scope"] = "all";
             body["source"] = source;
@@ -350,9 +433,22 @@ namespace StockPool
             if (_dlYear != null)
             {
                 int sy = UserSettings.Current.DownloadStartYear ?? (DateTime.Today.Year - 5);
-                _dlYear.SelectedItem = sy.ToString();
-                if (_dlYear.SelectedIndex < 0) _dlYear.SelectedItem = (DateTime.Today.Year - 5).ToString();
+                // 回填不算用户操作：既不保存（否则把默认值写回设置），
+                // 也不触发「改年份 → 自动切完整下载」。
+                _dlFilling = true;
+                try
+                {
+                    _dlYear.SelectedItem = sy.ToString();
+                    if (_dlYear.SelectedIndex < 0) _dlYear.SelectedItem = (DateTime.Today.Year - 5).ToString();
+                    // 「仅补最新」的勾选状态也要回填：它决定「起始年份生不生效」，
+                    // 属于用户的下载意图（上次选了完整下载，这次进来仍是完整下载）。
+                    // null = 从未显式选过 → 默认增量（起始年份若被显式改早，会自动切完整）。
+                    if (_dlIncremental != null)
+                        _dlIncremental.Checked = UserSettings.Current.DownloadIncremental ?? true;
+                }
+                finally { _dlFilling = false; }
             }
+            DlUpdateModeNote();
             DlUpdateHint();
             DlLoadAutoState(false);
             DlLoadLockupState(false);
@@ -601,6 +697,12 @@ namespace StockPool
             // 不会被某一只 2005 年上市的老票把起点拉到 2005 而误报「覆盖 20 年」。
             string coverBegin = Convert.ToString(J.GetFrom(root, "cover_begin") ?? "");
             string coverEnd = Convert.ToString(J.GetFrom(root, "cover_end") ?? "");
+            // 记下覆盖起点：用户把起始年份改到它之前时，说明「有更早历史要补」，
+            // 下载页据此自动切到完整下载（起始年份只在完整下载下生效）。
+            _dlCoverBegin = coverBegin;
+            // 覆盖情况此刻才拿到 → 补判一次（进页面时还拿不到）。
+            DlApplyHistoryFill();
+            DlUpdateModeNote();
             if (downloaded == 0) _dlAutoNote.Text = "库里还没有日K数据：先「开始下载」一次。";
             else if (coverBegin.Length > 0 && coverEnd.Length > 0)
                 _dlAutoNote.Text = string.Format("当前覆盖：{0} ~ {1}（多数股票）　已下载 {2} 只", coverBegin, coverEnd, downloaded);
@@ -903,9 +1005,22 @@ namespace StockPool
             // 一并计入已处理，进度条与计数文案统一；skipped 已包含在 completed 里，不重复加。
             int suspended = J.Int(J.GetFrom(task, "suspended"));
             int handled = completed + failed + suspended;
-            double percent = total > 0
-                ? Math.Min(100.0, handled * 100.0 / total)
-                : J.Num(J.GetFrom(task, "percent"));
+            // 两轮任务（完整历史 = 先近后远）：股票级计数只在**两个阶段都落定**后才前进，
+            // 而队列顺序是「先把所有股票的近期段跑完，再跑历史段」→ 第一轮跑完时
+            // 股票级计数仍是 0，进度条会长时间停在 0.0%（看着像卡死，实测 954 只已就位
+            // 仍显示「已处理 0 / 共 5580、进度 0.0%」）。真实完成度按**阶段行**算。
+            int phases = J.Int(J.GetFrom(task, "phases"));
+            int phaseSettled = J.Int(J.GetFrom(task, "phase_settled"));
+            int phaseTotal = J.Int(J.GetFrom(task, "phase_total"));
+            int phase1 = J.Int(J.GetFrom(task, "phase1_settled"));
+            int phase2 = J.Int(J.GetFrom(task, "phase2_settled"));
+            int currentPhase = J.Int(J.GetFrom(task, "current_phase"));
+            bool twoPhase = phases > 1 && phaseTotal > 0;
+            double percent = twoPhase
+                ? Math.Min(100.0, phaseSettled * 100.0 / phaseTotal)
+                : (total > 0
+                    ? Math.Min(100.0, handled * 100.0 / total)
+                    : J.Num(J.GetFrom(task, "percent")));
             _dlLastStatus = status;
             // 来源决定用词：本地通达信是「同步」（读本机文件、不联网），在线才是「下载」
             var source = Convert.ToString(J.GetFrom(J.GetFrom(task, "options"), "source") ?? "");
@@ -922,7 +1037,11 @@ namespace StockPool
             if (skipped > 0) extra += string.Format("　跳过 {0} 只（库里已足量）", skipped);
             if (suspended > 0) extra += string.Format("　停牌/退市 {0} 只", suspended);
             extra += DlElapsedText(task);
-            _dlCount.Text = string.Format("已处理 {0} / 共 {1}　完成 {2}　失败 {3}　剩余 {4}　进度 {5:0.0}%{6}",
+            _dlCount.Text = twoPhase
+                ? string.Format("已处理 {0} / 共 {1} 段（{2} 轮 × {3} 只）　完成 {4} 只　失败 {5} 只　剩余 {6} 只　进度 {7:0.0}%　第 {8}/{2} 轮：近期段 {9}，历史段 {10}{11}",
+                                phaseSettled, phaseTotal, phases, total, completed, failed, remaining, percent,
+                                currentPhase, phase1, phase2, extra)
+                : string.Format("已处理 {0} / 共 {1}　完成 {2}　失败 {3}　剩余 {4}　进度 {5:0.0}%{6}",
                                           handled, total, completed, failed, remaining, percent, extra);
             // 请求区间：后端按 mode 给出（增量模式不给下界，如实显示「仅补最近」）。
             // 这是**用户请求的范围**，不是每只股票真正要下的区间：后端会按库内已有数据
@@ -930,8 +1049,12 @@ namespace StockPool
             // 所以必须加说明，否则会被误读成「已有 2021~2026 还要从 2020 重下一遍」。
             string reqBegin = Convert.ToString(J.GetFrom(task, "requested_begin") ?? "");
             string reqEnd = Convert.ToString(J.GetFrom(task, "requested_end") ?? "");
-            // 增量任务区间是「各票窗口的并集」：终点=今天；起点取决于类型——
-            // 每日纯增量=最早那只的库内最新日+1（只补新增）；周度修订回收=最新日-overlap_days。
+            // 「无新增可补」等说明：库里最新日已追到应有交易日时，后端不再编区间
+            // （起点=最新日+1 会大于终点=应有交易日，是起止颠倒的假区间）。
+            string reqNote = Convert.ToString(J.GetFrom(task, "requested_note") ?? "");
+            // 增量任务区间是「各票窗口的并集」：终点=应有交易日（今天未收盘时=上一交易日）；
+            // 起点取决于类型——每日纯增量=最早那只的库内最新日+1（只补新增）；
+            // 周度修订回收=最新日-overlap_days。起点>终点说明「已无新增可补」，后端改给说明文案。
             bool reqIncremental = J.Int(J.GetFrom(task, "requested_incremental")) == 1;
             int reqOverlap = J.Int(J.GetFrom(task, "overlap_days"));   // >0 即周度修订回收任务
             if (kind == "lockup")
@@ -951,7 +1074,9 @@ namespace StockPool
                                 : (reqIncremental
                                     ? "（增量：逐票只补库内最新日之后的新增，已最新则跳过）"
                                     : "（按库内缺口增量补齐，已有区间不重下）"))
-                        : "本次请求区间：增量（仅补最近）")
+                        : (reqNote.Length > 0
+                            ? "本次请求区间：" + reqNote
+                            : "本次请求区间：增量（仅补最近）"))
                     : "";
             }
             if (status == "completed" && failed > 0) _dlStatus.Text += "（部分失败，可点「重试失败项」）";

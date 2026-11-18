@@ -205,7 +205,14 @@ def _normalize_codes(raw: Any) -> list[str]:
 # 全市场代码表的取数预算（秒）。两个源原本各 timeout=90 且串行 -> 最坏 180s，
 # 而本函数在下载接口的同步路径上。正常情况下首个源即命中（实测 1~2s），
 # 预算给到 20s 已留 10 倍余量（bug-02）。
-_UNIVERSE_BUDGET = 20.0
+#
+# ⚠️ **实测修正（2026-11-18）**：`stock_info_a_code_name` 要翻 **18 页**，
+# 冷启动实测 **27~36 秒**（不是 1~2s）→ 原来的 20s 预算会让**后端每次重启后的
+# 第一次调用必然超时**（用户看到「股票清单获取失败：A 股代码列表获取失败
+# （数据源无响应）」，而数据源其实好好的）；后续调用命中 akshare 的进程内缓存，
+# 0.1 秒就返回 → 表现为「第一次点开始失败，再点一次就好」。
+# 预算按实测上界（36s）留余量放到 60s：前端 `/start` 的超时是 120s，装得下。
+_UNIVERSE_BUDGET = 60.0
 _UNIVERSE_PER_SOURCE = 90.0
 
 
@@ -1825,7 +1832,14 @@ def _stamp_span(options: dict[str, Any], codes: list[str],
     创建任务时算一次写进 options，轮询时零成本；老任务没有这两个键就回退成
     「仅补最近」（前端已兼容）。
 
-    完整历史任务不做任何事（它的窗口就是 options.start_date ~ 今天）。
+    终点用「应有交易日」而不是自然日：任务创建于昨日或创建时尚未收盘，
+    写死的 today 会比实际下载目标少一天，造成「请求区间停在 10-19 而非 10-20」
+    的展示错误。
+
+    **没有新增可补时**（库里最新日已追到应有交易日）不编区间，改写 `span_note`：
+    如实说「已最新」，不要显示成起止颠倒的假区间。
+
+    完整历史任务不做任何事（它的窗口就是 options.start_date ~ 应有交易日）。
     """
     if str(options.get("mode") or MODE_FULL) != MODE_INCREMENTAL:
         return
@@ -1860,11 +1874,20 @@ def _stamp_span(options: dict[str, Any], codes: list[str],
         begin = start if begin is None or start < begin else begin
     if begin is None:                       # 全都没下过：就是从头拉，不编区间
         return
+    end = expected or dt.date.today().isoformat()
+    # ⚠️ **起止颠倒的假区间**：库里最新日已经追到「应有交易日」时，本轮其实
+    # **没有新增交易日可补** —— 增量窗口是「最新日 + 1 → 应有交易日」，而今天
+    # 还没收盘时「应有交易日」= 昨天，于是 begin(明天) > end(昨天)。
+    # 照原样显示就是「2026-11-18 ~ 2026-11-17」这种倒过来的区间，看着像
+    # 「要下今天（还没收盘）的数据」→ 这里如实说「无新增」，不给假区间。
+    if begin.isoformat() > end:
+        options["span_begin"] = ""
+        options["span_end"] = end
+        options["span_note"] = "已最新：无新增交易日可补"
+        return
     options["span_begin"] = begin.isoformat()
-    # 终点用「应有交易日」，不要用创建任务时的 dt.date.today() 写死：任务创建于
-    # 昨日或创建时尚未收盘，都会让写死的 end 比实际下载目标（_expected_data_day）
-    # 少一天，造成「请求区间停在 10-19 而非 10-20」的展示错误。
-    options["span_end"] = _expected_data_day() or dt.date.today().isoformat()
+    options["span_end"] = end
+    options.pop("span_note", None)
 
 
 def _backfill_spans() -> None:
@@ -1877,7 +1900,7 @@ def _backfill_spans() -> None:
         options = task.get("options") or {}
         if str(options.get("mode") or MODE_FULL) != MODE_INCREMENTAL:
             continue
-        if options.get("span_begin"):
+        if options.get("span_begin") or options.get("span_note"):
             continue
         if task["status"] not in ("running", "queued", "paused"):
             continue
@@ -1894,9 +1917,12 @@ def _backfill_spans() -> None:
 def _requested_span(task: dict[str, Any]) -> tuple[str | None, str | None]:
     """这个任务**请求下载的时间段**（下载页展示用），空值表示不限。
 
-    完整历史：从 options 里的起始日到今天；
+    完整历史：从 options 里的起始日到「应有交易日」；
     增量：创建时由 `_stamp_span` 算好的并集窗口（逐票其实是从各自库内最新
     日期前推的重叠段，展示的是这些窗口的并集）。
+
+    终点用「应有交易日」而不是自然日：今天还没收盘时并不存在今天的日线，
+    显示到今天会被读成「要下今天的数据」（而今天不可能有）。
     """
     options = task.get("options") or {}
     if str(options.get("kind") or KIND_BARS) == KIND_LOCKUP:
@@ -1908,11 +1934,32 @@ def _requested_span(task: dict[str, Any]) -> tuple[str | None, str | None]:
         # 终点随「应有交易日」动态刷新，不用创建任务时写死的 span_end：
         # 任务创建于昨日 / 创建时尚未收盘都会让写死的 end 比实际下载目标少一天。
         end = _expected_data_day() or str(options.get("span_end") or "")
+        # 起止颠倒（起点 > 终点）不在这里吞掉：交给 `_requested_note` 判成
+        # 「已最新、无新增可补」，并由 `_decorate` 清掉这个假区间。
         return begin, end
     begin = _option_date(options, "start_date")
     if begin is None:
         return None, None
-    return begin.isoformat(), dt.date.today().isoformat()
+    return begin.isoformat(), _expected_data_day() or dt.date.today().isoformat()
+
+
+def _requested_note(task: dict[str, Any], begin: str | None, end: str | None) -> str:
+    """请求区间的补充说明（下载页展示用）。
+
+    增量任务的区间是「库内最新日 + 1 → 应有交易日」：库里最新日已经追到应有
+    交易日时，起点会**大于**终点（今天还没收盘时：起点=明天、终点=昨天），
+    这不是「区间」，而是「本轮没有新增交易日可补」——如实说出来，别显示成
+    「2026-11-18 ~ 2026-11-17」这种起止颠倒的假区间。
+    """
+    options = task.get("options") or {}
+    note = str(options.get("span_note") or "")
+    if note:
+        return note
+    if str(options.get("mode") or MODE_FULL) != MODE_INCREMENTAL:
+        return ""
+    if begin and end and begin > end:
+        return "已最新：无新增交易日可补"
+    return ""
 
 
 def _decorate(task: dict[str, Any]) -> dict[str, Any]:
@@ -1921,7 +1968,27 @@ def _decorate(task: dict[str, Any]) -> dict[str, Any]:
     task["remaining"] = download_store.remaining(task["id"])
     task["failures"] = download_store.failures(task["id"])
     task["kind"] = str((task.get("options") or {}).get("kind") or KIND_BARS)
+    # ---- 阶段感知的进度（两轮任务：先近后远）----
+    # 股票级 completed 只在**两个阶段都落定**后才 +1，而队列顺序是「先把所有股票
+    # 的近期段跑完，再跑历史段」→ 第一轮跑完时股票级计数仍是 0，进度条长时间停在
+    # 0.0%，看着像卡死（实测 954 只已就位，界面仍显示「已处理 0 / 共 5580、0.0%」）。
+    # 这里把**真实完成度**（按阶段行计）单独给出，前端用它画进度条与百分比。
+    phases = int((task.get("options") or {}).get("phases") or 1)
+    progress = download_store.phase_progress(task["id"])
+    task["phases"] = phases
+    task["phase_settled"] = progress["settled"]
+    task["phase_total"] = task["total"] * phases
+    task["phase1_settled"] = progress["phase1"]
+    task["phase2_settled"] = progress["phase2"]
+    task["phase_percent"] = round(
+        progress["settled"] * 100.0 / max(1, task["total"] * phases), 1)
+    # 当前跑到第几轮（两轮任务：第一轮未跑完就是 1，否则 2）
+    task["current_phase"] = 1 if (phases > 1 and progress["phase1"] < task["total"]) else phases
     requested_begin, requested_end = _requested_span(task)
+    task["requested_note"] = _requested_note(task, requested_begin, requested_end)
+    if requested_begin and requested_end and requested_begin > requested_end:
+        # 起止颠倒 = 不是区间，是「无新增可补」→ 清掉区间，只留说明
+        requested_begin = requested_end = None
     task["requested_begin"] = requested_begin
     task["requested_end"] = requested_end
     # 增量任务的区间是「各票窗口的并集」，前端要据此换一种说法

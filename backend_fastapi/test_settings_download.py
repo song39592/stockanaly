@@ -224,6 +224,88 @@ class DownloadSettingsTests(unittest.TestCase):
         sync.assert_called_once()
         self.assertEqual(sync.call_args.kwargs["start"], dt.date(2026, 10, 14))
 
+    # ---- 请求区间的展示口径（回归：起止颠倒的假区间）----
+
+    def test_incremental_span_not_inverted_when_already_latest(self):
+        """库里最新日已追到应有交易日 → 不给「2026-11-18 ~ 2026-11-17」这种倒区间。"""
+        options = {"mode": service.MODE_INCREMENTAL, "overlap_days": 0}
+        with patch.object(service, "_expected_data_day", return_value="2026-11-17"), \
+             patch.object(service.price_store, "code_latest_dates",
+                          return_value={"000001": "2026-11-17"}), \
+             patch.object(service.stock_status, "is_suspended_like", return_value=False):
+            service._stamp_span(options, ["000001"])
+        self.assertEqual(options.get("span_begin"), "")
+        self.assertIn("无新增", options.get("span_note") or "")
+        self.assertEqual(service._requested_span({"options": options}), (None, None))
+
+    def test_incremental_span_keeps_begin_before_end(self):
+        """还有新增可补时，区间照常是「最新日+1 → 应有交易日」。"""
+        options = {"mode": service.MODE_INCREMENTAL, "overlap_days": 0}
+        with patch.object(service, "_expected_data_day", return_value="2026-11-17"), \
+             patch.object(service.price_store, "code_latest_dates",
+                          return_value={"000001": "2026-11-14"}), \
+             patch.object(service.stock_status, "is_suspended_like", return_value=False):
+            service._stamp_span(options, ["000001"])
+        self.assertEqual(options["span_begin"], "2026-11-15")
+        self.assertEqual(options["span_end"], "2026-11-17")
+        self.assertEqual(service._requested_span({"options": options}),
+                         ("2026-11-15", "2026-11-17"))
+
+    def test_full_span_end_is_expected_trade_day_not_today(self):
+        """完整下载的终点是「应有交易日」：今天还没收盘时不该显示要下今天的数据。"""
+        task = {"options": {"mode": service.MODE_FULL, "start_date": "2020-01-01"}}
+        with patch.object(service, "_expected_data_day", return_value="2026-11-17"):
+            begin, end = service._requested_span(task)
+        self.assertEqual(begin, "2020-01-01")
+        self.assertEqual(end, "2026-11-17")
+
+    def test_stored_inverted_span_is_reported_as_no_new_data(self):
+        """老任务存着「最新日+1」这个起点、终点又回到上一交易日 → 显示「无新增」，不给假区间。"""
+        task = {"id": "test", "status": "running", "completed": 0, "failed": 0, "total": 1,
+                "options": {"mode": service.MODE_INCREMENTAL, "span_begin": "2026-11-18",
+                            "span_end": "2026-11-17"}}
+        with patch.object(service, "_expected_data_day", return_value="2026-11-17"):
+            view = service._decorate(task)
+        self.assertIsNone(view["requested_begin"])
+        self.assertIsNone(view["requested_end"])
+        self.assertIn("无新增", view["requested_note"])
+
+    def test_full_phase2_fills_earlier_gap_from_start_year(self):
+        """起始年份早于库里已有起点时，阶段 2 只补「起始日 → 库内最早-1」这段缺口。"""
+        runtime = Mock()
+        runtime.stop.is_set.return_value = False
+        runtime.options = {"mode": service.MODE_FULL, "start_date": "2020-01-01",
+                           "split_date": "2023-11-18", "source": service.SOURCE_ONLINE,
+                           "with_reference": False}
+        with patch.object(service, "_skip_if_covered", return_value=False), \
+             patch.object(service.price_store, "earliest_bar_date", return_value="2021-08-02"), \
+             patch.object(service, "_no_older_history", return_value=False), \
+             patch.object(service.price_service, "sync_all_adjusts", return_value={}) as sync, \
+             patch.object(download_store, "finish_code"):
+            service._download_one("test", runtime, {"code": "000001", "seq": 0, "phase": 2})
+        sync.assert_called_once()
+        self.assertEqual(sync.call_args.kwargs["start"], dt.date(2020, 1, 1))
+        self.assertEqual(sync.call_args.kwargs["end"], dt.date(2021, 8, 1))
+
+    def test_two_phase_progress_is_counted_by_stage_rows(self):
+        """两轮任务：股票级计数在「两个阶段都落定」前是 0，
+        真实完成度必须按**阶段行**给（否则第一轮跑完仍显示 0%，看着像卡死）。"""
+        download_store.create_task("t2", "all", {"mode": service.MODE_FULL, "phases": 2},
+                                   ["000001", "000002"], 2)
+        # 000001：两个阶段都落定；000002：只落定第一阶段（近期段）
+        download_store.finish_code("t2", 0, ok=True)      # 000001 阶段 1
+        download_store.finish_code("t2", 2, ok=True)      # 000001 阶段 2
+        download_store.finish_code("t2", 1, ok=True)      # 000002 阶段 1
+        task = download_store.get_task("t2")
+        view = service._decorate(task)
+        self.assertEqual(view["completed"], 1)            # 只有 000001 两只都落定
+        self.assertEqual(view["phase_settled"], 3)        # 已落定的阶段行：3 行
+        self.assertEqual(view["phase_total"], 4)          # 2 只 × 2 轮
+        self.assertEqual(view["phase1_settled"], 2)
+        self.assertEqual(view["phase2_settled"], 1)
+        self.assertEqual(view["phase_percent"], 75.0)     # 真实完成度不是 0%
+        self.assertEqual(view["current_phase"], 2)        # 第一轮已跑完 → 进入第二轮
+
 
 if __name__ == "__main__":
     unittest.main()
