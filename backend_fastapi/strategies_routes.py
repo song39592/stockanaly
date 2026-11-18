@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -79,7 +79,12 @@ def _resolve_codes(req: BacktestRequest):
     """
     if not req.use_all:
         return [str(c).strip() for c in (req.codes or []) if str(c).strip()], {}
-    codes, detail = suniverse.build_detail(suniverse.spec_from_request(req))
+    try:
+        codes, detail = suniverse.build_detail(suniverse.spec_from_request(req))
+    except suniverse.ScopeDataUnavailable as exc:
+        # 剔除特征所需的外部数据（ST 名单）取不到 → **口径无法兑现** → 明确 400
+        # + 可操作的下一步。绝不能默默降级继续跑（理由见 universe.ScopeDataUnavailable）。
+        raise HTTPException(status_code=400, detail=str(exc))
     return codes, dict(detail)
 
 
@@ -105,7 +110,11 @@ def universe_summary(exclude: list[str] = Query(default=[]),
         {"start": start, "end": end, "exclude": list(exclude)},
         universe_mode="interval_data",
     )
-    out = suniverse.summary(spec)
+    try:
+        out = suniverse.summary(spec)
+    except suniverse.ScopeDataUnavailable as exc:
+        # 同上：名单取不到 → 预览也必须**明确报错**，不能显示一个「少剔了 ST」的假数字
+        raise HTTPException(status_code=400, detail=str(exc))
     out.update({"ok": True, "exclude": list(exclude)})
     return out
 

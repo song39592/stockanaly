@@ -331,18 +331,49 @@ def bar_counts(start: str | None = None, end: str | None = None,
 # 供 universe（股票池层）与 backtest（编排层）复用；这里只取数，不做「范围规则」判断。
 
 _NAME_TTL = 24 * 3600
-_name_cache: dict = {"at": 0.0, "map": {}}
+_NAME_RETRY = 300            # 取不到时的退避（秒）：别让每次调用都白等 90s
+_name_cache: dict = {"at": 0.0, "map": {}, "error": "", "tried_at": 0.0}
+
+
+def names_source_status() -> dict:
+    """akshare 全市场名称表的**可用性**（给「ST 剔除能不能做」提供判据）。
+
+    ⚠️ 这张表是 ST / *ST 剔除的**唯一**数据源（数据源不提供历史名单，只能用当前名单）。
+    取不到时若还继续跑，等于「勾了剔除 ST 却一只没剔」——
+    报告的「剔除明细」里只是**没有 st 这一项**（看起来像「本来就没有 ST」），
+    口径指纹也算不出差别 → **静默失真**，两份报告摆在一起没法比。
+
+    所以：**用到这张表的判定必须先看 `ok`**；为 False 就该中止并让用户知道
+    「可以取消该剔除项再跑」。详见 `universe.ScopeDataUnavailable`。
+    """
+    return {
+        "ok": bool(_name_cache["map"]),
+        "size": len(_name_cache["map"]),
+        "at": _name_cache["at"],
+        "tried_at": _name_cache["tried_at"],
+        "error": _name_cache["error"],
+        "source": "akshare.stock_info_a_code_name",
+    }
 
 
 def load_names(codes: list[str]) -> dict[str, str]:
-    """批量取股票名称：akshare 全市场表一次拉齐，失败静默降级为空映射。
+    """批量取股票名称：akshare 全市场表一次拉齐，**进程内缓存 24h**。
+
+    取不到时返回空映射（**不抛异常**）—— 名称本身是「锦上添花」，别让周榜之类的
+    展示功能整体崩掉。但**取不到这件事必须留痕**：`names_source_status()['ok']`
+    为 False、`['error']` 给出原因 → 依赖这份名单做**口径判定**的调用方
+    （见 `universe._apply_exclusions`）据此**中止**，而不是默默当成「没有 ST」。
 
     timeout=90：实测这张全市场表**冷启动要 50.8s**（5572 行），给 30s 会超时 →
-    返回空映射 → 周榜/回测的**名称整列空白**。名称是「锦上添花」，但整列空白很显眼，
-    所以宁可多等。结果进程内缓存 24h。
+    名称整列空白。所以宁可多等。
     """
     now = time.time()
-    if not _name_cache["map"] or now - _name_cache["at"] > _NAME_TTL:
+    # 缓存空了 → 按退避重试（否则每次调用都白等 90s）；
+    # 缓存有但过期（24h）→ 重新拉。
+    retry_due = (not _name_cache["map"]) and (now - _name_cache["tried_at"] > _NAME_RETRY)
+    expired = bool(_name_cache["map"]) and (now - _name_cache["at"] > _NAME_TTL)
+    if retry_due or expired:
+        _name_cache["tried_at"] = now
         try:
             import akshare as ak
             from market_service import _ak          # 统一的超时/降级封装
@@ -353,8 +384,11 @@ def load_names(codes: list[str]) -> dict[str, str]:
                     for _, r in df.iterrows()
                 }
                 _name_cache["at"] = now
-        except Exception:                        # noqa: BLE001 - 名称拿不到就算了
-            pass
+                _name_cache["error"] = ""
+            else:
+                _name_cache["error"] = "akshare 返回空表"
+        except Exception as exc:                   # noqa: BLE001 - 记下原因，别崩
+            _name_cache["error"] = f"{type(exc).__name__}: {exc}"
     m = _name_cache["map"]
     return {c: m.get(c) or m.get(c.zfill(6), "") for c in codes}
 

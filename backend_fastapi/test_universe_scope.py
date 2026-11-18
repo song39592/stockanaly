@@ -61,7 +61,9 @@ class TestExclusions(unittest.TestCase):
             return list(BASE)
 
         def _load_names(codes):
-            return {"600000": "ST测试", "600001": "*ST测试", "300001": "正常"}
+            # 名单必须**覆盖全部**待判定代码：覆盖不足会中止（见 TestStNameUnavailable）
+            return {"600000": "ST测试", "600001": "*ST测试", "300001": "正常",
+                    "688001": "正常", "000002": "正常"}
 
         def _code_first_dates():
             # 600002 于基准日之后才上市；600000 上市于基准日前 400 天
@@ -76,6 +78,8 @@ class TestExclusions(unittest.TestCase):
 
         p = {"list_universe_codes": _list_universe_codes,
              "load_names": _load_names,
+             "names_source_status": lambda: {"ok": True, "size": len(BASE),
+                                             "source": "test", "error": ""},
              "code_first_dates": _code_first_dates,
              "market_caps_at": _market_caps_at}
         p.update(over)
@@ -130,7 +134,9 @@ class TestBuildDetail(unittest.TestCase):
         self._patches = patch.multiple(
             universe.data,
             list_universe_codes=lambda universe_mode="interval_data", start=None, end=None: list(BASE),
-            load_names=lambda codes: {},
+            load_names=lambda codes: {c: "正常" for c in BASE},
+            names_source_status=lambda: {"ok": True, "size": len(BASE),
+                                         "source": "test", "error": ""},
             code_first_dates=lambda: {},
             market_caps_at=lambda codes, as_of: ({}, {"shares_source": "as_of",
                                                        "fallback_codes": 0,
@@ -172,6 +178,101 @@ class TestBuildDetail(unittest.TestCase):
         self.assertIn("当前", note)                 # ST 用当前名单
         self.assertIn("上市日", note)               # 上市日近似
         self.assertIn("剔除明细", note)             # 每项只数
+
+
+class TestStNameUnavailable(unittest.TestCase):
+    """ST 名称名单取不到 / 覆盖不足 → **必须中止**，不能静默降级（实测踩出来的坑）。
+
+    旧口径会静默降级成「一只 ST 都没剔」→ 报告的剔除明细里只是没有 st 这一项，
+    口径指纹也算不出差别 → 两份报告「看起来同口径」而池子差 126 只、收益差 5%。
+    现在：勾了剔除、名单却拿不到 → 明确中止，并给出可操作的下一步。
+    """
+
+    def _patches(self, names_status, names_map):
+        return patch.multiple(
+            universe.data,
+            list_universe_codes=lambda universe_mode="interval_data", start=None, end=None: list(BASE),
+            load_names=lambda codes: names_map,
+            names_source_status=lambda: names_status,
+            code_first_dates=lambda: {},
+            market_caps_at=lambda codes, as_of: ({}, {"shares_source": "as_of",
+                                                       "fallback_codes": 0,
+                                                       "price_date": as_of}),
+        )
+
+    def test_unavailable_names_abort(self):
+        p = self._patches({"ok": False, "size": 0, "error": "Timeout"}, {})
+        with p:
+            with self.assertRaises(universe.ScopeDataUnavailable) as cm:
+                universe._apply_exclusions(list(BASE), _spec(exclude=["st", "star_st"]))
+        msg = str(cm.exception)
+        self.assertIn("取不到", msg)
+        self.assertIn("取消", msg)          # 必须给出可操作的下一步
+
+    def test_low_coverage_aborts(self):
+        p = self._patches({"ok": True, "size": 5, "error": ""},
+                           {"600000": "正常"})          # 只覆盖 1/5 = 20%
+        with p:
+            with self.assertRaises(universe.ScopeDataUnavailable) as cm:
+                universe._apply_exclusions(list(BASE), _spec(exclude=["st"]))
+        self.assertIn("覆盖", str(cm.exception))
+
+    def test_full_coverage_passes_and_reports(self):
+        names = {"600000": "ST测试", "600001": "*ST测试", "300001": "正常",
+                 "688001": "正常", "000002": "正常"}
+        p = self._patches({"ok": True, "size": 5, "error": ""}, names)
+        with p:
+            _codes, dropped, extra = universe._apply_exclusions(
+                list(BASE), _spec(exclude=["st", "star_st"]))
+        self.assertEqual(dropped["st"], 1)
+        self.assertEqual(dropped["star_st"], 1)
+        self.assertEqual(extra["st_name_coverage"], 1.0)
+
+    def test_note_declares_st_not_excluded(self):
+        """没勾 ST 剔除 → 口径说明必须**显式写明**，否则读者会以为「本来就没有 ST」。"""
+        note = universe.scope_note({"base_count": 10, "filtered_count": 10,
+                                    "dropped": {}, "exclude": [], "as_of": "2024-01-02"})
+        self.assertIn("未剔除", note)
+        self.assertIn("ST", note)
+
+
+class TestPoolSignature(unittest.TestCase):
+    """池子**结果**指纹：两份报告一比就知道池子是不是真的同一个。
+
+    `spec_signature` 只压常量 → 覆盖不到运行时差异（ST 名单这次取到没有、
+    区间端点、实际剔了多少只）→ 曾出现指纹完全相同、池子差 126 只、收益差 5%
+    却「看起来同口径」。`pool_signature` 把这些都压进去。
+    """
+
+    def setUp(self):
+        self._patches = patch.multiple(
+            universe.data,
+            list_universe_codes=lambda universe_mode="interval_data", start=None, end=None: list(BASE),
+            load_names=lambda codes: {c: "正常" for c in BASE},
+            names_source_status=lambda: {"ok": True, "size": len(BASE),
+                                         "source": "test", "error": ""},
+            code_first_dates=lambda: {},
+            market_caps_at=lambda codes, as_of: ({}, {"shares_source": "as_of",
+                                                       "fallback_codes": 0,
+                                                       "price_date": as_of}),
+        )
+        self._patches.start()
+        universe.invalidate()
+
+    def tearDown(self):
+        self._patches.stop()
+        universe.invalidate()
+
+    def test_signature_present_and_stable(self):
+        _c1, d1 = universe.build_detail(_spec(exclude=["st"]), force=True)
+        _c2, d2 = universe.build_detail(_spec(exclude=["st"]), force=True)
+        self.assertTrue(d1.get("pool_signature"))
+        self.assertEqual(d1["pool_signature"], d2["pool_signature"])
+
+    def test_signature_differs_when_pool_differs(self):
+        _c1, d1 = universe.build_detail(_spec(exclude=[]), force=True)
+        _c2, d2 = universe.build_detail(_spec(exclude=["st"]), force=True)
+        self.assertNotEqual(d1["pool_signature"], d2["pool_signature"])
 
 
 class TestAvailability(unittest.TestCase):
@@ -226,7 +327,9 @@ class TestPreviewEqualsRun(unittest.TestCase):
         self._patches = patch.multiple(
             universe.data,
             list_universe_codes=lambda universe_mode="interval_data", start=None, end=None: list(BASE),
-            load_names=lambda codes: {},
+            load_names=lambda codes: {c: "正常" for c in BASE},
+            names_source_status=lambda: {"ok": True, "size": len(BASE),
+                                         "source": "test", "error": ""},
             code_first_dates=lambda: {},
             market_caps_at=lambda codes, as_of: ({}, {"shares_source": "as_of",
                                                        "fallback_codes": 0,
