@@ -80,6 +80,10 @@
   状态判定**无前视**（决策日只用前一日收盘及更早），空仓 = 真清仓 → 付换手成本）、
   `jwzz_cross_all`（JWZZ 上穿/下穿，全量等权）、`jwzz_hold`（JWZZ 买入后持有到下穿，
   槽位制：最多 N 只、单票固定仓位、每日按 JWZZ 排名买前 k 只、槽位满则当天买不进）、
+  `jwzz_htop`（JWZZ 强势区买入 / 下穿或破 HTOP 清仓：买入按 JWZZ 排名取前 N、
+  每只固定 `M`（默认 1/20），**跌出前 N 不卖**；只在 JWZZ 收盘下穿 95‰
+  或当日最低价下破 HTOP（筹码密集上沿）时清仓；HTOP 与回测同复权口径、
+  按收盘价成交——实盘可用条件单在 HTOP 价位挂单）、
   `kl_pool_jwzz`（KL 入池 + JWZZ 买卖）、`scr90`、`macd`、`rps_score` 等；
   策略口径与参数见 `backend_fastapi/strategies/ARCHITECTURE.md`。
   **大盘状态用的指数序列**已落盘到**独立库** `bars/indices.db`（表 `index_bars`，
