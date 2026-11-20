@@ -403,6 +403,14 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                 # 覆盖率 95%~100% 的漏网要写明：那些票没参与 ST 判定）
                 "st_names": scope_extra.get("st_names"),
                 "st_name_coverage": scope_extra.get("st_name_coverage"),
+                # 上市日来源与覆盖率：真实上市日（交易所公布）是新股/次新股判定的
+                # 唯一依据；不在交易所当前上市表的少数票（已退市等）走保守兜底，
+                # 兜底只数必须落盘 —— 读者要能分开看「用真实数据」和「用兜底」。
+                "listing_date_source": scope_extra.get("listing_date_source"),
+                "listing_date_coverage": scope_extra.get("listing_date_coverage"),
+                "listing_date_covered": scope_extra.get("listing_date_covered"),
+                "listing_date_fallback": scope_extra.get("listing_date_fallback"),
+                "listing_date_unknown": scope_extra.get("listing_date_unknown"),
             },
             "equity_model": "weight_strict_fill",
             "per_stock_truncated": trunc_info,

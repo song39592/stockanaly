@@ -333,6 +333,33 @@ def _ensure_stock_meta_table(conn) -> None:
     conn.execute(_STOCK_META_TABLE)
 
 
+# **上市日**（交易所公布的首次公开发行日期）—— 固定不变的主数据。
+#
+# 为什么独立成表、而不是在 `stock_meta` 里加一列：
+#   `stock_meta` 由 `refresh_stock_meta()` 每天用「当前在市清单」做差量同步，
+#   **退市的票会被 DELETE 掉**。上市日恰恰是「已退市票」也要留着的字段
+#   （回测池用 interval_data 口径时，退市票的历史行情仍在库里、仍要参与
+#   新股/次新股判定）。跟着在市清单一起被删 → 老票的上市日就丢了。
+#
+# 为什么不能用「库里最早日K」当上市日（历史教训，见 strategies/core/universe.py）：
+#   本地库的下载起点是 2021-08-02，实测 5601 只里 **4283 只**的「最早日K」
+#   就等于那天 → 连 000001 / 600519 都被记成那天上市 → 「新股/次新股」判定
+#   一次能剔掉 5599 只。老口径是**全量**票用近似，不是少数例外。
+_LISTING_DATES_TABLE = """
+CREATE TABLE IF NOT EXISTS stock_listing_dates (
+  code TEXT PRIMARY KEY,
+  listing_date TEXT NOT NULL,          -- ISO 日期（YYYY-MM-DD）
+  source TEXT NOT NULL DEFAULT '',     -- 数据来源，如 exchange.sse
+  fetched_at TEXT NOT NULL
+) WITHOUT ROWID;
+"""
+
+
+def _ensure_listing_table(conn) -> None:
+    """幂等建上市日表（老库自愈）。"""
+    conn.execute(_LISTING_DATES_TABLE)
+
+
 def _market_of(code: str) -> str:
     """代码前缀 → 交易所（仅用于展示，不影响取数）。"""
     c = str(code).strip()
@@ -390,6 +417,60 @@ def all_stock_codes() -> list[str]:
         return [str(row["code"]).strip() for row in rows if str(row["code"]).strip()]
     except Exception:  # noqa: BLE001
         return []
+
+
+def listing_dates() -> dict[str, str]:
+    """{code: 上市日（ISO 日期）} —— **交易所公布的真实上市日**。
+
+    这是「新股/次新股」判定的唯一权威来源（见 `strategies/core/universe.py`）。
+    读本地库、零网络；库里没有的票**不在结果里**（调用方按「取不到不判定」处理，
+    并显式声明覆盖率，绝不静默当成「老票」）。
+
+    ⚠️ 不要再用 `code_earliest_dates()` 当上市日 —— 那是「库里最早日K」，
+    等于本地下载起点（实测 5601 只里 4283 只 = 2021-08-02），不是上市日。
+    """
+    try:
+        with db.connect(db.FACTORS_DB) as conn:
+            _ensure_listing_table(conn)
+            rows = conn.execute(
+                "SELECT code, listing_date FROM stock_listing_dates").fetchall()
+        return {str(r["code"]).strip(): str(r["listing_date"])[:10]
+                for r in rows
+                if str(r["code"]).strip() and r["listing_date"]}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def listing_dates_info() -> dict:
+    """上市日表的规模与最近一次抓取时间（给「数据是否新鲜」用）。"""
+    try:
+        with db.connect(db.FACTORS_DB) as conn:
+            _ensure_listing_table(conn)
+            row = conn.execute(
+                "SELECT COUNT(*) AS n, MAX(fetched_at) AS at FROM stock_listing_dates"
+            ).fetchone()
+        return {"count": int(row["n"] or 0), "last_fetched_at": row["at"]}
+    except Exception:  # noqa: BLE001
+        return {"count": 0, "last_fetched_at": None}
+
+
+def upsert_listing_dates(mapping: dict[str, str], source: str = "") -> int:
+    """写入上市日（`code` 主键 → INSERT OR REPLACE）。返回写入条数。
+
+    上市日是**固定数据**（不会变），所以重复写入无害；`source` 记录来源，
+    便于事后核对「这份上市日是哪张表来的」。
+    """
+    payload = [(str(c).strip(), str(d)[:10], source, db.now_iso())
+               for c, d in (mapping or {}).items()
+               if str(c).strip() and str(d).strip()]
+    if not payload:
+        return 0
+    with db.connect(db.FACTORS_DB) as conn:
+        _ensure_listing_table(conn)
+        conn.executemany(
+            "INSERT OR REPLACE INTO stock_listing_dates"
+            "(code,listing_date,source,fetched_at) VALUES(?,?,?,?)", payload)
+    return len(payload)
 
 
 def search_stocks(query: str, limit: int = 50) -> list[dict]:
@@ -493,6 +574,7 @@ def init_db() -> None:
     with db.connect(db.FACTORS_DB) as conn:
         _ensure_lockup_table(conn)
         _ensure_stock_meta_table(conn)
+        _ensure_listing_table(conn)
         conn.executescript("""
         -- 复权因子：只存 hfq_factor（基准为「上市首日」，历史值不随新的除权变化）。
         -- qfq_factor 以「最新日」为基准、每天都在变，存下来等于又把会变的数据请回来，故不存。

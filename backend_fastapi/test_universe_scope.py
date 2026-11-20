@@ -4,10 +4,10 @@
 覆盖五件事：
   1. 判定基准日 = **区间起点**（不是区间末日、也不是今天）；
   2. 微盘股按**区间起点**的市值判定（point-in-time，不用「今天的市值」）；
-  3. 新股/次新股以区间起点起算：基准日之后才上市的票要剔掉；
+  3. 新股/次新股以**交易所公布的真实上市日**、从区间起点起算：基准日之后才上市的票要剔掉；
   4. 每项剔除了多少只**必须回传**（否则报告无法自证样本）；
   5. 口径说明必须点明前视偏差与数据限制（ST 用当前名单 / 股本只有当前值 /
-     上市日以库里最早日K近似）。
+     上市日来源与覆盖率 / 兜底只数）。
 """
 from __future__ import annotations
 
@@ -65,10 +65,18 @@ class TestExclusions(unittest.TestCase):
             return {"600000": "ST测试", "600001": "*ST测试", "300001": "正常",
                     "688001": "正常", "000002": "正常"}
 
-        def _code_first_dates():
-            # 600002 于基准日之后才上市；600000 上市于基准日前 400 天
+        def _load_listing_dates(codes):
+            # **真实上市日**（交易所公布口径）：
+            # 600001 上市于基准日前 73 天（新股）、300001 基准日**之后**才上市、
+            # 600000 / 688001 是老票、000002 老票但不在夹具里 → 走兜底。
             return {"600000": "2022-10-09", "600001": "2023-09-01",
-                    "300001": "2023-12-01", "688001": "2019-01-01"}
+                    "300001": "2023-12-01", "688001": "2019-01-01",
+                    "000002": "2015-06-01"}
+
+        def _earliest_bar_dates():
+            # 「库里最早日K」——**不是上市日**，只在上市日取不到时保守兜底。
+            # 夹具里上市日齐全 → 用不到。
+            return {}
 
         def _market_caps_at(codes, as_of):
             seen["as_of"] = as_of
@@ -80,7 +88,10 @@ class TestExclusions(unittest.TestCase):
              "load_names": _load_names,
              "names_source_status": lambda: {"ok": True, "size": len(BASE),
                                              "source": "test", "error": ""},
-             "code_first_dates": _code_first_dates,
+             "load_listing_dates": _load_listing_dates,
+             "listing_source_status": lambda: {"ok": True, "size": len(BASE),
+                                               "source": "test", "error": ""},
+             "earliest_bar_dates": _earliest_bar_dates,
              "market_caps_at": _market_caps_at}
         p.update(over)
         return patch.multiple(universe.data, **p), seen
@@ -137,7 +148,10 @@ class TestBuildDetail(unittest.TestCase):
             load_names=lambda codes: {c: "正常" for c in BASE},
             names_source_status=lambda: {"ok": True, "size": len(BASE),
                                          "source": "test", "error": ""},
-            code_first_dates=lambda: {},
+            load_listing_dates=lambda codes: {c: "2015-06-01" for c in BASE},
+            listing_source_status=lambda: {"ok": True, "size": len(BASE),
+                                          "source": "test", "error": ""},
+            earliest_bar_dates=lambda: {},
             market_caps_at=lambda codes, as_of: ({}, {"shares_source": "as_of",
                                                        "fallback_codes": 0,
                                                        "price_date": as_of}),
@@ -194,7 +208,10 @@ class TestStNameUnavailable(unittest.TestCase):
             list_universe_codes=lambda universe_mode="interval_data", start=None, end=None: list(BASE),
             load_names=lambda codes: names_map,
             names_source_status=lambda: names_status,
-            code_first_dates=lambda: {},
+            load_listing_dates=lambda codes: {c: "2015-06-01" for c in BASE},
+            listing_source_status=lambda: {"ok": True, "size": len(BASE),
+                                          "source": "test", "error": ""},
+            earliest_bar_dates=lambda: {},
             market_caps_at=lambda codes, as_of: ({}, {"shares_source": "as_of",
                                                        "fallback_codes": 0,
                                                        "price_date": as_of}),
@@ -236,6 +253,98 @@ class TestStNameUnavailable(unittest.TestCase):
         self.assertIn("ST", note)
 
 
+class TestListingDateUnavailable(unittest.TestCase):
+    """上市日取不到 / 覆盖不足 → **必须中止**（与 ST 名单同一纪律）。
+
+    旧口径用「库里最早日K」当上市日 —— 那只是**本地下载起点**（2021-08-02），
+    实测 5601 只里 **4283 只**的「最早日K」= 那天（连 000001 / 600519 都算那天上市）
+    → 判定基准日改成区间起点后「天龄 = 0 ≤ 90」→ `ipo` 一次剔掉 **5599 只**，
+    实跑只剩 2 只；而页面预览按「今天」算只剔 430 只 → 预览与实跑口径分叉。
+
+    新口径：交易所公布的**真实上市日**；取不到就**中止**，不许拿近似值硬顶
+    （「勾了剔除新股却一只没剔」会让剔除明细看起来像「本来就没有新股」）。
+    """
+
+    def _patches(self, status, listing_map, fallback=None):
+        return patch.multiple(
+            universe.data,
+            list_universe_codes=lambda universe_mode="interval_data", start=None, end=None: list(BASE),
+            load_names=lambda codes: {c: "正常" for c in BASE},
+            names_source_status=lambda: {"ok": True, "size": len(BASE),
+                                         "source": "test", "error": ""},
+            load_listing_dates=lambda codes: listing_map,
+            listing_source_status=lambda: status,
+            earliest_bar_dates=lambda: (fallback or {}),
+            market_caps_at=lambda codes, as_of: ({}, {"shares_source": "as_of",
+                                                       "fallback_codes": 0,
+                                                       "price_date": as_of}),
+        )
+
+    def test_unavailable_listing_aborts(self):
+        p = self._patches({"ok": False, "size": 0, "error": "Timeout"}, {})
+        with p:
+            with self.assertRaises(universe.ScopeDataUnavailable) as cm:
+                universe._apply_exclusions(list(BASE), _spec(exclude=["ipo"]))
+        msg = str(cm.exception)
+        self.assertIn("取不到", msg)
+        self.assertIn("取消", msg)          # 必须给出可操作的下一步
+
+    def test_low_coverage_aborts(self):
+        p = self._patches({"ok": True, "size": 5, "error": ""},
+                           {"600000": "2020-01-01"})          # 只覆盖 1/5 = 20%
+        with p:
+            with self.assertRaises(universe.ScopeDataUnavailable) as cm:
+                universe._apply_exclusions(list(BASE), _spec(exclude=["ipo"]))
+        self.assertIn("覆盖", str(cm.exception))
+
+    def test_missing_code_falls_back_to_earliest_bar(self):
+        """少数票不在交易所当前上市表（已退市等）→ 用「库里最早日K」保守兜底，
+        且**兜底只数必须落盘**（读者要能分开看「真实数据」与「兜底」）。"""
+        base = ["60%04d" % i for i in range(100)]
+        listing = {c: "2020-01-01" for c in base[:98]}
+        # 兜底日期离基准日（2023-11-13）不到 90 天 → 按新股剔掉
+        fallback = {base[98]: "2023-11-01", base[99]: "2023-11-02"}
+        p = self._patches({"ok": True, "size": 98, "error": ""}, listing, fallback)
+        with p:
+            _codes, dropped, extra = universe._apply_exclusions(
+                base, _spec(exclude=["ipo"]))
+        self.assertEqual(extra["listing_date_source"], "exchange_listing_date")
+        self.assertEqual(extra["listing_date_coverage"], 0.98)
+        self.assertEqual(extra["listing_date_fallback"], 2)
+        self.assertEqual(extra["listing_date_unknown"], 0)
+        self.assertEqual(dropped["ipo"], 2)
+
+    def test_unknown_listing_is_declared_not_silently_dropped(self):
+        """上市日完全取不到 → 不判定（按非新股），但**只数要落盘**。"""
+        base = ["60%04d" % i for i in range(100)]
+        listing = {c: "2020-01-01" for c in base[:97]}
+        p = self._patches({"ok": True, "size": 97, "error": ""}, listing, {})
+        with p:
+            _codes, dropped, extra = universe._apply_exclusions(
+                base, _spec(exclude=["ipo"]))
+        self.assertEqual(extra["listing_date_unknown"], 3)
+        self.assertEqual(extra["listing_date_fallback"], 0)
+        self.assertNotIn("ipo", dropped)   # 没上市日 → 不判定，不算新股
+
+    def test_note_declares_listing_source(self):
+        """口径说明必须说清上市日来源 + 覆盖率 + 兜底只数。"""
+        base = ["60%04d" % i for i in range(100)]
+        listing = {c: "2020-01-01" for c in base[:98]}
+        fallback = {base[98]: "2023-11-01", base[99]: "2023-11-02"}
+        p = self._patches({"ok": True, "size": 98, "error": ""}, listing, fallback)
+        with p:
+            _codes, _dropped, extra = universe._apply_exclusions(
+                base, _spec(exclude=["ipo"]))
+            note = universe.scope_note({
+                "base_count": len(base), "filtered_count": len(base),
+                "dropped": {}, "exclude": ["ipo"], "as_of": "2023-11-13",
+                **extra,
+            })
+        self.assertIn("上市日", note)
+        self.assertIn("真实上市日", note)
+        self.assertIn("兜底", note)
+
+
 class TestPoolSignature(unittest.TestCase):
     """池子**结果**指纹：两份报告一比就知道池子是不是真的同一个。
 
@@ -251,7 +360,10 @@ class TestPoolSignature(unittest.TestCase):
             load_names=lambda codes: {c: "正常" for c in BASE},
             names_source_status=lambda: {"ok": True, "size": len(BASE),
                                          "source": "test", "error": ""},
-            code_first_dates=lambda: {},
+            load_listing_dates=lambda codes: {c: "2015-06-01" for c in BASE},
+            listing_source_status=lambda: {"ok": True, "size": len(BASE),
+                                          "source": "test", "error": ""},
+            earliest_bar_dates=lambda: {},
             market_caps_at=lambda codes, as_of: ({}, {"shares_source": "as_of",
                                                        "fallback_codes": 0,
                                                        "price_date": as_of}),
@@ -330,7 +442,10 @@ class TestPreviewEqualsRun(unittest.TestCase):
             load_names=lambda codes: {c: "正常" for c in BASE},
             names_source_status=lambda: {"ok": True, "size": len(BASE),
                                          "source": "test", "error": ""},
-            code_first_dates=lambda: {},
+            load_listing_dates=lambda codes: {c: "2015-06-01" for c in BASE},
+            listing_source_status=lambda: {"ok": True, "size": len(BASE),
+                                          "source": "test", "error": ""},
+            earliest_bar_dates=lambda: {},
             market_caps_at=lambda codes, as_of: ({}, {"shares_source": "as_of",
                                                        "fallback_codes": 0,
                                                        "price_date": as_of}),

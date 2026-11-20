@@ -92,7 +92,7 @@ stats.py      ⑥ hfq 收盘价 → 净值曲线与指标（与策略无关）
 
 | 文件 | 角色 | 职责 | 允许依赖 |
 | --- | --- | --- | --- |
-| `data.py` | **数据层** | `load_bars(codes, fields) -> {code: DataFrame}`、`list_universe_codes(universe_mode)`、`load_bars_raw_for(codes)`；原始分类数据 `load_names()` / `code_first_dates()` / `market_caps_at(as_of)`（**区间起点口径**，PIT —— 市值只有这一份口径，别再另写「最新市值」）；取数走 **`kline_service`**（全项目唯一的「取数 + 周期合样」出口）；包内**唯一**允许 `import price_store` 的地方 | `kline_service`、`price_store` |
+| `data.py` | **数据层** | `load_bars(codes, fields) -> {code: DataFrame}`、`list_universe_codes(universe_mode)`、`load_bars_raw_for(codes)`；原始分类数据 `load_names()` / `load_listing_dates()`（**交易所公布的真实上市日**）/ `earliest_bar_dates()`（**仅作兜底**，不是上市日）/ `market_caps_at(as_of)`（**区间起点口径**，PIT —— 市值只有这一份口径，别再另写「最新市值」）；取数走 **`kline_service`**（全项目唯一的「取数 + 周期合样」出口）；包内**唯一**允许 `import price_store` 的地方 | `kline_service`、`price_store` |
 | `universe.py` | **股票池层** | `build_detail(spec)` 按规则（板块前缀/ST/上市日/市值）把基池筛成回测代码**并回传每项剔除只数与口径说明**；**注入判定的唯一口径**：`filter_available(codes, start, end)`（区间内根数 < `MIN_BARS` → 不可注入）、`resolve_window` / `resolve_lookback_window`（实际取数区间）；`summary(spec)` 给前端预览（= 剔除特征 + 注入判定，数字与实跑一致）；**小型键值缓存**（最多 8 种范围），范围不变直接复用；**不依赖 backtest** | `data` |
 | `base.py` | **契约层** | `@strategy` / `ParamSpec` / `Signal` / `StrategyContext`；`run()` 调策略、`signals_to_positions()` 信号→权重序列、**`diff_trades()` 权重→流水** | `data`（仅类型）、`pandas` |
 | `stats.py` | **统计引擎** | 目标权重序列 + hfq 收盘价 → 净值与指标；raw OHLCV → 可行性指标；**与策略完全解耦** | 仅 `numpy/pandas`、`core.limit_price`（涨跌停口径的唯一实现） |
@@ -115,12 +115,24 @@ codes, detail = universe.build_detail(spec)   # detail 含每项剔除只数与�
 
 - 规则按「**排除**」语义：基池 = `data.list_universe_codes()`，勾选的特征从基池剔除；
   各特征独立计算取并集。
-- 🔴 **外部数据（ST 名称名单）取不到 / 覆盖不足 → 中止，不静默降级**
+- 🔴 **外部数据（ST 名称名单 / 上市日表）取不到 / 覆盖不足 → 中止，不静默降级**
   （`universe.ScopeDataUnavailable` → HTTP 400 + 可操作提示：取消该剔除项或恢复网络）。
   「取不到」= **不知道**，不等于「没有」—— 静默降级会让报告的「剔除明细」看起来像
   「本来就没有 ST」，口径指纹也算不出差别。
   实测佐例：ST 名单一次没取到 → 两份报告 `spec_signature` **完全相同**，
   池子却差 126 只、收益差 5% → 结论直接失效。
+- 🆕 **上市日 = 交易所公布的真实上市日**（2026-11-20.a 起）。
+  旧口径用「库里最早日K」近似 —— 那只是**本地下载起点**（2021-08-02），
+  实测 5601 只里 **4283 只**的「最早日K」= 那天（连 `000001` / `600519` 都算那天上市），
+  判定基准日改成区间起点后「天龄 = 0 ≤ 90」→ `ipo` 一次剔掉 **5599 只**、实跑只剩 2 只。
+  新口径取**交易所官方批量表**（沪主板 + 沪科创 + 深市 + 北交所，实测 5580 只），
+  落盘在 `price_store.stock_listing_dates`（独立表：退市票的上市日要留着，
+  不能挂在按在市清单差量同步的 `stock_meta` 上），本地命中即零网络。
+  取不到 / 覆盖 <95% → **中止**（与 ST 名单同一纪律）。
+  实测对照（全池 5590 只，`as_of=2020-11-20`）：旧口径剔 **5590 只（池子归零）**，
+  新口径剔 2088 只、**剩 3502 只** → 全市场池不再被误杀。
+  配套落盘：`scope.exclusion.listing_date_source` / `listing_date_coverage` /
+  `listing_date_covered` / `listing_date_fallback` / `listing_date_unknown`。
 - 键值缓存 key = 规范化 spec（模式/区间/基准日/排除项/阈值），最多 8 种范围，TTL 1h；
   `invalidate()` 可手动清空（如刚下载完新股数据后希望重建）。
 - 阈值默认：新股 ≤90 自然日、次新 90~365 自然日、微盘 ≤30 亿总市值，均可在 spec 覆盖。
@@ -156,7 +168,7 @@ codes, avail = universe.filter_available(codes, start, end) # 注入判定（唯
 | 特征 | 判定依据 | 含未来信息？ |
 |---|---|---|
 | 微盘股 | 区间起点当日的总市值（收盘价取该日前最近一个交易日） | 价格已回到区间起点 ✅；**股本只有当前值**（数据源不提供历史股本）⚠️ |
-| 新股 / 次新股 | 上市日距**区间起点**的天数（上市日以「库里最早日K」近似） | 基准日已回到区间起点 ✅；**历史未拉全的老票会被误判成次新股（剔除偏多）** ⚠️ |
+| 新股 / 次新股 | **交易所公布的真实上市日**距**区间起点**的天数 | 基准日已回到区间起点 ✅；上市日是**真实主数据**（非近似）✅；少数不在交易所当前上市表的票（已退市等）走「库里最早日K」**保守兜底**（偏多剔）⚠️ |
 | ST / \*ST | akshare **当前**名称表 | 🔴 **是** —— 数据源不提供历史 ST 名单，无法还原历史 |
 | 创业板 / 科创板 / 北交所 | 代码前缀 | 否 |
 
@@ -173,7 +185,9 @@ ST 类判定用的是「今天的状态」去筛整段历史；而「已声明�
 ST 名单这次取到没有、区间端点、判定基准日、实际剔了多少只。
 所以另有一个指纹把这些压进去（`as_of` + 区间起止 + 剔除明细 + 池大小 + 名单可用性）。
 两份报告一比 `pool_signature`：**不同 = 池子真的不同**，别再靠「看起来同口径」硬比。
-配套：`scope.exclusion.st_names` / `st_name_coverage` 落盘名单来源与覆盖率。
+配套：`scope.exclusion.st_names` / `st_name_coverage` 落盘名单来源与覆盖率；
+上市日侧落盘 `listing_date_source` / `listing_date_coverage` / `listing_date_covered` /
+`listing_date_fallback`（兜底只数）/ `listing_date_unknown`（完全取不到 → 未参与判定）。
 
 #### spec 构造的唯一入口 🆕
 
@@ -414,7 +428,7 @@ class Signal:
 >
 > ⚠️ **涨跌停幅度是分时段的，暂未精确实现**（见 `core/limit_price.py`）：
 > ST 自 2025-04 起由 5% 改为 10%（现行口径一律按 10% 处理，跨 2025-04 的区间早期会偏松）、
-> 北交所 30% 未覆盖、本地行情无 ST 标识与上市日期字段。
+> 北交所 30% 未覆盖、本地行情无 ST 标识字段（上市日期已另有真实数据源，见 `data.load_listing_dates`）。
 > ⚠️ **买卖方向各判各的**：一字跌停时**买入是能成交的**（板上是卖单），一字涨停时
 > **卖出是能成交的**（板上是买单）。旧写法「`high == low` 且 `|收盘涨跌幅| ≥ 幅度`」
 > 买卖两侧共用绝对值涨跌幅，会把这两类**判反**。

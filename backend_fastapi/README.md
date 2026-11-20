@@ -75,6 +75,15 @@ POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / 
                                         筹码矩阵不可得等），上限 2000 条；被截断时
                                         scope.warnings 里注明总数。前端按条数显示「跳过只数」，
                                         故必须是逐票而非汇总（汇总会让计数失真）
+                                       scope.benchmark = **本次用的基准指数代码**
+                                        （形如 sh000300；没选 = null）。它只喂
+                                        alpha / beta / IR 的计算（数据层
+                                        data.load_benchmark），**不影响
+                                        equity_benchmark 曲线** —— 那条曲线恒为
+                                        「等权全池买入持有」（同池等权、与选哪个
+                                        指数无关）。两者别混成一个「基准」。
+                                        指数本地无行情 → 取不到 → 三个指标置空
+                                        并进 scope.warnings
                                        scope.exclusion.available_count / skipped_insufficient /
                                         window = **注入判定**结论（可注入只数 / 区间内行情不足
                                         剔除的只数 / 实际取数区间）。口径在股票池层
@@ -95,6 +104,15 @@ POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / 
                                        scope.exclusion.st_names / st_name_coverage =
                                         ST 名称名单来源与覆盖率（<100% 说明有票未参与
                                          ST 判定，按非 ST 处理）
+                                       scope.exclusion.listing_date_source =
+                                        上市日来源（exchange_listing_date = 交易所公布的
+                                         **真实上市日**；旧口径 earliest_bar = 库里最早日K
+                                         近似，已废止 —— 它等于本地下载起点，一次能剔掉
+                                         5599 只）。listing_date_coverage / covered =
+                                         覆盖率；listing_date_fallback = 不在交易所当前
+                                         上市表（已退市等）走「库里最早日K」保守兜底的
+                                         只数；listing_date_unknown = 上市日完全取不到
+                                         → 未参与新股/次新股判定的只数
                                        scope.limit_open_policy + **limit_open** =
                                         「涨停开盘应对」三档（keep 不撤单 / cancel 撤单 /
                                         reseal 涨停条件单，**全局生效**，只作用于回测）。

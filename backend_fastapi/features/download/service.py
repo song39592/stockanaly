@@ -1408,6 +1408,34 @@ def _earliest_covered_day(earliest: dict[str, str]) -> str:
     return days[mid] if len(days) % 2 else min(days[mid - 1], days[mid])
 
 
+# 「行情数据是否齐」的**容忍阈值**（落后于基准日的只数超过它，才算「没齐」）。
+#
+# ⚠️ 2026-11-20 **临时**放大（1% → 5%）。实测：全市场 5637 只里 **5572 只已更新到
+#   信号日**，剩下 65 只与 `core.stock_status.suspended_like_codes()` **完全重合**
+#   （交集 65、剩余 0）—— 全部是**停牌/退市**票，本来就没有信号日的行情、
+#   **补也补不到**。旧阈值 max(5, 5637×1%) = **56 < 65** → 明明数据已齐，
+#   单日策略却被拦下，还提示「收盘数据未下载完成 / 等待补齐」（那 65 只永远补不齐）。
+#
+# 为什么放大是安全的：真故障（下载任务挂了 / 网络断 / 数据源挂了）会让**成千上万只**
+#   一起落后，不是几十只 → 任何小比例阈值都拦得住。几十只这个量级只可能是
+#   停牌/退市这类「本来就没有」。
+#
+# 🔴 **这是临时值，不是最终判据。** 正事见 `todo/backlog.md`：
+#   单日策略「数据齐否」应改成**查下载任务状态**（任务表里的完成结论 / span_end），
+#   而不是「逐票覆盖率 + 比例阈值」—— 那个阈值天生脆弱：退市股多几只就误拦、
+#   少几只真漏下载又放过；而且每判一次要全库扫 2~6 秒。
+#
+# ⚠️ 与下载侧「自动更新资格」那套阈值（`STALE_TOLERANCE_MIN/RATIO`）**不是一回事**：
+#   那套是「能不能开自动更新」，已经先排除了停牌/退市票；这套是「运行前拦不拦人」。
+STALENESS_TOLERANCE_MIN = 20
+STALENESS_TOLERANCE_RATIO = 0.05          # 临时值（1% → 5%），见上方说明与 todo
+
+
+def _staleness_tolerance(total: int) -> int:
+    """落后于基准日的只数超过它 → 判「数据没齐」。"""
+    return max(STALENESS_TOLERANCE_MIN, int(total * STALENESS_TOLERANCE_RATIO))
+
+
 def trading_day_context(target: str | None = None) -> dict[str, Any]:
     """「单日策略」日期上下文：今天 / 是否交易日 / 是否收盘 / 目标执行日。
 
@@ -1453,7 +1481,7 @@ def trading_day_context(target: str | None = None) -> dict[str, Any]:
 
     latest, earliest = _spans()                # 一次扫描同时给出两端
     total = len(latest)
-    tolerance = max(5, int(total * 0.01))
+    tolerance = _staleness_tolerance(total)
     covered = sum(1 for v in latest.values() if str(v)[:10] >= sig_iso)
     return {
         "today": today.isoformat(),
@@ -1510,10 +1538,12 @@ def freshness(codes: list[str] | None = None,
     covered = sum(1 for c in checked if str(latest[c]) >= expected)
     stale_codes = sorted(c for c in checked if str(latest[c]) < expected)
     # 全市场（策略页用法）时，少量停牌/退市股长期没有新 K 线，逐只都算缺口会让
-    # 每次运行策略前都被「数据不是最新」拦住（实测 5585 只里 15 只停牌就触发）。
-    # 缺票比例超过 1% 才提示；指定 codes（K 线页单只校验）仍逐只精确判定。
+    # 每次运行策略前都被「数据不是最新」拦住（实测 5585 只里 15 只停牌就触发；
+    # 2026-11-20 实测 65 只停牌/退市把 1% 阈值顶穿 → 数据已齐却被拦）。
+    # 容忍阈值见 `_staleness_tolerance`（临时值 5%，正事见 todo/backlog.md）。
+    # 指定 codes（K 线页单只校验）仍逐只精确判定。
     _need = (bool(stale_codes or missing) if wanted
-             else len(stale_codes) > max(5, int(len(checked) * 0.01)))
+             else len(stale_codes) > _staleness_tolerance(len(checked)))
     return {
         "expected": expected,
         "total": len(wanted) if wanted else len(latest),

@@ -393,9 +393,194 @@ def load_names(codes: list[str]) -> dict[str, str]:
     return {c: m.get(c) or m.get(c.zfill(6), "") for c in codes}
 
 
-def code_first_dates() -> dict[str, str]:
-    """{code: 最早日 K 日期}（raw 口径，≈上市日）。"""
+def earliest_bar_dates() -> dict[str, str]:
+    """{code: 最早日 K 日期}（raw 口径）。
+
+    ⚠️ **这不是上市日**，只是「本地库最早有行情的那天」（= 下载起点附近）。
+    上市日是**交易所公布的固定数据**，取 `load_listing_dates()`。
+
+    本函数只剩一个用途：给「上市日取不到」的极少数票（已退市等）做**保守兜底**
+    （宁可多剔、不可漏剔），见 `universe._apply_exclusions`。
+    历史教训见下面「上市日」段的 docstring。
+    """
     return price_store.code_earliest_dates()
+
+
+# ---------------------------------------------------------------- 上市日（真实主数据）
+#
+# **口径**：「新股 / 次新股」判定必须用**交易所公布的真实上市日**。
+#
+# 旧口径用「库里最早日K」近似，而本地库的下载起点是 2021-08-02 →
+# 实测 5601 只里 **4283 只**的「最早日K」就等于那天（连 000001 / 600519 都被
+# 记成那天上市）→ 判定基准日改成区间起点后，「天龄 = 0 ≤ 90」→
+# `ipo` 一次剔掉 **5599 只**，实跑只剩 2 只；而页面预览按「今天」算只剔 430 只，
+# 预览与实跑口径分叉。**根因是「用了一个不是上市日的量」。**
+#
+# **数据源**：交易所官方批量表（akshare 封装），一次拉齐全市场：
+#   沪主板 `stock_info_sh_name_code(symbol="主板A股")` + 沪科创 `symbol="科创板"`
+#   深市   `stock_info_sz_name_code(symbol="A股列表")`
+#   北交所 `stock_info_bj_name_code()`
+# 实测合计 **5580** 只，与本地主数据 `stock_meta` 的 5580 只一致；
+# 单接口 2~19s，四个并行 → 冷启动约 20s，之后走本地库零网络。
+#
+# **为什么落盘**（`price_store.stock_listing_dates`）：上市日是固定数据，
+# 不该每次回测都联网；也**不能**挂在 `stock_meta` 上 —— 那张表按「当前在市清单」
+# 差量同步，退市的票会被 DELETE，而退市票的上市日恰恰要留着（回测池用
+# interval_data 口径时它仍在池里）。
+
+_LISTING_TTL = 24 * 3600          # 上市日是固定数据，一天刷一次足够
+_LISTING_RETRY = 600              # 取不到时的退避（秒）：别让每次调用都白等 20s
+_LISTING_COVERAGE_MIN = 0.95      # 本地覆盖低于此 → 联网补全
+_listing_cache: dict = {"at": 0.0, "map": {}, "error": "", "tried_at": 0.0}
+
+
+def _parse_listing_date(value) -> str:
+    """上市日取值 → ISO 日期串；取不到返回空串（**不猜**）。"""
+    if value is None:
+        return ""
+    if isinstance(value, dt.datetime):
+        return value.date().isoformat()
+    if isinstance(value, dt.date):
+        return value.isoformat()
+    s = str(value).strip()
+    if not s or s.lower() in ("nan", "nat", "none", "-", "--"):
+        return ""
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if len(digits) == 8:                       # 19910403
+        try:
+            return dt.date(int(digits[:4]), int(digits[4:6]), int(digits[6:8])).isoformat()
+        except ValueError:
+            return ""
+    parts = [p for p in s.replace("/", "-").replace(".", "-").split("-") if p]
+    if len(parts) == 3 and all(p.isdigit() for p in parts):
+        try:
+            return dt.date(int(parts[0]), int(parts[1]), int(parts[2])).isoformat()
+        except ValueError:
+            return ""
+    return ""
+
+
+def _fetch_listing_tables() -> tuple[dict[str, str], list[str]]:
+    """四个交易所接口并行拉全市场上市日 → ({code: date}, 数据来源标签列表)。
+
+    任何一个接口失败都**只丢那一个市场**，不影响其它 —— 合并后仍能覆盖绝大多数票，
+    剩下的缺口由调用方按「取不到不判定」处理并声明覆盖率。
+    """
+    try:
+        import akshare as ak
+        from market_service import _ak
+    except Exception as exc:                   # noqa: BLE001
+        return {}, [f"akshare 不可用: {type(exc).__name__}: {exc}"]
+
+    jobs = [
+        ("exchange.sse.main", lambda: _ak(ak.stock_info_sh_name_code, timeout=120,
+                                         symbol="主板A股"), "证券代码", "上市日期"),
+        ("exchange.sse.star", lambda: _ak(ak.stock_info_sh_name_code, timeout=120,
+                                         symbol="科创板"), "证券代码", "上市日期"),
+        ("exchange.szse.a", lambda: _ak(ak.stock_info_sz_name_code, timeout=120,
+                                       symbol="A股列表"), "A股代码", "A股上市日期"),
+        ("exchange.bse", lambda: _ak(ak.stock_info_bj_name_code, timeout=120),
+         "证券代码", "上市日期"),
+    ]
+
+    def _one(job):
+        label, fn, code_col, date_col = job
+        try:
+            df = fn()
+        except Exception as exc:               # noqa: BLE001
+            return label, {}, f"{label}: {type(exc).__name__}: {exc}"
+        if df is None or getattr(df, "empty", True):
+            return label, {}, f"{label}: 返回空表或超时"
+        cols = set(df.columns)
+        if code_col not in cols or date_col not in cols:
+            return label, {}, f"{label}: 列名不对（{sorted(cols)}）"
+        out: dict[str, str] = {}
+        for _, row in df.iterrows():
+            code = str(row.get(code_col) or "").strip().zfill(6)
+            day = _parse_listing_date(row.get(date_col))
+            if len(code) == 6 and code.isdigit() and day:
+                out[code] = day
+        return label, out, ("" if out else f"{label}: 解析出 0 条")
+
+    merged: dict[str, str] = {}
+    errors: list[str] = []
+    sources: list[str] = []
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for label, rows, err in pool.map(_one, jobs):
+            if rows:
+                merged.update(rows)
+                sources.append(label)
+            if err:
+                errors.append(err)
+    return merged, sources + errors
+
+
+def _refresh_listing_dates() -> bool:
+    """联网刷新上市日 → 落盘 → 更新进程内缓存。成功返回 True。"""
+    rows, notes = _fetch_listing_tables()
+    if not rows:
+        _listing_cache["error"] = "；".join(notes) or "上市日表全部取不到"
+        return False
+    try:
+        price_store.upsert_listing_dates(rows, source="exchange")
+    except Exception as exc:                   # noqa: BLE001
+        _listing_cache["error"] = f"落盘失败: {type(exc).__name__}: {exc}"
+        return False
+    merged = dict(price_store.listing_dates())
+    _listing_cache["map"] = merged
+    _listing_cache["at"] = time.time()
+    _listing_cache["error"] = "；".join(notes) if notes else ""
+    return True
+
+
+def listing_source_status() -> dict:
+    """上市日表的**可用性**（给「新股/次新股判定能不能做」提供判据）。
+
+    ⚠️ `ok=True` 只说明「**有一份**上市日表」，**不代表覆盖了目标池子** ——
+    覆盖率必须由调用方按**自己的代码集合**算（见 `universe._apply_exclusions`）。
+    """
+    return {
+        "ok": bool(_listing_cache["map"]),
+        "size": len(_listing_cache["map"]),
+        "at": _listing_cache["at"],
+        "tried_at": _listing_cache["tried_at"],
+        "error": _listing_cache["error"],
+        "source": "exchange.sse+exchange.szse+exchange.bse",
+    }
+
+
+def load_listing_dates(codes: list[str]) -> dict[str, str]:
+    """{code: 真实上市日（ISO）} —— 「新股/次新股」判定的**唯一**数据源。
+
+    取数顺序：**本地库 → （覆盖不足时）联网补全 → 本地库**。
+    上市日是固定数据，落盘后每次回测零网络（冷启动约 20s 只发生一次）。
+
+    取不到时**不抛异常、不返回假值**：
+      · 整体取不到 → 返回空映射，调用方据此**中止**（`universe.ScopeDataUnavailable`）；
+      · 个别票缺失 → 返回值里就没有该票，调用方按「不判定 + 显式声明」处理。
+
+    ⚠️ 调用方**必须**自己算覆盖率并落到报告里（缺多少、怎么处理的），
+    否则「勾了剔除新股却一只没剔」会和旧口径的静默降级一样骗人。
+    """
+    want = {str(c).strip().zfill(6) for c in (codes or []) if str(c).strip()}
+    if not want:
+        return {}
+    now = time.time()
+    m = _listing_cache["map"]
+    if not m:
+        m = price_store.listing_dates()
+        _listing_cache["map"] = m
+        _listing_cache["at"] = now if m else 0.0
+    covered = len(want & set(m))
+    ratio = covered / len(want)
+    if ratio < _LISTING_COVERAGE_MIN:
+        retry_due = (now - _listing_cache["tried_at"]) > _LISTING_RETRY
+        expired = bool(m) and (now - _listing_cache["at"]) > _LISTING_TTL
+        if retry_due or expired:
+            _listing_cache["tried_at"] = now
+            _refresh_listing_dates()
+            m = _listing_cache["map"]
+    return {c: m.get(c, "") for c in want}
 
 
 def share_capital_at(as_of: str) -> tuple[dict[str, float], int]:

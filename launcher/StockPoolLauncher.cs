@@ -2918,6 +2918,10 @@ namespace StockPool
                     DlRefreshTdx();
                     // 后端就绪后恢复上次的个股 / 指标 / 筹码 / 周期（只做一次）
                     StockRestoreSession();
+                    // 后端就绪后补一次：回测结果页「基准对比」的指数清单。
+                    // 构造阶段那次请求必然落在「后端还没起来」的窗口里（启动器先起前端、
+                    // 后拉后端），而清单取不到时是**不锁死**的 —— 这里补一次就回来了。
+                    StReloadBenchList();
                 }
                 var ver = JsonValue(body, "api_version");
                 var detail = JsonValue(body, "backend_detail");
@@ -3243,8 +3247,12 @@ namespace StockPool
             if (IsDisposed) return;
             try
             {
-                if (InvokeRequired) BeginInvoke(a);
-                else a();
+                if (!InvokeRequired) { a(); return; }
+                // 后台线程 → 回 UI 线程。⚠ 句柄未创建时 BeginInvoke 会**直接抛**
+                //   （「在创建窗口句柄之前，不能在控件上调用 Invoke 或 BeginInvoke」），
+                //   旧写法把它吞在 catch 里 → 回调丢失、界面永远停在初始状态。
+                //   现在排队等句柄建好后补发（见 AsyncKit.QueueUiAction）。
+                QueueUiAction(a);
             }
             catch { }
         }

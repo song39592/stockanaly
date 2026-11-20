@@ -39,7 +39,7 @@ namespace StockPool
         // 股票池筛选记忆：8 位 mask（1=剔除），持久化到 settings.ini 的 scope_exclude
         private string _stScopeMask = "";
         private bool _stScopeLoading;
-        private TextBox _stComm, _stBench;
+        private TextBox _stComm;
         // 单股仓位上限：两个入口取更严者（后端折算）；留空 = 不限 = 按策略自己给的仓位执行
         private TextBox _stCapPct, _stCapAmt;
         // 「涨停开盘应对」三档（全局生效，只作用于回测）：下拉框项序 → 后端 policy key
@@ -58,7 +58,6 @@ namespace StockPool
             { "sub_new", "次新股" }, { "micro", "微盘股" },
         };
         private WheelValueBox _stCapital;
-        private CheckBox _stBenchChk;
         private int _stLocalCodeCount;
 
         // ③ 回测结果
@@ -270,6 +269,11 @@ namespace StockPool
             // 改完范围顺手就能跑，不用翻到「回测结果」页底去找埋在下面的按钮。
             // 点击 = 先跳到「回测结果」页（进度条 / 指标卡在那儿），再发起回测 —— 行为与原按钮一致。
             _stStrip.InsertActionAfter(1, "开始回测", delegate { StStartBacktestFromBar(); });
+
+            // 切到「回测结果」页（页签下标 2）时：指数清单还空着就重取一次。
+            // 构造阶段那次请求必然落在「后端还没起来」的窗口里（启动器先起前端、后拉后端），
+            // 用户进到结果页时后端通常已经就绪 —— 这时补一次最自然。
+            _stStrip.OnSelected = delegate(int idx) { if (idx == 2) StEnsureBenchList(); };
 
             _stStrip.Select(0);
             return p;
@@ -574,17 +578,14 @@ private void StRefreshCurStrategy()
                           Lbl("或金额(元)"), _stCapAmt, Mute(Lbl("留空=不限；两者取更严者"))));
             AddRow(stack, g3);
 
-            var g4 = Group("基准对比", out b);
-            _stBenchChk = new CheckBox();
-            _stBenchChk.Text = "对比基准（买入持有）";
-            _stBenchChk.AutoSize = true;
-            _stBench = new TextBox();
-            _stBench.Width = 100;
-            _stBench.Text = "000300";
-            _stBench.Enabled = false;
-            _stBenchChk.CheckedChanged += delegate { _stBench.Enabled = _stBenchChk.Checked; };
-            AddRow(b, Row(_stBenchChk, _stBench, Mute(Lbl("留空则不对比；指数可能无本地数据）"))));
-            AddRow(stack, g4);
+            // 基准（指数）对比的输入框在「**回测结果**」页（基准是结果的对照物，
+            // 不是回测的输入条件 —— 理由见 StrategyPage.Bench.cs）。这里只做**只读回显**，
+            // 免得用户在本页点「开始回测」时不知道到底带没带基准。
+            _stBenchEcho = Mute(Lbl("基准：不对比"));
+            AddRow(stack, Row(Mute(Lbl("基准对比在「回测结果」页选")),
+                              MiniBtn("去选择", delegate { _stStrip.Select(2); }, 80),
+                              _stBenchEcho));
+            StRefreshBenchEcho();
 
             // ---- 「涨停开盘应对」：隔夜单在涨停开盘时怎么办（全局生效，只作用于回测）----
             // 口径在 backend_fastapi/core/limit_price.py，三档：
@@ -712,6 +713,9 @@ private void StRefreshCurStrategy()
             _stMetricCards.MaximumSize = new Size(900, 0);
             _stMetricCards.Margin = new Padding(0, 0, 0, 8);
             AddRow(stack, _stMetricCards);
+
+            // 基准（指数）对比：**从「回测范围」页搬到这里**（理由见 StrategyPage.Bench.cs）。
+            AddRow(stack, StBuildBenchGroup());
 
             var chartHost = new Panel();
             chartHost.Height = 240;
@@ -1557,7 +1561,9 @@ private void StRefreshCurStrategy()
                 { "window", window > 0 ? (object)window : null },
                 { "initial_capital", (double)_stCapital.Value },
                 { "commission", J.NumOr(_stComm.Text, 0.0003) },
-                { "benchmark", (_stBenchChk.Checked && _stBench.Text.Trim().Length > 0) ? _stBench.Text.Trim() : null },
+                // ⚠ 这里**不传 benchmark**：本请求走 /api/strategies/recommend，
+                //   后端 start_reco_task 的签名里根本没有 benchmark 参数（传了也被忽略）。
+                //   基准对比只有**完整回测**有意义（那里的 alpha/beta/IR 才按指数算）。
                 { "ruin_threshold", ruinThreshold },
                 { "position_cap_pct", StCapPct() },
                 { "position_cap_amount", StCapAmt() },
@@ -1907,7 +1913,8 @@ private void StRefreshCurStrategy()
                 { "end", StDate(_stEnd) },
                 { "initial_capital", (double)_stCapital.Value },
                 { "commission", J.NumOr(_stComm.Text, 0.0003) },
-                { "benchmark", (_stBenchChk.Checked && _stBench.Text.Trim().Length > 0) ? _stBench.Text.Trim() : null },
+                // 基准（指数）来自「回测结果」页的选择；没选 = null（后端就用等权全池买入持有）。
+                { "benchmark", StBenchCode() },
                 { "position_cap_pct", StCapPct() },
                 { "position_cap_amount", StCapAmt() },
                 { "limit_open_policy", StLimitOpenPolicy() },
@@ -2259,8 +2266,21 @@ private void StRefreshCurStrategy()
             _stMetricCards.Controls.Add(StKpiCard("资金利用率", StMPct(metrics, "capital_utilization")));
             _stMetricCards.Controls.Add(StKpiCard("每单位动用资金", StMPct(metrics, "return_per_utilized_capital")));
             object bret;
+            // ⚠ 这条曲线**恒为**「等权全池买入持有」（后端 equity_benchmark 的口径），
+            //   与用户选的指数无关 —— 卡片名必须说清楚，否则会被当成「指数收益」。
             if (metrics.TryGetValue("benchmark_return", out bret) && bret != null)
-                _stMetricCards.Controls.Add(StKpiCard("基准收益", J.Pct100Plain(J.Num(bret))));
+                _stMetricCards.Controls.Add(StKpiCard("等权全池收益", J.Pct100Plain(J.Num(bret))));
+            // alpha / beta / IR：只有**选了指数基准**、且该指数本地取得到行情时后端才算得出。
+            // 算不出来就**不显示** —— 摆一张空卡片比不摆更让人以为「结果是 0」。
+            object valpha = J.Get(metrics, "alpha");
+            if (valpha != null)
+                _stMetricCards.Controls.Add(StKpiCard("Alpha", J.Num(valpha).ToString("F2")));
+            object vbeta = J.Get(metrics, "beta");
+            if (vbeta != null)
+                _stMetricCards.Controls.Add(StKpiCard("Beta", J.Num(vbeta).ToString("F2")));
+            object vir = J.Get(metrics, "ir");
+            if (vir != null)
+                _stMetricCards.Controls.Add(StKpiCard("IR", J.Num(vir).ToString("F2")));
             Skin(_stMetricCards);
 
             _stEqDates = ToStringList(j["dates"]);
@@ -2289,6 +2309,10 @@ private void StRefreshCurStrategy()
             // 参与只数改从 scope.codes_count 取（metrics.num_stocks 已废止 —— 它其实是
             // 回测池大小，不是持仓数，显示出来会被当成「持仓了这么多只」）
             var scope = j["scope"] as Dictionary<string, object>;
+            // 基准：按**报告里记录的** scope.benchmark 写，不看「当前页面选了什么」——
+            // 历史报告重放必须显示它当时用的基准（验收点：不依赖当前页面选择）。
+            if (_stBenchReport != null)
+                _stBenchReport.Text = "本次报告：" + StBenchScopeNote(scope, metrics);
             // 买不进的建仓（隔日一字涨停买不进）→ 逐条列进表里（收益 0、备注「买不进」）；
             // 清仓延后（隔日一字跌停卖不出）→ 写进成交行的备注列。都不另开表、不加说明行。
             StFillTradesRows(_stTradesGrid, _stTradesData,
@@ -2323,6 +2347,13 @@ private void StRefreshCurStrategy()
                 if (loCanceled > 0)
                     _stResultStatus.Text += " · 涨停开盘撤单 " + loCanceled + " 次";
             }
+
+            // 指数曲线：拿起始资金（与组合同轴的基准），再叠加**当前下拉选的**那条指数。
+            // ⚠ 图上画的是「当前选择」，而上面那行文字写的是「报告里记录的」——
+            //   两者可以不同（用户换了下拉、或重放一份用别的指数跑出来的历史报告），
+            //   各说各的、不混：文字=这份报告当时用的基准，图=你现在想对比的指数。
+            _stInitialCapital = scope != null ? J.Num(J.Get(scope, "initial_capital")) : 0;
+            StLoadIndexCurve(StBenchCode());
         }
 
         // ---------------- 历史结果（加载已保存的回测报告） ----------------
@@ -2475,6 +2506,12 @@ private void StRefreshCurStrategy()
             if (_stEquityBox != null) _stEquityBox.Invalidate();
             if (_stTradesGrid != null) StFillTradesRows(_stTradesGrid, null);
             if (_stTradesTip != null) _stTradesTip.Text = StTradesTipText();
+            // 基准行也要一起清：留着上一份报告的基准，会被当成这份报告用的基准。
+            if (_stBenchReport != null) _stBenchReport.Text = "本次报告：—";
+            // 指数曲线也要清：它按**上一份报告的交易日**对齐过，换一份结果就是错的。
+            _stEqIndex = null;
+            _stEqIndexCode = "";
+            if (_stIndexMsg != null) _stIndexMsg.Text = "";
         }
 
         /// <summary>取「没成交的建仓」明细（后端已按执行日倒序、最多 2000 条）。
@@ -2820,6 +2857,8 @@ private void StRefreshCurStrategy()
             foreach (var v in _stEq) if (v != null) { min = Math.Min(min, v.Value); max = Math.Max(max, v.Value); }
             if (_stEqBench != null)
                 foreach (var v in _stEqBench) if (v != null) { min = Math.Min(min, v.Value); max = Math.Max(max, v.Value); }
+            if (_stEqIndex != null)
+                foreach (var v in _stEqIndex) if (v != null) { min = Math.Min(min, v.Value); max = Math.Max(max, v.Value); }
             if (min == max) { min -= 1; max += 1; }
 
             int padL = 8, padR = 8, padT = 12, padB = 18;
@@ -2846,6 +2885,14 @@ private void StRefreshCurStrategy()
                         if (_stEqBench[i] != null && _stEqBench[i - 1] != null)
                             g.DrawLine(pen, pt(i - 1, _stEqBench[i - 1].Value), pt(i, _stEqBench[i].Value));
             }
+            if (_stEqIndex != null)
+            {
+                // 指数：**只用收盘价**一条线（与组合同起点、同纵轴 → 可直接比高低）
+                using (var pen = new Pen(C.LineViolet, 1.5f))
+                    for (int i = 1; i < _stEqIndex.Count; i++)
+                        if (_stEqIndex[i] != null && _stEqIndex[i - 1] != null)
+                            g.DrawLine(pen, pt(i - 1, _stEqIndex[i - 1].Value), pt(i, _stEqIndex[i].Value));
+            }
             using (var pen = new Pen(C.AccentDeep, 2f))
                 for (int i = 1; i < _stEq.Count; i++)
                     if (_stEq[i] != null && _stEq[i - 1] != null)
@@ -2855,7 +2902,11 @@ private void StRefreshCurStrategy()
             {
                 g.DrawString("组合", new Font("Microsoft YaHei UI", 9f), new SolidBrush(C.AccentDeep), (float)padL, 0f);
                 if (_stEqBench != null)
-                    g.DrawString("基准", new Font("Microsoft YaHei UI", 9f), new SolidBrush(C.LineGoldDeep), (float)(padL + 44), 0f);
+                    // 图例必须写全：这条线**恒为**等权全池买入持有，不是用户选的指数。
+                    g.DrawString("全池等权", new Font("Microsoft YaHei UI", 9f), new SolidBrush(C.LineGoldDeep), (float)(padL + 52), 0f);
+                if (_stEqIndex != null)
+                    g.DrawString("指数 " + StBenchShortName(_stEqIndexCode),
+                        new Font("Microsoft YaHei UI", 9f), new SolidBrush(C.LineViolet), (float)(padL + 118), 0f);
                 g.DrawString(((double)(_stEq[_stEq.Count - 1] ?? min)).ToString("F0"), this.Font, bb, (float)padL, (float)(padT + h + 2));
             }
         }

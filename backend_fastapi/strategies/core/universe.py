@@ -22,7 +22,7 @@
 ## 判定口径（**与时间的关系**）
 剔除特征不是「按回测区间逐日判断」，而是**一次性把整段历史的池子筛出来**：
   · 微盘股 → **区间起点**当日市值（point-in-time，不含未来信息，也不随日期漂）；
-  · 新股/次新股 → 上市日距**区间起点**的天数（回测当时视角）；
+  · 新股/次新股 → **交易所公布的真实上市日**距**区间起点**的天数（回测当时视角）；
   · ST/*ST → akshare **当前**名称表（数据源无历史名单 → 前视偏差，**必须显式声明**）；
   · 板块 → 代码前缀（与时间无关）。
 「每项剔除了多少只」必须回传并写进报告 —— 否则读者无从判断这个净值跑在什么样本上。
@@ -74,6 +74,11 @@ MICRO_CAP = 3_000_000_000     # 总市值 ≤30 亿 = 微盘股
 # 一样是降级，只是没那么显眼。低于这个比例 → 中止（见 ScopeDataUnavailable）。
 NAME_COVERAGE_MIN = 0.95
 
+# ---- 上市日表的**覆盖率下限**（同一把尺子）----
+# 「新股/次新股」判定要靠上市日。上市日表只覆盖一部分票时，没覆盖的票
+# **无法判定**是新股还是老票 → 与「整个没取到」一样是降级 → 中止。
+LISTING_COVERAGE_MIN = 0.95
+
 
 class ScopeDataUnavailable(RuntimeError):
     """剔除特征所需的**外部数据**取不到 → 口径无法兑现 → **明确中止**。
@@ -113,7 +118,15 @@ _cache: dict = {}             # key -> (codes, base_count, at, detail)
 # 2026-11-18.a：ST / *ST 剔除所需名单**取不到时从「静默降级」改成「中止」**
 #   （旧口径会悄悄一只 ST 都没剔 → 报告与指纹都看不出，池子差 126 只、收益差 5%
 #   却「看起来同口径」）。旧口径产出的报告一律视为**旧口径**，不可与新报告对比。
-SPEC_VERSION = "2026-11-18.a"
+#
+# 2026-11-20.a：**上市日从「库里最早日K」近似改成「交易所公布的真实上市日」**。
+#   旧口径把「本地库最早有行情的那天」当上市日，而下载起点是 2021-08-02 →
+#   实测 5601 只里 **4283 只**的「最早日K」= 那天（连 000001 / 600519 都算那天上市）
+#   → 判定基准日改成区间起点后「天龄 = 0 ≤ 90」→ `ipo` 一次剔掉 **5599 只**，
+#   实跑只剩 2 只；而预览按「今天」算只剔 430 只 → **预览与实跑口径分叉**。
+#   新口径：交易所官方批量表（沪主板+沪科创+深市+北交所，实测 5580 只），
+#   取不到**中止**（与 ST 名单同一纪律）。旧口径产出的报告一律视为**旧口径**。
+SPEC_VERSION = "2026-11-20.a"
 
 
 def spec_signature() -> str:
@@ -137,7 +150,7 @@ def spec_signature() -> str:
         f"EXCLUDE={','.join(CATEGORIES)}",
         f"FWD={','.join(_FORWARD_LOOKING)}",
         "ASOF=start",
-        "LISTING=earliest_bar",
+        "LISTING=exchange_listing_date",
     ])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
 
@@ -261,6 +274,7 @@ def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str,
     dropped: dict[str, int] = {}
     st_cov: float | None = None      # ST 名单覆盖率（None = 本次没用到名单）
     st_covered: int = 0
+    listing_meta: dict = {}          # 上市日来源 / 覆盖率 / 兜底只数（用到才填）
 
     def _hit(feature: str, codes) -> None:
         if codes:
@@ -309,15 +323,55 @@ def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str,
         _hit("st", hit_st)
         _hit("star_st", hit_star_st)
 
-    # 新股 / 次新股：上市日距**区间起点**多少天
+    # 新股 / 次新股：**交易所公布的真实上市日**距**区间起点**多少天。
+    #
+    # ⚠️ 旧口径用「库里最早日K」当上市日 —— 那只是本地下载起点（2021-08-02），
+    #   实测 5601 只里 **4283 只**的「最早日K」= 那天（连 000001 / 600519 都算那天上市）
+    #   → 判定基准日改成区间起点后「天龄 = 0 ≤ 90」→ `ipo` 一次剔掉 **5599 只**，
+    #   实跑只剩 2 只；预览按「今天」算只剔 430 只 → 预览与实跑口径分叉。
+    #   根因不是阈值，是**用错了量**：那不是上市日。
+    #
+    # 取不到上市日 → **中止**（与 ST 名单同一纪律）：「勾了剔除新股却一只没剔」
+    # 会让报告的剔除明细看起来像「本来就没有新股」，口径指纹也算不出差别。
     if ex & {"ipo", "sub_new"}:
-        first = data.code_first_dates()
+        listing = data.load_listing_dates(base)
+        status = data.listing_source_status()
+        if not status.get("ok"):
+            raise ScopeDataUnavailable(
+                "剔除新股/次新股需要真实上市日（交易所公布的上市公司列表），本次取不到"
+                f"（{status.get('error') or '未知原因'}）。已中止本次回测 —— "
+                "继续跑等于「勾了剔除却一只没剔」，报告里的剔除明细会看起来像"
+                "「本来就没有新股」。\n"
+                "→ 下一步：(1) 恢复网络后重试；(2) 在回测范围里**取消**"
+                "『剔除新股 / 次新股』再跑（口径会变：报告会明确写出剔除明细里没有新股）。"
+            )
+        covered = sum(1 for c in base if listing.get(c))
+        cov = (covered / len(base)) if base else 1.0
+        if cov < LISTING_COVERAGE_MIN:
+            raise ScopeDataUnavailable(
+                f"上市日表只覆盖 {covered}/{len(base)} 只"
+                f"（{cov:.1%} < {LISTING_COVERAGE_MIN:.0%}）→ 没覆盖的票无法判定新股/次新股，"
+                "与「整个没取到」一样是降级，已中止本次回测。\n"
+                "→ 下一步：(1) 稍后重试（上市日表要联网拉四个交易所列表）；"
+                "(2) 在回测范围里**取消**『剔除新股 / 次新股』再跑。"
+            )
+        # 少数票不在交易所**当前**上市表（已退市 / 长期停牌）→ 用「库里最早日K」兜底。
+        # 兜底方向是**保守**的：最早日K ≥ 真实上市日 → 天龄算小 → 更易被判新股
+        # → 偏多剔，不会让新股期的行情漏进池子。兜底只数必须写进报告。
+        missing = [c for c in base if not listing.get(c)]
+        fallback = data.earliest_bar_dates() if missing else {}
         hit_ipo: list[str] = []
         hit_sub: list[str] = []
+        fb_used = 0
+        unknown = 0
         for code in base:
-            list_d = _parse_date(first.get(code))
+            list_d = _parse_date(listing.get(code))
             if list_d is None:
-                continue
+                list_d = _parse_date(fallback.get(code))
+                if list_d is None:
+                    unknown += 1
+                    continue               # 上市日未知 → 不判定（按非新股），并计入声明
+                fb_used += 1
             days = (as_of_d - list_d).days
             if "ipo" in ex and days <= ipo_days:
                 hit_ipo.append(code)
@@ -325,6 +379,13 @@ def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str,
                 hit_sub.append(code)
         _hit("ipo", hit_ipo)
         _hit("sub_new", hit_sub)
+        listing_meta = {
+            "listing_date_source": "exchange_listing_date",
+            "listing_date_coverage": round(cov, 4),
+            "listing_date_covered": covered,
+            "listing_date_fallback": fb_used,
+            "listing_date_unknown": unknown,
+        }
 
     # 微盘股：**区间起点**的总市值（point-in-time）。
     # 不用「今天的市值」：那是前视偏差（后来跌成微盘的票连同它过去那段大涨
@@ -342,6 +403,8 @@ def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str,
         # 因此没参与 ST 判定」（覆盖不足到会中止，但 95%~100% 之间的漏网要写明）。
         extra["st_name_coverage"] = round(st_cov, 4)
         extra["st_name_covered"] = st_covered
+    if listing_meta:
+        extra.update(listing_meta)
     return [c for c in base if c not in drop], dropped, extra
 
 
@@ -448,9 +511,11 @@ def build_detail(spec: dict, force: bool = False) -> tuple[list[str], dict]:
         "as_of": as_of_d.isoformat(),
         # 只能用当前状态判定的特征 → 前视偏差，必须让人看见（不能只写「幸存者偏差」）
         "forward_looking": [f for f in _FORWARD_LOOKING if f in ex],
-        # 上市日只能拿「库里最早日K」近似 —— 历史未拉全的老票会被误判成
-        # 新股/次新股（剔除偏多）。误差方向必须写出来，不能让读者自己猜。
-        "listing_date_source": "earliest_bar",
+        # 上市日来源：**交易所公布的真实上市日**（旧口径是「库里最早日K」近似，
+        # 而那是本地下载起点 → 一次能剔掉 5599 只，已废止）。
+        # 只在真的用到「新股/次新股」判定时才有值；没勾该特征 → None
+        # （本次没用到上市日，别让人误以为用了某个近似值）。
+        "listing_date_source": (extra or {}).get("listing_date_source"),
         # ST 名单的可用性（取不到时本次若勾了 ST 剔除会**中止**，
         # 所以跑到这里说明名单可用；仍要落盘，让读者知道判定依据是哪份表）
         "st_names": {"ok": bool(st_status.get("ok")), "size": st_status.get("size"),
@@ -473,6 +538,9 @@ def build_detail(spec: dict, force: bool = False) -> tuple[list[str], dict]:
         "dropped=" + ",".join(f"{k}:{dropped[k]}" for k in sorted(dropped)),
         f"st_names_ok={1 if st_status.get('ok') else 0}",
         f"st_cov={extra.get('st_name_coverage', '')}",
+        f"listing_src={extra.get('listing_date_source', '')}",
+        f"listing_cov={extra.get('listing_date_coverage', '')}",
+        f"listing_fb={extra.get('listing_date_fallback', '')}",
     ]).encode("utf-8")).hexdigest()[:8]
     _cache[key] = (codes, len(base), now, detail)
     if len(_cache) > _CACHE_MAX:
@@ -487,7 +555,8 @@ def scope_note(detail: dict) -> str:
       ① 每项剔除了多少只（否则读者不知道「勾了剔除」到底做了什么）；
       ② 判定基准日 = 区间起点（微盘按该日市值、新股/次新股按该日起算）；
       ③ 哪些判定用的是「当前状态」→ 含前视偏差（数据源不提供历史 ST 名单）；
-      ④ 两条数据限制：股本只有当前值、上市日只能拿「库里最早日K」近似；
+      ④ 数据限制：股本只有当前值（无历史股本）；上市日已接**交易所真实数据**，
+         但不在交易所当前上市表的少数票（已退市等）走「库里最早日K」保守兜底；
       ⑤ **最终可注入多少只**（区间内行情不足的又扣掉多少只）—— 读者看到的
          必须与实跑参与统计的只数一致。
 
@@ -527,13 +596,28 @@ def scope_note(detail: dict) -> str:
     if cov is not None and cov < 1.0:
         parts.append(f"⚠️ ST 名称名单只覆盖 {cov:.1%} → 未覆盖的票**未参与 ST 判定**"
                      f"（按非 ST 处理）")
-    if detail.get("listing_date_source") == "earliest_bar" and (ex & {"ipo", "sub_new"}):
-        parts.append("⚠️ 上市日以「库里最早日K」近似：历史未拉全的老票会被误判成新股/次新股（剔除偏多）")
+    if ex & {"ipo", "sub_new"}:
+        # 上市日来源必须说清楚：真实上市日 vs 兜底 vs 完全未知，三种情况读者要能分开看。
+        src = detail.get("listing_date_source")
+        lcov = detail.get("listing_date_coverage")
+        fb = detail.get("listing_date_fallback") or 0
+        unk = detail.get("listing_date_unknown") or 0
+        if src == "exchange_listing_date":
+            seg = [f"上市日取**交易所公布的真实上市日**（按基准日 {detail.get('as_of') or '-'} 起算天龄）"]
+            if lcov is not None and lcov < 1.0:
+                seg.append(f"⚠️ 上市日表只覆盖 {lcov:.1%}")
+            if fb:
+                seg.append(f"{fb} 只不在交易所当前上市表（已退市等）→ 上市日用「库里最早日K」"
+                           "**保守兜底**（最早日K ≥ 真实上市日 → 天龄偏小 → 偏多剔）")
+            if unk:
+                seg.append(f"{unk} 只上市日完全取不到 → **未参与**新股/次新股判定（按非新股处理）")
+            parts.append("；".join(seg))
+        else:
+            parts.append("⚠️ 上市日未取到（本次新股/次新股判定可能未按真实上市日执行）")
     cap_meta = detail.get("market_cap_meta") or {}
     if cap_meta.get("shares_source") == "latest":
         parts.append("⚠️ 微盘判定用的**股本是当前值**（数据源不提供历史股本，只有价格回到区间起点）")
     return "；".join(parts)
-
 
 def summary(spec: dict, force: bool = False) -> dict:
     """回测范围预览：基池 / 剔除后 / **可注入** 数量 + 每项剔除只数 + 口径说明。
@@ -560,6 +644,10 @@ def summary(spec: dict, force: bool = False) -> dict:
         "as_of": detail["as_of"],
         "forward_looking": detail["forward_looking"],
         "listing_date_source": detail.get("listing_date_source"),
+        "listing_date_coverage": detail.get("listing_date_coverage"),
+        "listing_date_covered": detail.get("listing_date_covered"),
+        "listing_date_fallback": detail.get("listing_date_fallback"),
+        "listing_date_unknown": detail.get("listing_date_unknown"),
         "market_cap_meta": detail.get("market_cap_meta") or {},
         # 口径版本与指纹：预览与回测报告**共用同一句**（同一份实现，不各写一套）
         "spec_version": SPEC_VERSION,
