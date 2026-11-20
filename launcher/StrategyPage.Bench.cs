@@ -54,6 +54,15 @@ namespace StockPool
         /// <summary>范围页上的**只读回显**：避免用户在范围页点「开始回测」时不知道带没带基准。</summary>
         private Label _stBenchEcho;
         private bool _stBenchListReady;
+        /// <summary>SelectedIndexChanged 只订阅一次（重复订阅 → 保存偏好 / 重画曲线都跑多遍）。</summary>
+        private bool _stBenchSubscribed = false;
+        /// <summary>重填清单期间的中间态 → 抑制事件（否则清空 Items 会把已存的偏好清成空）。</summary>
+        private bool _stBenchFilling = false;
+
+        /// <summary>基准说明的默认文案（清单取不到时被替换，取到后要还原）。</summary>
+        private const string BENCH_NOTE_DEFAULT =
+            "图上那条金线恒为「等权全池买入持有」，与此处选择无关；"
+            + "选指数只影响 alpha / beta / IR 的计算，且下次回测才生效。";
 
         /// <summary>结果页的「基准对比（指数）」分组（由 StBuildResult 插入）。</summary>
         private Control StBuildBenchGroup()
@@ -70,11 +79,12 @@ namespace StockPool
             _stBenchIdx.SelectedIndex = 0;
             AddRow(body, Row(Lbl("对比基准"), _stBenchIdx));
 
-            _stBenchNote = Mute(Lbl(
-                "图上那条金线**恒为**「等权全池买入持有」，与此处选择无关；"
-                + "选指数只影响 alpha / beta / IR 的计算，且**下次回测**才生效。"));
+            _stBenchNote = Mute(Lbl(BENCH_NOTE_DEFAULT));
             _stBenchNote.MaximumSize = new Size(900, 0);
             AddRow(body, Row(_stBenchNote));
+
+            // 手动重载：后端晚起 / 清单取空时，用户能自己补一次（不必重启程序）。
+            AddRow(body, Row(MiniBtn("重新载入指数清单", delegate { StReloadBenchList(); }, 150)));
 
             _stBenchReport = Mute(Lbl("本次报告：尚未回测"));
             _stBenchReport.MaximumSize = new Size(900, 0);
@@ -88,44 +98,113 @@ namespace StockPool
             return group;
         }
 
-        /// <summary>取指数清单（复用个股页那一份 /api/history/indices，不重复实现）。</summary>
+        /// <summary>
+        /// 取指数清单（复用个股页那一份 /api/history/indices，不重复实现）。
+        ///
+        /// ⚠ **失败不锁死**：启动器是「先起前端、再拉后端」，窗体构造阶段那一次请求
+        ///   几乎必然失败（连接被拒）—— 锁死就等于「基准下拉里永远只有『不对比』」。
+        ///   失败时把 _stBenchListReady 复位，等后端就绪后由 StReloadBenchList 重取。
+        /// </summary>
         private void StLoadBenchIndices()
         {
-            if (_stBenchListReady || _stBenchIdx == null) return;
+            if (_stBenchIdx == null) return;
+            if (_stBenchListReady) return;
+            if (!IsHandleCreated)
+            {
+                // 窗体还没显示（句柄未建）→ 现在发请求几乎必然失败：
+                // 启动器是「先起前端、后拉后端」，这会儿后端还没起来。
+                // 等句柄建好（= 窗体已显示）再取，那会儿后端通常已经就绪。
+                // 幂等：HandleCreated 可能触发多次，_stBenchListReady 守卫只取一次。
+                HandleCreated += delegate { StLoadBenchIndices(); };
+                return;
+            }
             _stBenchListReady = true;
             StockLoadIndexList(delegate
             {
                 // 清单是异步回来的，回调在 UI 线程（StockLoadIndexList 走 RunUi）。
-                _stBenchIdx.Items.Clear();
-                _stBenchCodes.Clear();
-                _stBenchIdx.Items.Add("不对比（只用等权全池买入持有）");
-                _stBenchCodes.Add("");
-                foreach (var o in _stockIndexOpts)
+                if (_stBenchIdx == null) return;
+                bool got = _stockIndexOpts.Count > 0;
+                _stBenchFilling = true;      // 重填期间的中间态 → 抑制事件
+                try
                 {
-                    if (string.IsNullOrEmpty(o.Code)) continue;
-                    string label = o.Name + "（" + o.Code + "）";
-                    // 本地没有行情的指数照样列出，但标出来 —— 选了它后端会取不到，
-                    // alpha/beta 会是空（不标的话用户只会看到「指标不见了」）。
-                    if (!o.Available) label += " · 本地无行情";
-                    _stBenchIdx.Items.Add(label);
-                    _stBenchCodes.Add(o.Code);
+                    _stBenchIdx.Items.Clear();
+                    _stBenchCodes.Clear();
+                    _stBenchIdx.Items.Add("不对比（只用等权全池买入持有）");
+                    _stBenchCodes.Add("");
+                    foreach (var o in _stockIndexOpts)
+                    {
+                        if (string.IsNullOrEmpty(o.Code)) continue;
+                        string label = o.Name + "（" + o.Code + "）";
+                        // 本地没有行情的指数照样列出，但标出来 —— 选了它后端会取不到，
+                        // alpha/beta 会是空（不标的话用户只会看到「指标不见了」）。
+                        if (!o.Available) label += " · 本地无行情";
+                        _stBenchIdx.Items.Add(label);
+                        _stBenchCodes.Add(o.Code);
+                    }
+                    _stBenchIdx.SelectedIndex = 0;
                 }
-                if (_stockIndexOpts.Count == 0 && _stBenchNote != null)
-                    _stBenchNote.Text = "指数清单取不到（后端未启动？启动后重新打开本页再试）；"
+                finally { _stBenchFilling = false; }
+
+                if (!got)
+                {
+                    // 取不到 → 不锁死（允许重试），并把原因说清楚
+                    _stBenchListReady = false;
+                    _stBenchNote.Text = "指数清单取不到（后端还没起来？点「重新载入指数清单」重试）；"
                         + "不选也能跑 —— 图上那条金线是「等权全池买入持有」。";
+                }
+                else
+                {
+                    _stBenchNote.Text = BENCH_NOTE_DEFAULT;
+                    // 可观测：清单到底加载没加载成功，落在「运行日志」页里，
+                    // 下次再出现「下拉里只有『不对比』」时能直接看证据，不用猜。
+                    Log("系统", "基准对比：指数清单已加载 " + _stockIndexOpts.Count + " 项");
+                }
 
                 // 订阅放在清单填完之后：构造期设 SelectedIndex 会触发事件，
                 // 那时用户上次的选择还没恢复 → 会把上次的偏好立刻清掉。
-                _stBenchIdx.SelectedIndexChanged += delegate
+                // ⚠ 只订阅一次：重载清单会再走一遍这里，重复订阅会让
+                //   「保存偏好 / 重画指数曲线」每次都跑多遍。
+                if (!_stBenchSubscribed)
                 {
-                    StSaveBenchPref();
-                    StRefreshBenchEcho();
-                    // 换指数 → **不重跑回测**，只重画那条指数曲线。
-                    StLoadIndexCurve(StBenchCode());
-                };
+                    _stBenchIdx.SelectedIndexChanged += delegate
+                    {
+                        if (_stBenchFilling) return;      // 重填清单的中间态 → 不动偏好
+                        StSaveBenchPref();
+                        StRefreshBenchEcho();
+                        // 换指数 → **不重跑回测**，只重画那条指数曲线。
+                        StLoadIndexCurve(StBenchCode());
+                    };
+                    _stBenchSubscribed = true;
+                }
                 StApplyBenchPref();
                 StRefreshBenchEcho();
             });
+        }
+
+        /// <summary>
+        /// 强制重载指数清单（后端就绪后 / 用户点「重新载入指数清单」时用）。
+        ///
+        /// 为什么要「强制」：清单请求失败时**不锁死**（见 StockLoadIndexList），
+        /// 但仍受「失败后 3 秒内不重试」的限流约束 —— 后端刚起来时正好落在这个窗口里，
+        /// 不强制就会白等一轮。
+        /// </summary>
+        internal void StReloadBenchList()
+        {
+            if (_stBenchIdx == null) return;             // 策略页还没构建（不需要）
+            _stockIndexListLoaded = false;                // 允许重新取
+            _stockIndexLastTry = DateTime.MinValue;       // 跳过重试间隔
+            _stockIndexLoading = false;                   // 解锁：万一上一轮卡在「正在取」
+            _stockIndexWaiters.Clear();                   // 清掉积压的等待者（避免重复刷下拉）
+            _stBenchListReady = false;
+            StLoadBenchIndices();
+        }
+
+        /// <summary>进入「回测结果」页时：清单还空着就重取一次（后端这时多半已就绪）。</summary>
+        internal void StEnsureBenchList()
+        {
+            if (_stBenchIdx == null) return;
+            if (_stockIndexOpts.Count > 0) return;
+            StReloadBenchList();
         }
 
         /// <summary>恢复上次选的基准（settings.json 的 bench_code）。</summary>
@@ -189,6 +268,9 @@ namespace StockPool
                 : "基准 " + StBenchLabel(code)
                     + "（alpha / beta / IR 按该指数计算；金线仍是等权全池买入持有）";
             if (metrics == null) return head;
+            // ⚠ 没选基准时**不能**说「该指数本地取不到行情」—— 压根就没有「该指数」，
+            //   这句话会让用户以为是自己选的指数坏了（实测出现过这种误导文案）。
+            if (string.IsNullOrEmpty(code)) return head;
             if (J.Get(metrics, "alpha") == null && J.Get(metrics, "beta") == null)
                 return head + " —— ⚠ 该指数本地取不到行情，这三个指标为空";
             return head;

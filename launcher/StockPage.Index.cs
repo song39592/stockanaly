@@ -45,8 +45,17 @@ namespace StockPool
         /// <summary>当前打开的是指数（不是个股）。</summary>
         private bool _stockIsIndex = false;
 
-        /// <summary>指数清单是否已取过（取过就不再打后端）。</summary>
+        /// <summary>指数清单是否已取过（取过就不再打后端）。
+        /// <para>⚠ 只有**真的拿到清单**才算取过 —— 空的算失败（见 StockLoadIndexList）。</para></summary>
         private bool _stockIndexListLoaded = false;
+
+        /// <summary>上次取清单的时间（失败后的最小重试间隔用）。</summary>
+        private DateTime _stockIndexLastTry = DateTime.MinValue;
+
+        /// <summary>取清单失败后的最小重试间隔（毫秒）。
+        /// <para>失败不锁死（后端比前端晚起），但也不能「每次按键都打后端」——
+        /// 后者正是原来「失败也标记为取过了」想避免的，代价却是清单永久为空。</para></summary>
+        private const int INDEX_LIST_RETRY_GAP_MS = 3000;
 
         /// <summary>清单是否正在取（避免并发重复请求）。</summary>
         private bool _stockIndexLoading = false;
@@ -80,9 +89,20 @@ namespace StockPool
         private void StockLoadIndexList(Action done)
         {
             if (_stockIndexListLoaded) { if (done != null) done(); return; }
+            if (_stockIndexLoading)
+            {
+                if (done != null) _stockIndexWaiters.Add(done);
+                return;                              // 已在取 → 等它回来即可
+            }
+            // 失败后的最小重试间隔：限流窗口内不发请求，直接回调（清单仍是空的）。
+            if ((DateTime.Now - _stockIndexLastTry).TotalMilliseconds < INDEX_LIST_RETRY_GAP_MS)
+            {
+                if (done != null) done();
+                return;
+            }
             if (done != null) _stockIndexWaiters.Add(done);
-            if (_stockIndexLoading) return;          // 已在取 → 等它回来即可
             _stockIndexLoading = true;
+            _stockIndexLastTry = DateTime.Now;
             RunUi<System.Collections.ArrayList>(
                 delegate
                 {
@@ -106,14 +126,22 @@ namespace StockPool
                         o.Available = av is bool && (bool)av;
                         if (!string.IsNullOrEmpty(o.Code)) _stockIndexOpts.Add(o);
                     }
-                    _stockIndexListLoaded = true;
+                    // ⚠ 只有**真的拿到清单**才算「取过了」：GetText 失败时 work 返回的是
+                    //   **空列表而不是异常** → 走的就是这个成功分支。若这里无条件置 true，
+                    //   「清单为空」就被当成「已取过」→ 永久锁死、永不重试
+                    //   （启动器先起前端、后拉后端，构造阶段那一次必然失败）。
+                    _stockIndexListLoaded = _stockIndexOpts.Count > 0;
+                    if (!_stockIndexListLoaded)
+                        Log("系统", "指数清单取不到（后端未就绪？）→ 不锁死，允许重试");
                     _stockIndexLoading = false;
                     StockFlushIndexWaiters();
                 },
                 delegate(Exception ex)
                 {
-                    // 失败也标记为「取过了」：否则每次输入都会重试打后端
-                    _stockIndexListLoaded = true;
+                    // ⚠ 失败**不**标记为「取过了」：启动器是**先起前端、后拉后端**，
+                    //   构造阶段那一次几乎必然失败（连接被拒）—— 锁死就等于
+                    //   「指数清单永久为空」→ 基准下拉里只剩「不对比」，且永不恢复。
+                    _stockIndexListLoaded = false;
                     _stockIndexLoading = false;
                     StockFlushIndexWaiters();
                 },

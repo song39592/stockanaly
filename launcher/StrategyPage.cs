@@ -270,6 +270,11 @@ namespace StockPool
             // 点击 = 先跳到「回测结果」页（进度条 / 指标卡在那儿），再发起回测 —— 行为与原按钮一致。
             _stStrip.InsertActionAfter(1, "开始回测", delegate { StStartBacktestFromBar(); });
 
+            // 切到「回测结果」页（页签下标 2）时：指数清单还空着就重取一次。
+            // 构造阶段那次请求必然落在「后端还没起来」的窗口里（启动器先起前端、后拉后端），
+            // 用户进到结果页时后端通常已经就绪 —— 这时补一次最自然。
+            _stStrip.OnSelected = delegate(int idx) { if (idx == 2) StEnsureBenchList(); };
+
             _stStrip.Select(0);
             return p;
         }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Windows.Forms;
 
 namespace StockPool
@@ -63,31 +64,96 @@ namespace StockPool
                     }
                     catch (Exception ex)
                     {
-                        try
-                        {
-                            Invoke((Action)delegate
-                            {
-                                if (IsDisposed || Disposing) return;
-                                if (stillValid != null && !stillValid()) return;
-                                if (onFail != null) onFail(ex);
-                            });
-                        }
-                        catch (Exception) { }
-                        return;
-                    }
-                    try
-                    {
-                        Invoke((Action)delegate
+                        InvokeUi(delegate
                         {
                             if (IsDisposed || Disposing) return;
                             if (stillValid != null && !stillValid()) return;
-                            if (onOk != null) onOk(result);
+                            if (onFail != null) onFail(ex);
                         });
+                        return;
                     }
-                    catch (Exception) { }
+                    InvokeUi(delegate
+                    {
+                        if (IsDisposed || Disposing) return;
+                        if (stillValid != null && !stillValid()) return;
+                        if (onOk != null) onOk(result);
+                    });
                 });
             }
             catch (Exception) { }
+        }
+
+        // ====================================================================
+        //  句柄未创建时的回调排队（构造阶段发起的请求靠它兜住）
+        //
+        //  实测证据（探针 2，2026-11-20）：句柄未创建时调用 Control.Invoke 会**直接抛**
+        //  InvalidOperationException ——「在创建窗口句柄之前，不能在控件上调用 Invoke
+        //  或 BeginInvoke」。而本项目里**窗体构造阶段**就会发起一批请求
+        //  （各页首次刷新、指数清单…），那会儿窗体还没 Show、句柄还不存在 →
+        //  回调被旧的 catch 静默吞掉 → 页面永远等不到结果。
+        //
+        //  症状（实测）：回测结果页「基准对比」的下拉里永远只有「不对比」，
+        //  说明文字停在初始那句，点「重新载入指数清单」也无效 ——
+        //  后者是因为「正在取」标志被永久卡住，后续调用只是把回调塞进等待队列。
+        //
+        //  现在：句柄建好之前到达的回调先排队，等 HandleCreated 之后用
+        //  **BeginInvoke** 逐个补发（不能用 Invoke：HandleCreated 是在 UI 线程里
+        //  触发的，同步 Invoke 会与它互相等待 → 死锁）。
+        // ====================================================================
+
+        /// <summary>句柄未创建期间排队的 UI 回调（HandleCreated 之后补发）。</summary>
+        private readonly List<Action> _pendingUiActions = new List<Action>();
+
+        /// <summary>HandleCreated 是否已挂钩（只挂一次）。</summary>
+        private bool _pendingUiHooked = false;
+
+        /// <summary>
+        /// 回到 UI 线程执行回调 —— **句柄还没建好时不丢**（排队等 HandleCreated）。
+        /// </summary>
+        private void InvokeUi(Action a)
+        {
+            if (a == null) return;
+            if (IsDisposed || Disposing) return;
+            if (IsHandleCreated)
+            {
+                try { Invoke(a); }
+                catch (Exception) { }
+                return;
+            }
+            QueueUiAction(a);
+        }
+
+        /// <summary>把回调排队，等句柄建好后补发（句柄已建时直接 BeginInvoke）。</summary>
+        private void QueueUiAction(Action a)
+        {
+            if (a == null) return;
+            if (IsDisposed || Disposing) return;
+            if (IsHandleCreated)
+            {
+                try { BeginInvoke(a); }
+                catch (Exception) { }
+                return;
+            }
+            lock (_pendingUiActions) { _pendingUiActions.Add(a); }
+            if (_pendingUiHooked) return;
+            _pendingUiHooked = true;
+            HandleCreated += delegate { FlushPendingUiActions(); };
+        }
+
+        /// <summary>句柄建好后补发排队的回调。</summary>
+        private void FlushPendingUiActions()
+        {
+            List<Action> list;
+            lock (_pendingUiActions)
+            {
+                list = new List<Action>(_pendingUiActions);
+                _pendingUiActions.Clear();
+            }
+            foreach (Action x in list)
+            {
+                try { if (IsHandleCreated) BeginInvoke(x); }
+                catch (Exception) { }
+            }
         }
     }
 }
