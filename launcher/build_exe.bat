@@ -59,6 +59,7 @@ echo 正在编译原生窗口程序...
   "%~dp0RpsPoolPage.cs" ^
   "%~dp0DownloadPage.cs" ^
   "%~dp0StrategyPage.cs" ^
+  "%~dp0StrategyPage.Bench.cs" ^
   "%~dp0WheelKit.cs" ^
   "%~dp0WheelRoller.cs" ^
   "%~dp0WheelSlider.cs" ^

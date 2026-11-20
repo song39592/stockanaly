@@ -75,6 +75,15 @@ POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / 
                                         筹码矩阵不可得等），上限 2000 条；被截断时
                                         scope.warnings 里注明总数。前端按条数显示「跳过只数」，
                                         故必须是逐票而非汇总（汇总会让计数失真）
+                                       scope.benchmark = **本次用的基准指数代码**
+                                        （形如 sh000300；没选 = null）。它只喂
+                                        alpha / beta / IR 的计算（数据层
+                                        data.load_benchmark），**不影响
+                                        equity_benchmark 曲线** —— 那条曲线恒为
+                                        「等权全池买入持有」（同池等权、与选哪个
+                                        指数无关）。两者别混成一个「基准」。
+                                        指数本地无行情 → 取不到 → 三个指标置空
+                                        并进 scope.warnings
                                        scope.exclusion.available_count / skipped_insufficient /
                                         window = **注入判定**结论（可注入只数 / 区间内行情不足
                                         剔除的只数 / 实际取数区间）。口径在股票池层
