@@ -95,6 +95,15 @@ POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / 
                                        scope.exclusion.st_names / st_name_coverage =
                                         ST 名称名单来源与覆盖率（<100% 说明有票未参与
                                          ST 判定，按非 ST 处理）
+                                       scope.exclusion.listing_date_source =
+                                        上市日来源（exchange_listing_date = 交易所公布的
+                                         **真实上市日**；旧口径 earliest_bar = 库里最早日K
+                                         近似，已废止 —— 它等于本地下载起点，一次能剔掉
+                                         5599 只）。listing_date_coverage / covered =
+                                         覆盖率；listing_date_fallback = 不在交易所当前
+                                         上市表（已退市等）走「库里最早日K」保守兜底的
+                                         只数；listing_date_unknown = 上市日完全取不到
+                                         → 未参与新股/次新股判定的只数
                                        scope.limit_open_policy + **limit_open** =
                                         「涨停开盘应对」三档（keep 不撤单 / cancel 撤单 /
                                         reseal 涨停条件单，**全局生效**，只作用于回测）。
