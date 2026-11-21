@@ -18,6 +18,7 @@ namespace StockPool
     internal sealed partial class MainForm
     {
         private const string DlApi = "http://127.0.0.1:8000/api/history/download";
+        private const string HistApi = "http://127.0.0.1:8000/api/history";
 
         private int _dlTabIndex = -1;
         private ComboBox _dlYear;         // 起始年份（只精确到年，统一按该年 1 月 1 日）
@@ -35,6 +36,9 @@ namespace StockPool
         private GroupBox _dlLockupGroup;         // 锁仓系数区块（有日K数据才显示）
         private Label _dlLockupNote;
         private Button _dlLockupBtn;        private bool _dlSettingsLoading;          // 程序回填控件值时抑制保存事件
+        private GroupBox _dlIndexGroup;          // 基准指数区块（回测基准对比用，独立表 index_bars）
+        private Label _dlIndexNote;
+        private Button _dlIndexBtn;
         private bool _dlFilling;            // 下载页控件回填中（不算用户操作：不保存、不改模式）
         private string _dlCoverBegin = "";  // 库里已覆盖的起点（多数票），用于判断「要不要补更早历史」
         private GroupBox _dlTdxGroup;             // 本地通达信区块（配置有效才显示）
@@ -199,7 +203,22 @@ namespace StockPool
             _dlLockupGroup = g3;
             AddRow(stack, g3);
 
-            // ---- ④ 本地通达信（配置了该目录才会显示）----
+            // ---- ④ 基准指数（回测基准对比用；独立表 index_bars，不进股票池）----
+            TableLayoutPanel b3i;
+            var g3i = Group("基准指数（回测基准对比用）", out b3i);
+            _dlIndexNote = Mute(Lbl("正在检测指数覆盖…"));
+            _dlIndexNote.AutoSize = false;
+            _dlIndexNote.Width = 700;
+            _dlIndexNote.Height = 46;
+            AddRow(b3i, Row(_dlIndexNote));
+            _dlIndexBtn = MiniBtn("下载/更新基准指数", delegate { DlStartIndices(); }, 168);
+            AddRow(b3i, Row(_dlIndexBtn));
+            AddRow(b3i, Row(Mute(Lbl("指数走独立库 index_bars，不进个股日K表、也不进回测池。"
+                + "首次下载拉全历史，之后只补最新交易日；清单由后端统一给出。"))));
+            _dlIndexGroup = g3i;
+            AddRow(stack, g3i);
+
+            // ---- ⑤ 本地通达信（配置了该目录才会显示）----
             TableLayoutPanel b4;
             var g4 = Group("同步通达信历史数据（本地）", out b4);
             _dlTdxNote = Mute(Lbl("未检测到通达信目录：到「设置」页配置后出现本功能"));
@@ -452,6 +471,7 @@ namespace StockPool
             DlUpdateHint();
             DlLoadAutoState(false);
             DlLoadLockupState(false);
+            DlLoadIndexState();
             DlRefreshTdx();
             DlPickLatestTask();
         }
@@ -551,6 +571,98 @@ namespace StockPool
                     if (_dlLockupBtn != null) _dlLockupBtn.Enabled = true;
                     DlRenderTask(root);
                 });
+            });
+            th.IsBackground = true;
+            th.Start();
+        }
+
+        /// <summary>下载/更新基准指数：走同一个 /start，只是 kind=indices（清单由后端给出）。</summary>
+        private void DlStartIndices()
+        {
+            if (_dlCommandBusy) return;
+            if (_dlLastStatus == "running" || _dlLastStatus == "queued")
+            {
+                Msg("已有任务正在运行，请先暂停或等它结束");
+                return;
+            }
+            var body = new Dictionary<string, object>();
+            body["scope"] = "all";          // 路由层只收 all|pool；真正的清单由后端 kind=indices 决定
+            body["kind"] = "indices";
+            body["concurrency"] = 4;
+            body["rate_limit"] = 4.0;
+            string json = new JavaScriptSerializer().Serialize(body);
+
+            if (_dlIndexBtn != null) _dlIndexBtn.Enabled = false;
+            _dlCommandBusy = true;
+            ++_dlRound;
+            _dlStatus.Text = "状态：正在启动基准指数下载…";
+            var th = new Thread(delegate()
+            {
+                string resp;
+                // 指数清单来自后端常量，不用拉 A 股清单，很快
+                if (!PostJson(DlApi + "/start", json, 60000, out resp))
+                {
+                    var err = JsonValue(resp, "detail");
+                    if (string.IsNullOrEmpty(err)) err = resp;
+                    Ui(delegate
+                    {
+                        _dlCommandBusy = false;
+                        if (_dlIndexBtn != null) _dlIndexBtn.Enabled = true;
+                        Msg("启动失败：" + err);
+                        DlRenderButtons(_dlLastStatus, 0);
+                    });
+                    return;
+                }
+                var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                Ui(delegate
+                {
+                    _dlCommandBusy = false;
+                    if (_dlIndexBtn != null) _dlIndexBtn.Enabled = true;
+                    DlRenderTask(root);
+                });
+            });
+            th.IsBackground = true;
+            th.Start();
+        }
+
+        /// <summary>拉一次 /api/history/indices：本地已落盘多少条、清单共多少条。</summary>
+        private void DlLoadIndexState()
+        {
+            if (_dlIndexNote == null) return;
+            var th = new Thread(delegate()
+            {
+                string resp;
+                try
+                {
+                    if (!Probe(HistApi + "/indices", 20000, out resp)) return;
+                    var root = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    var items = J.GetFrom(root, "items") as ArrayList;
+                    Ui(delegate
+                    {
+                        if (items == null)
+                        {
+                            _dlIndexNote.Text = "指数清单暂时取不到（后端未就绪？）。";
+                            return;
+                        }
+                        int available = 0;
+                        foreach (var item in items)
+                        {
+                            var row = item as Dictionary<string, object>;
+                            if (row == null) continue;
+                            bool ok = false;
+                            try { ok = Convert.ToBoolean(J.GetFrom(row, "available")); }
+                            catch { }
+                            if (ok) available++;
+                        }
+                        _dlIndexNote.Text = string.Format(
+                            "清单 {0} 条基准指数，本地已落盘 {1} 条{2}",
+                            items.Count, available,
+                            available < items.Count
+                                ? "；未落盘的首次下载会拉全历史。"
+                                : "；全部已落盘，点按钮只补最新交易日。");
+                    });
+                }
+                catch { }
             });
             th.IsBackground = true;
             th.Start();
@@ -1064,6 +1176,13 @@ namespace StockPool
                     ? "本次请求：锁仓系数补采（按报告期过滤，已是最新的股票不入队）"
                     : "";
             }
+            else if (kind == "indices")
+            {
+                // 指数由 sync_index 自己判增量，没有统一时间窗
+                _dlRange.Text = (status == "running" || status == "queued" || status == "paused")
+                    ? "本次请求：基准指数日K（首次拉全历史，已落盘只补最新；不进个股池）"
+                    : "";
+            }
             else
             {
                 _dlRange.Text = (status == "running" || status == "queued" || status == "paused")
@@ -1089,6 +1208,7 @@ namespace StockPool
                 DlLoadAutoState(true);
                 // 锁仓系数补采跑完时，覆盖情况要立刻刷新（否则卡片还显示旧的「待补采」）
                 if (kind == "lockup") DlLoadLockupState(true);
+                if (kind == "indices") DlLoadIndexState();
             }
             else DlStartPoll();
         }
@@ -1106,18 +1226,20 @@ namespace StockPool
             _dlBtnCancel.Enabled = active || status == "paused";
             if (_dlTdxBtn != null) _dlTdxBtn.Enabled = !active && status != "paused";
             if (_dlLockupBtn != null) _dlLockupBtn.Enabled = !active && status != "paused";
+            if (_dlIndexBtn != null) _dlIndexBtn.Enabled = !active && status != "paused";
             if (string.IsNullOrEmpty(status) && failed == 0) _dlBtnStart.Enabled = true;
             if (_dlCommandBusy)
             {
                 _dlBtnStart.Enabled = _dlBtnToggle.Enabled = _dlBtnRetry.Enabled = _dlBtnCancel.Enabled = false;
                 if (_dlTdxBtn != null) _dlTdxBtn.Enabled = false;
                 if (_dlLockupBtn != null) _dlLockupBtn.Enabled = false;
+                if (_dlIndexBtn != null) _dlIndexBtn.Enabled = false;
             }
         }
 
         /// <summary>
-        /// 状态文案按数据来源与任务类型区分：本地通达信是「同步」，
-        /// kind=lockup 是「补采锁仓系数」，在线日K才是「下载」。
+        /// 状态文案按数据来源与任务类型区分：本地通达信是「本地同步」，
+        /// kind=lockup 是「补采锁仓系数」、kind=indices 是「同步基准指数」，在线日K才是「下载」。
         /// </summary>
         private static string DlStatusText(string status, string source, string kind)
         {
@@ -1130,6 +1252,18 @@ namespace StockPool
                     case "paused": return "已暂停（补采锁仓系数）";
                     case "completed": return "锁仓系数补采完成";
                     case "cancelled": return "已取消（补采锁仓系数）";
+                    default: return string.IsNullOrEmpty(status) ? "未开始" : status;
+                }
+            }
+            if (kind == "indices")
+            {
+                switch (status)
+                {
+                    case "queued": return "排队中（同步基准指数）";
+                    case "running": return "同步基准指数中（联网）";
+                    case "paused": return "已暂停（基准指数）";
+                    case "completed": return "基准指数同步完成";
+                    case "cancelled": return "已取消（基准指数）";
                     default: return string.IsNullOrEmpty(status) ? "未开始" : status;
                 }
             }
