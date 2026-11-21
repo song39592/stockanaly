@@ -751,6 +751,14 @@ def _download_index(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> No
     except Exception as exc:                      # noqa: BLE001 - 单条失败不影响整个任务
         if runtime.stop.is_set():
             return
+        # 库里已有历史 + 这段增量窗口没有新交易日（周末 / 当天数据未发布）→ 已最新，
+        # 算完成而不是失败。实测 2026-11-21 周六：3 条已落盘指数全被记成 NoDataError。
+        # 首次同步就取不到才是真失败，落到下面走重试。
+        if (isinstance(exc, price_service.NoDataError)
+                and price_store.index_date_spans().get(code, ("", ""))[1]):
+            runtime.note_ok()
+            download_store.finish_code(task_id, seq, ok=True)
+            return
         message = f"{type(exc).__name__}: {exc}"
         retries = int(item.get("retries") or 0)
         if retries < MAX_RETRIES:

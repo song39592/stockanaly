@@ -12,8 +12,9 @@ namespace StockPool
     /// 为什么搬（三条理由，缺一条就不该搬）：
     ///   ① 基准是**结果的对照物**，不是回测的输入条件 —— 范围页里混着「池子 / 时间 /
     ///      资金」这些真正的输入，基准放那儿会让人以为「换个基准要重设回测条件」；
-    ///   ② 基准只影响 alpha / beta / IR 的**计算**（净值图上那条金线**恒为**「等权全池
-    ///      买入持有」，与选哪个指数无关），所以跑完再选也不影响已出的结果；
+    ///   ② 基准只影响 alpha / beta / IR 的**计算**，净值图上叠加的是所选指数的收盘曲线；
+    ///      等权全池那条线已于 2026-11-21 移除（指标卡「等权全池收益」仍保留），
+    ///      所以跑完再选也不影响已出的结果；
     ///   ③ 指数代码形态是「市场前缀 + 6 位数字」（sh000300），**裸 6 位会被后端当个股
     ///      去取**（000300 是只个股）→ alpha/beta 会算成个股的。旧默认值 "000300"
     ///      就是踩在这个坑上，且**界面上没有任何提示**（后端只是取不到就置 null）。
@@ -21,7 +22,7 @@ namespace StockPool
     /// ⚠ 口径边界：本模块**不改后端**。
     ///   · 请求体 `benchmark` = 本页选中的指数代码（没选 = null）；
     ///   · 后端用它算 alpha/beta/IR（`data.load_benchmark` → `stats` 的 `bench_close`），
-    ///     而 `equity_benchmark` 曲线**恒为**等权全池买入持有 —— 两者别混；
+    ///     `equity_benchmark` 是恒定的等权全池买入持有、前端已不渲染 —— 两者别混；
     ///   · `scope.benchmark` 随报告落盘，历史重放按**报告里记录的**基准渲染，
     ///     不依赖当前页面选择（见 `StRenderResult` 读 `scope.benchmark`）。
     /// </remarks>
@@ -61,8 +62,8 @@ namespace StockPool
 
         /// <summary>基准说明的默认文案（清单取不到时被替换，取到后要还原）。</summary>
         private const string BENCH_NOTE_DEFAULT =
-            "图上那条金线恒为「等权全池买入持有」，与此处选择无关；"
-            + "选指数只影响 alpha / beta / IR 的计算，且下次回测才生效。";
+            "选指数在净值图上叠加该指数的收盘曲线，并用于 alpha / beta / IR 的计算；"
+            + "两者都按下次回测生效。等权全池仅保留「等权全池收益」指标卡，不再画线。";
 
         /// <summary>结果页的「基准对比（指数）」分组（由 StBuildResult 插入）。</summary>
         private Control StBuildBenchGroup()
@@ -74,7 +75,7 @@ namespace StockPool
             _stBenchIdx.DropDownStyle = ComboBoxStyle.DropDownList;
             _stBenchIdx.FlatStyle = FlatStyle.Flat;
             _stBenchIdx.Width = 320;
-            _stBenchIdx.Items.Add("不对比（只用等权全池买入持有）");
+            _stBenchIdx.Items.Add("不对比（不叠加指数曲线）");
             _stBenchCodes.Add("");
             _stBenchIdx.SelectedIndex = 0;
             AddRow(body, Row(Lbl("对比基准"), _stBenchIdx));
@@ -129,7 +130,7 @@ namespace StockPool
                 {
                     _stBenchIdx.Items.Clear();
                     _stBenchCodes.Clear();
-                    _stBenchIdx.Items.Add("不对比（只用等权全池买入持有）");
+                    _stBenchIdx.Items.Add("不对比（不叠加指数曲线）");
                     _stBenchCodes.Add("");
                     foreach (var o in _stockIndexOpts)
                     {
@@ -150,7 +151,7 @@ namespace StockPool
                     // 取不到 → 不锁死（允许重试），并把原因说清楚
                     _stBenchListReady = false;
                     _stBenchNote.Text = "指数清单取不到（后端还没起来？点「重新载入指数清单」重试）；"
-                        + "不选也能跑 —— 图上那条金线是「等权全池买入持有」。";
+                        + "不选也能跑 —— 只是不叠加指数曲线、不计算 alpha / beta / IR。";
                 }
                 else
                 {
@@ -250,7 +251,7 @@ namespace StockPool
             if (_stBenchEcho == null) return;
             string code = StBenchCode();
             _stBenchEcho.Text = string.IsNullOrEmpty(code)
-                ? "不对比（等权全池买入持有）"
+                ? "不对比（不叠加指数曲线）"
                 : StBenchLabel(code) + " · 下次回测生效";
         }
 
@@ -264,9 +265,9 @@ namespace StockPool
             string code = "";
             if (scope != null) code = J.StrOr(J.Get(scope, "benchmark"), "");
             string head = string.IsNullOrEmpty(code)
-                ? "未选指数基准（alpha / beta / IR 未计算；金线 = 等权全池买入持有）"
+                ? "未选指数基准（不叠加曲线，alpha / beta / IR 未计算）"
                 : "基准 " + StBenchLabel(code)
-                    + "（alpha / beta / IR 按该指数计算；金线仍是等权全池买入持有）";
+                    + "（图上叠加该指数收盘曲线，alpha / beta / IR 按该指数计算）";
             if (metrics == null) return head;
             // ⚠ 没选基准时**不能**说「该指数本地取不到行情」—— 压根就没有「该指数」，
             //   这句话会让用户以为是自己选的指数坏了（实测出现过这种误导文案）。

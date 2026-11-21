@@ -39,6 +39,7 @@ namespace StockPool
         private GroupBox _dlIndexGroup;          // 基准指数区块（回测基准对比用，独立表 index_bars）
         private Label _dlIndexNote;
         private Button _dlIndexBtn;
+        private string _dlAutoIndicesFor = "";   // 已自动带过指数的 bars 任务 id（防重复触发）
         private bool _dlFilling;            // 下载页控件回填中（不算用户操作：不保存、不改模式）
         private string _dlCoverBegin = "";  // 库里已覆盖的起点（多数票），用于判断「要不要补更早历史」
         private GroupBox _dlTdxGroup;             // 本地通达信区块（配置有效才显示）
@@ -213,8 +214,9 @@ namespace StockPool
             AddRow(b3i, Row(_dlIndexNote));
             _dlIndexBtn = MiniBtn("下载/更新基准指数", delegate { DlStartIndices(); }, 168);
             AddRow(b3i, Row(_dlIndexBtn));
-            AddRow(b3i, Row(Mute(Lbl("指数走独立库 index_bars，不进个股日K表、也不进回测池。"
-                + "首次下载拉全历史，之后只补最新交易日；清单由后端统一给出。"))));
+            AddRow(b3i, Row(Mute(Lbl("点「开始下载」时会自动把基准指数一起更新，也可单独点本按钮。"
+                + "指数走独立库 index_bars，不进个股日K表、也不进回测池；"
+                + "首次下载拉全历史，之后只补最新交易日。"))));
             _dlIndexGroup = g3i;
             AddRow(stack, g3i);
 
@@ -1209,6 +1211,13 @@ namespace StockPool
                 // 锁仓系数补采跑完时，覆盖情况要立刻刷新（否则卡片还显示旧的「待补采」）
                 if (kind == "lockup") DlLoadLockupState(true);
                 if (kind == "indices") DlLoadIndexState();
+                // 个股下载跑完后自动把基准指数一起更新 —— 这才是「下载时列表一起下载」。
+                // 用任务 id 去重：轮询会反复进入这里，不能每次都起一个指数任务。
+                if (status == "completed" && kind == "bars" && _dlAutoIndicesFor != _dlTaskId)
+                {
+                    _dlAutoIndicesFor = _dlTaskId;
+                    DlStartIndices();
+                }
             }
             else DlStartPoll();
         }

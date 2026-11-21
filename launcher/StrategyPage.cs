@@ -150,7 +150,6 @@ namespace StockPool
         private Label _stHistStatus;
         private List<string> _stEqDates;
         private List<double?> _stEq;
-        private List<double?> _stEqBench;
         // 全市场推荐 / 近期回测都是长任务（全市场实测 419s / 761s），已改为后端异步任务，
         // 进度统一由上面的「统一任务区」跟进（_stJobTimer / _stJobKind）。
         private CheckBox _stRecentRuinChk;       // 近期回测：「破产截断」开关
@@ -2266,8 +2265,9 @@ private void StRefreshCurStrategy()
             _stMetricCards.Controls.Add(StKpiCard("资金利用率", StMPct(metrics, "capital_utilization")));
             _stMetricCards.Controls.Add(StKpiCard("每单位动用资金", StMPct(metrics, "return_per_utilized_capital")));
             object bret;
-            // ⚠ 这条曲线**恒为**「等权全池买入持有」（后端 equity_benchmark 的口径），
+            // ⚠ 这个指标**恒为**「等权全池买入持有」（后端 benchmark_return 的口径），
             //   与用户选的指数无关 —— 卡片名必须说清楚，否则会被当成「指数收益」。
+            //   净值图上已不再画这条线（2026-11-21 移除），但收益数字仍有对照价值，保留卡片。
             if (metrics.TryGetValue("benchmark_return", out bret) && bret != null)
                 _stMetricCards.Controls.Add(StKpiCard("等权全池收益", J.Pct100Plain(J.Num(bret))));
             // alpha / beta / IR：只有**选了指数基准**、且该指数本地取得到行情时后端才算得出。
@@ -2285,9 +2285,8 @@ private void StRefreshCurStrategy()
 
             _stEqDates = ToStringList(j["dates"]);
             _stEq = ToNullableDoubleList(j["equity"]);
-            object eb;
-            bool hasEb = j.TryGetValue("equity_benchmark", out eb);
-            _stEqBench = (hasEb && eb != null) ? ToNullableDoubleList(eb) : null;
+            // equity_benchmark（等权全池）的曲线已不再画：纵轴只按组合 + 选中指数定标，
+            // 后端照旧下发该字段（report 口径不变），这里只是不消费、不渲染。
             _stEquityBox.Invalidate();
 
             // 成交明细（逐笔）：后端内联下发 trades（已按买入日期倒序裁过）。
@@ -2499,7 +2498,6 @@ private void StRefreshCurStrategy()
             if (_stMetricCards != null) _stMetricCards.Controls.Clear();
             _stEqDates = null;
             _stEq = null;
-            _stEqBench = null;
             _stTradesData = new List<Dictionary<string, object>>();
             _stTradesTotal = 0;
             _stTradesTruncated = 0;
@@ -2855,8 +2853,6 @@ private void StRefreshCurStrategy()
 
             double min = double.MaxValue, max = double.MinValue;
             foreach (var v in _stEq) if (v != null) { min = Math.Min(min, v.Value); max = Math.Max(max, v.Value); }
-            if (_stEqBench != null)
-                foreach (var v in _stEqBench) if (v != null) { min = Math.Min(min, v.Value); max = Math.Max(max, v.Value); }
             if (_stEqIndex != null)
                 foreach (var v in _stEqIndex) if (v != null) { min = Math.Min(min, v.Value); max = Math.Max(max, v.Value); }
             if (min == max) { min -= 1; max += 1; }
@@ -2878,13 +2874,6 @@ private void StRefreshCurStrategy()
                 padL + (int)(w * i / n),
                 padT + (int)(h * (1 - (val - min) / (max - min))));
 
-            if (_stEqBench != null)
-            {
-                using (var pen = new Pen(C.LineGoldDeep, 1.5f))
-                    for (int i = 1; i < _stEqBench.Count; i++)
-                        if (_stEqBench[i] != null && _stEqBench[i - 1] != null)
-                            g.DrawLine(pen, pt(i - 1, _stEqBench[i - 1].Value), pt(i, _stEqBench[i].Value));
-            }
             if (_stEqIndex != null)
             {
                 // 指数：**只用收盘价**一条线（与组合同起点、同纵轴 → 可直接比高低）
@@ -2901,12 +2890,9 @@ private void StRefreshCurStrategy()
             using (var bb = new SolidBrush(_cText))
             {
                 g.DrawString("组合", new Font("Microsoft YaHei UI", 9f), new SolidBrush(C.AccentDeep), (float)padL, 0f);
-                if (_stEqBench != null)
-                    // 图例必须写全：这条线**恒为**等权全池买入持有，不是用户选的指数。
-                    g.DrawString("全池等权", new Font("Microsoft YaHei UI", 9f), new SolidBrush(C.LineGoldDeep), (float)(padL + 52), 0f);
                 if (_stEqIndex != null)
                     g.DrawString("指数 " + StBenchShortName(_stEqIndexCode),
-                        new Font("Microsoft YaHei UI", 9f), new SolidBrush(C.LineViolet), (float)(padL + 118), 0f);
+                        new Font("Microsoft YaHei UI", 9f), new SolidBrush(C.LineViolet), (float)(padL + 52), 0f);
                 g.DrawString(((double)(_stEq[_stEq.Count - 1] ?? min)).ToString("F0"), this.Font, bb, (float)padL, (float)(padT + h + 2));
             }
         }
