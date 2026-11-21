@@ -52,10 +52,30 @@ COMMON_INDICES: tuple[tuple[str, str], ...] = (
 
 _NAMES = dict(COMMON_INDICES)
 
+# 指数类别说明（下载器 `price_service.INDEX_CATALOG` 从这里派生，不另存一份清单）
+INDEX_KINDS: dict[str, str] = {
+    "sh000001": "沪市全市场",
+    "sz399001": "深市宽基",
+    "sh000300": "大盘蓝筹",
+    "sh000852": "小盘宽基",
+    "sh000985": "全市场",
+    "sh000016": "大盘蓝筹",
+    "sh000905": "中盘宽基",
+    "sh000688": "科创板",
+    "bj899050": "北交所",
+    "sz399330": "深市宽基",
+    "sz399006": "创业板",
+}
+
 
 def normalize_code(code: object) -> str:
     """指数代码归一：去空白 + 转小写（`SH000001` → `sh000001`）。"""
     return str(code or "").strip().lower()
+
+
+def index_symbol(code: object) -> str:
+    """指数代码 → 数据源用的纯 6 位代码（去掉市场前缀）。"""
+    return normalize_code(code)[2:]
 
 
 def is_index_code(code: object) -> bool:

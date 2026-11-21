@@ -21,6 +21,7 @@ from typing import Any
 import akshare as ak
 
 from . import price_store
+from . import indices as index_defs
 from .fallback import first_ok
 from . import share_service
 from market_service import _ak
@@ -317,12 +318,14 @@ def refetch_bars(code: str, adjust: str = "raw") -> dict[str, Any]:
 #   ① 东财 `index_zh_a_hist`          —— 用**纯 6 位**代码（000001 / 000300 / 000852）
 #   ② 东财 `stock_zh_index_daily_em`  —— 用带前缀符号
 #   ③ 新浪 `stock_zh_index_daily`      —— 用带前缀符号，**不接受日期参数**（取全历史后本地过滤）
+# ⚠️ 清单**唯一来源**是 `core/indices.py::COMMON_INDICES` —— 这里只派生数据源需要的
+# symbol（纯 6 位）与类别说明。原先这里硬编码 5 条，而前端下拉用另一份 11 条清单，
+# 结果 6 条指数「下拉里有、点下载报未知代码」（2026-11-21 实测）。两份清单 = 迟早漂移。
 INDEX_CATALOG: dict[str, dict[str, str]] = {
-    "sh000001": {"symbol": "000001", "name": "上证指数", "kind": "沪市全市场"},
-    "sz399001": {"symbol": "399001", "name": "深证成指", "kind": "深市宽基"},
-    "sh000300": {"symbol": "000300", "name": "沪深300", "kind": "大盘蓝筹"},
-    "sh000852": {"symbol": "000852", "name": "中证1000", "kind": "小盘宽基"},
-    "sh000985": {"symbol": "000985", "name": "中证全指", "kind": "全市场"},
+    code: {"symbol": index_defs.index_symbol(code),
+           "name": name,
+           "kind": index_defs.INDEX_KINDS.get(code, "")}
+    for code, name in index_defs.COMMON_INDICES
 }
 
 

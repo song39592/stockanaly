@@ -10,10 +10,12 @@
 `features.stock.profile`（锁仓系数），本模块只决定「下载谁、什么时候下载、
 失败怎么办」，不碰数据源细节、不碰存储结构。
 
-任务分两类（`kind`）：
+任务分三类（`kind`）：
   * `bars`（默认）—— 日 K，带「先近后远」两轮与参考数据；
   * `lockup` —— 只补锁仓系数（十大流通股东 → r / L），按报告期过滤队列，
-    已是最新报告期的股票根本不排进来。
+    已是最新报告期的股票根本不排进来；
+  * `indices` —— 基准指数日 K（独立表 `index_bars`），清单取 `core/indices.py`，
+    取数走 `price_service.sync_index`，与个股共用队列 / 限速 / 断点续传。
 """
 from __future__ import annotations
 
@@ -29,6 +31,7 @@ from typing import Any
 import akshare as ak
 
 from core import db
+from core import indices as index_catalog
 from features.download import store as download_store
 from features.history import store as history_store
 from core import price_service
@@ -67,6 +70,7 @@ MODE_INCREMENTAL = "incremental"    # 增量：只补最新数据（日常更新
 
 KIND_BARS = "bars"                  # 任务类型：日 K（默认）
 KIND_LOCKUP = "lockup"              # 任务类型：只补锁仓系数（十大流通股东 → r / L）
+KIND_INDICES = "indices"            # 任务类型：基准指数日 K（独立表 index_bars）
 
 SOURCE_ONLINE = "online"            # 数据来源：在线 akshare（限速、能拿全历史）
 SOURCE_TDX = "tdx"                  # 数据来源：本机通达信日线（秒级，但只有最近几年）
@@ -351,6 +355,15 @@ def _resolve_codes(scope: str, source: str = SOURCE_ONLINE) -> list[str]:
     if scope == "all":
         return _universe_codes()
     raise ValueError(f"未知的下载范围：{scope}")
+
+
+def _index_codes() -> list[str]:
+    """基准指数清单：**唯一来源** `core/indices.py::COMMON_INDICES`。
+
+    指数代码带市场前缀（`sh000001`），**绝不能**经过 `_normalize_codes`
+    —— 它会把非数字剥掉，`sh000001` 就变成 `000001`（平安银行）了。
+    """
+    return [code for code, _ in index_catalog.COMMON_INDICES]
 
 
 # --------------------------------------------------------------------------- #
@@ -718,6 +731,49 @@ def _download_lockup(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> N
     download_store.finish_code(task_id, seq, ok=True)
 
 
+def _download_index(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None:
+    """基准指数日 K：复用队列 / 限速 / 暂停续传 / 失败退避，取数走 `sync_index`。
+
+    指数不在个股日 K 表里（独立库 `index_bars`），也没有复权 / 锁仓这些概念，
+    整条链路只做一件事：把这条指数同步到最新。首次同步拉全历史、之后按库内
+    最新日增量补齐，都由 `sync_index` 自己判定，这里不重复实现。
+    """
+    code = item["code"]
+    seq = item["seq"]
+    try:
+        if runtime.stop.is_set():
+            return
+        runtime.limiter.acquire()
+        result = price_service.sync_index(code)
+        errors = list(result.get("errors") or [])
+        if errors:
+            raise RuntimeError("；".join(errors))
+    except Exception as exc:                      # noqa: BLE001 - 单条失败不影响整个任务
+        if runtime.stop.is_set():
+            return
+        # 库里已有历史 + 这段增量窗口没有新交易日（周末 / 当天数据未发布）→ 已最新，
+        # 算完成而不是失败。实测 2026-11-21 周六：3 条已落盘指数全被记成 NoDataError。
+        # 首次同步就取不到才是真失败，落到下面走重试。
+        if (isinstance(exc, price_service.NoDataError)
+                and price_store.index_date_spans().get(code, ("", ""))[1]):
+            runtime.note_ok()
+            download_store.finish_code(task_id, seq, ok=True)
+            return
+        message = f"{type(exc).__name__}: {exc}"
+        retries = int(item.get("retries") or 0)
+        if retries < MAX_RETRIES:
+            backoff = RETRY_BACKOFF_SECONDS[min(retries, len(RETRY_BACKOFF_SECONDS) - 1)]
+            download_store.requeue_code(task_id, seq, f"{message}（{backoff}s 后重试）")
+            time.sleep(backoff)
+            return
+        download_store.finish_code(task_id, seq, ok=False, error=message)
+        download_store.record_error(task_id, code, message)
+        return
+
+    runtime.note_ok()
+    download_store.finish_code(task_id, seq, ok=True)
+
+
 def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None:
     """下载一只股票的**某一个阶段**：日K（+ 可选复权因子 / 除权），失败退避重试。
 
@@ -726,14 +782,18 @@ def _download_one(task_id: str, runtime: _Runtime, item: dict[str, Any]) -> None
       完整历史 · 更早阶段：起始日 → 分界点
       增量模式：交给 `sync_bars` 按库里最新日期 -14 天重叠，只补最新数据
 
-    `kind=lockup` 时只补锁仓系数，不走下面的时间窗与日 K 逻辑。
+    `kind=lockup` 只补锁仓系数、`kind=indices` 同步基准指数，都不走下面的个股时间窗。
     """
     code = item["code"]
     seq = item["seq"]
     phase = int(item.get("phase") or 1)
     options = runtime.options
-    if (options.get("kind") or KIND_BARS) == KIND_LOCKUP:
+    kind = options.get("kind") or KIND_BARS
+    if kind == KIND_LOCKUP:
         _download_lockup(task_id, runtime, item)
+        return
+    if kind == KIND_INDICES:
+        _download_index(task_id, runtime, item)
         return
     mode = options.get("mode") or MODE_FULL
     source = options.get("source") or SOURCE_ONLINE
@@ -1326,8 +1386,9 @@ def _options_for(mode: str, *, source: str = SOURCE_ONLINE, start_date: str | No
     if mode == MODE_FULL:
         begin = _option_date({"start_date": start_date}, "start_date") or _default_start_date()
     split = _split_date()
-    # 锁仓补采没有时间窗概念（股东数据按季披露），固定跑一轮
-    if kind == KIND_LOCKUP:
+    # 锁仓补采没有时间窗概念（股东数据按季披露）；指数由 sync_index 自己判增量，
+    # 两者都固定跑一轮。
+    if kind in (KIND_LOCKUP, KIND_INDICES):
         phases = 1
     elif source == SOURCE_TDX:
         # 本地通达信只跑一轮：本机有几年的日线就同步几年，不再联网补更早的历史
@@ -1898,6 +1959,9 @@ def start_task(*, scope: str = "all", source: str = SOURCE_ONLINE,
 
     kind=lockup 时**只补锁仓系数**（不打日 K）：范围取「已下载日线的股票」，
     且只排「报告期过期或从未采集」的那些，已是最新的直接不进队列。
+
+    kind=indices 时**只同步基准指数**（独立表 `index_bars`，不进个股池）：
+    清单取 `core/indices.py`，首次拉全历史、之后按库内最新日增量补。
     """
     if _has_alive_task():
         raise RuntimeError("已有任务正在运行或暂停中，请继续该任务，或取消并等待收尾后再新建")
@@ -1905,7 +1969,7 @@ def start_task(*, scope: str = "all", source: str = SOURCE_ONLINE,
         raise ValueError(f"未知的下载模式：{mode}")
     if source not in (SOURCE_ONLINE, SOURCE_TDX):
         raise ValueError(f"未知的数据来源：{source}")
-    if kind not in (KIND_BARS, KIND_LOCKUP):
+    if kind not in (KIND_BARS, KIND_LOCKUP, KIND_INDICES):
         raise ValueError(f"未知的任务类型：{kind}")
 
     if kind == KIND_LOCKUP:
@@ -1915,6 +1979,9 @@ def start_task(*, scope: str = "all", source: str = SOURCE_ONLINE,
             scope=scope, concurrency=concurrency,
             rate_limit=min(float(rate_limit or DEFAULT_RATE_LIMIT), LOCKUP_RATE_LIMIT),
             force_reference=force_reference)
+
+    if kind == KIND_INDICES:
+        return _start_index_task(concurrency=concurrency, rate_limit=rate_limit)
 
     if source == SOURCE_TDX:
         mode = MODE_FULL                # 本地同步的语义就是「把完整历史攒齐」
@@ -1953,6 +2020,25 @@ def _start_lockup_task(*, scope: str, concurrency: int,
                            force_reference=force_reference, kind=KIND_LOCKUP)
     task_id = "lk-" + uuid.uuid4().hex
     download_store.create_task(task_id, scope, options, pending, 1, origin=ORIGIN_MANUAL)
+    _spawn(task_id, options)
+    return task_id
+
+
+def _start_index_task(*, concurrency: int, rate_limit: float) -> str:
+    """建一个「只同步基准指数」的任务（`ix-` 前缀，便于在任务列表里认出来）。
+
+    指数只有十来条，不占磁盘预估、也不走全市场股票清单（那是裸 6 位代码），
+    所以这里不调 `_ensure_disk_space` / `_resolve_codes`；代码直接取
+    `core/indices.py`（唯一来源），不做 6 位数字归一（会吃掉市场前缀）。
+    """
+    codes = _index_codes()
+    if not codes:
+        raise RuntimeError("基准指数清单为空，无法下载")
+    options = _options_for(MODE_INCREMENTAL, concurrency=concurrency,
+                           rate_limit=rate_limit, with_reference=False,
+                           kind=KIND_INDICES)
+    task_id = "ix-" + uuid.uuid4().hex
+    download_store.create_task(task_id, "indices", options, codes, 1, origin=ORIGIN_MANUAL)
     _spawn(task_id, options)
     return task_id
 
@@ -2059,8 +2145,11 @@ def _requested_span(task: dict[str, Any]) -> tuple[str | None, str | None]:
     显示到今天会被读成「要下今天的数据」（而今天不可能有）。
     """
     options = task.get("options") or {}
-    if str(options.get("kind") or KIND_BARS) == KIND_LOCKUP:
+    kind = str(options.get("kind") or KIND_BARS)
+    if kind == KIND_LOCKUP:
         return None, None                   # 锁仓补采没有时间窗，看报告期
+    if kind == KIND_INDICES:
+        return None, None                   # 指数由 sync_index 判增量，没有统一时间窗
     if str(options.get("mode") or MODE_FULL) != MODE_FULL:
         begin = str(options.get("span_begin") or "")
         if not begin:

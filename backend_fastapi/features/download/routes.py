@@ -1,7 +1,7 @@
 """历史数据遍历下载的 HTTP 接口。
 
 任务在后端后台跑（worker 池 + 限速），前端只需轮询进度：
-    POST /api/history/download/start            启动任务（kind=bars 日K / lockup 锁仓系数）
+    POST /api/history/download/start            启动任务（bars 日K / lockup 锁仓系数 / indices 基准指数）
     GET  /api/history/download/{id}             进度 + 失败清单
     POST /api/history/download/{id}/pause|resume|cancel|retry-failed
     GET  /api/history/download/lockup/state     锁仓系数落盘状态（状态卡片）
@@ -26,7 +26,7 @@ class StartRequest(BaseModel):
     scope: str = Field(default="all", pattern=r"^(all|pool)$")
     mode: str = Field(default="full", pattern=r"^(full|incremental)$")
     source: str = Field(default="online", pattern=r"^(online|tdx)$")
-    kind: str = Field(default="bars", pattern=r"^(bars|lockup)$")
+    kind: str = Field(default="bars", pattern=r"^(bars|lockup|indices)$")
     start_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     # 并发 / 限速：2026-11-09 实测校准（单票 0.91s，8 并发 5.36 只/秒）。
     # 上限从 8 放到 16 —— 后台任务要用 8~12 档，路由层先拒掉的话改了解释器。
@@ -64,7 +64,8 @@ def start(req: StartRequest):
     """启动下载任务。
 
     `kind=bars`（默认）下载日 K；`kind=lockup` 只补锁仓系数
-    （十大流通股东 → r / L，按报告期过滤，已是最新的股票不入队）。
+    （十大流通股东 → r / L，按报告期过滤，已是最新的股票不入队）；
+    `kind=indices` 只同步基准指数（清单取 core/indices.py，落 index_bars）。
     """
     try:
         task_id = download_service.start_task(

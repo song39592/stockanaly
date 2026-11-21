@@ -58,9 +58,9 @@ namespace StockPool
         public string EnvPython = "";
         public string EnvNode = "";
         /// <summary>回测的「基准（指数）」选择（形如 sh000300；空 = 不对比）。
-        /// <para>只影响 alpha / beta / IR 的计算（净值图上那条曲线恒为「等权全池买入
-        /// 持有」，与选哪个指数无关）。跨会话保留：否则每次进页面都要重选一次，
-        /// 而它恰恰是**下次回测**才生效的选项。</para></summary>
+        /// <para>决定净值图上叠加的指数收盘曲线，以及 alpha / beta / IR 的计算；
+        /// 等权全池那条线已于 2026-11-21 移除（只留「等权全池收益」指标卡）。
+        /// 跨会话保留：否则每次进页面都要重选一次，而它恰恰是**下次回测**才生效的选项。</para></summary>
         public string BenchCode = "";
         public Dictionary<string, object> CustomThemes = new Dictionary<string, object>();
         public SecretStatus SecretStatus = new SecretStatus();

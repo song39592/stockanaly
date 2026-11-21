@@ -150,7 +150,11 @@ namespace StockPool
         private Label _stHistStatus;
         private List<string> _stEqDates;
         private List<double?> _stEq;
-        private List<double?> _stEqBench;
+        // 回测结果图表：净值曲线 / 每日收益柱状图（纯前端切换，不碰后端口径）
+        private ComboBox _stChartMode;
+        private ComboBox _stBarWindow;                      // 柱状图显示窗口：全历史几千天挤成 1px，默认只看最近 250 日
+        private DateTimePicker _stBarFrom, _stBarTo;        // 自定义区间起止（勾选「自定义区间」时生效）
+        private const string BAR_INDEX_CODE = "sh000001";   // 柱状图默认指数：上证（未选基准时自动叠加）
         // 全市场推荐 / 近期回测都是长任务（全市场实测 419s / 761s），已改为后端异步任务，
         // 进度统一由上面的「统一任务区」跟进（_stJobTimer / _stJobKind）。
         private CheckBox _stRecentRuinChk;       // 近期回测：「破产截断」开关
@@ -716,6 +720,57 @@ private void StRefreshCurStrategy()
 
             // 基准（指数）对比：**从「回测范围」页搬到这里**（理由见 StrategyPage.Bench.cs）。
             AddRow(stack, StBuildBenchGroup());
+
+            // 图表切换：净值曲线（默认）/ 每日收益柱状图。纯前端，不动后端口径。
+            var chartRow = new FlowLayoutPanel();
+            chartRow.AutoSize = true;
+            chartRow.Margin = new Padding(0, 0, 0, 2);
+            chartRow.Controls.Add(Mute(Lbl("图表：")));
+            _stChartMode = new ComboBox();
+            _stChartMode.DropDownStyle = ComboBoxStyle.DropDownList;
+            _stChartMode.Width = 190;
+            _stChartMode.Items.Add("净值曲线");
+            _stChartMode.Items.Add("每日收益（指数涨跌 × 策略收益）");
+            _stChartMode.SelectedIndex = 0;
+            _stChartMode.SelectedIndexChanged += delegate { StOnChartModeChanged(); };
+            chartRow.Controls.Add(_stChartMode);
+            chartRow.Controls.Add(Mute(Lbl("　区间：")));
+            _stBarWindow = new ComboBox();
+            _stBarWindow.DropDownStyle = ComboBoxStyle.DropDownList;
+            _stBarWindow.Width = 96;
+            _stBarWindow.Items.Add("最近 250 日");
+            _stBarWindow.Items.Add("最近 120 日");
+            _stBarWindow.Items.Add("最近 500 日");
+            _stBarWindow.Items.Add("全部交易日");
+            _stBarWindow.Items.Add("自定义区间");
+            _stBarWindow.SelectedIndex = 0;
+            _stBarWindow.SelectedIndexChanged += delegate
+            {
+                bool custom = _stBarWindow.SelectedIndex == 4;
+                if (_stBarFrom != null) _stBarFrom.Visible = custom;
+                if (_stBarTo != null) _stBarTo.Visible = custom;
+                if (_stEquityBox != null) _stEquityBox.Invalidate();
+            };
+            chartRow.Controls.Add(_stBarWindow);
+            _stBarFrom = new DateTimePicker();
+            _stBarFrom.Format = DateTimePickerFormat.Custom;
+            _stBarFrom.CustomFormat = "yyyy-MM-dd";
+            _stBarFrom.Width = 106;
+            _stBarFrom.Visible = false;
+            _stBarTo = new DateTimePicker();
+            _stBarTo.Format = DateTimePickerFormat.Custom;
+            _stBarTo.CustomFormat = "yyyy-MM-dd";
+            _stBarTo.Width = 106;
+            _stBarTo.Visible = false;
+            EventHandler barDateChanged = delegate
+            {
+                if (_stEquityBox != null) _stEquityBox.Invalidate();
+            };
+            _stBarFrom.ValueChanged += barDateChanged;
+            _stBarTo.ValueChanged += barDateChanged;
+            chartRow.Controls.Add(_stBarFrom);
+            chartRow.Controls.Add(_stBarTo);
+            AddRow(stack, chartRow);
 
             var chartHost = new Panel();
             chartHost.Height = 240;
@@ -2266,8 +2321,9 @@ private void StRefreshCurStrategy()
             _stMetricCards.Controls.Add(StKpiCard("资金利用率", StMPct(metrics, "capital_utilization")));
             _stMetricCards.Controls.Add(StKpiCard("每单位动用资金", StMPct(metrics, "return_per_utilized_capital")));
             object bret;
-            // ⚠ 这条曲线**恒为**「等权全池买入持有」（后端 equity_benchmark 的口径），
+            // ⚠ 这个指标**恒为**「等权全池买入持有」（后端 benchmark_return 的口径），
             //   与用户选的指数无关 —— 卡片名必须说清楚，否则会被当成「指数收益」。
+            //   净值图上已不再画这条线（2026-11-21 移除），但收益数字仍有对照价值，保留卡片。
             if (metrics.TryGetValue("benchmark_return", out bret) && bret != null)
                 _stMetricCards.Controls.Add(StKpiCard("等权全池收益", J.Pct100Plain(J.Num(bret))));
             // alpha / beta / IR：只有**选了指数基准**、且该指数本地取得到行情时后端才算得出。
@@ -2285,9 +2341,9 @@ private void StRefreshCurStrategy()
 
             _stEqDates = ToStringList(j["dates"]);
             _stEq = ToNullableDoubleList(j["equity"]);
-            object eb;
-            bool hasEb = j.TryGetValue("equity_benchmark", out eb);
-            _stEqBench = (hasEb && eb != null) ? ToNullableDoubleList(eb) : null;
+            // equity_benchmark（等权全池）的曲线已不再画：纵轴只按组合 + 选中指数定标，
+            // 后端照旧下发该字段（report 口径不变），这里只是不消费、不渲染。
+            if (_stChartMode != null && _stChartMode.SelectedIndex == 1) StOnChartModeChanged();
             _stEquityBox.Invalidate();
 
             // 成交明细（逐笔）：后端内联下发 trades（已按买入日期倒序裁过）。
@@ -2499,7 +2555,6 @@ private void StRefreshCurStrategy()
             if (_stMetricCards != null) _stMetricCards.Controls.Clear();
             _stEqDates = null;
             _stEq = null;
-            _stEqBench = null;
             _stTradesData = new List<Dictionary<string, object>>();
             _stTradesTotal = 0;
             _stTradesTruncated = 0;
@@ -2837,10 +2892,150 @@ private void StRefreshCurStrategy()
             return string.IsNullOrEmpty(s) ? "未平仓" : s;
         }
         // ---------------- 净值曲线绘制 ----------------
+        /// <summary>图表切换：柱状图模式下若还没有指数曲线，默认取上证用于当日涨跌判定。</summary>
+        private void StOnChartModeChanged()
+        {
+            if (_stEquityBox == null) return;
+            bool bar = _stChartMode != null && _stChartMode.SelectedIndex == 1;
+            if (bar && (_stEqIndex == null || _stEqIndex.Count < 2)
+                && _stEqDates != null && _stEqDates.Count >= 2)
+                StLoadIndexCurve(BAR_INDEX_CODE);   // 复用已加载的基准曲线，不重复取数
+            _stEquityBox.Invalidate();
+        }
+
+        /// <summary>单图双柱（纯前端算，不动后端口径）：每天两根并排柱 —— 策略每日收益 R[t]=eq[t]/eq[t-1]-1
+        /// 与指数当日涨跌，同一天紧挨着，直接看出「指数涨但策略亏」的日子。
+        /// <para>颜色只区分系列：策略红实、指数蓝实，均为实心；涨跌看柱子在 0% 基线上/下，两者共用该基线。
+        /// 默认只画最近 250 日（全历史几千天会把柱挤成 1px），可选区间或自定义起止日期。
+        /// 指数用当前叠加的基准曲线，未选则默认上证。</para></summary>
+        private void StDailyBarPaint(PictureBox box, Graphics g)
+        {
+            var r = box.ClientRectangle;
+            g.Clear(_cBg);
+            if (_stEq == null || _stEq.Count < 2)
+            {
+                using (var b = new SolidBrush(_cSub))
+                    g.DrawString("暂无每日收益（先运行回测）", this.Font, b, 10f, 10f);
+                return;
+            }
+
+            int n = _stEq.Count;
+            var rets = new double?[n];   // 策略当日收益
+            var irets = new double?[n];  // 指数当日涨跌
+            bool hasIdx = _stEqIndex != null && _stEqIndex.Count == n;
+            for (int i = 1; i < n; i++)
+            {
+                if (_stEq[i] != null && _stEq[i - 1] != null && _stEq[i - 1].Value != 0)
+                    rets[i] = _stEq[i].Value / _stEq[i - 1].Value - 1;
+                if (hasIdx && _stEqIndex[i] != null && _stEqIndex[i - 1] != null
+                    && _stEqIndex[i - 1].Value != 0)
+                    irets[i] = _stEqIndex[i].Value / _stEqIndex[i - 1].Value - 1;
+            }
+
+            // 窗口范围：自定义起止日期按字符串比较（_stEqDates 是 yyyy-MM-dd）；其余按最近 N 日
+            int from = 1, to = n;
+            int win = _stBarWindow == null ? 0 : _stBarWindow.SelectedIndex;
+            if (win == 4 && _stBarFrom != null && _stBarTo != null && _stEqDates != null)
+            {
+                string lo = _stBarFrom.Value.ToString("yyyy-MM-dd");
+                string hi = _stBarTo.Value.ToString("yyyy-MM-dd");
+                for (int i = 1; i < n; i++)
+                {
+                    string d = i < _stEqDates.Count ? _stEqDates[i] : "";
+                    if (string.CompareOrdinal(d, lo) >= 0 && string.CompareOrdinal(d, hi) <= 0)
+                    {
+                        if (from == 1 && (i == 1 || string.CompareOrdinal(
+                            i - 1 < _stEqDates.Count ? _stEqDates[i - 1] : "", lo) < 0)) from = i;
+                        to = i + 1;
+                    }
+                }
+                if (from >= to) { from = Math.Max(1, n - 250); to = n; }   // 区间无重叠 → 退回默认
+            }
+            else
+            {
+                int days = win == 1 ? 120 : win == 2 ? 500 : win == 3 ? int.MaxValue : 250;
+                if (days < int.MaxValue && n - 1 > days) from = n - days;
+            }
+            int count = Math.Max(1, to - from);
+
+            // 单图双柱：每天两根（策略 + 指数），共用一个纵轴跨度（取两者最大绝对值）
+            double span = 0.005;
+            for (int i = from; i < to; i++)
+            {
+                if (rets[i].HasValue) span = Math.Max(span, Math.Abs(rets[i].Value));
+                if (irets[i].HasValue) span = Math.Max(span, Math.Abs(irets[i].Value));
+            }
+            span *= 1.15;
+
+            int padL = 8, padR = 8, padT = 20, padB = 20;
+            int x0 = padL;
+            int w = Math.Max(1, r.Width - padL - padR);
+            int h = Math.Max(1, r.Height - padT - padB);
+            double y0 = padT + h / 2.0;
+            Func<double, int> yy = v => (int)(y0 - v / span * (h / 2.0));
+
+            using (var grid = new Pen(_light ? Color.FromArgb(222, 224, 228) : Color.FromArgb(58, 62, 72)))
+            {
+                for (int i = 0; i <= 4; i++)
+                {
+                    int y = padT + h * i / 4;
+                    g.DrawLine(grid, x0, y, x0 + w, y);
+                }
+                g.DrawLine(grid, x0, (int)y0, x0 + w, (int)y0);   // 0% 基线
+            }
+
+            // 每天一个 slot，左半画策略、右半画指数；颜色只区分系列，涨跌看柱子在 0% 基线上下
+            double slot = (double)w / Math.Max(1, to - from);
+            int bw = Math.Max(1, (int)(slot / 2) - 1);
+            using (var upBrush = new SolidBrush(C.Up))             // 策略：红实（上=涨 下=跌）
+            using (var idxBrush = new SolidBrush(C.Accent))        // 指数：蓝实（上=涨 下=跌）
+            {
+                for (int i = from; i < to; i++)
+                {
+                    int slotX = x0 + (int)(slot * (i - from));
+                    int baseY = (int)y0;
+
+                    var rv = rets[i];
+                    if (rv.HasValue && Math.Abs(rv.Value) >= 1e-12)
+                    {
+                        int yv = yy(rv.Value);
+                        int top = Math.Min(yv, baseY), bh = Math.Max(1, Math.Abs(baseY - yv));
+                        g.FillRectangle(upBrush, slotX, top, bw, bh);
+                    }
+
+                    var iv = irets[i];
+                    if (iv.HasValue && Math.Abs(iv.Value) >= 1e-12)
+                    {
+                        int ix = slotX + bw + 1;
+                        int yv = yy(iv.Value);
+                        int top = Math.Min(yv, baseY), bh = Math.Max(1, Math.Abs(baseY - yv));
+                        g.FillRectangle(idxBrush, ix, top, bw, bh);
+                    }
+                }
+            }
+
+            using (var b = new SolidBrush(_cText))
+            using (var f = new Font("Microsoft YaHei UI", 9f))
+            {
+                string d0 = from < _stEqDates.Count ? _stEqDates[from] : "";
+                string d1 = to - 1 < _stEqDates.Count ? _stEqDates[to - 1] : "";
+                string bench = hasIdx ? StBenchShortName(_stEqIndexCode) : "未加载";
+                g.DrawString(string.Format("{0} ~ {1}  共 {2} 日  跨度 ±{3:P1}  基准 {4}",
+                    d0, d1, count, span, bench), f, b, (float)x0, 1f);
+                g.DrawString("红=策略 蓝=指数（每天左红右蓝，均实心；柱在基线上=涨、下=跌）",
+                    f, b, (float)x0, (float)(padT + h + 2));
+            }
+        }
+
         private void StEquityPaint(object sender, PaintEventArgs e)
         {
             var box = (PictureBox)sender;
             var g = e.Graphics;
+            if (_stChartMode != null && _stChartMode.SelectedIndex == 1)
+            {
+                StDailyBarPaint(box, g);
+                return;
+            }
             // 本函数是 PictureBox 的事件处理器、不是 Control 子类，进不了 ChartControl 基类，
             // 抗锯齿只能手工设一次（与其它 4 个自绘表面保持一致，第 07 项）
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
@@ -2855,8 +3050,6 @@ private void StRefreshCurStrategy()
 
             double min = double.MaxValue, max = double.MinValue;
             foreach (var v in _stEq) if (v != null) { min = Math.Min(min, v.Value); max = Math.Max(max, v.Value); }
-            if (_stEqBench != null)
-                foreach (var v in _stEqBench) if (v != null) { min = Math.Min(min, v.Value); max = Math.Max(max, v.Value); }
             if (_stEqIndex != null)
                 foreach (var v in _stEqIndex) if (v != null) { min = Math.Min(min, v.Value); max = Math.Max(max, v.Value); }
             if (min == max) { min -= 1; max += 1; }
@@ -2878,13 +3071,6 @@ private void StRefreshCurStrategy()
                 padL + (int)(w * i / n),
                 padT + (int)(h * (1 - (val - min) / (max - min))));
 
-            if (_stEqBench != null)
-            {
-                using (var pen = new Pen(C.LineGoldDeep, 1.5f))
-                    for (int i = 1; i < _stEqBench.Count; i++)
-                        if (_stEqBench[i] != null && _stEqBench[i - 1] != null)
-                            g.DrawLine(pen, pt(i - 1, _stEqBench[i - 1].Value), pt(i, _stEqBench[i].Value));
-            }
             if (_stEqIndex != null)
             {
                 // 指数：**只用收盘价**一条线（与组合同起点、同纵轴 → 可直接比高低）
@@ -2901,12 +3087,9 @@ private void StRefreshCurStrategy()
             using (var bb = new SolidBrush(_cText))
             {
                 g.DrawString("组合", new Font("Microsoft YaHei UI", 9f), new SolidBrush(C.AccentDeep), (float)padL, 0f);
-                if (_stEqBench != null)
-                    // 图例必须写全：这条线**恒为**等权全池买入持有，不是用户选的指数。
-                    g.DrawString("全池等权", new Font("Microsoft YaHei UI", 9f), new SolidBrush(C.LineGoldDeep), (float)(padL + 52), 0f);
                 if (_stEqIndex != null)
                     g.DrawString("指数 " + StBenchShortName(_stEqIndexCode),
-                        new Font("Microsoft YaHei UI", 9f), new SolidBrush(C.LineViolet), (float)(padL + 118), 0f);
+                        new Font("Microsoft YaHei UI", 9f), new SolidBrush(C.LineViolet), (float)(padL + 52), 0f);
                 g.DrawString(((double)(_stEq[_stEq.Count - 1] ?? min)).ToString("F0"), this.Font, bb, (float)padL, (float)(padT + h + 2));
             }
         }
