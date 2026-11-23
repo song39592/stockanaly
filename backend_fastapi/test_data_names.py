@@ -39,11 +39,44 @@ class TestNamesLocalFirst(unittest.TestCase):
         """本地表够用 → **一次网络都不发**（断网也能跑）。"""
         with patch.object(data.price_store, "stock_names",
                           return_value=(dict(LOCAL), SNAP)), \
+             patch.object(data.price_store, "upsert_stock_names") as upsert, \
              patch.object(data, "_fetch_names_online") as online:
             out = data.load_names(["600000", "300001"])
         self.assertFalse(online.called, "本地够用时不该联网")
+        self.assertFalse(upsert.called, "本地够用时不该有写库")
         self.assertEqual(out["600000"], "ST本地")
         self.assertEqual(out["300001"], "宁德时代")
+
+    def test_online_fallback_persists_to_local_table(self):
+        """联网兜底取到的名单必须**落盘**（取到就存）——
+        只放进程内缓存的话，下次启动又要重取一遍（27~50s）。"""
+        import market_service
+        import pandas as pd
+
+        frame = pd.DataFrame({"code": ["600000"], "name": ["ST在线"]})
+
+        class _FakeAk:
+            @staticmethod
+            def stock_info_a_code_name():
+                return frame
+
+        saved = {}
+
+        def _fake_upsert(names):
+            saved.update(names)
+            return {"upserted": len(names), "inserted": 1, "updated": 0, "error": None}
+
+        with patch.dict(sys.modules, {"akshare": _FakeAk}), \
+             patch.object(market_service, "_ak", return_value=frame), \
+             patch.object(data.price_store, "upsert_stock_names",
+                          side_effect=_fake_upsert) as upsert, \
+             patch.object(data.price_store, "stock_names",
+                          return_value=({"600000": "ST在线"}, "2026-11-23T10:00:00")):
+            data._fetch_names_online()
+        upsert.assert_called_once()
+        self.assertEqual(saved, {"600000": "ST在线"})
+        # 落盘后这份名单就是**本地表**里的 → 来源标签变纯本地
+        self.assertEqual(data.names_source_status()["source"], "local.stock_meta")
 
     def test_status_exposes_source_and_snapshot(self):
         """来源与**快照时刻**必须透出来（报告要能写明判定依据是哪份表）。"""

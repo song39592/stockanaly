@@ -379,11 +379,15 @@ def _load_local_names() -> bool:
 
 
 def _fetch_names_online() -> None:
-    """联网取 akshare 全市场名称表 → **只补缺口**（不覆盖本地已有项）。
+    """联网取 akshare 全市场名称表 → **落盘**并入本地主数据表（取到就存）。
 
     只在「本地表对目标池覆盖不足」时触发（新装环境 / 本地表还没播种）。
-    timeout=90：实测这张全市场表**冷启动要 50.8s**（5572 行），给 30s 会超时 →
+    timeout=90：实测这张全市场表**冷启动要 27~50s**（5581 行），给 30s 会超时 →
     名称整列空白。所以宁可多等。失败只记原因，不抛。
+
+    ⚠️ **取到就存**（`price_store.upsert_stock_names`）：只放进程内缓存的话，
+    下次启动又要重取一遍 → 用户看到的就是「每次都重新来一遍又不存」。
+    落盘后本地表就是最新的一份（来源标签也变成纯本地），下次零网络。
     """
     try:
         import akshare as ak
@@ -394,10 +398,21 @@ def _fetch_names_online() -> None:
             return
         online = {str(r["code"]).strip().zfill(6): str(r["name"])
                   for _, r in df.iterrows()}
-        local = _name_cache["local"]
-        _name_cache["online"] = {c: n for c, n in online.items() if not local.get(c)}
+        saved = price_store.upsert_stock_names(online)
+        local, synced = price_store.stock_names()
+        if local:
+            # 落盘成功 → 本地表已是最新的一份（来源标签变成纯本地）
+            _name_cache["local"] = local
+            _name_cache["online"] = {}
+            _name_cache["updated_at"] = synced
+        else:
+            # 落盘失败 → 本次仍用内存里的在线名单（**只补缺口**，不覆盖本地已有项）
+            local = _name_cache["local"]
+            _name_cache["online"] = {c: n for c, n in online.items() if not local.get(c)}
         _name_cache["at"] = time.time()
         _name_cache["error"] = "" if _names_map() else "akshare 返回空表"
+        if saved.get("error"):
+            _name_cache["error"] = f"落盘失败（本次用内存名单）: {saved['error']}"
     except Exception as exc:                   # noqa: BLE001 - 记下原因，别崩
         _name_cache["error"] = f"{type(exc).__name__}: {exc}"
 

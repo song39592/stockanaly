@@ -455,6 +455,68 @@ def stock_names() -> tuple[dict[str, str], str]:
         return {}, ""
 
 
+def upsert_stock_names(names: dict[str, str]) -> dict:
+    """把**在线取到的名称**并入本地主数据表（**取到就存**，别每次重取一遍）。
+
+    为什么需要它：`strategies/core/data.py` 的 ST 名单兜底会联网取
+    `akshare.stock_info_a_code_name`（实测冷启动 27~50s）。只放进进程内缓存的话，
+    **下次启动又要重取一遍**（用户看到的就是「每次都重新来一遍」）→ 取到就落盘，
+    下次本地命中、零网络。
+
+    与 `refresh_stock_meta()` 的分工（**别混**）：
+      · `refresh_stock_meta()` = **全量差量同步**（新增 / 退市 DELETE / 改名 /
+        拼音回填），数据源 `stock_zh_a_spot_em`（当前在市清单）→ 每日刷新走它；
+      · 本函数 = **只并入名称、不删行**，任何「代码→名称」表都能喂（本地表比
+        某个来源多出的行保留，删除交给上面的全量同步）。
+
+    返回统计（`upserted` / `inserted` / `updated` / `error`）。
+    """
+    result = {"upserted": 0, "inserted": 0, "updated": 0, "error": None}
+    if not names:
+        return result
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    try:
+        with db.connect(db.FACTORS_DB) as conn:
+            _ensure_stock_meta_table(conn)
+            existing = {str(r["code"]): str(r["name"] or "")
+                        for r in conn.execute("SELECT code,name FROM stock_meta").fetchall()}
+            for code, name in names.items():
+                code = str(code).strip().zfill(6)
+                nm = str(name or "").strip().replace(" ", "")
+                if len(code) != 6 or not code.isdigit() or not nm:
+                    continue
+                old = existing.get(code)
+                if old is None:
+                    full, initial = _to_pinyin(nm)
+                    conn.execute(
+                        "INSERT INTO stock_meta(code,name,pinyin,pinyin_initial,market,updated_at) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (code, nm, full, initial, _market_of(code), now))
+                    result["inserted"] += 1
+                elif old != nm:
+                    full, initial = _to_pinyin(nm)
+                    if full:
+                        # 拼音算得出来才一起改（pypinyin 缺失时别把已有拼音抹成空）
+                        conn.execute(
+                            "UPDATE stock_meta SET name=?,pinyin=?,pinyin_initial=?,updated_at=? "
+                            "WHERE code=?", (nm, full, initial, now, code))
+                    else:
+                        conn.execute("UPDATE stock_meta SET name=?,updated_at=? WHERE code=?",
+                                     (nm, now, code))
+                    result["updated"] += 1
+            # 名称快照刷新到此刻（本地表现在就是「刚取到的」这份名单）。
+            # ⚠️ 单独兜住异常：它在**同一个事务**里，抛异常会让整批写入一起回滚。
+            try:
+                db.meta_set(conn, "stock_meta_synced_at", now)
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as exc:  # noqa: BLE001 - 落盘失败不该拖垮调用方（调用方仍可用内存里的名单）
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        return result
+    result["upserted"] = result["inserted"] + result["updated"]
+    return result
+
+
 def listing_dates() -> dict[str, str]:
     """{code: 上市日（ISO 日期）} —— **交易所公布的真实上市日**。
 
@@ -548,7 +610,14 @@ def refresh_stock_meta() -> dict:
         result["error"] = "akshare 未安装"
         return result
     try:
-        df = ak.stock_zh_a_spot_em()
+        # ⚠️ 必须走 `_ak`（带硬超时）：akshare 内部多数接口**不设 timeout**，
+        # 数据源无响应时会长时间阻塞 —— 这个函数在**调度线程**与用户的下载点击
+        # 路径上都会跑，卡住就是整个后端卡住。
+        # `raise_on_error=True`：保留失败原因（502 / 超时 / 连接失败），
+        # 否则错误只会显示成一句「A股列表为空」，查不出根因。
+        # 函数内导入：避免与 features.market.service 形成模块级循环依赖。
+        from market_service import _ak
+        df = _ak(ak.stock_zh_a_spot_em, timeout=120, raise_on_error=True)
     except Exception as exc:  # noqa: BLE001
         result["error"] = f"拉取A股列表失败：{exc}"
         return result

@@ -20,15 +20,12 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 import shutil
 import threading
 import time
 import uuid
 from functools import wraps
 from typing import Any
-
-import akshare as ak
 
 from core import db
 from core import indices as index_catalog
@@ -38,8 +35,6 @@ from core import price_service
 from core import price_store
 from core import stock_status
 from core import tdx_reader
-from core.fallback import first_ok      # bug-02：串行多源回退的总时间预算
-from features.market.service import _ak
 from features.stock import profile as stock_profile
 
 # 默认下载窗口：**最近 5 年**（界面「起始日期」可改）。
@@ -207,130 +202,55 @@ def _normalize_codes(raw: Any) -> list[str]:
 # --------------------------------------------------------------------------- #
 # 下载范围
 # --------------------------------------------------------------------------- #
-# 全市场代码表的取数预算（秒）。两个源原本各 timeout=90 且串行 -> 最坏 180s，
-# 而本函数在下载接口的同步路径上。
+# 全市场 A 股代码清单 = **本地主数据表**（`price_store.stock_meta`）。
 #
 # ⚠️ **实测（2026-11-18）**：`stock_info_a_code_name` 要翻 **18 页**，耗时随数据源
-# 状态剧烈波动：冷启动 27~36 秒，被限流时实测 **167 秒**。原来的 20s 预算会让
-# **后端每次重启后的第一次调用必然超时**（用户看到「股票清单获取失败：A 股代码
-# 列表获取失败（数据源无响应）」，而数据源其实好好的）；后续调用命中 akshare 的
-# 进程内缓存，0.1 秒就返回 → 表现为「第一次点开始失败，再点一次就好」。
+# 状态剧烈波动：冷启动 27~36 秒，被限流时实测 **167 秒** → 它**不能**在用户点
+# 「开始下载」的同步路径上取（旧实现第一次点必然超时，表现为「第一次点开始失败，
+# 再点一次就好」）。
 #
-# ⭐ 真正的解法是**别在关键路径上取**（见 `_universe_codes`）：清单缓存在库里，
-# 调度器后台刷新，用户的点击几乎总是命中缓存 → 这里是兜底的冷路径预算。
-_UNIVERSE_BUDGET = 60.0
-_UNIVERSE_PER_SOURCE = 90.0
-
-# 全市场代码表的缓存（存 download_settings 表，随数据目录走）。
-# 清单本身低频变动（新股上市 / 退市），12 小时刷一次足够。
-_UNIVERSE_CACHE_KEY = "universe_codes"
-_UNIVERSE_CACHE_TTL = 12 * 3600.0
-
-
-def _cached_universe_codes(allow_stale: bool = False) -> dict[str, Any] | None:
-    """库里缓存的全市场代码表（`{codes, at, source, ttl}`）；没有或已过期返回 None。
-
-    `allow_stale=True` 时忽略有效期（网络取不到时的兜底）。
-    """
-    raw = download_store.get_setting(_UNIVERSE_CACHE_KEY, "")
-    if not raw:
-        return None
-    try:
-        payload = json.loads(raw)
-        codes = [str(c) for c in (payload.get("codes") or [])]
-        at = float(payload.get("at") or 0.0)
-    except (TypeError, ValueError):
-        return None
-    if not codes:
-        return None
-    ttl = float(payload.get("ttl") or _UNIVERSE_CACHE_TTL)
-    if not allow_stale and (time.time() - at) > ttl:
-        return None
-    return {"codes": codes, "at": at, "source": str(payload.get("source") or ""), "ttl": ttl}
-
-
-def _store_universe_codes(codes: list[str], source: str = "network",
-                          ttl: float = _UNIVERSE_CACHE_TTL) -> None:
-    download_store.set_setting(_UNIVERSE_CACHE_KEY, json.dumps(
-        {"codes": codes, "at": time.time(), "source": source, "ttl": ttl},
-        ensure_ascii=False))
-
-
-def _fetch_universe_codes(budget: float = _UNIVERSE_BUDGET) -> list[str]:
-    """联网取全市场 A 股代码（akshare；两个来源任一可用即可）。"""
-    sources = []
-    for name in ("stock_info_a_code_name", "stock_zh_a_spot_em"):
-        func = getattr(ak, name, None)
-        if func is not None:
-            sources.append((name, lambda t, _fn=func: _ak(_fn, timeout=t)))
-    _, frame = first_ok(sources, budget=budget, per_call=_UNIVERSE_PER_SOURCE,
-                        is_ok=lambda df: df is not None and not getattr(df, "empty", True))
-    if frame is None:
-        raise RuntimeError("A 股代码列表获取失败（数据源无响应，或 akshare 未提供该接口）")
-    columns = {str(column).strip(): column for column in frame.columns}
-    code_column = next(
-        (columns[key] for key in ("code", "代码", "证券代码", "symbol") if key in columns), None)
-    if code_column is None:
-        raise RuntimeError("A 股代码列表里找不到代码列")
-    return _normalize_codes(list(frame[code_column]))
+# ⚠️ 旧实现（2026-11-23 前）：清单缓存在 `download_settings`（12 小时有效），
+#   过期就在后台联网重取一次 `akshare.stock_info_a_code_name` → **每 12 小时重取一遍**，
+#   而且取到的清单**只写缓存、不进主数据表** → 主数据（名称）还是旧的，两份清单还会分叉。
+#
+# ✅ 新口径：**统一用本地**。
+#   · 清单读取 = `price_store.all_stock_codes()`（零网络、毫秒级）；
+#   · 刷新 = **显式动作**：每日调度（`stock_meta_refreshed_at` 记当天）或
+#     `POST /api/stock/meta/refresh` → 刷新结果**落盘**，之后一直用本地；
+#   · 本地表为空（首次安装）→ 刷新一次并落盘；仍为空 → 明确报错，不给空清单。
+#   用户点「开始下载」因此**永远不等网络**。
 
 
 def _universe_codes() -> list[str]:
-    """取全市场 A 股代码：**缓存优先**，联网兜底，再兜底到本地主数据表。
+    """全市场 A 股代码清单：**本地主数据表优先**（零网络），空表才联网刷新并落盘。
 
     ⚠️ 为什么不让用户等网络：本函数在下载接口的**同步路径**上
     （`_resolve_codes(scope="all")` → `/start`），启动器一侧超时有限
-    （`/start` 120s、`/universe` 90s），而清单取数实测 27~36 秒、被限流时能到
-    **167 秒**、数据源整体不可达时会直接 SSL 失败 → 慢一点就报
+    （`/start` 120s、`/universe` 90s），而旧口径的联网取数实测 27~36 秒、
+    被限流时能到 **167 秒**、数据源整体不可达时会直接 SSL 失败 → 慢一点就报
     「任务启动失败：A 股代码列表获取失败（数据源无响应）」，而数据源其实是好的、只是慢。
 
-    清单本身是**低频变动**的数据（新股上市 / 退市），兜底顺序：
-    1. 缓存（网络取的一份，12 小时有效）→ 零网络、毫秒级；
-    2. 联网取（60s 预算）→ 成功就更新缓存；
-    3. 联网失败 + 有陈旧缓存 → 用陈旧缓存（最多差 12 小时的几只票），打印缓存年龄；
-    4. 连缓存都没有 → 用**本地主数据表**（`stock_meta`，刷新成功后它就等于那份
-       在市清单）→ 宁可多带几只已退市的票，也不能让「开始下载」整个用不了；
-       有效期按 1 小时算（短），网络恢复后很快换回准确清单；
-    5. 什么都没有 → 明确报错，不静默给个空清单。
+    ✅ 现在**统一用本地**（`stock_meta`）：
+    1. 本地主数据表有数据 → 直接用（零网络、毫秒级，用户永远不等网络）；
+    2. 本地表为空（首次安装 / 从未成功刷新）→ **联网刷新一次并落盘**
+       （`price_store.refresh_stock_meta()`：取全市场在市清单 + 名称，一起存）；
+    3. 刷新也失败 → 明确报错，不静默给个空清单。
+
+    刷新是**显式动作**（每日调度 / `POST /api/stock/meta/refresh`），不再由
+    「缓存过期」隐式触发 —— 旧口径每 12 小时重取一遍且**取到不存主数据**，
+    两份清单还会分叉（清单是新的、名称是旧的）。
     """
-    cached = _cached_universe_codes()
-    if cached is not None:
-        return cached["codes"]
-    try:
-        codes = _fetch_universe_codes()
-    except RuntimeError as exc:
-        stale = _cached_universe_codes(allow_stale=True)
-        if stale is not None:
-            age_h = (time.time() - stale["at"]) / 3600.0
-            print(f"[download] 全市场清单联网取数失败（{exc}），"
-                  f"改用 {age_h:.1f} 小时前的缓存（{len(stale['codes'])} 只）")
-            return stale["codes"]
-        local = price_store.all_stock_codes()
-        if local:
-            print(f"[download] 全市场清单联网取数失败（{exc}），"
-                  f"改用本地主数据表（{len(local)} 只，可能含已退市的票）")
-            _store_universe_codes(local, source="local", ttl=3600.0)
-            return local
-        raise
-    _store_universe_codes(codes, source="network")
-    return codes
-
-
-def _refresh_universe_cache_async() -> None:
-    """后台刷新代码表缓存（调度器调用）：慢的网络调用不占用户的同步路径。"""
-    if _cached_universe_codes() is not None:
-        return
-
-    def worker() -> None:
-        try:
-            # 后台线程没人等 → 预算放宽到 300s（被限流时实测要 167s，
-            # 用同步路径那 60s 的预算会永远取不到，缓存就永远是陈旧的）
-            codes = _fetch_universe_codes(budget=300.0)
-            _store_universe_codes(codes, source="network")
-        except Exception:                         # noqa: BLE001 - 刷新失败不影响调度
-            pass
-
-    threading.Thread(target=worker, daemon=True).start()
+    local = price_store.all_stock_codes()
+    if local:
+        return local
+    # 本地表还没有（首次安装 / 从未成功刷新）→ 联网刷新一次并**落盘**
+    result = price_store.refresh_stock_meta()
+    local = price_store.all_stock_codes()
+    if local:
+        print(f"[download] 本地股票主数据为空，已联网刷新并落盘（{len(local)} 只）")
+        return local
+    raise RuntimeError("股票清单为空：本地主数据表没有数据，且联网刷新失败"
+                       f"（{result.get('error') or '未知原因'}）")
 
 
 def _resolve_codes(scope: str, source: str = SOURCE_ONLINE) -> list[str]:
@@ -2003,7 +1923,11 @@ def _scheduler_tick() -> None:
         return
     stored = download_store.settings_map()
     today = dt.date.today().isoformat()
-    # 股票基础主数据：表空则播种；否则每日增量刷新（有新股才动库，不每次重拉）
+    # 股票基础主数据（**全市场代码表 + 名称的唯一来源**）：表空则播种；
+    # 否则每日增量刷新（有新股才动库，不每次重拉）。
+    # ⚠️ 这是**显式刷新**的两个入口之一（另一个是 `POST /api/stock/meta/refresh`）：
+    #   旧的「代码表缓存过期 → 后台联网重取」已删除 —— 清单现在直接读本地表，
+    #   没必要再维护第二份副本（副本只存代码、不存名称 → 与主数据迟早分叉）。
     try:
         from core import price_store as _ps
         if _ps.stock_meta_count() == 0 or download_store.get_setting(
@@ -2014,18 +1938,7 @@ def _scheduler_tick() -> None:
             # 含已退市的票，而当下在市只有 5580 只）。
             if not result.get("error"):
                 download_store.set_setting("stock_meta_refreshed_at", today)
-                # 这次刷新拿到的就是「全市场在市代码清单」→ 直接存成下载用的缓存
-                # （同一个接口，省一次慢调用；口径与网络清单一致）
-                codes = _ps.all_stock_codes()
-                if codes:
-                    _store_universe_codes(codes)
     except Exception:                         # noqa: BLE001 - 主数据刷新失败不影响调度
-        pass
-    # 全市场代码表缓存：过期就在**后台线程**刷新（联网可能要 30~170 秒，
-    # 不能占住调度线程、更不能占住用户点「开始下载」的同步路径）
-    try:
-        _refresh_universe_cache_async()
-    except Exception:                         # noqa: BLE001 - 刷新失败不影响调度
         pass
     if stored.get("auto_update") == "1":
         # 日线自动更新**全天都会尝试**：库里还落后于「应有交易日」就补，不限于

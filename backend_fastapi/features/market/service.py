@@ -167,14 +167,20 @@ def _uses_v8(fn) -> bool:
     return cached
 
 
-def _ak(fn, *args, timeout=None, **kwargs):
+def _ak(fn, *args, timeout=None, raise_on_error=False, **kwargs):
     """调用 akshare 接口；未安装、异常或超时均返回 None（单来源降级）。
 
     akshare 内部多数接口未设置 timeout，数据源无响应时会长时间阻塞，
     因此放到独立线程执行并设硬超时，超时立刻放弃该来源，不拖住整个页面；
     依赖 py_mini_racer 的接口额外串行化，避免并发初始化 V8 崩掉整个后端进程。
+
+    ⚠️ `raise_on_error=True`：**保留失败原因再抛异常** —— 给「刷新主数据」这类
+    需要把根因写给用户看的调用方用（默认仍返回 None：页面侧要的是「降级不报错」，
+    异常在这一层被吞掉就只剩一句「数据源无响应」，查不出到底是 502 还是超时）。
     """
     if ak is None or fn is None:
+        if raise_on_error:
+            raise RuntimeError("akshare 未安装或接口不存在")
         return None
     is_v8 = _uses_v8(fn)
     limit = timeout or (AK_V8_TIMEOUT if is_v8 else AK_TIMEOUT)
@@ -186,21 +192,27 @@ def _ak(fn, *args, timeout=None, **kwargs):
                 return
             try:
                 box["value"] = fn(*args, **kwargs)
-            except Exception:             # noqa: BLE001 - 数据源失败静默降级
+            except Exception as exc:           # noqa: BLE001 - 数据源失败静默降级
+                box["error"] = exc
                 box["value"] = None
             finally:
                 _V8_LOCK.release()
             return
         try:
             box["value"] = fn(*args, **kwargs)
-        except Exception:                 # noqa: BLE001 - 数据源失败静默降级
+        except Exception as exc:               # noqa: BLE001 - 数据源失败静默降级
+            box["error"] = exc
             box["value"] = None
 
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
     thread.join(limit)
     if thread.is_alive():
+        if raise_on_error:
+            raise TimeoutError(f"接口调用超时（{limit:g}s）")
         return None                       # 超时：按数据源不可用降级
+    if raise_on_error and box.get("error") is not None:
+        raise box["error"]
     return box.get("value")
 
 

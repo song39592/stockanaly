@@ -341,45 +341,33 @@ class DownloadSettingsTests(unittest.TestCase):
         self.assertFalse(finish.call_args.kwargs.get("ok"))
         record_error.assert_called_once()
 
-    def test_universe_codes_use_cache_without_network(self):
-        """命中缓存时**不联网**（清单取数实测 27~36 秒、被限流时 167 秒，
-        不能占住用户点「开始下载」的同步路径）。"""
-        service._store_universe_codes(["000001", "600000"])
-        with patch.object(service, "_fetch_universe_codes") as fetch:
+    def test_universe_codes_use_local_meta_without_network(self):
+        """本地主数据表有数据 → **一次网络都不发**（清单取数实测 27~36 秒、
+        被限流时 167 秒，不能占住用户点「开始下载」的同步路径）。"""
+        with patch.object(service.price_store, "all_stock_codes",
+                          return_value=["000001", "600000"]), \
+             patch.object(service.price_store, "refresh_stock_meta") as refresh:
             codes = service._universe_codes()
-        fetch.assert_not_called()
+        refresh.assert_not_called()
         self.assertEqual(codes, ["000001", "600000"])
 
-    def test_universe_codes_fall_back_to_stale_cache_when_network_fails(self):
-        """联网取数失败时用陈旧缓存兜底（不静默：走的是同一份缓存，只是过期）。"""
-        service._store_universe_codes(["000001"])
-        # 把缓存时间改旧 → 过期
-        payload = json.loads(download_store.get_setting(service._UNIVERSE_CACHE_KEY, ""))
-        payload["at"] = time.time() - 30 * 3600
-        download_store.set_setting(service._UNIVERSE_CACHE_KEY,
-                                   json.dumps(payload, ensure_ascii=False))
-        with patch.object(service, "_fetch_universe_codes",
-                          side_effect=RuntimeError("数据源无响应")):
+    def test_universe_codes_refresh_and_persist_when_local_empty(self):
+        """本地表空（首次安装）→ 联网刷新一次并**落盘**（不是取完就算）。"""
+        with patch.object(service.price_store, "all_stock_codes",
+                          side_effect=[[], ["000001", "600000"]]), \
+             patch.object(service.price_store, "refresh_stock_meta",
+                          return_value={"error": None}) as refresh:
             codes = service._universe_codes()
-        self.assertEqual(codes, ["000001"])
+        refresh.assert_called_once()
+        self.assertEqual(codes, ["000001", "600000"])
 
-    def test_universe_codes_raise_when_no_cache_and_network_fails(self):
-        """既没缓存又取不到 → 明确报错，不静默给个空清单。"""
-        with patch.object(service, "_fetch_universe_codes",
-                          side_effect=RuntimeError("数据源无响应")), \
-             patch.object(service.price_store, "all_stock_codes", return_value=[]):
+    def test_universe_codes_raise_when_local_empty_and_refresh_fails(self):
+        """本地空 + 刷新失败 → 明确报错，不静默给个空清单。"""
+        with patch.object(service.price_store, "all_stock_codes", return_value=[]), \
+             patch.object(service.price_store, "refresh_stock_meta",
+                          return_value={"error": "数据源无响应"}):
             with self.assertRaises(RuntimeError):
                 service._universe_codes()
-
-    def test_universe_codes_fall_back_to_local_meta_when_nothing_else(self):
-        """缓存没有 + 联网不通 → 用本地主数据表：宁可多带几只已退市的票，
-        也不能让「开始下载」整个用不了（数据源整体不可达时实测会 SSL 失败）。"""
-        with patch.object(service, "_fetch_universe_codes",
-                          side_effect=RuntimeError("数据源无响应")), \
-             patch.object(service.price_store, "all_stock_codes",
-                          return_value=["000001", "600000"]):
-            codes = service._universe_codes()
-        self.assertEqual(codes, ["000001", "600000"])
 
     def test_two_phase_progress_is_counted_by_stage_rows(self):
         """两轮任务：股票级计数在「两个阶段都落定」前是 0，
