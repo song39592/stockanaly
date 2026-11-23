@@ -1938,6 +1938,9 @@ def _scheduler_tick() -> None:
             # 含已退市的票，而当下在市只有 5580 只）。
             if not result.get("error"):
                 download_store.set_setting("stock_meta_refreshed_at", today)
+                # 旧的「代码表缓存」副本已废弃（清单统一读本地主数据表）→ 清掉，
+                # 别在库里留一份没人读的陈旧数据误导后来人。
+                download_store.set_setting("universe_codes", "")
     except Exception:                         # noqa: BLE001 - 主数据刷新失败不影响调度
         pass
     if stored.get("auto_update") == "1":
