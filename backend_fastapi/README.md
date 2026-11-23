@@ -56,6 +56,8 @@ GET  /api/stock/quote     → 按代码查名称与当前股价（供输入代�
 GET  /api/strategies/universe/summary → 回测范围预览（基池/剔除后只数 + 每项剔除只数 +
                                        **可注入只数**（= 实跑参与统计的只数）+ 口径说明）
                                        判定口径与字段含义详见 strategies/ARCHITECTURE.md「股票池层」
+                                       ST 名单取数：**本地主数据表 `stock_meta` 优先**（零网络、
+                                        离线可跑）；本地覆盖不足才联网补齐（只补缺口）
                                        ⚠️ 勾了「剔除 ST/*ST」但名称名单**取不到 / 覆盖不足**时
                                        → **HTTP 400 + 可操作提示**（取消该剔除项或恢复网络），
                                        不会静默降级成「一只没剔」（见 universe.ScopeDataUnavailable）
@@ -104,6 +106,10 @@ POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / 
                                        scope.exclusion.st_names / st_name_coverage =
                                         ST 名称名单来源与覆盖率（<100% 说明有票未参与
                                          ST 判定，按非 ST 处理）
+                                       scope.exclusion.st_name_source / st_name_updated_at =
+                                        名单**来源**（local.stock_meta = 本地快照，零网络；
+                                         akshare… = 在线表）与**快照时刻**（本地快照
+                                         最多滞后一天 → 口径说明里会显式声明）
                                        scope.exclusion.listing_date_source =
                                         上市日来源（exchange_listing_date = 交易所公布的
                                          **真实上市日**；旧口径 earliest_bar = 库里最早日K
@@ -277,13 +283,14 @@ GET  /api/history/index/{code}      查询指数 K线（原始价、无复权；
 ⚠️ 判据**不能**用「库内最早日 > 缺口起点」——缺口起点本身就是「库内最早日 − 1 天」
 算出来的，那个比较恒为真，会让更早段被整体跳过（任务报「完成」而历史一条没补）。
 
-**全市场代码清单是缓存优先**：清单取数（`stock_info_a_code_name` 要翻 18 页）实测
-27~36 秒、数据源被限流时能到 **167 秒**、整体不可达时直接 SSL 失败，而它在
+**全市场代码清单统一用本地主数据表**：清单取数（`stock_info_a_code_name` 要翻 18 页）
+实测 27~36 秒、数据源被限流时能到 **167 秒**、整体不可达时直接 SSL 失败，而它在
 `/start` 的**同步路径**上（启动器超时 120s / 90s）→ 慢一点就报「任务启动失败」。
-因此清单缓存在 `download_settings`（随数据目录走，12 小时有效），调度器在**后台线程**
-刷新，用户点「开始下载」几乎总是命中缓存（毫秒级）；联网失败时依次退到
-陈旧缓存 → 本地主数据表 `stock_meta`（刷新成功后它就等于那份在市清单），
-都拿不到才明确报错。口径不变：缓存里存的就是同一份网络清单。
+所以清单**不再联网取**（旧口径是「缓存 12 小时 + 后台重取」，而且取到的清单**只存缓存、
+不进主数据** → 与主数据的名称迟早分叉，两份清单对不上）。现在直接读 `stock_meta`
+（**全市场代码表 + 名称的唯一来源**），**刷新是显式动作**：每日调度或
+`POST /api/stock/meta/refresh` → 刷新结果**落盘**；本地表为空（首次安装）才联网
+刷新一次并落盘；都拿不到才明确报错。用户点「开始下载」因此**永远不等网络**。
 
 **进度的口径分两层（两轮任务尤其重要）**：
 股票级计数（`completed` / `failed` / `skipped`）按**股票只数**记，只有该股票的
@@ -373,6 +380,22 @@ GET  /api/history/download/tdx/status       通达信目录检测
 除权除息的本地 `gbbq` 是**加密**的（容器结构为「4 字节记录数 + N×29 字节」，但内容无可读日期），
 `tdx_reader.read_xdxr` 只做带严格校验的尝试、解不出即返回 None，
 **复权因子自动回落到在线新浪源**——绝不把猜出来的数据写进库。
+
+### 数据齐否（运行前检查）的判据
+
+`/api/history/download/freshness` 与 `/api/history/download/trading_day_context`
+判定「信号日的数据齐不齐」用**逐票事实**，不用比例阈值：
+
+- **豁免集**（本来就没有该日行情，不算缺口）：停牌/退市（`core/stock_status` 的逐票标记）、
+  未上市（交易所真实上市日 > 信号日）。豁免数量随响应透出
+  （`exempt_suspended` / `exempt_not_listed`）—— 别让「豁免」看起来像「没缺」。
+- **缺口集**：落后于信号日且不在豁免集 → `gap` / `gap_codes`（前 20 只代码）。
+  `need_refresh`（freshness）与 `data_ready`（trading_day_context）都按它判定。
+- **任务依据**：`task_state` = 最近一次全市场下载任务（scope='all' / 'downloaded'）的
+  完成状态、`span_end`、`covers_signal_day`、失败/停牌计数 —— 供界面说明「依据是哪一轮」。
+  ⚠️ 任务状态**不是**唯一判据：现有任务都是「按缺口排队」的增量任务，
+  「任务成功」不等于「全市场都齐」。
+- **上市日表取不到** → 不豁免未上市（宁可误拦不误放），并透出 `listing_ready=false`。
 
 ## 九、说明
 

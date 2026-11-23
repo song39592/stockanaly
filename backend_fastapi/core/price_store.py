@@ -419,6 +419,104 @@ def all_stock_codes() -> list[str]:
         return []
 
 
+def stock_names() -> tuple[dict[str, str], str]:
+    """{code: 名称} + 本地表最近更新时刻 —— **本地主数据副本，零网络**。
+
+    `stock_meta` 由 `refresh_stock_meta()` 用「当前在市 A 股清单」差量同步
+    （新增 INSERT / 退市 DELETE / 名称变更 UPDATE），所以它就是那份清单的
+    本地副本：实测 5931 只、**名称 100% 有**、对库里 5637 只**全覆盖**
+    （在线那张 `akshare.stock_info_a_code_name` 实测 5572~5581 行 → 对库里
+    缺 57 只，覆盖率 99.0%；缺的 57 只在 ST 判定里会被当成「非 ST」放进来）。
+
+    ⚠️ 这是**快照**：ST 状态最多滞后一天（优先取「最近一次**成功同步**时刻」
+    `stock_meta_synced_at`；没有该记录才退回 MAX(updated_at) = 最近一次**改动**时刻）
+    → 用它做口径判定时，报告必须写明来源与同步时间（见 `strategies/core/universe.py`）。
+
+    返回 `({}, "")` 表示本地表不可用（调用方据此走在线兜底 / 中止）。
+    """
+    try:
+        with db.connect(db.FACTORS_DB, touch_meta=False) as conn:
+            _ensure_stock_meta_table(conn)
+            rows = conn.execute("SELECT code,name,updated_at FROM stock_meta").fetchall()
+            # 本地表最近一次**成功同步**的时刻（权威口径；没有记录才退回 MAX(updated_at)）
+            synced = db.meta_get(conn, "stock_meta_synced_at", "") or ""
+        names: dict[str, str] = {}
+        changed = ""
+        for r in rows:
+            code = str(r["code"] or "").strip()
+            if not code:
+                continue
+            names[code] = str(r["name"] or "")
+            at = str(r["updated_at"] or "")
+            if at > changed:
+                changed = at
+        return names, (synced or changed)
+    except Exception:  # noqa: BLE001
+        return {}, ""
+
+
+def upsert_stock_names(names: dict[str, str]) -> dict:
+    """把**在线取到的名称**并入本地主数据表（**取到就存**，别每次重取一遍）。
+
+    为什么需要它：`strategies/core/data.py` 的 ST 名单兜底会联网取
+    `akshare.stock_info_a_code_name`（实测冷启动 27~50s）。只放进进程内缓存的话，
+    **下次启动又要重取一遍**（用户看到的就是「每次都重新来一遍」）→ 取到就落盘，
+    下次本地命中、零网络。
+
+    与 `refresh_stock_meta()` 的分工（**别混**）：
+      · `refresh_stock_meta()` = **全量差量同步**（新增 / 退市 DELETE / 改名 /
+        拼音回填），数据源 `stock_zh_a_spot_em`（当前在市清单）→ 每日刷新走它；
+      · 本函数 = **只并入名称、不删行**，任何「代码→名称」表都能喂（本地表比
+        某个来源多出的行保留，删除交给上面的全量同步）。
+
+    返回统计（`upserted` / `inserted` / `updated` / `error`）。
+    """
+    result = {"upserted": 0, "inserted": 0, "updated": 0, "error": None}
+    if not names:
+        return result
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    try:
+        with db.connect(db.FACTORS_DB) as conn:
+            _ensure_stock_meta_table(conn)
+            existing = {str(r["code"]): str(r["name"] or "")
+                        for r in conn.execute("SELECT code,name FROM stock_meta").fetchall()}
+            for code, name in names.items():
+                code = str(code).strip().zfill(6)
+                nm = str(name or "").strip().replace(" ", "")
+                if len(code) != 6 or not code.isdigit() or not nm:
+                    continue
+                old = existing.get(code)
+                if old is None:
+                    full, initial = _to_pinyin(nm)
+                    conn.execute(
+                        "INSERT INTO stock_meta(code,name,pinyin,pinyin_initial,market,updated_at) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (code, nm, full, initial, _market_of(code), now))
+                    result["inserted"] += 1
+                elif old != nm:
+                    full, initial = _to_pinyin(nm)
+                    if full:
+                        # 拼音算得出来才一起改（pypinyin 缺失时别把已有拼音抹成空）
+                        conn.execute(
+                            "UPDATE stock_meta SET name=?,pinyin=?,pinyin_initial=?,updated_at=? "
+                            "WHERE code=?", (nm, full, initial, now, code))
+                    else:
+                        conn.execute("UPDATE stock_meta SET name=?,updated_at=? WHERE code=?",
+                                     (nm, now, code))
+                    result["updated"] += 1
+            # 名称快照刷新到此刻（本地表现在就是「刚取到的」这份名单）。
+            # ⚠️ 单独兜住异常：它在**同一个事务**里，抛异常会让整批写入一起回滚。
+            try:
+                db.meta_set(conn, "stock_meta_synced_at", now)
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as exc:  # noqa: BLE001 - 落盘失败不该拖垮调用方（调用方仍可用内存里的名单）
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        return result
+    result["upserted"] = result["inserted"] + result["updated"]
+    return result
+
+
 def listing_dates() -> dict[str, str]:
     """{code: 上市日（ISO 日期）} —— **交易所公布的真实上市日**。
 
@@ -512,7 +610,14 @@ def refresh_stock_meta() -> dict:
         result["error"] = "akshare 未安装"
         return result
     try:
-        df = ak.stock_zh_a_spot_em()
+        # ⚠️ 必须走 `_ak`（带硬超时）：akshare 内部多数接口**不设 timeout**，
+        # 数据源无响应时会长时间阻塞 —— 这个函数在**调度线程**与用户的下载点击
+        # 路径上都会跑，卡住就是整个后端卡住。
+        # `raise_on_error=True`：保留失败原因（502 / 超时 / 连接失败），
+        # 否则错误只会显示成一句「A股列表为空」，查不出根因。
+        # 函数内导入：避免与 features.market.service 形成模块级循环依赖。
+        from market_service import _ak
+        df = _ak(ak.stock_zh_a_spot_em, timeout=120, raise_on_error=True)
     except Exception as exc:  # noqa: BLE001
         result["error"] = f"拉取A股列表失败：{exc}"
         return result
@@ -560,6 +665,17 @@ def refresh_stock_meta() -> dict:
         if gone:
             conn.executemany("DELETE FROM stock_meta WHERE code=?", [(c,) for c in gone])
             deleted = len(gone)
+        # 本地表最近一次**成功同步**的时刻 —— 名称快照的权威时间戳。
+        # 为什么不用 `MAX(updated_at)`：那只是「最近一次新增/改名」的时刻，
+        # 没改名没新股的日子它会一直停在旧值 → 报告里会把「今天同步过」说成
+        # 「N 天前同步过」（宁可说旧，不可说新）。
+        # ⚠️ 这里必须单独兜住异常：它在**同一个事务**里，抛异常会让整次刷新的
+        #   写入一起回滚（表都更了、时刻没记上 → 快照时间说旧，无害；
+        #   反过来表没更成功却崩了 → 每天都白刷一次）。
+        try:
+            db.meta_set(conn, "stock_meta_synced_at", now)
+        except Exception:  # noqa: BLE001
+            pass
     result.update(fetched=len(seen), inserted=inserted, deleted=deleted,
                   updated=updated, pinyin_fixed=pinyin_fixed)
     return result

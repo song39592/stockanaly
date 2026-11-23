@@ -341,45 +341,33 @@ class DownloadSettingsTests(unittest.TestCase):
         self.assertFalse(finish.call_args.kwargs.get("ok"))
         record_error.assert_called_once()
 
-    def test_universe_codes_use_cache_without_network(self):
-        """命中缓存时**不联网**（清单取数实测 27~36 秒、被限流时 167 秒，
-        不能占住用户点「开始下载」的同步路径）。"""
-        service._store_universe_codes(["000001", "600000"])
-        with patch.object(service, "_fetch_universe_codes") as fetch:
+    def test_universe_codes_use_local_meta_without_network(self):
+        """本地主数据表有数据 → **一次网络都不发**（清单取数实测 27~36 秒、
+        被限流时 167 秒，不能占住用户点「开始下载」的同步路径）。"""
+        with patch.object(service.price_store, "all_stock_codes",
+                          return_value=["000001", "600000"]), \
+             patch.object(service.price_store, "refresh_stock_meta") as refresh:
             codes = service._universe_codes()
-        fetch.assert_not_called()
+        refresh.assert_not_called()
         self.assertEqual(codes, ["000001", "600000"])
 
-    def test_universe_codes_fall_back_to_stale_cache_when_network_fails(self):
-        """联网取数失败时用陈旧缓存兜底（不静默：走的是同一份缓存，只是过期）。"""
-        service._store_universe_codes(["000001"])
-        # 把缓存时间改旧 → 过期
-        payload = json.loads(download_store.get_setting(service._UNIVERSE_CACHE_KEY, ""))
-        payload["at"] = time.time() - 30 * 3600
-        download_store.set_setting(service._UNIVERSE_CACHE_KEY,
-                                   json.dumps(payload, ensure_ascii=False))
-        with patch.object(service, "_fetch_universe_codes",
-                          side_effect=RuntimeError("数据源无响应")):
+    def test_universe_codes_refresh_and_persist_when_local_empty(self):
+        """本地表空（首次安装）→ 联网刷新一次并**落盘**（不是取完就算）。"""
+        with patch.object(service.price_store, "all_stock_codes",
+                          side_effect=[[], ["000001", "600000"]]), \
+             patch.object(service.price_store, "refresh_stock_meta",
+                          return_value={"error": None}) as refresh:
             codes = service._universe_codes()
-        self.assertEqual(codes, ["000001"])
+        refresh.assert_called_once()
+        self.assertEqual(codes, ["000001", "600000"])
 
-    def test_universe_codes_raise_when_no_cache_and_network_fails(self):
-        """既没缓存又取不到 → 明确报错，不静默给个空清单。"""
-        with patch.object(service, "_fetch_universe_codes",
-                          side_effect=RuntimeError("数据源无响应")), \
-             patch.object(service.price_store, "all_stock_codes", return_value=[]):
+    def test_universe_codes_raise_when_local_empty_and_refresh_fails(self):
+        """本地空 + 刷新失败 → 明确报错，不静默给个空清单。"""
+        with patch.object(service.price_store, "all_stock_codes", return_value=[]), \
+             patch.object(service.price_store, "refresh_stock_meta",
+                          return_value={"error": "数据源无响应"}):
             with self.assertRaises(RuntimeError):
                 service._universe_codes()
-
-    def test_universe_codes_fall_back_to_local_meta_when_nothing_else(self):
-        """缓存没有 + 联网不通 → 用本地主数据表：宁可多带几只已退市的票，
-        也不能让「开始下载」整个用不了（数据源整体不可达时实测会 SSL 失败）。"""
-        with patch.object(service, "_fetch_universe_codes",
-                          side_effect=RuntimeError("数据源无响应")), \
-             patch.object(service.price_store, "all_stock_codes",
-                          return_value=["000001", "600000"]):
-            codes = service._universe_codes()
-        self.assertEqual(codes, ["000001", "600000"])
 
     def test_two_phase_progress_is_counted_by_stage_rows(self):
         """两轮任务：股票级计数在「两个阶段都落定」前是 0，
@@ -399,6 +387,119 @@ class DownloadSettingsTests(unittest.TestCase):
         self.assertEqual(view["phase2_settled"], 1)
         self.assertEqual(view["phase_percent"], 75.0)     # 真实完成度不是 0%
         self.assertEqual(view["current_phase"], 2)        # 第一轮已跑完 → 进入第二轮
+
+
+class DataGapTests(unittest.TestCase):
+    """「数据齐否」判据：逐票事实 + 豁免集（回归：2026-11-20 停牌票被误拦）。
+
+    旧判据是比例阈值（落后只数 > max(5, 总数×1%)）—— 65 只停牌/退市票就把 1%
+    顶穿，明明 5572/5637 已更新到信号日却被拦。现在改成逐票判定：
+    停牌/退市、未上市**豁免**，剩下的才是真缺口。
+    """
+
+    def _patched(self, latest, suspended=None, listing=None, tasks=None):
+        return patch.multiple(
+            service.stock_status,
+            suspended_like_codes=Mock(return_value=set(suspended or ())),
+        ), patch.object(service.price_store, "listing_dates",
+                        Mock(return_value=dict(listing or {}))), \
+            patch.object(service.download_store, "list_tasks",
+                         Mock(return_value=list(tasks or [])))
+
+    def test_suspended_stock_is_exempt_not_a_gap(self):
+        """停牌/退市票：本来就没有信号日行情 → 豁免，不算缺口。"""
+        latest = {"000001": "2026-11-20", "600000": "2026-11-19"}
+        p1, p2, p3 = self._patched(latest, suspended={"600000"})
+        with p1, p2, p3:
+            gap = service.market_gap("2026-11-20", latest)
+        self.assertEqual(gap["gap_count"], 0)
+        self.assertEqual(gap["exempt_suspended"], 1)
+        self.assertEqual(gap["stale_total"], 1)
+
+    def test_not_listed_stock_is_exempt(self):
+        """上市日晚于信号日 → 那天它还没上市 → 豁免。"""
+        latest = {"000001": "2026-11-19"}
+        p1, p2, p3 = self._patched(latest, listing={"000001": "2026-11-21"})
+        with p1, p2, p3:
+            gap = service.market_gap("2026-11-20", latest)
+        self.assertEqual(gap["gap_count"], 0)
+        self.assertEqual(gap["exempt_not_listed"], 1)
+
+    def test_real_gap_is_still_reported(self):
+        """真缺口（没停牌、已上市、就是没数据）→ 仍然要报出来并拦住。"""
+        latest = {"000001": "2026-11-19"}
+        p1, p2, p3 = self._patched(latest, listing={"000001": "2020-01-01"})
+        with p1, p2, p3:
+            gap = service.market_gap("2026-11-20", latest)
+        self.assertEqual(gap["gap_count"], 1)
+        self.assertEqual(gap["gap_codes"], ["000001"])
+
+    def test_listing_table_unavailable_does_not_exempt(self):
+        """上市日表取不到 → 宁可误拦也不误放，并透出 listing_ready=False。"""
+        latest = {"000001": "2026-11-19"}
+        p1 = patch.object(service.stock_status, "suspended_like_codes",
+                          Mock(return_value=set()))
+        p2 = patch.object(service.price_store, "listing_dates",
+                          Mock(side_effect=RuntimeError("表损坏")))
+        p3 = patch.object(service.download_store, "list_tasks", Mock(return_value=[]))
+        with p1, p2, p3:
+            gap = service.market_gap("2026-11-20", latest)
+        self.assertEqual(gap["gap_count"], 1)
+        self.assertFalse(gap["listing_ready"])
+
+    def test_task_state_is_reported_as_evidence(self):
+        """下载任务结论作为「依据」透出（覆盖信号日 / 失败数 / 停牌数）。"""
+        task = {"id": "t1", "status": "completed", "scope": "downloaded", "origin": "auto",
+                "created_at": "2026-11-20T08:00:00+00:00",
+                "finished_at": "2026-11-20T08:12:00+00:00",
+                "options": {"span_end": "2026-11-20"}, "total": 100, "completed": 90,
+                "failed": 5, "skipped": 0, "suspended": 5}
+        with patch.object(service.download_store, "list_tasks", return_value=[task]):
+            state = service.download_task_state("2026-11-20")
+        self.assertTrue(state["available"])
+        self.assertTrue(state["covers_signal_day"])
+        self.assertEqual(state["failed"], 5)
+        self.assertEqual(state["suspended"], 5)
+
+    def test_task_state_missing_task_is_not_silent(self):
+        """没有可用任务 → 明确说没有（不装作「数据已齐」）。"""
+        with patch.object(service.download_store, "list_tasks", return_value=[]):
+            state = service.download_task_state("2026-11-20")
+        self.assertFalse(state["available"])
+        self.assertIn("没有找到", state["reason"])
+
+    def test_freshness_uses_gap_not_ratio(self):
+        """全市场判定走缺口口径：停牌票豁免后缺口为 0 → 不拦。"""
+        latest = {"000001": "2026-11-20", "600000": "2026-11-19"}
+        with patch.object(service, "_spans", return_value=(latest, latest)), \
+             patch.object(service, "_expected_data_day", return_value="2026-11-20"), \
+             patch.object(service, "_market_has_closed_today", return_value=True), \
+             patch.object(service, "_next_trade_day", side_effect=lambda d: d), \
+             patch.object(service.stock_status, "suspended_like_codes",
+                          return_value={"600000"}), \
+             patch.object(service.price_store, "listing_dates", return_value={}), \
+             patch.object(service.download_store, "list_tasks", return_value=[]):
+            view = service.freshness()
+        self.assertFalse(view["need_refresh"])
+        self.assertEqual(view["gap"], 0)
+        self.assertEqual(view["exempt_suspended"], 1)
+
+    def test_freshness_blocks_when_real_gap_exists(self):
+        """有真缺口 → need_refresh=True 且给出缺口清单。"""
+        latest = {"000001": "2026-11-19", "600000": "2026-11-20"}
+        with patch.object(service, "_spans", return_value=(latest, latest)), \
+             patch.object(service, "_expected_data_day", return_value="2026-11-20"), \
+             patch.object(service, "_market_has_closed_today", return_value=True), \
+             patch.object(service, "_next_trade_day", side_effect=lambda d: d), \
+             patch.object(service.stock_status, "suspended_like_codes", return_value=set()), \
+             patch.object(service.price_store, "listing_dates",
+                          return_value={"000001": "2020-01-01"}), \
+             patch.object(service.download_store, "list_tasks", return_value=[]):
+            view = service.freshness()
+        self.assertTrue(view["need_refresh"])
+        self.assertEqual(view["gap"], 1)
+        self.assertEqual(view["gap_codes"], ["000001"])
+
 
 
 if __name__ == "__main__":

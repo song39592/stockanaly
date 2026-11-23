@@ -401,8 +401,12 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                 "pool_signature": scope_extra.get("pool_signature"),
                 # ST 名单可用性 + 覆盖率（名单取不到 → 本次已中止，不会跑到这里；
                 # 覆盖率 95%~100% 的漏网要写明：那些票没参与 ST 判定）
+                # ⚠️ 名单来源与快照时刻也要落盘：ST 判定依据的是哪份表、什么时候的快照
+                #（本地快照最多滞后一天 → 读者要能看见这个滞后）。
                 "st_names": scope_extra.get("st_names"),
                 "st_name_coverage": scope_extra.get("st_name_coverage"),
+                "st_name_source": scope_extra.get("st_name_source"),
+                "st_name_updated_at": scope_extra.get("st_name_updated_at"),
                 # 上市日来源与覆盖率：真实上市日（交易所公布）是新股/次新股判定的
                 # 唯一依据；不在交易所当前上市表的少数票（已退市等）走保守兜底，
                 # 兜底只数必须落盘 —— 读者要能分开看「用真实数据」和「用兜底」。

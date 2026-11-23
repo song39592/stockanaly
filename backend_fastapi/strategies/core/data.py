@@ -330,67 +330,172 @@ def bar_counts(start: str | None = None, end: str | None = None,
 # ---------------------------------------------------------------- 名称 / 上市日 / 市值（原始数据）
 # 供 universe（股票池层）与 backtest（编排层）复用；这里只取数，不做「范围规则」判断。
 
-_NAME_TTL = 24 * 3600
-_NAME_RETRY = 300            # 取不到时的退避（秒）：别让每次调用都白等 90s
-_name_cache: dict = {"at": 0.0, "map": {}, "error": "", "tried_at": 0.0}
+# **名称取数：本地优先**（2026-11-23 起）
+#
+# 旧口径：每次都联网拉 `akshare.stock_info_a_code_name`（实测冷启动 **50.8s**、
+# 5572~5581 行），进程内缓存 24h。两个硬伤：
+#   ① 断网 → 回测**直接跑不了**（ST 名单取不到 → 中止，见 `universe.ScopeDataUnavailable`）；
+#   ② 在线表比本地主数据表 `stock_meta`（实测 **5931 只、名称 100% 有**）少
+#      **350 行左右** → 缺名称的那几十只票在 ST 判定里会被当成「非 ST」放进来。
+#
+# 新口径：**本地 `stock_meta` 优先**（零网络、离线可跑、覆盖更全），
+# 本地对目标池覆盖不足时才联网**补缺口**（只补缺的，不覆盖本地已有项）。
+# ⚠️ 本地是**快照**：ST 状态最多滞后一天 → 快照时刻必须落进报告（见 `universe.py`）。
+
+_NAME_TTL = 24 * 3600             # 本地名称快照有效期（超过就重读一次本地表）
+_NAME_RETRY = 300                 # 联网取数失败后的退避（秒）：别让每次调用都白等 90s
+_NAME_LOCAL_COVERAGE_MIN = 0.95   # 本地对目标池的覆盖率下限；不足才联网补
+_name_cache: dict = {"at": 0.0, "local": {}, "online": {}, "error": "",
+                     "tried_at": 0.0, "updated_at": ""}
+
+
+def _names_map() -> dict[str, str]:
+    """当前名称表（**本地优先**：同名以本地为准）。"""
+    m = dict(_name_cache["online"])
+    m.update(_name_cache["local"])
+    return m
+
+
+def reset_names_cache() -> None:
+    """清空名称缓存（测试 / 手动刷新后用）。"""
+    _name_cache.update({"at": 0.0, "local": {}, "online": {}, "error": "",
+                        "tried_at": 0.0, "updated_at": ""})
+
+
+def _load_local_names() -> bool:
+    """从本地主数据表 `stock_meta` 载入名称快照（**零网络**）。成功返回 True。"""
+    local, synced = price_store.stock_names()
+    if not local:
+        _name_cache["error"] = "本地名称表为空或不可读"
+        return False
+    _name_cache["local"] = local
+    _name_cache["at"] = time.time()
+    _name_cache["updated_at"] = synced
+    # 本地补上了 → 在线那份里已被本地覆盖的条目丢掉（来源标签要如实反映）
+    _name_cache["online"] = {c: n for c, n in _name_cache["online"].items()
+                             if c not in local}
+    _name_cache["error"] = ""
+    return True
+
+
+def _fetch_names_online() -> None:
+    """联网取 akshare 全市场名称表 → **落盘**并入本地主数据表（取到就存）。
+
+    只在「本地表对目标池覆盖不足」时触发（新装环境 / 本地表还没播种）。
+    timeout=90：实测这张全市场表**冷启动要 27~50s**（5581 行），给 30s 会超时 →
+    名称整列空白。所以宁可多等。失败只记原因，不抛。
+
+    ⚠️ **取到就存**（`price_store.upsert_stock_names`）：只放进程内缓存的话，
+    下次启动又要重取一遍 → 用户看到的就是「每次都重新来一遍又不存」。
+    落盘后本地表就是最新的一份（来源标签也变成纯本地），下次零网络。
+    """
+    try:
+        import akshare as ak
+        from market_service import _ak          # 统一的超时/降级封装
+        df = _ak(ak.stock_info_a_code_name, timeout=90)
+        if df is None or getattr(df, "empty", True):
+            _name_cache["error"] = "akshare 返回空表"
+            return
+        online = {str(r["code"]).strip().zfill(6): str(r["name"])
+                  for _, r in df.iterrows()}
+        saved = price_store.upsert_stock_names(online)
+        local, synced = price_store.stock_names()
+        if local:
+            # 落盘成功 → 本地表已是最新的一份（来源标签变成纯本地）
+            _name_cache["local"] = local
+            _name_cache["online"] = {}
+            _name_cache["updated_at"] = synced
+        else:
+            # 落盘失败 → 本次仍用内存里的在线名单（**只补缺口**，不覆盖本地已有项）
+            local = _name_cache["local"]
+            _name_cache["online"] = {c: n for c, n in online.items() if not local.get(c)}
+        _name_cache["at"] = time.time()
+        _name_cache["error"] = "" if _names_map() else "akshare 返回空表"
+        if saved.get("error"):
+            _name_cache["error"] = f"落盘失败（本次用内存名单）: {saved['error']}"
+    except Exception as exc:                   # noqa: BLE001 - 记下原因，别崩
+        _name_cache["error"] = f"{type(exc).__name__}: {exc}"
+
+
+def _snapshot_age_hours() -> float | None:
+    """本地名称快照的「年龄」（小时）；没有快照时刻 → None（**不是 0**）。"""
+    stamp = str(_name_cache["updated_at"] or "")
+    if not stamp:
+        return None
+    try:
+        t = dt.datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    now = dt.datetime.now(tz=t.tzinfo) if t.tzinfo else dt.datetime.now()
+    return round((now - t).total_seconds() / 3600, 1)
 
 
 def names_source_status() -> dict:
-    """akshare 全市场名称表的**可用性**（给「ST 剔除能不能做」提供判据）。
+    """当前名称名单的**可用性**（给「ST 剔除能不能做」提供判据）。
 
-    ⚠️ 这张表是 ST / *ST 剔除的**唯一**数据源（数据源不提供历史名单，只能用当前名单）。
+    ⚠️ 这份名单是 ST / *ST 剔除的**唯一**数据源（数据源不提供历史名单，只能用当前名单）。
     取不到时若还继续跑，等于「勾了剔除 ST 却一只没剔」——
     报告的「剔除明细」里只是**没有 st 这一项**（看起来像「本来就没有 ST」），
     口径指纹也算不出差别 → **静默失真**，两份报告摆在一起没法比。
 
     所以：**用到这张表的判定必须先看 `ok`**；为 False 就该中止并让用户知道
     「可以取消该剔除项再跑」。详见 `universe.ScopeDataUnavailable`。
+
+    字段：
+      · `source`     —— 名单来源（`local.stock_meta` / `akshare.stock_info_a_code_name` /
+                        两者组合）。**口径变了报告要能看出来**（旧报告一律是纯在线表）。
+      · `updated_at` —— 本地快照时刻（ISO）；为空 = 用的是在线表（当场取，无快照时刻）。
+      · `age_hours`  —— 快照年龄（小时）；快照过期要在报告里显式声明（ST 状态会滞后）。
     """
+    m = _names_map()
+    src = []
+    if _name_cache["local"]:
+        src.append("local.stock_meta")
+    if _name_cache["online"]:
+        src.append("akshare.stock_info_a_code_name")
     return {
-        "ok": bool(_name_cache["map"]),
-        "size": len(_name_cache["map"]),
+        "ok": bool(m),
+        "size": len(m),
         "at": _name_cache["at"],
         "tried_at": _name_cache["tried_at"],
         "error": _name_cache["error"],
-        "source": "akshare.stock_info_a_code_name",
+        "source": "+".join(src),
+        "updated_at": _name_cache["updated_at"],
+        "age_hours": _snapshot_age_hours(),
     }
 
 
 def load_names(codes: list[str]) -> dict[str, str]:
-    """批量取股票名称：akshare 全市场表一次拉齐，**进程内缓存 24h**。
+    """批量取股票名称：**本地主数据表优先**，缺时才联网补。
+
+    取数顺序：
+      1. 本地 `stock_meta`（`price_store.stock_names()`，**零网络**）—— **主口径**；
+      2. 本地对目标池覆盖不足 → 联网取 akshare 全市场表**只补缺口**
+         （新装环境本地表还没播种时也走这条）。
 
     取不到时返回空映射（**不抛异常**）—— 名称本身是「锦上添花」，别让周榜之类的
     展示功能整体崩掉。但**取不到这件事必须留痕**：`names_source_status()['ok']`
     为 False、`['error']` 给出原因 → 依赖这份名单做**口径判定**的调用方
     （见 `universe._apply_exclusions`）据此**中止**，而不是默默当成「没有 ST」。
-
-    timeout=90：实测这张全市场表**冷启动要 50.8s**（5572 行），给 30s 会超时 →
-    名称整列空白。所以宁可多等。
     """
+    codes = list(codes or [])
+    want = {str(c).strip().zfill(6) for c in codes if str(c).strip()}
+    if not want:
+        return {}
     now = time.time()
-    # 缓存空了 → 按退避重试（否则每次调用都白等 90s）；
-    # 缓存有但过期（24h）→ 重新拉。
-    retry_due = (not _name_cache["map"]) and (now - _name_cache["tried_at"] > _NAME_RETRY)
-    expired = bool(_name_cache["map"]) and (now - _name_cache["at"] > _NAME_TTL)
-    if retry_due or expired:
-        _name_cache["tried_at"] = now
-        try:
-            import akshare as ak
-            from market_service import _ak          # 统一的超时/降级封装
-            df = _ak(ak.stock_info_a_code_name, timeout=90)
-            if df is not None and not getattr(df, "empty", True):
-                _name_cache["map"] = {
-                    str(r["code"]).zfill(6): str(r["name"])
-                    for _, r in df.iterrows()
-                }
-                _name_cache["at"] = now
-                _name_cache["error"] = ""
-            else:
-                _name_cache["error"] = "akshare 返回空表"
-        except Exception as exc:                   # noqa: BLE001 - 记下原因，别崩
-            _name_cache["error"] = f"{type(exc).__name__}: {exc}"
-    m = _name_cache["map"]
-    return {c: m.get(c) or m.get(c.zfill(6), "") for c in codes}
+    # 1) 本地快照：没有、或超过 TTL（24h）→ 重读一次（本地表由每日主数据刷新维护）
+    if not _name_cache["local"] or (now - _name_cache["at"]) > _NAME_TTL:
+        _load_local_names()
+    m = _names_map()
+    # 2) 本地覆盖不足 → 联网补缺口（退避 5 分钟：别让每次调用都白等 90s）
+    if len(want & set(m)) / len(want) < _NAME_LOCAL_COVERAGE_MIN:
+        retry_due = (now - _name_cache["tried_at"]) > _NAME_RETRY
+        expired = bool(m) and (now - _name_cache["at"]) > _NAME_TTL
+        if retry_due or expired:
+            _name_cache["tried_at"] = now
+            _fetch_names_online()
+    m = _names_map()
+    return {c: (m.get(c) or m.get(str(c).strip().zfill(6), "")) for c in codes}
 
 
 def earliest_bar_dates() -> dict[str, str]:
