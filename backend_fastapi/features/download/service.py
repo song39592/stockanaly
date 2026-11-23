@@ -1469,32 +1469,147 @@ def _earliest_covered_day(earliest: dict[str, str]) -> str:
     return days[mid] if len(days) % 2 else min(days[mid - 1], days[mid])
 
 
-# 「行情数据是否齐」的**容忍阈值**（落后于基准日的只数超过它，才算「没齐」）。
+# 「行情数据是否齐」的判据（**单一来源**，2026-11-23 重写）
 #
-# ⚠️ 2026-11-20 **临时**放大（1% → 5%）。实测：全市场 5637 只里 **5572 只已更新到
-#   信号日**，剩下 65 只与 `core.stock_status.suspended_like_codes()` **完全重合**
-#   （交集 65、剩余 0）—— 全部是**停牌/退市**票，本来就没有信号日的行情、
-#   **补也补不到**。旧阈值 max(5, 5637×1%) = **56 < 65** → 明明数据已齐，
-#   单日策略却被拦下，还提示「收盘数据未下载完成 / 等待补齐」（那 65 只永远补不齐）。
+# 🔴 **不再用比例阈值**：旧做法是「落后于基准日的只数 > max(5, 总数×1%)」，
+#   天生脆弱 —— 2026-11-20 实测 65 只停牌/退市票就把 1% 顶穿（阈值 56 < 65），
+#   明明 5572/5637 已更新到信号日却被拦；少几只真漏下载又放过；
+#   而且拦了只给一个比例，看不出「到底缺哪几只」。
 #
-# 为什么放大是安全的：真故障（下载任务挂了 / 网络断 / 数据源挂了）会让**成千上万只**
-#   一起落后，不是几十只 → 任何小比例阈值都拦得住。几十只这个量级只可能是
-#   停牌/退市这类「本来就没有」。
+# 新做法（逐票，三层）：
+#   ① **豁免集** = 「本来就没有」的票 —— 补也补不到，不算缺口：
+#      · 停牌 / 退市：`core.stock_status` 的逐票标记（下载失败推导 + 取数成功自愈）；
+#      · 未上市：交易所**真实上市日** > 信号日（1793a50 落盘在 `core/price_store`）。
+#   ② **缺口集** = 落后于信号日 且 不在豁免集 → **非空即「没齐」**，
+#      并把清单（代码）给出去 —— 用户能看见缺哪几只、该补哪几只。
+#   ③ **下载任务结论**作为**佐证**：最近一次全市场任务的状态 / 失败清单，
+#      回答「这轮试过没有、试过还是失败」—— 让人知道该等还是该重跑。
 #
-# 🔴 **这是临时值，不是最终判据。** 正事见 `todo/backlog.md`：
-#   单日策略「数据齐否」应改成**查下载任务状态**（任务表里的完成结论 / span_end），
-#   而不是「逐票覆盖率 + 比例阈值」—— 那个阈值天生脆弱：退市股多几只就误拦、
-#   少几只真漏下载又放过；而且每判一次要全库扫 2~6 秒。
+# ⚠️ 为什么任务状态**不能当唯一判据**：现有任务都是「按缺口排队」的增量任务
+#   （scope='downloaded'，只排当时落后的票），**不是**「全市场覆盖」任务 →
+#   「任务成功」并不等于「全市场都齐」。它只能当佐证。
 #
-# ⚠️ 与下载侧「自动更新资格」那套阈值（`STALE_TOLERANCE_MIN/RATIO`）**不是一回事**：
-#   那套是「能不能开自动更新」，已经先排除了停牌/退市票；这套是「运行前拦不拦人」。
-STALENESS_TOLERANCE_MIN = 20
-STALENESS_TOLERANCE_RATIO = 0.05          # 临时值（1% → 5%），见上方说明与 todo
+# ⚠️ 停牌标记有**滞后**（标记来自下载失败推导）：今天刚停牌的票要等下一轮
+#   下载连续失败后才写标记；那一轮任务把它记成 failed → 由 ① 的豁免 + ③ 的
+#   失败清单共同兜住。
+#
+# ⚠️ 与下载侧「自动更新资格」那套阈值（`STALE_TOLERANCE_MIN/RATIO`）**不是
+#   一回事**：那套是「能不能开自动更新」，已经先排除了停牌/退市票；
+#   这套是「运行前拦不拦人」。
+def _gap_exemptions(signal_day: str, stale: list[str]) -> dict[str, Any]:
+    """豁免集：**本来就没有**信号日行情的票（停牌/退市 + 未上市）。
+
+    返回 {"suspended": [...], "not_listed": [...], "listing_ready": bool}。
+
+    ⚠️ 上市日表取不到时**不豁免未上市**（宁可误拦也不误放），并把
+      `listing_ready=False` 透出去 → 调用方要显式声明「上市日表不可用」。
+    """
+    out: dict[str, Any] = {"suspended": [], "not_listed": [], "listing_ready": False}
+    if not stale:
+        return out
+    suspended = stock_status.suspended_like_codes()
+    out["suspended"] = sorted(c for c in stale if c in suspended)
+    try:
+        listing = price_store.listing_dates()
+    except Exception:                                 # noqa: BLE001 - 取不到按「不豁免」处理
+        listing = {}
+    out["listing_ready"] = bool(listing)
+    if listing:
+        not_listed = []
+        for c in stale:
+            day = str(listing.get(c) or "")[:10]
+            # 上市日 **晚于** 信号日 → 那天它还没上市（当天上市的不豁免：
+            # 上市首日就该有行情）。
+            if day and day > signal_day:
+                not_listed.append(c)
+        out["not_listed"] = sorted(not_listed)
+    return out
 
 
-def _staleness_tolerance(total: int) -> int:
-    """落后于基准日的只数超过它 → 判「数据没齐」。"""
-    return max(STALENESS_TOLERANCE_MIN, int(total * STALENESS_TOLERANCE_RATIO))
+def _latest_market_task() -> dict[str, Any] | None:
+    """最近一次**已完成**的全市场相关下载任务（scope='all' / 'downloaded'）。
+
+    只认「全市场相关」的两类 scope：'all'（全市场）与 'downloaded'（库里已下载
+    的票 = 日常自动更新用的那个）。指定代码 / 指数 / 锁仓的任务不代表全市场，
+    不能拿来当「全市场数据齐」的证据。
+    """
+    best: tuple[str, dict[str, Any]] | None = None
+    for task in download_store.list_tasks(50):
+        if str(task.get("status") or "") != "completed":
+            continue
+        if str(task.get("scope") or "") not in ("all", "downloaded"):
+            continue
+        stamp = str(task.get("created_at") or "")
+        if best is None or stamp > best[0]:
+            best = (stamp, task)
+    return best[1] if best else None
+
+
+def download_task_state(signal_day: str) -> dict[str, Any]:
+    """最近一次全市场下载任务的结论（给前端当「依据」展示）。
+
+    `covers_signal_day` = 这一轮的目标日盖到了信号日 —— 没盖到就不能拿它当
+    「这一轮把全市场补齐了」的证据（增量任务只排当时落后的票）。
+    """
+    task = _latest_market_task()
+    if task is None:
+        return {"available": False,
+                "reason": "没有找到已完成的全市场下载任务（数据齐否改用逐票核对）"}
+    options = task.get("options") or {}
+    span_end = str(options.get("span_end") or "")[:10]
+    return {
+        "available": True,
+        "id": str(task.get("id") or ""),
+        "origin": str(task.get("origin") or ""),
+        "status": str(task.get("status") or ""),
+        "created_at": str(task.get("created_at") or ""),
+        "finished_at": str(task.get("finished_at") or ""),
+        "span_end": span_end,
+        "covers_signal_day": bool(span_end) and span_end >= signal_day,
+        "total": int(task.get("total") or 0),
+        "completed": int(task.get("completed") or 0),
+        "failed": int(task.get("failed") or 0),
+        "skipped": int(task.get("skipped") or 0),
+        "suspended": int(task.get("suspended") or 0),
+    }
+
+
+def market_gap(signal_day: str, latest: dict[str, str] | None = None) -> dict[str, Any]:
+    """全市场「数据齐否」：逐票事实 + 豁免集 → **缺口清单**。
+
+    返回：
+      · `gap_codes` / `gap_count`：真缺口（落后于信号日且不在豁免集里）；
+      · `exempt_suspended` / `exempt_not_listed`：豁免了多少只停牌 / 未上市；
+      · `stale_total`：落后总数（含被豁免的）；
+      · `task_state`：最近一次全市场下载任务的结论（佐证）；
+      · `tried_failed`：缺口里「这一轮下载器试过、但失败」的票（区分「没排进
+        队列」与「试了没成」）。
+    """
+    if latest is None:
+        latest, _earliest = _spans()
+    stale = sorted(c for c, d in latest.items() if str(d)[:10] < signal_day)
+    exempt = _gap_exemptions(signal_day, stale)
+    gap = sorted(set(stale) - set(exempt["suspended"]) - set(exempt["not_listed"]))
+    state = download_task_state(signal_day)
+    tried_failed: list[str] = []
+    if state.get("available") and state.get("id"):
+        try:
+            failed = {str(f.get("code") or "") for f in download_store.failures(str(state["id"]))}
+            tried_failed = sorted(failed & set(gap))
+        except Exception:                             # noqa: BLE001 - 佐证取不到不影响判据
+            tried_failed = []
+    return {
+        "signal_day": signal_day,
+        "gap_codes": gap,
+        "gap_count": len(gap),
+        "stale_total": len(stale),
+        "exempt_suspended": len(exempt["suspended"]),
+        "exempt_not_listed": len(exempt["not_listed"]),
+        "listing_ready": bool(exempt["listing_ready"]),
+        "task_state": state,
+        "tried_failed": tried_failed,
+    }
+
 
 
 def trading_day_context(target: str | None = None) -> dict[str, Any]:
@@ -1542,8 +1657,9 @@ def trading_day_context(target: str | None = None) -> dict[str, Any]:
 
     latest, earliest = _spans()                # 一次扫描同时给出两端
     total = len(latest)
-    tolerance = _staleness_tolerance(total)
-    covered = sum(1 for v in latest.values() if str(v)[:10] >= sig_iso)
+    # 逐票事实 + 豁免集：停牌/退市、未上市**不算缺口**（本来就没有，补也补不到）
+    gap = market_gap(sig_iso, latest)
+    covered = total - gap["stale_total"]
     return {
         "today": today.isoformat(),
         "is_trade_day": is_trade,
@@ -1564,7 +1680,15 @@ def trading_day_context(target: str | None = None) -> dict[str, Any]:
         "calendar_ready": bool(days),
         "covered": covered,
         "total": total,
-        "data_ready": total > 0 and (total - covered) <= tolerance,
+        "data_ready": total > 0 and gap["gap_count"] == 0,
+        # 缺口明细：给前端显示「到底缺哪几只」+「豁免了多少只停牌/未上市」
+        "gap": gap["gap_count"],
+        "gap_codes": gap["gap_codes"][:20],
+        "exempt_suspended": gap["exempt_suspended"],
+        "exempt_not_listed": gap["exempt_not_listed"],
+        "listing_ready": gap["listing_ready"],
+        "task_state": gap["task_state"],
+        "tried_failed": gap["tried_failed"][:20],
     }
 
 
@@ -1582,7 +1706,7 @@ def freshness(codes: list[str] | None = None,
     该由自动更新提前把数据补齐，这里只负责如实报告 + 提供单只补齐入口。
     """
     wanted = [str(c).strip() for c in (codes or []) if str(c).strip()]
-    latest = price_store.code_latest_dates()
+    latest, _earliest = _spans()          # 全表聚合（带缓存；原先每次直接扫表）
     if not latest:
         return {"expected": expected_day, "total": 0, "covered": 0, "stale": 0,
                 "latest": None, "need_refresh": bool(wanted), "checked": [],
@@ -1590,33 +1714,50 @@ def freshness(codes: list[str] | None = None,
                 "next_trade_day": _next_trade_day(dt.date.today()).isoformat()}
     expected = expected_day or _expected_data_day()
     if wanted:
+        # 指定 codes（K 线页单只校验）：逐只精确判定，**不豁免**
+        # （停牌票显示「陈旧」是对的 —— 它确实没有数据）。
         checked = [c for c in wanted if c in latest]
         # 库里完全没有的票也算缺口（第一次打开的新股）
         missing = [c for c in wanted if c not in latest]
+        covered = sum(1 for c in checked if str(latest[c]) >= expected)
+        stale_codes = sorted(c for c in checked if str(latest[c]) < expected)
+        stale_count = len(stale_codes)
+        _need = bool(stale_codes or missing)
+        gap_info: dict[str, Any] = {}
     else:
+        # 全市场（策略页用法）：**逐票事实 + 豁免集**，不再用比例阈值。
+        # 豁免：停牌/退市、未上市（本来就没有信号日行情，补也补不到）。
+        gap = market_gap(expected, latest)
         checked = list(latest.keys())
         missing = []
-    covered = sum(1 for c in checked if str(latest[c]) >= expected)
-    stale_codes = sorted(c for c in checked if str(latest[c]) < expected)
-    # 全市场（策略页用法）时，少量停牌/退市股长期没有新 K 线，逐只都算缺口会让
-    # 每次运行策略前都被「数据不是最新」拦住（实测 5585 只里 15 只停牌就触发；
-    # 2026-11-20 实测 65 只停牌/退市把 1% 阈值顶穿 → 数据已齐却被拦）。
-    # 容忍阈值见 `_staleness_tolerance`（临时值 5%，正事见 todo/backlog.md）。
-    # 指定 codes（K 线页单只校验）仍逐只精确判定。
-    _need = (bool(stale_codes or missing) if wanted
-             else len(stale_codes) > _staleness_tolerance(len(checked)))
+        covered = len(checked) - gap["stale_total"]
+        stale_codes = list(gap["gap_codes"])
+        # stale 保持旧语义「落后于基准日的只数」（含被豁免的停牌 / 未上市），
+        # 这样 covered + stale = total 仍然成立；真缺口看 gap / gap_codes。
+        stale_count = gap["stale_total"]
+        _need = gap["gap_count"] > 0
+        gap_info = {
+            "gap": gap["gap_count"],
+            "gap_codes": gap["gap_codes"][:20],
+            "exempt_suspended": gap["exempt_suspended"],
+            "exempt_not_listed": gap["exempt_not_listed"],
+            "listing_ready": gap["listing_ready"],
+            "task_state": gap["task_state"],
+            "tried_failed": gap["tried_failed"][:20],
+        }
     return {
         "expected": expected,
         "total": len(wanted) if wanted else len(latest),
         "checked": len(checked),
         "covered": covered,
-        "stale": len(stale_codes),
+        "stale": stale_count,
         "missing": len(missing),
         "latest": max(str(d) for d in latest.values()),
         "need_refresh": _need,
         "stale_examples": (stale_codes + missing)[:10],
         "market_closed": _market_has_closed_today(),
         "next_trade_day": _next_trade_day(dt.date.today()).isoformat(),
+        **gap_info,
     }
 
 

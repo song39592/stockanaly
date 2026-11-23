@@ -1801,8 +1801,36 @@ private void StRefreshCurStrategy()
                 if (!need) { Ui(proceed); return; }
 
                 string expected = J.StrOr(f["expected"], "?");
-                int covered = J.Int(f["covered"]);
                 int checkedCount = J.Int(f["checked"]);
+                // 缺口明细：后端已把「本来就没有该日行情」的票豁免掉，gap 才是真缺口。
+                int gap = J.Int(f["gap"]);
+                int exSus = J.Int(f["exempt_suspended"]);
+                int exNew = J.Int(f["exempt_not_listed"]);
+                var gapArr = J.Arr(J.Get(f, "gap_codes"));
+                var taskState = J.Map(J.Get(f, "task_state"));
+                string gapList = "";
+                if (gapArr != null && gapArr.Count > 0)
+                {
+                    var sb = new System.Text.StringBuilder();
+                    int n = Math.Min(8, gapArr.Count);
+                    for (int i = 0; i < n; i++)
+                    {
+                        if (i > 0) sb.Append("、");
+                        sb.Append(J.Str(gapArr[i]));
+                    }
+                    if (gapArr.Count > n) sb.Append(" …");
+                    gapList = sb.ToString();
+                }
+                string taskLine = "";
+                if (taskState != null)
+                {
+                    object avail = J.Get(taskState, "available");
+                    if (avail is bool && (bool)avail)
+                    {
+                        taskLine = "最近一次全市场下载：补到 " + J.StrOr(J.Get(taskState, "span_end"), "?")
+                            + "（已完成，失败 " + J.Int(J.Get(taskState, "failed")) + " 只）。\r\n";
+                    }
+                }
                 DialogResult dr = DialogResult.None;
                 Ui(delegate
                 {
@@ -1821,13 +1849,20 @@ private void StRefreshCurStrategy()
                           + "· 用现有数据继续：结果基于各票现有数据（未补齐），可能不是最新行情";
                     dr = MessageBox.Show(this,
                         head
-                        // ⚠️ 新鲜度是**逐票**判定的：covered = 已更新到 expected 的只数，
-                        // latest = 全市场里最新那一只的日期（通常就是 expected）。
-                        // 原来写「本地行情只更新到 <latest>（应有 <expected>）」在
-                        // latest==expected 时会自相矛盾（"只更新到 10-13，应有 10-13"），
-                        // 完全看不出「其实 5573 只还停在更早」。这里改成按只数说。
-                        + "但 " + checkedCount + " 只里只有 " + covered + " 只更新到 " + expected
-                        + "（其余 " + Math.Max(0, checkedCount - covered) + " 只还停在更早的交易日）。\r\n\r\n"
+                        // 「差多少」必须用**缺口数**（gap），不能用 checked - covered：
+                        // 后者把「停牌/退市、未上市」也算成缺口 —— 2026-11-20 实测 65 只
+                        // 停牌/退市把 1% 阈值顶穿，明明数据已齐却被拦。现在后端把
+                        // 「本来就没有该日行情」的票单独豁免并计数，弹框直接说清：
+                        // 还差哪几只、另外豁免了多少只、依据是哪一轮下载。
+                        + (gap > 0
+                            ? "但还有 " + gap + " 只股票没有 " + expected + " 的收盘数据"
+                              + (gapList.Length > 0 ? "：" + gapList : "") + "。\r\n"
+                            : "")
+                        + (exSus + exNew > 0
+                            ? "（另有 " + exSus + " 只停牌/退市、" + exNew + " 只未上市 —— "
+                              + "它们本来就没有该日行情，不计入。）\r\n"
+                            : "")
+                        + taskLine
                         + (singleDay ? "本地行情尚未更新到 " + expected + "，" : "")
                         + (singleDay ? "无法生成该日执行的单日策略。\r\n\r\n" : "")
                         + tail,
@@ -1894,8 +1929,7 @@ private void StRefreshCurStrategy()
                 catch (Exception) { return; }        // 单次失败下个周期再试
                 bool need = f.ContainsKey("need_refresh") && f["need_refresh"] is bool
                             && (bool)f["need_refresh"];
-                int covered = J.Int(f["covered"]);
-                int total = J.Int(f["checked"]);
+                int gap = J.Int(f["gap"]);
                 string latest = J.StrOr(f["latest"], "?");
                 Ui(delegate
                 {
@@ -1907,9 +1941,11 @@ private void StRefreshCurStrategy()
                         then();
                         return;
                     }
+                    // 显示「还差几只」而不是 covered/total：covered 把停牌/退市、
+                    // 未上市也算成没覆盖（后端已豁免，gap 才是真缺口）。
                     string w = string.Format(
-                        "等待补齐中 {0}/{1}（数据至 {2}）…可切到别的页签，补齐在后台继续",
-                        covered, total, latest);
+                        "等待补齐中…还差 {0} 只（数据至 {1}）…可切到别的页签，补齐在后台继续",
+                        gap, latest);
                     StJobText(w, false);
                     SetErr(_stResultStatus, w);
                 });

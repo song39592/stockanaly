@@ -374,6 +374,22 @@ GET  /api/history/download/tdx/status       通达信目录检测
 `tdx_reader.read_xdxr` 只做带严格校验的尝试、解不出即返回 None，
 **复权因子自动回落到在线新浪源**——绝不把猜出来的数据写进库。
 
+### 数据齐否（运行前检查）的判据
+
+`/api/history/download/freshness` 与 `/api/history/download/trading_day_context`
+判定「信号日的数据齐不齐」用**逐票事实**，不用比例阈值：
+
+- **豁免集**（本来就没有该日行情，不算缺口）：停牌/退市（`core/stock_status` 的逐票标记）、
+  未上市（交易所真实上市日 > 信号日）。豁免数量随响应透出
+  （`exempt_suspended` / `exempt_not_listed`）—— 别让「豁免」看起来像「没缺」。
+- **缺口集**：落后于信号日且不在豁免集 → `gap` / `gap_codes`（前 20 只代码）。
+  `need_refresh`（freshness）与 `data_ready`（trading_day_context）都按它判定。
+- **任务依据**：`task_state` = 最近一次全市场下载任务（scope='all' / 'downloaded'）的
+  完成状态、`span_end`、`covers_signal_day`、失败/停牌计数 —— 供界面说明「依据是哪一轮」。
+  ⚠️ 任务状态**不是**唯一判据：现有任务都是「按缺口排队」的增量任务，
+  「任务成功」不等于「全市场都齐」。
+- **上市日表取不到** → 不豁免未上市（宁可误拦不误放），并透出 `listing_ready=false`。
+
 ## 九、说明
 
 - 数据源均为公开接口，反爬/改版可能导致个别来源失败，已做优雅降级，不会导致整体报错。
