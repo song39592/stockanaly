@@ -15,7 +15,8 @@
 
 ## 缓存
 结果只由「规则 + 基准日」决定。连续多次回测不改范围时**没必要重算** —— 尤其 ST 名称表
-要联网、市值要全库扫一遍。这里用**小型键值缓存**（key = 规范化后的 spec，最多 8 种范围）
+要读全表（现已本地化，零网络）、市值要全库扫一遍。这里用**小型键值缓存**
+（key = 规范化后的 spec，最多 8 种范围）
 把生成结果留在内存；范围一变就按新 key 重建，旧范围仍可命中。TTL 兜底，防止长期运行后
 数据已更新而池子仍是旧的。
 
@@ -23,7 +24,9 @@
 剔除特征不是「按回测区间逐日判断」，而是**一次性把整段历史的池子筛出来**：
   · 微盘股 → **区间起点**当日市值（point-in-time，不含未来信息，也不随日期漂）；
   · 新股/次新股 → **交易所公布的真实上市日**距**区间起点**的天数（回测当时视角）；
-  · ST/*ST → akshare **当前**名称表（数据源无历史名单 → 前视偏差，**必须显式声明**）；
+  · ST/*ST → **当前**名称名单（**本地主数据表 `stock_meta` 快照**，零网络；
+    覆盖不足时才联网补 akshare 全市场表）—— 数据源无历史名单 → 前视偏差，
+    **必须显式声明**（含快照时刻）；
   · 板块 → 代码前缀（与时间无关）。
 「每项剔除了多少只」必须回传并写进报告 —— 否则读者无从判断这个净值跑在什么样本上。
 
@@ -85,7 +88,8 @@ class ScopeDataUnavailable(RuntimeError):
 
     ## 为什么必须中止，而不是降级（这是实测踩出来的坑）
 
-    勾了「剔除 ST / \*ST」，但 ST 名称名单（akshare 全市场表）联网取不到时，
+    勾了「剔除 ST / \*ST」，但 ST 名称名单（本地主数据表 `stock_meta`，缺失时才联网取
+    akshare 全市场表）取不到时，
     旧实现**静默降级**成「一只 ST 都没剔」→
 
     * 报告的「剔除明细」里只是**没有 st 这一项** → 看起来像「本来就没有 ST」；
@@ -126,7 +130,16 @@ _cache: dict = {}             # key -> (codes, base_count, at, detail)
 #   实跑只剩 2 只；而预览按「今天」算只剔 430 只 → **预览与实跑口径分叉**。
 #   新口径：交易所官方批量表（沪主板+沪科创+深市+北交所，实测 5580 只），
 #   取不到**中止**（与 ST 名单同一纪律）。旧口径产出的报告一律视为**旧口径**。
-SPEC_VERSION = "2026-11-20.a"
+#
+# 2026-11-23.a：**ST / *ST 名单来源从「每次联网取 akshare 全市场表」改成
+#   「本地主数据表 `stock_meta` 快照」**（本地覆盖不足时才联网**补缺口**）。
+#   为什么这也算口径变更（不是纯优化）：本地快照实测 **5931 只、名称 100% 有**，
+#   在线表只有 **5572 行** → 两份名单覆盖到的票**不同** → 在线表缺的那 359 只
+#   在旧口径里会被当成「非 ST」放进来 → **池子不同 → 收益可能不同**。
+#   所以旧口径产出的报告一律视为**旧口径**，不可与新报告直接对比。
+#   配套落盘：`st_names.source`（来源）/ `st_names.updated_at`（快照时刻），
+#   池子指纹新增 `st_src` / `st_at` → 同口径不同来源一眼可辨。
+SPEC_VERSION = "2026-11-23.a"
 
 
 def spec_signature() -> str:
@@ -249,7 +262,7 @@ def spec_from_request(req, universe_mode: str | None = None) -> dict:
 def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str, int], dict]:
     """基池剔除 exclude 里的特征。各特征独立计算、取并集。
 
-    ⚠️ **依赖外部数据**的特征（ST / \*ST 要联网取名单）**取不到就中止**
+    ⚠️ **依赖外部数据**的特征（ST / \*ST 要名称名单）**取不到就中止**
     （`ScopeDataUnavailable`），不静默降级 —— 理由见该异常类的 docstring。
 
     返回 (剩余代码, 每项剔除只数)。**只数必须回传** —— 否则读者无法判断
@@ -259,7 +272,7 @@ def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str,
     判定口径（关键）：
       · 微盘股 → **区间起点**的总市值（point-in-time），不是「今天的市值」；
       · 新股/次新股 → 上市日距**区间起点**的天数；
-      · ST/*ST → akshare 的**当前**名称表（无历史名单 → 前视偏差，须声明）。
+      · ST/*ST → **当前**名称名单（本地主数据表快照，无历史名单 → 前视偏差，须声明）。
     """
     ex = set(spec.get("exclude") or [])
     if not ex:
@@ -274,6 +287,7 @@ def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str,
     dropped: dict[str, int] = {}
     st_cov: float | None = None      # ST 名单覆盖率（None = 本次没用到名单）
     st_covered: int = 0
+    st_meta: dict = {}                # ST 名单来源 / 快照时刻（用到才填）
     listing_meta: dict = {}          # 上市日来源 / 覆盖率 / 兜底只数（用到才填）
 
     def _hit(feature: str, codes) -> None:
@@ -286,7 +300,8 @@ def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str,
         if feat in ex:
             _hit(feat, [c for c in base if _board_key(c) == feat])
 
-    # ST / *ST：名称（akshare 全市场表，24h 缓存）—— **当前**名单，无法还原历史
+    # ST / *ST：名称（**本地主数据表 `stock_meta` 优先**，覆盖不足才联网补）——
+    # **当前**名单，无法还原历史
     if ex & {"st", "star_st"}:
         # ⚠️ 顺序要紧：**先取**（取数失败会把原因记进 `names_source_status`），
         #    再判可用性 —— 反过来会得到「未知原因」，等于没告诉用户到底怎么了。
@@ -294,11 +309,14 @@ def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str,
         status = data.names_source_status()
         if not status.get("ok"):
             raise ScopeDataUnavailable(
-                "剔除 ST/*ST 需要联网取当前名称名单（akshare 全市场表），本次取不到"
+                "剔除 ST/*ST 需要当前名称名单（本地主数据表 stock_meta；"
+                "覆盖不足时才联网取 akshare 全市场表），本次取不到"
                 f"（{status.get('error') or '未知原因'}）。已中止本次回测 —— "
                 "继续跑等于「勾了剔除却一只没剔」，报告里的剔除明细会看起来像"
                 "「本来就没有 ST」，口径指纹也算不出差别。\n"
-                "→ 下一步：(1) 恢复网络后重试；(2) 在回测范围里**取消**『剔除 ST / *ST』"
+                "→ 下一步：(1) 恢复网络后重试（回测会自动联网补齐）；"
+                "(2) 先刷新一次股票基础主数据（POST /api/stock/meta/refresh）"
+                "把本地名称表补上；(3) 在回测范围里**取消**『剔除 ST / *ST』"
                 "再跑（口径会变：报告会明确写出剔除明细里没有 ST）。"
             )
         st_covered = sum(1 for c in base if names.get(c))
@@ -306,11 +324,21 @@ def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str,
         if st_cov < NAME_COVERAGE_MIN:
             raise ScopeDataUnavailable(
                 f"ST 名称名单只覆盖 {st_covered}/{len(base)} 只"
-                f"（{st_cov:.1%} < {NAME_COVERAGE_MIN:.0%}）→ 没覆盖的票会被当成"
+                f"（{st_cov:.1%} < {NAME_COVERAGE_MIN:.0%}，来源："
+                f"{status.get('source') or '未知'}）→ 没覆盖的票会被当成"
                 "「非 ST」放进来，与「名单整个没取到」一样是降级，已中止本次回测。\n"
-                "→ 下一步：(1) 稍后重试（名单是全市场表，冷启动要 ~50s）；"
-                "(2) 在回测范围里**取消**『剔除 ST / *ST』再跑。"
+                "→ 下一步：(1) 刷新股票基础主数据（POST /api/stock/meta/refresh）"
+                "后重试；(2) 恢复网络让回测自动联网补齐；"
+                "(3) 在回测范围里**取消**『剔除 ST / *ST』再跑。"
             )
+        # 判定依据是**哪份表、什么时候的快照** → 必须落进报告：
+        # 本地快照最多滞后一天，读者要能看见这个滞后（旧口径每次联网取，
+        # 没有「快照时刻」这回事 → 口径变了，指纹也要跟着变）。
+        st_meta = {
+            "st_name_source": status.get("source"),
+            "st_name_updated_at": status.get("updated_at"),
+            "st_name_age_hours": status.get("age_hours"),
+        }
         hit_st: list[str] = []
         hit_star_st: list[str] = []
         for code in base:
@@ -403,6 +431,8 @@ def _apply_exclusions(base: list[str], spec: dict) -> tuple[list[str], dict[str,
         # 因此没参与 ST 判定」（覆盖不足到会中止，但 95%~100% 之间的漏网要写明）。
         extra["st_name_coverage"] = round(st_cov, 4)
         extra["st_name_covered"] = st_covered
+    if st_meta:
+        extra.update(st_meta)
     if listing_meta:
         extra.update(listing_meta)
     return [c for c in base if c not in drop], dropped, extra
@@ -518,8 +548,13 @@ def build_detail(spec: dict, force: bool = False) -> tuple[list[str], dict]:
         "listing_date_source": (extra or {}).get("listing_date_source"),
         # ST 名单的可用性（取不到时本次若勾了 ST 剔除会**中止**，
         # 所以跑到这里说明名单可用；仍要落盘，让读者知道判定依据是哪份表）
+        # ⚠️ `source` 现在**会变**：本地主数据表 / 在线表 / 两者组合 →
+        #    两份报告的 ST 判定依据可能不同 → 池子指纹必须能区分（见 pool_signature）。
         "st_names": {"ok": bool(st_status.get("ok")), "size": st_status.get("size"),
-                     "source": st_status.get("source")},
+                     "source": st_status.get("source"),
+                     "updated_at": st_status.get("updated_at"),
+                     "age_hours": st_status.get("age_hours"),
+                     "used": bool(set(ex) & {"st", "star_st"})},
     }
     detail.update(extra or {})
     # ---- 池子**结果**指纹：补 `spec_signature` 只压常量的缺口 -------------------
@@ -538,6 +573,8 @@ def build_detail(spec: dict, force: bool = False) -> tuple[list[str], dict]:
         "dropped=" + ",".join(f"{k}:{dropped[k]}" for k in sorted(dropped)),
         f"st_names_ok={1 if st_status.get('ok') else 0}",
         f"st_cov={extra.get('st_name_coverage', '')}",
+        f"st_src={st_status.get('source', '')}",
+        f"st_at={st_status.get('updated_at', '')}",
         f"listing_src={extra.get('listing_date_source', '')}",
         f"listing_cov={extra.get('listing_date_coverage', '')}",
         f"listing_fb={extra.get('listing_date_fallback', '')}",
@@ -596,6 +633,18 @@ def scope_note(detail: dict) -> str:
     if cov is not None and cov < 1.0:
         parts.append(f"⚠️ ST 名称名单只覆盖 {cov:.1%} → 未覆盖的票**未参与 ST 判定**"
                      f"（按非 ST 处理）")
+    if ex & {"st", "star_st"}:
+        # 名单**来源**与**快照时刻**必须写出来：ST 判定依据的是哪份表、什么时候的快照。
+        # 本地快照最多滞后一天 → 滞后要在报告里看得见（不是「取不到」，是「旧」）。
+        st_names = detail.get("st_names") or {}
+        seg = [f"ST 名称名单来源：{st_names.get('source') or '未知'}"]
+        at = st_names.get("updated_at") or ""
+        age = st_names.get("age_hours")
+        if at:
+            seg.append(f"快照时刻 {at}")
+            if age is not None and age > 24:
+                seg.append(f"⚠️ 快照已 **{age:.0f} 小时**未更新 → ST 状态可能滞后")
+        parts.append("；".join(seg))
     if ex & {"ipo", "sub_new"}:
         # 上市日来源必须说清楚：真实上市日 vs 兜底 vs 完全未知，三种情况读者要能分开看。
         src = detail.get("listing_date_source")
@@ -657,6 +706,8 @@ def summary(spec: dict, force: bool = False) -> dict:
         "pool_signature": detail.get("pool_signature"),
         "st_names": detail.get("st_names"),
         "st_name_coverage": detail.get("st_name_coverage"),
+        "st_name_source": detail.get("st_name_source"),
+        "st_name_updated_at": detail.get("st_name_updated_at"),
         "note": scope_note(detail),
     }
     return out

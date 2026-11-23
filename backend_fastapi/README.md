@@ -56,6 +56,8 @@ GET  /api/stock/quote     → 按代码查名称与当前股价（供输入代�
 GET  /api/strategies/universe/summary → 回测范围预览（基池/剔除后只数 + 每项剔除只数 +
                                        **可注入只数**（= 实跑参与统计的只数）+ 口径说明）
                                        判定口径与字段含义详见 strategies/ARCHITECTURE.md「股票池层」
+                                       ST 名单取数：**本地主数据表 `stock_meta` 优先**（零网络、
+                                        离线可跑）；本地覆盖不足才联网补齐（只补缺口）
                                        ⚠️ 勾了「剔除 ST/*ST」但名称名单**取不到 / 覆盖不足**时
                                        → **HTTP 400 + 可操作提示**（取消该剔除项或恢复网络），
                                        不会静默降级成「一只没剔」（见 universe.ScopeDataUnavailable）
@@ -104,6 +106,10 @@ POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / 
                                        scope.exclusion.st_names / st_name_coverage =
                                         ST 名称名单来源与覆盖率（<100% 说明有票未参与
                                          ST 判定，按非 ST 处理）
+                                       scope.exclusion.st_name_source / st_name_updated_at =
+                                        名单**来源**（local.stock_meta = 本地快照，零网络；
+                                         akshare… = 在线表）与**快照时刻**（本地快照
+                                         最多滞后一天 → 口径说明里会显式声明）
                                        scope.exclusion.listing_date_source =
                                         上市日来源（exchange_listing_date = 交易所公布的
                                          **真实上市日**；旧口径 earliest_bar = 库里最早日K

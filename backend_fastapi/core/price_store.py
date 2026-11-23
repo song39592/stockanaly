@@ -419,6 +419,42 @@ def all_stock_codes() -> list[str]:
         return []
 
 
+def stock_names() -> tuple[dict[str, str], str]:
+    """{code: 名称} + 本地表最近更新时刻 —— **本地主数据副本，零网络**。
+
+    `stock_meta` 由 `refresh_stock_meta()` 用「当前在市 A 股清单」差量同步
+    （新增 INSERT / 退市 DELETE / 名称变更 UPDATE），所以它就是那份清单的
+    本地副本：实测 5931 只、**名称 100% 有**、对库里 5637 只**全覆盖**
+    （在线那张 `akshare.stock_info_a_code_name` 实测 5572~5581 行 → 对库里
+    缺 57 只，覆盖率 99.0%；缺的 57 只在 ST 判定里会被当成「非 ST」放进来）。
+
+    ⚠️ 这是**快照**：ST 状态最多滞后一天（优先取「最近一次**成功同步**时刻」
+    `stock_meta_synced_at`；没有该记录才退回 MAX(updated_at) = 最近一次**改动**时刻）
+    → 用它做口径判定时，报告必须写明来源与同步时间（见 `strategies/core/universe.py`）。
+
+    返回 `({}, "")` 表示本地表不可用（调用方据此走在线兜底 / 中止）。
+    """
+    try:
+        with db.connect(db.FACTORS_DB, touch_meta=False) as conn:
+            _ensure_stock_meta_table(conn)
+            rows = conn.execute("SELECT code,name,updated_at FROM stock_meta").fetchall()
+            # 本地表最近一次**成功同步**的时刻（权威口径；没有记录才退回 MAX(updated_at)）
+            synced = db.meta_get(conn, "stock_meta_synced_at", "") or ""
+        names: dict[str, str] = {}
+        changed = ""
+        for r in rows:
+            code = str(r["code"] or "").strip()
+            if not code:
+                continue
+            names[code] = str(r["name"] or "")
+            at = str(r["updated_at"] or "")
+            if at > changed:
+                changed = at
+        return names, (synced or changed)
+    except Exception:  # noqa: BLE001
+        return {}, ""
+
+
 def listing_dates() -> dict[str, str]:
     """{code: 上市日（ISO 日期）} —— **交易所公布的真实上市日**。
 
@@ -560,6 +596,17 @@ def refresh_stock_meta() -> dict:
         if gone:
             conn.executemany("DELETE FROM stock_meta WHERE code=?", [(c,) for c in gone])
             deleted = len(gone)
+        # 本地表最近一次**成功同步**的时刻 —— 名称快照的权威时间戳。
+        # 为什么不用 `MAX(updated_at)`：那只是「最近一次新增/改名」的时刻，
+        # 没改名没新股的日子它会一直停在旧值 → 报告里会把「今天同步过」说成
+        # 「N 天前同步过」（宁可说旧，不可说新）。
+        # ⚠️ 这里必须单独兜住异常：它在**同一个事务**里，抛异常会让整次刷新的
+        #   写入一起回滚（表都更了、时刻没记上 → 快照时间说旧，无害；
+        #   反过来表没更成功却崩了 → 每天都白刷一次）。
+        try:
+            db.meta_set(conn, "stock_meta_synced_at", now)
+        except Exception:  # noqa: BLE001
+            pass
     result.update(fetched=len(seen), inserted=inserted, deleted=deleted,
                   updated=updated, pinyin_fixed=pinyin_fixed)
     return result

@@ -129,7 +129,7 @@ def _compute_one(code: str, start: str | None, end: str | None,
 
 
 def _load_names(codes: list[str]) -> dict[str, str]:
-    """批量取名称（复用 strategies 里「一次拉全市场」的 24h 缓存）。
+    """批量取名称（复用 strategies 的名称缓存：**本地主数据表优先**，零网络）。
 
     名称是锦上添花：拿不到就让前端显示「—」，绝不影响分析本身。
     """
