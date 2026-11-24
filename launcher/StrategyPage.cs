@@ -180,7 +180,7 @@ namespace StockPool
             {
                 WheelValueBox wv = Ctrl as WheelValueBox;
                 if (wv != null)
-                    return wv.Step >= 1m ? (object)(int)wv.Value : (object)(double)wv.Value;
+                    return Type == "int" ? (object)(int)wv.Value : (object)(double)wv.Value;
                 ComboBox cb = Ctrl as ComboBox;
                 if (cb != null) return cb.SelectedItem == null ? "" : cb.SelectedItem.ToString();
                 TextBox tb = Ctrl as TextBox;
@@ -466,7 +466,10 @@ private void StRefreshCurStrategy()
                 decimal lo = (decimal)mn;
                 decimal hi = (decimal)mx;
                 decimal def = (decimal)Clamp(J.NumOr(p["default"], 0), mn, mx);
-                var n = new WheelValueBox(lo, hi, 0.01m, def);
+                // 大范围浮点参数（JWZZ 触发阈值 ‰：-500~2000）按 1 步进：0.01 在滚轮里几乎调不动。
+                // 小范围系数（仓位 / 倍量等）保持 0.01 细调。
+                decimal step = (mx - mn >= 1000) ? 1m : 0.01m;
+                var n = new WheelValueBox(lo, hi, step, def);
                 n.Width = 100;
                 ctrl = n;
             }
