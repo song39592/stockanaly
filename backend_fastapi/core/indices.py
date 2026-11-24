@@ -48,6 +48,15 @@ COMMON_INDICES: tuple[tuple[str, str], ...] = (
     ("sh000688", "科创50"),
     ("bj899050", "北证50"),
     ("sz399330", "深证100"),
+    # ---- 分类指数：交易所「股票价格异常波动」判定用的对应分类指数 ----
+    # 异动口径：个股相对**对应分类指数**的涨跌幅偏离值（不是上证综指 / 深证成指）。
+    # 沪市主板 sh000002 / 深市主板 sz399107 / 创业板 sz399102 / 科创板 sh000688。
+    # ⚠️ 科创板基准是 sh000688（科创50），不是 sh000680（科创综指）——
+    #   东财「严重异动预测」21 组样本逐条复算：科创综指对不上，科创50 精确到 0.01pp。
+    # 板块 → 基准指数的唯一映射见本文件 `benchmark_index_for`。
+    ("sh000002", "上证A股指数"),
+    ("sz399107", "深证A指"),
+    ("sz399102", "创业板综指"),
 )
 
 _NAMES = dict(COMMON_INDICES)
@@ -61,11 +70,44 @@ INDEX_KINDS: dict[str, str] = {
     "sh000985": "全市场",
     "sh000016": "大盘蓝筹",
     "sh000905": "中盘宽基",
-    "sh000688": "科创板",
+    "sh000688": "科创板 / 异动基准",
     "bj899050": "北交所",
     "sz399330": "深市宽基",
     "sz399006": "创业板",
+    "sh000002": "异动基准·沪市主板",
+    "sz399107": "异动基准·深市主板",
+    "sz399102": "异动基准·创业板",
 }
+
+
+# 异动判定基准指数（唯一来源）：板块 → 指数代码。
+# 经东财「严重异动预测」2026-11-24 前后 21 组样本逐条复算，
+# `(close[t]/close[t-N]-1) - (idx[t]/idx[t-N]-1)` 与东财 N 日涨幅偏离值 100% 相等。
+ABNORMAL_BENCHMARKS: dict[str, str] = {
+    "main_sh": "sh000002",   # 沪市主板 6xxxxx
+    "main_sz": "sz399107",   # 深市主板 0xxxxx
+    "chinext": "sz399102",   # 创业板 300/301
+    "star": "sh000688",      # 科创板 688/689 —— 科创50，非科创综指
+    "bse": "bj899050",       # 北交所：按北证50 处理，暂无样本可核，有明文再改这里
+}
+
+
+def benchmark_index_for(code: object) -> str:
+    """个股代码 → 异动判定基准指数（唯一映射，调用方不要各写一份）。
+
+    沪深主板必须分开：华东重机(002685) 用深证A指得 96.08%，用上证A指只有 89.66%，
+    后者会漏掉次日 +2.11% 的严重异动预测。
+    """
+    c = str(code or "").strip().zfill(6)
+    if c.startswith(("300", "301")):
+        return ABNORMAL_BENCHMARKS["chinext"]
+    if c.startswith(("688", "689")):
+        return ABNORMAL_BENCHMARKS["star"]
+    if c.startswith(("43", "83", "87", "88", "92")):
+        return ABNORMAL_BENCHMARKS["bse"]
+    if c.startswith("6"):
+        return ABNORMAL_BENCHMARKS["main_sh"]
+    return ABNORMAL_BENCHMARKS["main_sz"]
 
 
 def normalize_code(code: object) -> str:
