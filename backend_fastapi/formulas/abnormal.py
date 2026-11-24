@@ -94,6 +94,11 @@ def threshold_for_board(board: str, is_st: bool = False) -> float:
     return THRESHOLD_INNOVATION if str(board) in ("chinext", "star", "bse") else THRESHOLD_MAIN
 
 
+def _dev_pair(cur_s, cur_i, prev_s, prev_i):
+    """Single-window ratio deviation -- the ONLY formula for deviation window."""
+    return (cur_s / prev_s - 1.0) - (cur_i / prev_i - 1.0)
+
+
 def _window_dev_extremes(s: pd.Series, idx: pd.Series,
                          lo: int, hi: int) -> tuple[pd.Series, pd.Series]:
     """对每个 N∈[lo,hi] 算比值偏离，返回逐日 (最大, 最小)。
@@ -101,12 +106,21 @@ def _window_dev_extremes(s: pd.Series, idx: pd.Series,
     用「N 日以内任一达标」而不是「恰好 N 日」—— 东财对奥精医疗用 14 日窗口
     触发 30 日 −70% 规则；固定 30 日会漏。
     """
-    cols = {
-        k: (s / s.shift(k) - 1.0) - (idx / idx.shift(k) - 1.0)
-        for k in range(int(lo), int(hi) + 1)
-    }
-    frame = pd.DataFrame(cols, index=s.index)
-    return frame.max(axis=1), frame.min(axis=1)
+    sv = s.to_numpy(dtype=float)
+    iv = idx.to_numpy(dtype=float)
+    n = len(sv)
+    lo, hi = int(lo), int(hi)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mx_arr = np.full(n, -np.inf)
+        mn_arr = np.full(n, np.inf)
+        for k in range(lo, min(hi, n - 1) + 1):
+            d = _dev_pair(sv[k:], iv[k:], sv[:-k], iv[:-k])
+            ok = ~np.isnan(d)          # pandas.max skips NaN, keeps +/-inf
+            np.maximum(mx_arr[k:], d, out=mx_arr[k:], where=ok)
+            np.minimum(mn_arr[k:], d, out=mn_arr[k:], where=ok)
+    mx_arr[~np.isfinite(mx_arr)] = np.nan
+    mn_arr[~np.isfinite(mn_arr)] = np.nan
+    return pd.Series(mx_arr, index=s.index), pd.Series(mn_arr, index=s.index)
 
 
 def _abnormal_event_counts(s: pd.Series, idx: pd.Series, threshold: float,
@@ -125,7 +139,8 @@ def _abnormal_event_counts(s: pd.Series, idx: pd.Series, threshold: float,
         if i - base < 3:
             continue
         if not (np.isfinite(sv[i]) and np.isfinite(iv[i])
-                and np.isfinite(sv[base]) and np.isfinite(iv[base]) and iv[base] > 0):
+                and np.isfinite(sv[base]) and sv[base] > 0
+                and np.isfinite(iv[base]) and iv[base] > 0):
             continue
         dev = (sv[i] / sv[base] - 1.0) - (iv[i] / iv[base] - 1.0)
         if abs(dev) >= threshold - eps:
