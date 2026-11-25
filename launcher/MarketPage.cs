@@ -45,16 +45,21 @@ namespace StockPool
         private Label _mktBlCaption, _mktDtCaption;
         private Button _mktBlFold, _mktDtFold;
         private StockGrid _mktBlasted, _mktLimitDown;                // ⑤ 炸板 / 跌停（表格）
+        private StockGrid _mktAbnormal, _mktAlert;                   // ⑥ 当日异动 / ⑦ 异动预警（表格）
+        private Label _mktAbnormalStatus, _mktAlertStatus;
+        private bool _mktAbnormalFired, _mktAlertFired;              // 二级页首次切入时才拉（扫描较重）
 
-        // ⑥ AI 分析（调 /api/market/ai-analysis，复用同一个 LLM_API_KEY）
+        // ⑧ AI 分析（调 /api/market/ai-analysis，复用同一个 LLM_API_KEY）
         private Label _mktAiStatus;
         private RichTextBox _mktAiBox;
         private ComboBox _mktAiDepth;
         private string _mktAiMarkdown = "";
         private int _mktAiSubIndex = -1;      // 「AI 分析」二级页下标
         private bool _mktAiFired = false;     // 是否已自动生成过一次
+        private int _mktAbnormalIndex = -1;   // 「当日异动」二级页下标
+        private int _mktAlertIndex = -1;      // 「异动预警」二级页下标
 
-        // 二级导航：① / ② / ③ 各自一页，④ 连板 + ⑤ 大面股 合为一页
+        // 二级导航：① / ② / ③ 各自一页，④ 连板 + ⑤ 大面股 合为一页，⑥ 当日异动 / ⑦ 异动预警 各自一页
         private SubTabStrip _mktStrip;
 
         /// <summary>
@@ -103,6 +108,15 @@ namespace StockPool
             _mktStrip = new SubTabStrip(this, root, 1, 2, "mkt-subtab");
             _mktStrip.OnSelected = delegate(int index)
             {
+                // 重页首次切入才拉：全市场异动扫描首次约 30 秒，不能在进入本页时
+                // 与其余五块一起并发，否则把「连板 / 大面股」也拖慢。
+                if ((index == _mktAbnormalIndex && !_mktAbnormalFired)
+                    || (index == _mktAlertIndex && !_mktAlertFired))
+                {
+                    _mktAbnormalFired = true;
+                    _mktAlertFired = true;
+                    MktLoadAbnormal();
+                }
                 // 首次切到「AI 分析」页时才生成：此时应用早已启动、后端已就绪，
                 // 避免在 BuildMarketPage（应用启动瞬间）抢跑导致「连不上后端」。
                 if (index == _mktAiSubIndex && !_mktAiFired)
@@ -112,11 +126,15 @@ namespace StockPool
                 }
             };
 
-            // ---- 四个二级页 ----
+            // ---- 七个二级页 ----
             _mktStrip.Add("外围环境", MktBuildGlobal);
             _mktStrip.Add("大盘资金", MktBuildCapital);
             _mktStrip.Add("板块β", MktBuildSectors);
             _mktStrip.Add("连板 · 大面股", MktBuildLadder);
+            _mktAbnormalIndex = _mktStrip.Count;
+            _mktStrip.Add("当日异动", MktBuildAbnormalToday);
+            _mktAlertIndex = _mktStrip.Count;
+            _mktStrip.Add("异动预警", MktBuildAbnormalAlert);
             _mktAiSubIndex = _mktStrip.Count;
             _mktStrip.Add("AI 分析", MktBuildMktAi);
 
@@ -314,6 +332,54 @@ namespace StockPool
             AddRow(stack, g5);
         }
 
+        /// <summary>⑥ 当日异动：全市场逐票扫描，已触发的普通 / 严重异动 + 触发原因。</summary>
+        private void MktBuildAbnormalToday(TableLayoutPanel stack)
+        {
+            TableLayoutPanel b;
+            var g = Group("", out b);
+            _mktAbnormalStatus = Mute(Lbl("首次切入时扫描全市场（约 30 秒）"));
+            AddRow(b, Row(_mktAbnormalStatus));
+            AddRow(b, Row(Mute(Lbl("基于当日收盘数据，已触发的普通 / 严重异动；备注写明触发原因"))));
+            _mktAbnormal = NewGrid(new List<GridColumn> {
+                new GridColumn("代码") { IsCode = true, Jump = true },
+                NameColumn(),
+                new GridColumn("基准指数", "board"),
+                new GridColumn("3日偏离", "dev3", true),
+                new GridColumn("阈值", "threshold", true),
+                new GridColumn("10日次数", "ev10", true),
+                new GridColumn("30日偏离", "dev30", true),
+                new GridColumn("类型", "type"),
+                new GridColumn("触发原因") { Width = 520, Size = DataGridViewAutoSizeColumnMode.None },
+            });
+            _mktAbnormal.SetSortable(true);
+            AddRow(b, Row(Mute(Lbl("首次切入扫描一次；顶部「刷新」可重扫")), MktCopyBtn(_mktAbnormal)));
+            AddRow(b, _mktAbnormal);
+            AddRow(stack, g);
+        }
+
+        /// <summary>⑦ 异动预警：距阈值 80% / 10日已 3 次 / 接近严重偏离，备注写明将触发原因。</summary>
+        private void MktBuildAbnormalAlert(TableLayoutPanel stack)
+        {
+            TableLayoutPanel b;
+            var g = Group("", out b);
+            _mktAlertStatus = Mute(Lbl("首次切入时扫描全市场（约 30 秒）"));
+            AddRow(b, Row(_mktAlertStatus));
+            AddRow(b, Row(Mute(Lbl("基于上一交易日收盘，预警下一交易日可能触发：距阈值不足 20% / 10日内已3次 / 接近严重偏离"))));
+            _mktAlert = NewGrid(new List<GridColumn> {
+                new GridColumn("代码") { IsCode = true, Jump = true },
+                NameColumn(),
+                new GridColumn("基准指数", "board"),
+                new GridColumn("3日偏离", "dev3", true),
+                new GridColumn("已达阈值", "pct", true),
+                new GridColumn("10日次数", "ev10", true),
+                new GridColumn("将触发原因") { Width = 560, Size = DataGridViewAutoSizeColumnMode.None },
+            });
+            _mktAlert.SetSortable(true);
+            AddRow(b, Row(Mute(Lbl("首次切入扫描一次；与「当日异动」共用同一份扫描缓存")), MktCopyBtn(_mktAlert)));
+            AddRow(b, _mktAlert);
+            AddRow(stack, g);
+        }
+
         // ---------------- 通用控件 ----------------
 
         /// <summary>生成「复制表格」按钮：点击将表格（含表头）以 TSV 写入剪贴板，并短暂反馈结果。</summary>
@@ -433,6 +499,9 @@ namespace StockPool
             _mktPending = jobs.Length;
             _mktFailed = 0;
 
+            // 已打开过异动子页时，顶部刷新也一并重扫（force 走后端缓存清理由 date 区分）
+            if (_mktAbnormalFired || _mktAlertFired) MktLoadAbnormal();
+
             foreach (string[] job in jobs)
             {
                 string name = job[0];
@@ -461,6 +530,38 @@ namespace StockPool
                     }
                 });
             }
+        }
+
+        /// <summary>
+        /// 全市场异动扫描：两个子页共用一次结果（后端按交易日缓存）。
+        /// 首次切入才触发，不进 MktLoadAll 的五块并发，避免拖慢常规盘面加载。
+        /// </summary>
+        private void MktLoadAbnormal()
+        {
+            string date = _mktDate != null && _mktDate.Checked ? _mktDate.Value.ToString("yyyyMMdd") : "";
+            string url = "http://127.0.0.1:8000/api/market/abnormal/today"
+                + (date == "" ? "" : "?date=" + date);
+            if (_mktAbnormalStatus != null) _mktAbnormalStatus.Text = "扫描中…（首次约 35 秒）";
+            if (_mktAlertStatus != null) _mktAlertStatus.Text = "扫描中…（首次约 35 秒）";
+            System.Threading.Tasks.Task.Run(delegate
+            {
+                try
+                {
+                    string resp = VRequest(url, null, 180000);
+                    var j = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(resp);
+                    // 一次请求同时渲染两个子页（today 接口已带上 alert 结果）
+                    Invoke((Action)delegate { MktRenderAbnormal("today", j); MktRenderAbnormal("alert", j); });
+                }
+                catch (Exception ex)
+                {
+                    string msg = "失败：" + ex.Message;
+                    try { Invoke((Action)delegate {
+                        SetErr(_mktAbnormalStatus, msg);
+                        SetErr(_mktAlertStatus, msg);
+                    }); }
+                    catch (Exception) { }
+                }
+            });
         }
 
         /// <summary>单个 job 收尾：全部返回后才复位顶部状态。
@@ -1156,6 +1257,72 @@ bool ok = J.IsOk(j);
 
             _mktBlStatus.Text = J.Str(J.Get(j, "trade_date")) + "（炸板 " + (blasted != null ? blasted.Count : 0)
                 + " 只 · 跌停 " + (limitDown != null ? limitDown.Count : 0) + " 只）";
+        }
+
+        // ---------------- ⑥ 当日异动 / ⑦ 异动预警 ----------------
+        private void MktRenderAbnormal(string kind, Dictionary<string, object> j)
+        {
+            bool today = kind == "today";
+            StockGrid g = today ? _mktAbnormal : _mktAlert;
+            Label status = today ? _mktAbnormalStatus : _mktAlertStatus;
+            if (g == null || status == null) return;
+            g.Rows.Clear();
+            if (!J.IsOk(j))
+            {
+                SetErr(status, J.Str(J.Get(j, "trade_date")) + " 未获取到异动数据");
+                return;
+            }
+            var rows = J.Arr(J.Get(j, today ? "today" : "alert"));
+            int count = 0;
+            if (rows != null)
+            {
+                foreach (Dictionary<string, object> s in rows)
+                {
+                    MktAbnormalRow(g, s, today);
+                    count++;
+                }
+            }
+            g.Fit(160, 620);
+            string baseDate = J.Str(J.Get(j, "trade_date"));
+            if (today)
+            {
+                status.Text = baseDate + " 收盘（当日异动 " + count + " 只 · 扫描 "
+                    + MktText(J.Get(j, "scanned")) + " 只）";
+            }
+            else
+            {
+                status.Text = "基于 " + baseDate + " 收盘，预警 " + J.Str(J.Get(j, "alert_date"))
+                    + " 可能触发（" + count + " 只）";
+            }
+            status.Tag = "muted";
+        }
+
+        private static void MktAbnormalRow(DataGridView g, Dictionary<string, object> s, bool today)
+        {
+            double? dev = J.NumOrNull(J.Get(s, "deviation_3"));
+            string devText = dev != null ? (dev.Value * 100).ToString("+0.00;-0.00;0.00") + "%" : "—";
+            double? ratio = J.NumOrNull(J.Get(s, "dev3_ratio"));
+            string pctText = ratio != null ? (ratio.Value * 100).ToString("0") + "%" : "—";
+            string thrText = J.NumOrNull(J.Get(s, "threshold")) != null
+                ? (J.NumOrNull(J.Get(s, "threshold")).Value * 100).ToString("0") + "%" : "—";
+            string cnt = MktText(J.Get(s, "event_count_up")) + " / " + MktText(J.Get(s, "event_count_dn"));
+            string dev30 = J.NumOrNull(J.Get(s, "dev30")) != null
+                ? (J.NumOrNull(J.Get(s, "dev30")).Value * 100).ToString("+0.0;-0.0;0.0") + "%" : "—";
+            string reason = J.Str(J.Get(s, "reason"));
+            int row;
+            if (today)
+            {
+                string type = J.Get(s, "is_severe") != null && (bool)J.Get(s, "is_severe")
+                    ? "严重异动" : ((bool)(J.Get(s, "abnormal_price") ?? false) ? "价格异动" : "换手异动");
+                row = g.Rows.Add(J.Str(J.Get(s, "code")), J.Str(J.Get(s, "name")),
+                    J.Str(J.Get(s, "board")), devText, thrText, cnt, dev30, type, reason);
+            }
+            else
+            {
+                row = g.Rows.Add(J.Str(J.Get(s, "code")), J.Str(J.Get(s, "name")),
+                    J.Str(J.Get(s, "board")), devText, pctText, cnt, reason);
+            }
+            MktColor(g.Rows[row].Cells[3], dev);
         }
 
         // ---------------- 小工具 ----------------

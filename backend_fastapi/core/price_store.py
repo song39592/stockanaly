@@ -1552,6 +1552,38 @@ def float_shares_at(code: str, date: str | None = None) -> float | None:
     return None if row is None else row["float_shares"]
 
 
+def float_shares_all(codes, date: str | None = None) -> dict[str, float]:
+    """批量取 `date` 当日生效的流通股本（股），与 `float_shares_at` 同一口径，
+    但一次 SQL 拿全市场 —— 扫全市场时逐只调用会多出数千次开库。"""
+    want = [str(c).strip() for c in codes if str(c).strip()]
+    if not want:
+        return {}
+    out: dict[str, float] = {}
+    with db.connect(db.FACTORS_DB) as conn:
+        _ensure_share_table(conn)
+        for code in want:
+            row = None
+            if date:
+                day = str(date)[:10]
+                row = conn.execute(
+                    "SELECT float_shares FROM share_capital WHERE code=? AND as_of<=? "
+                    "ORDER BY as_of DESC LIMIT 1", (code, day),
+                ).fetchone()
+                if row is None:
+                    row = conn.execute(
+                        "SELECT float_shares FROM share_capital WHERE code=? AND as_of>? "
+                        "ORDER BY as_of ASC LIMIT 1", (code, day),
+                    ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT float_shares FROM share_capital WHERE code=? "
+                    "ORDER BY as_of DESC LIMIT 1", (code,),
+                ).fetchone()
+            if row is not None and row["float_shares"]:
+                out[code] = float(row["float_shares"])
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # 锁仓系数缓存（r / L）
 # --------------------------------------------------------------------------- #
@@ -1923,6 +1955,63 @@ def load_bars(code: str, adjust: str = "qfq", start: str | None = None,
 # --------------------------------------------------------------------------- #
 # 横截面（全市场）批量读取 —— 供 RPS 等「同一交易日全市场排名」的指标使用
 # --------------------------------------------------------------------------- #
+def load_market_columns(columns: tuple[str, ...], adjust: str = "raw",
+                        start: str | None = None, end: str | None = None,
+                        codes: list[str] | None = None) -> dict[str, pd.DataFrame]:
+    """全市场横截面**多列**一次读取，返回 {列名: 宽表(trade_date × code)}。
+
+    `load_market_close` 的推广：同一段 SQL 一次取回需要的列，避免「close 一遍、
+    volume 又一遍」重复扫分片；横截面类需求（RPS、全市场异动扫描）共用这一个
+    入口。逐只 load_bars 会把按股指纹校验放大到数千次（实测全市场 ~10 分钟），
+    这里按年份分片整片查询、不做按股指纹校验（只读、低风险，严格校验走 load_bars）。
+
+    列必须在 `STANDARD_BAR_COLUMNS` 之外可调用方自行校验；返回**存储口径原值**，
+    复权请用 `apply_hfq_factors`（close 等价格列）。
+    """
+    cols = tuple(dict.fromkeys(c for c in columns if c))
+    if not cols:
+        return {}
+    store_adjust = _store_adjust(adjust)
+    years = _shard_years()
+    if start:
+        years = [y for y in years if y >= _year_of(start)]
+    if end:
+        years = [y for y in years if y <= _year_of(end)]
+    select = "code, trade_date, " + ",".join(cols)
+    frames: dict[str, list[pd.DataFrame]] = {c: [] for c in cols}
+    for year in years:
+        sql = f"SELECT {select} FROM daily_bars WHERE adjust=?"
+        params: list[Any] = [store_adjust]
+        if start:
+            sql += " AND trade_date>=?"
+            params.append(str(start)[:10])
+        if end:
+            sql += " AND trade_date<=?"
+            params.append(str(end)[:10])
+        with db.connect(db.bars_db(year)) as conn:
+            rows = conn.execute(sql, params).fetchall()
+        if not rows:
+            continue
+        df = pd.DataFrame(rows, columns=["code", "trade_date", *cols])
+        # 逐分片 pivot 后按行拼接：避免把 600 万行长表一次性 concat 进内存
+        for c in cols:
+            frames[c].append(df.pivot(index="trade_date", columns="code", values=c))
+
+    out: dict[str, pd.DataFrame] = {}
+    for c in cols:
+        if not frames[c]:
+            out[c] = pd.DataFrame()
+            continue
+        panel = pd.concat(frames[c], axis=0)
+        panel.index = [str(d)[:10] for d in panel.index]
+        panel = panel.sort_index()
+        if codes is not None:
+            keep = [x for x in codes if x in panel.columns]
+            panel = panel[keep]
+        out[c] = panel
+    return out
+
+
 def load_market_close(adjust: str = "raw", start: str | None = None,
                       codes: list[str] | None = None) -> pd.DataFrame:
     """一次性读取**全市场**收盘价，返回宽表（索引 trade_date，列=code）。
@@ -1938,35 +2027,7 @@ def load_market_close(adjust: str = "raw", start: str | None = None,
       * 返回**原始价**（store 口径），不在此处复权；需要复权请在调用方按
         `load_all_factors()` 的因子自行缩放（见 indicators.data 的 RPS 面板）。
     """
-    store_adjust = _store_adjust(adjust)
-    years = _shard_years()
-    if start:
-        years = [y for y in years if y >= _year_of(start)]
-
-    frames: list[pd.DataFrame] = []
-    for year in years:
-        sql = "SELECT code, trade_date, close FROM daily_bars WHERE adjust=?"
-        params: list[Any] = [store_adjust]
-        if start:
-            sql += " AND trade_date>=?"
-            params.append(str(start)[:10])
-        with db.connect(db.bars_db(year)) as conn:
-            rows = conn.execute(sql, params).fetchall()
-        if not rows:
-            continue
-        df = pd.DataFrame(rows, columns=["code", "trade_date", "close"])
-        # 逐分片 pivot 后按行拼接：避免把 600 万行长表一次性 concat 进内存
-        frames.append(df.pivot(index="trade_date", columns="code", values="close"))
-
-    if not frames:
-        return pd.DataFrame()
-    panel = pd.concat(frames, axis=0)
-    panel.index = [str(d)[:10] for d in panel.index]
-    panel = panel.sort_index()
-    if codes is not None:
-        keep = [c for c in codes if c in panel.columns]
-        panel = panel[keep]
-    return panel
+    return load_market_columns(("close",), adjust=adjust, start=start, codes=codes)["close"]
 
 
 def load_all_factors() -> list[dict[str, Any]]:
