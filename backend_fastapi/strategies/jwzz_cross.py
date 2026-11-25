@@ -48,11 +48,18 @@ import numpy as np
 
 from .core.base import strategy, ParamSpec, Signal
 from .core import data
-from formulas.jwzz import DEFAULT_PERIOD, jwzz_panel
+from formulas.jwzz import jwzz_panel
+
+# 本策略的成本 EMA 周期默认值：§五.8 生产口径复测（cp=5 夏普 5.351 vs cp=13 的 3.386，
+# 配对 t=+4.79、跨 3 段 3/3、换池 8/8 全为正）→ 默认值定为 5。
+# 注意：formulas.jwzz.DEFAULT_PERIOD 仍为 13（指标 / 其他策略的默认值），此处**不共用**，
+# 因 §五.8 的结论只对 jwzz_cross 这个策略成立。
+DEFAULT_COST_PERIOD = 5
 
 
 @strategy(
     id="jwzz_cross",
+    version="3",
     name="JWZZ 上穿/下穿",
     category="趋势",
     description="价量偏离度 JWZZ 上穿阈值（默认 95‰）视为进入强势状态并买入，"
@@ -61,18 +68,20 @@ from formulas.jwzz import DEFAULT_PERIOD, jwzz_panel
     outputs="目标权重向量(组合占比) + 因子值(meta)",
     requires_pool=False,
     params=[
-        ParamSpec("cost_period", "int", DEFAULT_PERIOD, min=2, max=250,
+        ParamSpec("cost_period", "int", DEFAULT_COST_PERIOD, min=2, max=250,
                    label="成本EMA周期"),
         ParamSpec("threshold", "float", 95.0, min=-500.0, max=2000.0,
                    label="触发阈值(‰)"),
         ParamSpec("smooth_period", "int", 0, min=0, max=250,
                    label="平滑周期(0=原始JWZZ；>0需把阈值调低约5倍)"),
         ParamSpec("top_n", "int", 10, min=1, max=200, label="持仓数量上限"),
+        ParamSpec("offset", "int", 0, min=0, max=200,
+                  label="持仓排序偏移(0=买第1~N名；1=买第2~N+1名)"),
         ParamSpec("position", "float", 1.0, min=0.1, max=1.0, label="总仓位系数"),
     ],
 )
-def jwzz_cross(ctx, cost_period: int = DEFAULT_PERIOD, threshold: float = 95.0,
-               smooth_period: int = 0, top_n: int = 10,
+def jwzz_cross(ctx, cost_period: int = DEFAULT_COST_PERIOD, threshold: float = 95.0,
+               smooth_period: int = 0, top_n: int = 10, offset: int = 0,
                position: float = 1.0) -> list:
     codes = [str(c).strip() for c in (ctx.codes or []) if str(c).strip()]
     if not codes:
@@ -81,6 +90,7 @@ def jwzz_cross(ctx, cost_period: int = DEFAULT_PERIOD, threshold: float = 95.0,
     thr = float(threshold)
     smooth_n = max(0, int(smooth_period))
     top_n = max(1, int(top_n))
+    offset = max(0, int(offset))
     pos = min(1.0, max(0.0, float(position)))
 
     # 主动拉取所需字段（inputs=["close","volume","amount"]）；缓存命中，无额外 I/O
@@ -106,7 +116,8 @@ def jwzz_cross(ctx, cost_period: int = DEFAULT_PERIOD, threshold: float = 95.0,
         if day_bull.size:
             # 偏离度降序；同值保持列序（stable），保证结果可复现、不依赖 dict 顺序
             order = day_bull[np.argsort(-strength_m[day_bull, t], kind="stable")]
-            picks = {cols[i] for i in order[:top_n]}
+            # 严格偏移：offset=1 → 买第 2~N+1 名；强势票不足时少买，不回退补位
+            picks = {cols[i] for i in order[offset:offset + top_n]}
         else:
             picks = set()
         if picks == held:
@@ -122,10 +133,13 @@ def jwzz_cross(ctx, cost_period: int = DEFAULT_PERIOD, threshold: float = 95.0,
         if picks:
             w = pos / len(picks)
             value_of = {cols[i]: float(strength_m[i, t]) for i in range(len(cols))}
-            for rank, code in enumerate(sorted(picks), start=1):
+            # rank 用真实 JWZZ 强度名次（order 内位置，1=最强），不再按代码字母序
+            strength_rank = {cols[i]: j for j, i in enumerate(order, start=1)}
+            for code in sorted(picks):
                 signals.append(Signal(
                     code=code, time=day, weight=w, reason="JWZZ 上穿阈值",
-                    meta={"value": round(value_of.get(code, 0.0), 3), "rank": rank},
+                    meta={"value": round(value_of.get(code, 0.0), 3),
+                          "rank": strength_rank[code]},
                 ))
         held = picks
 
