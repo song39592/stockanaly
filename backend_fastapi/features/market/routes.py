@@ -9,8 +9,10 @@
     GET /sectors    ③ 板块β（行业与概念资金流 Top10 / 申万一级行业涨跌）
     GET /limit-up   ④ 连板梯队（连板结构 + 晋级率）
     GET /big-loss   ⑤ 大面股（炸板池 + 跌停池）
-    POST /ai-analysis ⑥ 盘面 AI 分析（投喂五大维度，调用 LLM，需配置 LLM_API_KEY）
-    POST /ai-analysis/stream ⑥ 同上，但以 SSE 流式返回各数据块的拉取进度与最终结果
+    GET /abnormal/today  ⑥ 当日异动（全市场扫描，复用 formulas/abnormal 内核）
+    GET /abnormal/alert  ⑦ 异动预警（将触发：距阈值 80% / 10日已3次 / 接近严重偏离）
+    POST /ai-analysis ⑧ 盘面 AI 分析（投喂五大维度，调用 LLM，需配置 LLM_API_KEY）
+    POST /ai-analysis/stream ⑧ 同上，但以 SSE 流式返回各数据块的拉取进度与最终结果
 
 均支持 ?date=YYYYMMDD 指定交易日（①②③ 仅部分口径有历史数据源，② 恒为实时快照）
 与 ?force=1 跳过进程内缓存（ai-analysis 为 POST，date/depth/force 放 body）。
@@ -81,6 +83,9 @@ def market_global(date: str = "", force: bool = False):
     """① 外围环境：美股 / 港股 / 大宗商品 / 费城半导体。date 为空时返回实时行情。"""
     if force:
         market_service.clear_cache("global_market")
+    # 进入本页必调本接口：顺带后台预热全市场异动扫描（~38s），
+    # 用户切到「当日异动 / 异动预警」子页时缓存通常已就绪，零等待。
+    market_service.warm_abnormal_scan()
     return json_safe_deep(market_service.global_market(date or None))
 
 
@@ -114,6 +119,25 @@ def market_big_loss(date: str = "", force: bool = False):
     if force:
         market_service.clear_cache("big_loss")
     return json_safe_deep(market_service.big_loss(date or None))
+
+
+@router.get("/abnormal/today")
+def market_abnormal_today(date: str = "", force: bool = False):
+    """⑥ 当日异动：全市场逐票扫描，列已触发的普通 / 严重异动及触发原因。
+
+    date 为空取本地最新交易日；全市场扫描较重，结果按交易日缓存（盘中 2 分钟）。
+    """
+    if force:
+        market_service.clear_cache("abnormal_scan")
+    return json_safe_deep(market_service.abnormal_today(date or None))
+
+
+@router.get("/abnormal/alert")
+def market_abnormal_alert(date: str = "", force: bool = False):
+    """⑦ 异动预警：距价格异动阈值 ≥80% / 10日内已 3 次 / 接近严重偏离的个股。"""
+    if force:
+        market_service.clear_cache("abnormal_scan")
+    return json_safe_deep(market_service.abnormal_alert(date or None))
 
 
 @router.post("/ai-analysis")

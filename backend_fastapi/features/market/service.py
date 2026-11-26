@@ -1345,6 +1345,354 @@ def big_loss(date=None):
     return {**data, "cached": cached}
 
 
+# --------------------------------------------------------------------------- #
+# ⑥ 当日异动 / ⑦ 异动预警（全市场扫描，本地日线 + 分类指数）
+# --------------------------------------------------------------------------- #
+# 口径唯一来源：formulas/abnormal.py（触发判定 / 阈值 / 事件次数）与
+# core/indices.py（个股 → 分类指数映射）。本模块只做取数、过滤与原因文案，
+# 不重写任何一条异动判据 —— 两处各写一份迟早算出两个数且都不报错。
+from core import indices as _index_defs          # noqa: E402 - 集中放在使用点附近，避免顶部依赖扩张
+from formulas import abnormal as _abnormal       # noqa: E402
+
+# 30 日窗口 + 3 日前置 + 余量；窗口内的偏离极值都靠这段预热算出来。
+_ABNORMAL_LOOKBACK = 45
+# 「将触发」的产品层定义（不是交易所规则）：距价格异动阈值 ≥80% 即预警。
+# NEAR_ABNORMAL_RATIO 的唯一来源在 formulas/abnormal.py，这里只复用不复制。
+_NEAR_SEVERE_RATIO = 0.85                        # 10/30 日严重异动偏离的预警比例
+_ABNORMAL_WORKERS = 8                            # 并行取数的线程数（SQLite WAL 只读，安全）
+_ABNORMAL_SCAN_LOCK = threading.Lock()           # 扫描单飞：两页并发只跑一次，详见 abnormal_scan
+
+
+def _abnormal_benchmarks(start: str, end: str, errors: list) -> dict:
+    """异动基准指数收盘序列（本地优先；本地缺失走新浪现采并落盘，取到就落盘）。
+
+    `core.indices.ABNORMAL_BENCHMARKS` 是「板块 → 指数」的唯一映射，这里只遍历它的值，
+    不另存一份清单。本地已落盘的直接用；缺的那几条（首次部署常见）走 `_ak` 新浪源补齐
+    —— 与「主数据本地优先、取到就落盘」同构，补完以后每次都走本地。
+    """
+    from core import price_store as ps
+    out: dict = {}
+    for code in sorted(set(_index_defs.ABNORMAL_BENCHMARKS.values())):
+        rows = ps.list_index_bars(code, start=start, end=end, fields=["close"])
+        if not rows:
+            frame = _ak(ak.stock_zh_index_daily, symbol=code)
+            if frame is None or getattr(frame, "empty", True):
+                errors.append(f"异动基准指数 {code} 本地缺失且数据源不可用")
+                continue
+            try:
+                bars = [{"date": str(row["date"])[:10], "close": row["close"],
+                         "open": row.get("open"), "high": row.get("high"),
+                         "low": row.get("low"), "volume": row.get("volume")}
+                        for _, row in frame.iterrows()]
+                ps.upsert_index_bars(code, bars, source="新浪财经")
+                rows = ps.list_index_bars(code, start=start, end=end, fields=["close"])
+            except Exception as exc:              # noqa: BLE001 - 单条指数失败只降级该指数
+                errors.append(f"异动基准指数 {code} 补齐失败：{exc}")
+        if rows:
+            out[code] = pd.Series(
+                {str(r["trade_date"])[:10]: float(r["close"])
+                 for r in rows if r.get("close") is not None},
+                dtype=float, name=code)
+    return out
+
+
+def _abnormal_next_trade_day(trade_date: str) -> str:
+    """数据基准日的下一交易日 = 预警目标日。
+
+    预警是「截至 trade_date 收盘尚未触发、但已接近阈值」，只有下一交易日继续
+    同向波动才会真正触发 —— 目标日必须是下一交易日，不是数据基准日。
+    本地交易日历优先；日历暂未就绪时退化为跳过周末的工作日。
+    """
+    days = sorted(str(d)[:10] for d in _a_share_trade_days(blocking=False))
+    for day in days:
+        if day > trade_date:
+            return day
+    nxt = dt.date.fromisoformat(str(trade_date)[:10]) + dt.timedelta(days=1)
+    while nxt.weekday() >= 5:
+        nxt += dt.timedelta(days=1)
+    return nxt.isoformat()
+
+
+def _abnormal_threshold(code: str, name: str, benchmark: str) -> float:
+    """个股异动阈值：复用 formulas 的 threshold_for_board，board 从唯一映射反查。"""
+    key = next((k for k, v in _index_defs.ABNORMAL_BENCHMARKS.items()
+                if v == benchmark), "main_sh")
+    return _abnormal.threshold_for_board(key, is_st="ST" in str(name).upper())
+
+
+def _abnormal_turnover(bar: dict, shares: float) -> float:
+    """换手率（小数）：本地 turnover 列优先，缺失用 成交量(手)×100 ÷ 流通股本 补算。
+
+    库里 turnover 列并非每日都有（数据源偶发缺失），直接传 NaN 会让换手率型异动
+    静默不触发；流通股本表 `share_capital` 是本地表，补算是零网络的。
+    """
+    value = bar.get("turnover")
+    if value is not None and pd.notna(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            pass
+    volume = bar.get("volume")
+    if volume and shares and shares > 0:
+        try:
+            return min(1.0, max(0.0, float(volume) * 100.0 / float(shares)))
+        except (TypeError, ValueError):
+            pass
+    return float("nan")
+
+
+def _abnormal_reason(row: dict, *, kind: str) -> str:
+    """按内核输出拼一句中文原因。只做文案，判定全交给 formulas/abnormal。"""
+    thr_pct = round(float(row["threshold"]) * 100)
+    dev_pct = row.get("deviation_3")
+    dev_text = ("%+.2f%%" % (float(dev_pct) * 100)) if dev_pct is not None and pd.notna(dev_pct) else "—"
+    parts = []
+    if kind == "today":
+        if row.get("abnormal_price"):
+            parts.append(f"3日累计偏离 {dev_text}（阈值 ±{thr_pct}%）")
+        if row.get("abnormal_turnover"):
+            parts.append("换手率 3日均值/前5日均值 ≥ 30 倍且累计 ≥ 20%")
+        if row.get("severe_count"):
+            n = max(int(row.get("event_count_up") or 0), int(row.get("event_count_dn") or 0))
+            direction = "向上" if (row.get("event_count_up") or 0) >= (row.get("event_count_dn") or 0) else "向下"
+            parts.append(f"10日内 {n} 次{direction}异动（≥4 次）")
+        if row.get("severe_dev10"):
+            parts.append("10日内累计偏离达标（+100% / -50%）")
+        if row.get("severe_dev30"):
+            parts.append("30日内累计偏离达标（+200% / -70%）")
+        if row.get("is_severe") and not any(p for p in parts if "严重" in p or "10日内" in p or "30日内" in p):
+            parts.append("达到严重异常波动口径")
+        return "；".join(parts) if parts else "触发异动"
+    # 预警：将触发原因
+    ratio = row.get("dev3_ratio")
+    if row.get("near_abnormal"):
+        pct = round(float(ratio) * 100) if ratio is not None and pd.notna(ratio) else 80
+        parts.append(f"3日累计偏离 {dev_text}，已达阈值 {pct}%（距 ±{thr_pct}% 不足 20%）")
+    n = max(int(row.get("event_count_up") or 0), int(row.get("event_count_dn") or 0))
+    if n >= 3 and n < 4:
+        direction = "向上" if (row.get("event_count_up") or 0) >= (row.get("event_count_dn") or 0) else "向下"
+        parts.append(f"10日内已 {n} 次{direction}异动，再 1 次即触发严重异动")
+    dev10 = row.get("dev10")
+    if dev10 is not None and pd.notna(dev10) and (
+            float(dev10) >= 1.0 * _NEAR_SEVERE_RATIO or float(dev10) <= -0.5 * _NEAR_SEVERE_RATIO):
+        parts.append(f"10日累计偏离 {float(dev10) * 100:+.1f}%，接近严重异动 +100% / -50%")
+    dev30 = row.get("dev30")
+    if dev30 is not None and pd.notna(dev30) and (
+            float(dev30) >= 2.0 * _NEAR_SEVERE_RATIO or float(dev30) <= -0.7 * _NEAR_SEVERE_RATIO):
+        parts.append(f"30日累计偏离 {float(dev30) * 100:+.1f}%，接近严重异动 +200% / -70%")
+    return "；".join(parts) if parts else "接近异动阈值"
+
+
+def abnormal_scan(date: str | None = None):
+    """全市场异动扫描（当日 + 将触发）。返回逐票状态、原因与统计。
+
+    `date` 为空取本地最新交易日；指定交易日时只扫到该日为止。所有计算走
+    `formulas.abnormal.abnormal_detail`，本函数只负责取数、过滤与备注。
+    """
+    from core import price_store as ps
+
+    def build():
+        errors: list = []
+        codes = ps.all_stock_codes()
+        if not codes:
+            return {"ok": False, "as_of": _now_str(), "trade_date": None,
+                    "scanned": 0, "today": [], "alert": [], "errors": ["本地股票清单为空"]}
+
+        # 日期轴与三列行情一次取回：逐只 load_bars 会把按股指纹校验放大 5000+ 次
+        # （实测 ~165s），这里走横截面面板（实测 ~1s），close 用同一份 hfq 因子复权
+        # ——与 load_bars(hfq) 同一份 apply_hfq_factors，口径不会分叉。
+        cols = ps.load_market_columns(
+            ("close", "volume", "turnover"), "raw",
+            start=(dt.date.today() - dt.timedelta(days=120)).isoformat())
+        panel = cols.get("close")
+        if panel is None or panel.empty:
+            return {"ok": False, "as_of": _now_str(), "trade_date": None,
+                    "scanned": 0, "today": [], "alert": [], "errors": ["本地日线为空"]}
+        dates = [str(d)[:10] for d in panel.index]
+        if date:
+            wanted = _compact_date(date)
+            dates = [d for d in dates if _compact_date(d) <= wanted]
+            if not dates:
+                return {"ok": False, "as_of": _now_str(), "trade_date": date,
+                        "scanned": 0, "today": [], "alert": [], "errors": [f"指定交易日 {date} 早于本地数据"]}
+        trade_date = dates[-1]
+        window = dates[-_ABNORMAL_LOOKBACK:]
+        start, end = window[0], window[-1]
+        panel = panel.loc[window]
+        close_panel = ps.apply_hfq_factors(panel)             # 价格唯一复权实现处
+        volume_panel = cols.get("volume")
+        volume_panel = volume_panel.reindex(window) if volume_panel is not None else pd.DataFrame()
+        turn_panel = cols.get("turnover")
+        turn_panel = turn_panel.reindex(window) if turn_panel is not None else pd.DataFrame()
+        # 本地 turnover 列偶有缺失，用 成交量 ×100 ÷ 流通股本 补算；股本批量按最新日取。
+        shares_map = ps.float_shares_all(close_panel.columns.tolist(), trade_date)
+
+        bench = _abnormal_benchmarks(start, end, errors)
+        if not bench:
+            return {"ok": False, "as_of": _now_str(), "trade_date": trade_date,
+                    "scanned": 0, "today": [], "alert": [],
+                    "errors": errors + ["异动基准指数全部不可用"]}
+        names, _ = ps.stock_names()
+
+        def evaluate(code):
+            """单只逐日异动判定；返回 (base, today_row, alert_row) 或 None（判不出来）。"""
+            name = names.get(code, "")
+            benchmark = _index_defs.benchmark_index_for(code)
+            idx = bench.get(benchmark)
+            close = close_panel[code].dropna()
+            if idx is None or len(close) < 8:
+                return None
+            shares = shares_map.get(code, 0.0) or 0.0
+            turns = turn_panel[code] if code in turn_panel.columns else pd.Series(dtype=float)
+            vols = volume_panel[code] if code in volume_panel.columns else pd.Series(dtype=float)
+            turnover = pd.Series(
+                {d: _abnormal_turnover({"turnover": turns.get(d), "volume": vols.get(d)}, shares)
+                 for d in close.index}, dtype=float)
+            thr = _abnormal_threshold(code, name, benchmark)
+            try:
+                detail = _abnormal.abnormal_detail(close, idx, turnover, threshold=thr, lag=0)
+            except Exception:                     # noqa: BLE001 - 单只算不出来只跳过
+                return None
+            if detail.empty or trade_date not in detail.index:
+                return None
+            last = detail.loc[trade_date]
+            if not bool(last.get("valid", False)):
+                return None
+
+            def pick(key):
+                v = last.get(key)
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    return None
+                return round(float(v), 4) if isinstance(v, (int, float)) and not isinstance(v, bool) else bool(v)
+
+            base = {
+                "code": code, "name": name, "board": benchmark,
+                "threshold": thr,
+                "deviation_3": pick("deviation_3"), "dev10": pick("dev10"), "dev30": pick("dev30"),
+                "dev3_ratio": pick("dev3_ratio"),
+                "event_count_up": int(last.get("event_count_up") or 0),
+                "event_count_dn": int(last.get("event_count_dn") or 0),
+                "abnormal_price": bool(last.get("abnormal_price", False)),
+                "abnormal_turnover": bool(last.get("abnormal_turnover", False)),
+                "is_abnormal": bool(last.get("is_abnormal", False)),
+                "is_severe": bool(last.get("is_severe", False)),
+                "severe_count": bool(last.get("severe_count", False)),
+                "severe_dev10": bool(last.get("severe_dev10", False)),
+                "severe_dev30": bool(last.get("severe_dev30", False)),
+                "near_abnormal": bool(last.get("near_abnormal", False)),
+                "direction": int(last.get("direction") or 0),
+            }
+            today_row = None
+            if base["is_abnormal"] or base["is_severe"]:
+                today_row = {**base, "reason": _abnormal_reason(base, kind="today")}
+            alert_row = None
+            d10, d30 = base["dev10"], base["dev30"]
+            near_severe = (
+                (d10 is not None and (d10 >= 1.0 * _NEAR_SEVERE_RATIO
+                                      or d10 <= -0.5 * _NEAR_SEVERE_RATIO))
+                or (d30 is not None and (d30 >= 2.0 * _NEAR_SEVERE_RATIO
+                                         or d30 <= -0.7 * _NEAR_SEVERE_RATIO))
+            )
+            if base["near_abnormal"] or max(base["event_count_up"], base["event_count_dn"]) >= 3 \
+                    or near_severe:
+                alert_row = {**base, "reason": _abnormal_reason(base, kind="alert")}
+            return today_row, alert_row
+
+        today_rows: list = []
+        alert_rows: list = []
+        skipped = 0
+        # 串行：实测线程池并行反而更慢（pandas Series 构造受 GIL 限制，
+        # 线程切换抵消 numpy 释放 GIL 的收益，38s → 52s）。
+        for code in close_panel.columns:
+            result = evaluate(code)
+            if result is None:
+                skipped += 1
+                continue
+            t, a = result
+            if t is not None:
+                today_rows.append(t)
+            if a is not None:
+                alert_rows.append(a)
+
+        def rank(rows):
+            rows.sort(key=lambda r: (-(float(r.get("dev3_ratio") or 0)),
+                                     -max(r["event_count_up"], r["event_count_dn"]),
+                                     r["code"]))
+            return rows
+
+        today_rows, alert_rows = rank(today_rows), rank(alert_rows)
+        if skipped:
+            errors.append(f"数据不足 / 判不出来跳过 {skipped} 只")
+        alert_date = _abnormal_next_trade_day(trade_date)
+        return {
+            "ok": True, "as_of": _now_str(), "trade_date": trade_date,
+            "alert_date": alert_date,          # 预警目标日（数据基准日的下一交易日）
+            "scanned": len(close_panel.columns) - skipped, "total": len(codes),
+            "today": today_rows, "alert": alert_rows,
+            "today_count": len(today_rows), "alert_count": len(alert_rows),
+            "errors": errors,
+            "alert_note": f"基于 {trade_date} 收盘数据，预警 {alert_date} 可能触发（距今仍有一个交易日）",
+        }
+
+    key = f"abnormal_scan:{date or 'auto'}"
+    # 单飞：当日异动 / 异动预警两页会同时发请求，_cached 本身没有 in-flight 去重，
+    # 并发 miss 会各跑一次 35 秒全市场扫描、互相抢 CPU。这里按 key 串行化：
+    # 第一个线程算，后续线程等锁，拿到锁后 _cached 已命中，直接复用。
+    with _ABNORMAL_SCAN_LOCK:
+        data, cached = _cached(key, build,
+                               ttl=HIST_CACHE_TTL if date else _ttl(120))
+    return {**data, "cached": cached}
+
+
+def abnormal_today(date: str | None = None):
+    """⑦ 当日异动页：已触发（普通 / 严重）个股 + 触发原因。
+
+    alert / alert_count 一并返回：前端两个子页共用一次扫描结果，只发一个请求
+    ——避免「两页并发各发一次」在缓存未命中时重复跑全市场扫描。
+    """
+    return abnormal_scan(date)
+
+
+def abnormal_alert(date: str | None = None):
+    """⑧ 异动预警页：将触发（距阈值 80% / 10日已 3 次异动 / 接近严重偏离）个股。"""
+    scan = abnormal_scan(date)
+    if not scan.get("ok"):
+        return scan
+    return {k: v for k, v in scan.items() if k not in ("today", "today_count")}
+
+
+_ABNORMAL_WARMING = set()
+_ABNORMAL_WARM_LOCK = threading.Lock()
+
+
+def warm_abnormal_scan() -> None:
+    """后台预热全市场异动扫描（不阻塞调用方）。
+
+    进入「盘面及板块」页会先拉 /global，此时起一个后台线程把扫描跑完；用户
+    再切到异动子页时缓存已就绪，零等待。与 indicators_routes 的面板预热同构。
+    """
+    key = "abnormal_scan:auto"
+    with _ABNORMAL_WARM_LOCK:
+        if key in _ABNORMAL_WARMING:
+            return
+        with _cache_lock:
+            hit = _cache.get(key)
+        if hit and (time.time() - hit[0]) < _ttl(120):
+            return
+        _ABNORMAL_WARMING.add(key)
+
+    def worker():
+        try:
+            abnormal_scan(None)
+        except Exception:                          # noqa: BLE001 - 预热失败不影响正常请求
+            pass
+        finally:
+            with _ABNORMAL_WARM_LOCK:
+                _ABNORMAL_WARMING.discard(key)
+
+    threading.Thread(target=worker, name="abnormal-scan-warm", daemon=True).start()
+
+
 # 盘面 AI 分析的六块数据（顺序仅作参考，实际并行抓取）
 AI_DIGEST_BLOCKS = (
     ("外围环境", lambda date: global_market(date)),

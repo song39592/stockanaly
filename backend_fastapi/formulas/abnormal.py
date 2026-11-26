@@ -79,7 +79,15 @@ _ABNORMAL_COLUMNS = (
     "deviation_3", "abnormal_price", "abnormal_turnover", "is_abnormal",
     "direction", "dev10", "dev30", "severe_count", "severe_dev10",
     "severe_dev30", "is_severe", "valid",
+    # 预警字段（供「异动预警」页生成「将触发」备注；不改变上面任何判定语义）：
+    # event_count_up / event_count_dn：10 日内同向异动事件次数（severe_count 的计数来源）
+    # dev3_ratio：|deviation_3| / 阈值（<1 表示距价格异动还差多少）
+    # near_abnormal：未触发但接近阈值（默认 ≥0.8 倍）
+    "event_count_up", "event_count_dn", "dev3_ratio", "near_abnormal",
 )
+
+# 预警：距价格异动阈值的比例达到此值即算「接近」（0.8 = 还差 20% 涨停幅度）
+NEAR_ABNORMAL_RATIO = 0.8
 
 
 def threshold_for_board(board: str, is_st: bool = False) -> float:
@@ -185,7 +193,14 @@ def abnormal_detail(close, idx_close, turnover, *,
     - `direction`：+1 = 向上异动、−1 = 向下异动、0 = 未异动 / 判不出来；
     - `severe_count` / `severe_dev10` / `severe_dev30`：三类严重异动（口径见模块 docstring）；
     - `is_severe`：三者任一；
-    - `valid`：是否判得出来（指数 / 换手率缺失或窗口不足 → False）。
+    - `valid`：是否判得出来（指数 / 换手率缺失或窗口不足 → False）；
+    - `event_count_up` / `event_count_dn`：10 日窗口内同向异动**事件**次数
+      （`severe_count` 用的就是它 ≥4 的判定，现显式输出供「预警」页显示还差几次）；
+    - `dev3_ratio`：`|deviation_3| / threshold`，<1 表示还没触发价格异动、
+      数值越接近 1 越接近触发；换手型异动不看这个比例；
+    - `near_abnormal`：`valid & ~is_abnormal & (dev3_ratio ≥ NEAR_ABNORMAL_RATIO)`
+      —— 距价格异动阈值还差不超过 20%，用于「将触发」提示（不是东财规则，
+      是产品层的预警定义）。
     """
     s = pd.Series(close).astype(float)
     if getattr(s, "empty", True):
@@ -243,6 +258,15 @@ def abnormal_detail(close, idx_close, turnover, *,
     need = int(SEVERE_COUNT_TIMES)
     severe_count = ((up_cnt >= need) | (dn_cnt >= need)) & valid
 
+    # 预警字段：事件次数直接暴露（severe_count 就是 up_cnt/dn_cnt >= 4 的布尔）
+    out["event_count_up"] = up_cnt.fillna(0).astype(np.int32)
+    out["event_count_dn"] = dn_cnt.fillna(0).astype(np.int32)
+    out["dev3_ratio"] = (out["deviation_3"].abs() / thr).where(valid)
+    out["near_abnormal"] = (
+        valid & (~out["is_abnormal"])
+        & (out["dev3_ratio"] >= float(NEAR_ABNORMAL_RATIO))
+    ).fillna(False).astype(bool)
+
     out["severe_count"] = severe_count.fillna(False).astype(bool)
     out["severe_dev10"] = severe_dev10.fillna(False).astype(bool)
     out["severe_dev30"] = severe_dev30.fillna(False).astype(bool)
@@ -257,8 +281,12 @@ def abnormal_detail(close, idx_close, turnover, *,
         # shift 后 bool 列被提升成 object（混了 NaN）。用 eq(True) 而非 fillna：
         # NaN == True → False，语义一致且无 object 降型的 FutureWarning。
         for c in ("abnormal_price", "abnormal_turnover", "is_abnormal",
-                  "severe_count", "severe_dev10", "severe_dev30", "is_severe", "valid"):
+                  "severe_count", "severe_dev10", "severe_dev30", "is_severe", "valid",
+                  "near_abnormal"):
             out[c] = out[c].eq(True)
+        # 事件次数 shift 后混 NaN 提升为 float，回落成 int（0 = 判不出来时的安全值）
+        for c in ("event_count_up", "event_count_dn"):
+            out[c] = out[c].fillna(0).astype(np.int32)
         out["direction"] = out["direction"].eq(1).astype(np.int8) + out["direction"].eq(-1).astype(np.int8) * -1
     return out
 

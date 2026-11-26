@@ -169,6 +169,55 @@ class TestSevereAbnormal(unittest.TestCase):
         self.assertTrue(bool(d["is_severe"].iloc[-1]))
 
 
+class TestAbnormalWarningFields(unittest.TestCase):
+    """预警字段：事件次数 / 距阈值比例 / near_abnormal（产品定义，非东财规则）。"""
+
+    def test_event_counts_exposed(self):
+        days = _days(20)
+        idx = pd.Series([100] * 20, index=days)
+        turn = pd.Series([0.01] * 20, index=days)
+        close = pd.Series([100.0] * 20)
+        for k in (3, 6, 9, 12):
+            close.iloc[k:] *= 1.25
+        close.index = days
+        d = abnormal_detail(close, idx, turn)
+        self.assertGreaterEqual(int(d["event_count_up"].iloc[12]), 4)
+        self.assertEqual(int(d["event_count_dn"].iloc[12]), 0)
+        self.assertTrue(bool(d["severe_count"].iloc[12]))
+
+    def test_dev3_ratio_and_near_abnormal(self):
+        days = _days(6)
+        idx = pd.Series([100] * 6, index=days)
+        turn = pd.Series([0.01] * 6, index=days)
+        # 3 日 +18%：比例 0.9 → 未触发但预警
+        close = pd.Series([100, 100, 100, 118, 118, 118], index=days)
+        d = abnormal_detail(close, idx, turn)
+        self.assertAlmostEqual(float(d["dev3_ratio"].iloc[3]), 0.9, places=5)
+        self.assertFalse(bool(d["is_abnormal"].iloc[3]))
+        self.assertTrue(bool(d["near_abnormal"].iloc[3]))
+        # +12%：比例 0.6 → 不预警
+        close2 = pd.Series([100, 100, 100, 112, 112, 112], index=days)
+        d2 = abnormal_detail(close2, idx, turn)
+        self.assertAlmostEqual(float(d2["dev3_ratio"].iloc[3]), 0.6, places=5)
+        self.assertFalse(bool(d2["near_abnormal"].iloc[3]))
+        # +22%：已触发 → 不算「将触发」
+        close3 = pd.Series([100, 100, 100, 122, 122, 122], index=days)
+        d3 = abnormal_detail(close3, idx, turn)
+        self.assertTrue(bool(d3["is_abnormal"].iloc[3]))
+        self.assertFalse(bool(d3["near_abnormal"].iloc[3]))
+
+    def test_warning_fields_lag_shift(self):
+        days = _days(8)
+        idx = pd.Series([100] * 8, index=days)
+        turn = pd.Series([0.01] * 8, index=days)
+        close = pd.Series([100, 100, 100, 118, 118, 118, 118, 118], index=days)
+        d0 = abnormal_detail(close, idx, turn)
+        d1 = abnormal_detail(close, idx, turn, lag=1)
+        self.assertFalse(bool(d1["near_abnormal"].iloc[3]))
+        self.assertTrue(bool(d1["near_abnormal"].iloc[4]))
+        self.assertEqual(str(d1["event_count_up"].dtype), "int32")
+
+
 class TestLagAndValid(unittest.TestCase):
     def test_lag_is_no_lookahead(self):
         """lag=1 时 state[t] = 原 state[t-1]（截至昨日收盘），不会用到今日。"""
