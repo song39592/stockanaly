@@ -617,7 +617,7 @@ private void StRefreshCurStrategy()
                 Mute(Lbl("全局生效；撤单 = 该份额度当日为现金、不重分配"))));
             AddRow(stack, g5);
 
-            // ---- 买入时滤除异动（默认全关；与一字板/涨停撤单分开归因）----
+            // ---- 买入时滤除异动（默认仅勾选 near_severe；与一字板/涨停撤单分开归因）----
             // 判定在购买执行日做，用的是上一交易日收盘后的异动状态（无前视）。
             // 拦下的份额当日为现金、不重分配；判不出来（数据不足）默认放行并计数。
             var g6 = Group("买入时滤除异动", out b);
@@ -630,10 +630,11 @@ private void StRefreshCurStrategy()
             _stAbSevere = ExChk("严重异动(10/30日)");
             _stAbNearPrice = ExChk("将触发价格(20/30%)");
             _stAbNearSevere = ExChk("将触发严重(10/30日)");
+            _stAbNearSevere.Checked = true;   // 默认只开这一档：风险调整后指标最好，其余仍全关
             abRow.Controls.AddRange(new Control[] { _stAbPrice, _stAbTurnover, _stAbSevere,
                 _stAbNearPrice, _stAbNearSevere });
             AddRow(b, Row(abRow));
-            AddRow(b, Row(Mute(Lbl("默认全关；用上一交易日收盘判定，判不出来时放行并在报告里计数"))));
+            AddRow(b, Row(Mute(Lbl("默认勾选「将触发严重」；用上一交易日收盘判定，判不出来时放行并在报告里计数"))));
             AddRow(stack, g6);
 
             StLoadScopePrefs();      // 恢复上次的股票池筛选
