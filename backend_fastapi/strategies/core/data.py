@@ -801,6 +801,94 @@ def load_bars_raw_for(codes, start: str | None = None,
                      fields=["open", "high", "low", "close", "volume"], adjust="raw")
 
 
+def load_abnormal_for(codes, start: str, end: str,
+                      filters) -> dict[str, pd.DataFrame]:
+    """回测「买入时滤除异动」的逐日状态（**独立预热，不改策略输入区间**）。
+
+    为什么独立取数：异动判定要往前看 3 日 / 严重异动 30 日，若直接把
+    `run_backtest` 的 `start` 往前挪来预热，策略信号也会跟着变 —— 回测结果的
+    变化就来自两处（信号 + 异动过滤），无法归因。这里单独多取 31 根预热数据，
+    策略仍只看 `[start, end]`，两处互不干扰。
+
+    返回的 DataFrame 索引严格等于 `[start, end]` 的交易日（预热日已裁掉），
+    `lag=1`：state[t] = 截至 t-1 收盘的异动状态 → t 日买入可安全判定，无前视。
+    `filters` 为空时返回空 dict（默认关，不做任何取数）。
+    """
+    from formulas import abnormal as _ab
+    from core import indices as _idx
+
+    filters = tuple(filters or ())
+    if not filters:
+        return {}
+    unknown = set(filters) - set(_ab.FILTER_TYPES)
+    if unknown:
+        raise ValueError(f"未知异动过滤类型：{sorted(unknown)}；合法值：{list(_ab.FILTER_TYPES)}")
+
+    # 交易日历：用上证指数（本地已落盘）取 [start, end] 及往前 31 根预热。
+    # 31 = 严重异动 dev30 shift(30) + lag=1 的 1 根余量。
+    cal = load_index("sh000001", start=None, end=end, fields=["close"])
+    if cal is None or cal.empty:
+        return {}
+    dates = [str(d)[:10] for d in cal.index]
+    in_range = [d for d in dates if d >= start]
+    if not in_range:
+        return {}
+    pos = dates.index(in_range[0])
+    warm_start = dates[max(0, pos - 31)]
+
+    # 基准指数（5 条）：只取用到的那几条
+    benchmarks = {_idx.benchmark_index_for(c) for c in codes}
+    idx_series = {}
+    for b in benchmarks:
+        f = load_index(b, start=warm_start, end=end, fields=["close"])
+        if f is not None and not f.empty and "close" in f.columns:
+            idx_series[b] = f["close"].astype(float)
+
+    # 个股 hfq close + raw 换手率（库里 turnover 列优先，缺的用 volume/股本补）
+    hfq = load_bars(codes, warm_start, end, fields=["close"], adjust="hfq")
+    raw = load_bars(codes, warm_start, end, fields=["volume", "turnover"], adjust="raw")
+    shares = price_store.float_shares_all(list(codes), in_range[-1])
+    names, _ = price_store.stock_names()
+
+    out: dict[str, pd.DataFrame] = {}
+    for code in codes:
+        df = hfq.get(code)
+        if df is None or df.empty or "close" not in df.columns:
+            continue
+        close = df["close"].astype(float).sort_index()
+        idx = idx_series.get(_idx.benchmark_index_for(code))
+        if idx is None:
+            continue
+        r = raw.get(code)
+        turns = pd.Series(index=close.index, dtype=float)
+        if r is not None and not r.empty:
+            n_shares = float(shares.get(code) or 0)
+            for d in close.index:
+                row = r.loc[d] if d in r.index else None
+                v = row.get("turnover") if row is not None else None
+                if v is not None and pd.notna(v):
+                    turns.loc[d] = float(v)
+                elif row is not None and row.get("volume") and n_shares > 0:
+                    turns.loc[d] = min(1.0, float(row["volume"]) * 100.0 / n_shares)
+        thr = _ab.threshold_for_board(
+            _board_key(code), is_st=("ST" in str(names.get(code, "")).upper()))
+        try:
+            detail = _ab.abnormal_detail(close, idx, turns, threshold=thr, lag=1)
+        except Exception:                          # noqa: BLE001 - 单只失败不影响整体
+            continue
+        # 裁掉预热日，只留回测区间；执行层按 state.loc[trade_date] 取
+        kept = detail.loc[[d for d in in_range if d in detail.index]]
+        if not kept.empty:
+            out[code] = kept
+    return out
+
+
+def _board_key(code: object) -> str:
+    """板块键（代码前缀静态判定）—— 与 universe._board_key 同源，不在此另写映射。"""
+    from .universe import _board_key as _u_board_key
+    return _u_board_key(code)
+
+
 def load_pool_members(start: str | None = None,
                       end: str | None = None) -> dict[str, dict[str, dict]]:
     """股票池成员（按日期），策略包唯一取数入口内转发到 history 存储。

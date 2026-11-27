@@ -61,7 +61,7 @@ import logutil
 
 logger = logutil.logger
 
-SCHEMA = "backtest-report/2"        # 2：组合权重口径 + 成本分层 + 新指标组
+SCHEMA = "backtest-report/3"        # 2：组合权重口径 + 成本分层 + 新指标组；3：买入时异动过滤留痕
 INDEX_NAME = "index.json"
 MAX_PER_STOCK = 500          # 逐票汇总：降序头部 N + 尾部 N 各取 N 条（**双向**）
 MAX_TRADES = 20000           # 逐笔明细最多记多少笔（超出截断并标注 trades_truncated）
@@ -154,6 +154,13 @@ def _summarize(report: dict) -> dict:
         "limit_open_policy": scope.get("limit_open_policy"),
         "limit_open_canceled_builds": _num(
             (report.get("limit_open") or {}).get("canceled_builds")),
+        # ---- 买入时异动过滤（schema/3）----
+        # 开关与命中笔数必须进索引：两份报告收益不同，先看是不是同一套过滤口径。
+        "abnormal_filter": scope.get("abnormal_filter") or [],
+        "abnormal_skipped_builds": _num(
+            (report.get("abnormal") or {}).get("skipped_builds")),
+        "abnormal_undecidable_passed": _num(
+            (report.get("abnormal") or {}).get("undecidable_passed")),
         # ---- 范围口径（剔除明细 + 判定基准日）----
         # 不落这一组，报告就无法自证「这次到底剔了什么」——两份报告看起来
         # 同策略同区间，池子却不同，只能靠猜。
@@ -278,6 +285,9 @@ def build_report(payload: dict) -> dict:
         # 撤单拦掉了几笔、涉及多少目标权重。**必须落盘** —— 事后翻报告时
         # 只看到收益数字，看不出这一档到底拦掉了什么，就没法回答「这个条件值多少钱」。
         "limit_open": payload.get("limit_open") or {},
+        # 买入时异动过滤（schema/3 新增）：拦下几笔、判不出来放行几次、
+        # 规则生效日是哪天。与「一字板买不进 / 涨停开盘撤单」分开归因。
+        "abnormal": payload.get("abnormal") or {},
         # 净值序列：留着才能画图 / 算自定义指标，5000 只票的 equity 也就几万个点
         "dates": dates,
         "equity": payload.get("equity"),

@@ -83,11 +83,24 @@ _ABNORMAL_COLUMNS = (
     # event_count_up / event_count_dn：10 日内同向异动事件次数（severe_count 的计数来源）
     # dev3_ratio：|deviation_3| / 阈值（<1 表示距价格异动还差多少）
     # near_abnormal：未触发但接近阈值（默认 ≥0.8 倍）
-    "event_count_up", "event_count_dn", "dev3_ratio", "near_abnormal",
+    # near_severe：未触发严重异动但接近（事件≥3 / dev10、dev30 接近阈值）
+    "event_count_up", "event_count_dn", "dev3_ratio", "near_abnormal", "near_severe",
 )
 
 # 预警：距价格异动阈值的比例达到此值即算「接近」（0.8 = 还差 20% 涨停幅度）
 NEAR_ABNORMAL_RATIO = 0.8
+# 严重异动临近：事件次数 ≥ (4-1)，偏离达严重阈值的此比例（0.85 = 还差 15%）
+NEAR_SEVERE_RATIO = 0.85
+
+# 回测执行层「买入时滤除异动」的过滤类型（唯一合法值；默认全关）
+FILTER_PRICE = "price"
+FILTER_TURNOVER = "turnover"
+FILTER_SEVERE = "severe"
+# 「即将触发」分两档：普通价格阈值（20%/30% 的 80%）与严重异动阈值（10/30 日的 85%）
+FILTER_NEAR_PRICE = "near_price"
+FILTER_NEAR_SEVERE = "near_severe"
+FILTER_TYPES = (FILTER_PRICE, FILTER_TURNOVER, FILTER_SEVERE,
+                FILTER_NEAR_PRICE, FILTER_NEAR_SEVERE)
 
 
 def threshold_for_board(board: str, is_st: bool = False) -> float:
@@ -267,10 +280,28 @@ def abnormal_detail(close, idx_close, turnover, *,
         & (out["dev3_ratio"] >= float(NEAR_ABNORMAL_RATIO))
     ).fillna(False).astype(bool)
 
+    # 严重异动临近：未触发严重异动，但「再走一步即触发」——10 日内已 3 次同向
+    # 异动事件、或 dev10 / dev30 达严重阈值的 NEAR_SEVERE_RATIO 倍。
+    # ⚠️ 用 mx10/mn10、mx30/mn30 的「N 日以内极值」口径，与严重触发同源；
+    # 不用固定窗口 dev10/dev30（那会在第 14 日 -73.98% 这类情形漏判）。
+    severe_local = severe_count.fillna(False) | severe_dev10.fillna(False) | severe_dev30.fillna(False)
+    near_severe = (
+        valid & (~severe_local)
+        & (
+            (((up_cnt >= int(SEVERE_COUNT_TIMES) - 1)
+              | (dn_cnt >= int(SEVERE_COUNT_TIMES) - 1)).fillna(False))
+            | ((mx10 >= float(SEVERE_DEV10_UP) * NEAR_SEVERE_RATIO)
+               | (mn10 <= float(SEVERE_DEV10_DN) * NEAR_SEVERE_RATIO)).fillna(False)
+            | ((mx30 >= float(SEVERE_DEV30_UP) * NEAR_SEVERE_RATIO)
+               | (mn30 <= float(SEVERE_DEV30_DN) * NEAR_SEVERE_RATIO)).fillna(False)
+        )
+    ).fillna(False).astype(bool)
+
     out["severe_count"] = severe_count.fillna(False).astype(bool)
     out["severe_dev10"] = severe_dev10.fillna(False).astype(bool)
     out["severe_dev30"] = severe_dev30.fillna(False).astype(bool)
     out["is_severe"] = (out["severe_count"] | out["severe_dev10"] | out["severe_dev30"]) & valid
+    out["near_severe"] = near_severe & (~out["is_severe"])
     out["valid"] = valid.fillna(False).astype(bool)
 
     out = out[list(_ABNORMAL_COLUMNS)]
@@ -282,7 +313,7 @@ def abnormal_detail(close, idx_close, turnover, *,
         # NaN == True → False，语义一致且无 object 降型的 FutureWarning。
         for c in ("abnormal_price", "abnormal_turnover", "is_abnormal",
                   "severe_count", "severe_dev10", "severe_dev30", "is_severe", "valid",
-                  "near_abnormal"):
+                  "near_abnormal", "near_severe"):
             out[c] = out[c].eq(True)
         # 事件次数 shift 后混 NaN 提升为 float，回落成 int（0 = 判不出来时的安全值）
         for c in ("event_count_up", "event_count_dn"):
@@ -301,3 +332,40 @@ def abnormal_state(close, idx_close, turnover, *,
     """
     return abnormal_detail(close, idx_close, turnover, threshold=threshold,
                            lag=lag)["is_abnormal"].to_numpy(dtype=bool)
+
+
+def abnormal_block(detail: pd.DataFrame, filters) -> tuple[np.ndarray, np.ndarray]:
+    """回测执行层「买入时滤除异动」的判定入口（唯一实现）。
+
+    参数：
+      detail — `abnormal_detail(..., lag=1)` 的结果，已按买入执行日对齐；
+      filters — 过滤类型集合，取值见 `FILTER_TYPES`
+                （price/turnover/severe/near_price/near_severe）。
+
+    返回 `(blocked, undecidable)` 两个 bool 数组：
+      blocked[t] = True 表示 t 日建仓应被拦下；
+      undecidable[t] = True 表示 t 日 `valid=False`（判不出来）。
+
+    ⚠️ `undecidable` 必须放行（退回基线行为），不能当成「没异动」下结论 ——
+    模块 docstring「判不出来不等于没异动」；调用方要显式统计其数量。
+    """
+    types = set(filters or ())
+    unknown = types - set(FILTER_TYPES)
+    if unknown:
+        raise ValueError(f"未知异动过滤类型：{sorted(unknown)}；合法值：{list(FILTER_TYPES)}")
+    valid = detail["valid"].to_numpy(dtype=bool)
+    if not types:
+        return np.zeros(len(detail), dtype=bool), ~valid
+    hit = np.zeros(len(detail), dtype=bool)
+    if FILTER_PRICE in types:
+        hit |= detail["abnormal_price"].to_numpy(dtype=bool)
+    if FILTER_TURNOVER in types:
+        hit |= detail["abnormal_turnover"].to_numpy(dtype=bool)
+    if FILTER_SEVERE in types:
+        hit |= detail["is_severe"].to_numpy(dtype=bool)
+    if FILTER_NEAR_PRICE in types:
+        hit |= detail["near_abnormal"].to_numpy(dtype=bool)
+    if FILTER_NEAR_SEVERE in types:
+        hit |= detail["near_severe"].to_numpy(dtype=bool)
+    # 判不出来一律放行，哪怕其它列恰好为 True（valid=False 时那些列也无意义）
+    return (hit & valid), ~valid

@@ -10,8 +10,10 @@ import numpy as np
 import pandas as pd
 
 from formulas.abnormal import (
-    abnormal_detail, abnormal_state, threshold_for_board,
+    abnormal_detail, abnormal_state, abnormal_block, threshold_for_board,
     THRESHOLD_MAIN, THRESHOLD_ST, THRESHOLD_INNOVATION,
+    FILTER_PRICE, FILTER_TURNOVER, FILTER_SEVERE,
+    FILTER_NEAR_PRICE, FILTER_NEAR_SEVERE,
 )
 
 
@@ -270,6 +272,89 @@ class TestBenchmarkIndex(unittest.TestCase):
         self.assertEqual(benchmark_index_for("300949"), "sz399102")
         self.assertEqual(benchmark_index_for("688066"), "sh000688")
         self.assertEqual(benchmark_index_for("688613"), "sh000688")
+
+
+class TestAbnormalFilter(unittest.TestCase):
+    """回测执行层「买入时滤除异动」判定入口：分类型、判不出来放行、无前视。"""
+
+    def test_filter_types(self):
+        # 价格异动单独测（换手恒定不触发）
+        days = _days(10)
+        idx = pd.Series([100] * 10, index=days)
+        close = pd.Series([100, 110, 121, 133.1] + [133.1] * 6, index=days)
+        d = abnormal_detail(close, idx, pd.Series([0.01] * 10, index=days), lag=1)
+        price, _ = abnormal_block(d, [FILTER_PRICE])
+        turnover, _ = abnormal_block(d, [FILTER_TURNOVER])
+        self.assertTrue(bool(price[4]))          # t=3 异动，lag=1 推进到 t=4
+        self.assertFalse(bool(turnover[4]))      # 换手恒定，换手类型不拦
+
+        # 换手异动单独测（价格恒定不触发）：t=8 起 3日均 10% / 前5日均 0.1%
+        days2 = _days(12)
+        idx2 = pd.Series([100] * 12, index=days2)
+        close2 = pd.Series([100] * 12, index=days2)
+        turn2 = pd.Series([0.001] * 8 + [0.10] * 4, index=days2)
+        d2 = abnormal_detail(close2, idx2, turn2, lag=1)
+        turnover2, _ = abnormal_block(d2, [FILTER_TURNOVER])
+        price2, _ = abnormal_block(d2, [FILTER_PRICE])
+        self.assertTrue(bool(turnover2[10]))     # t=9 换手异动，lag=1 推进到 t=10
+        self.assertFalse(bool(price2[10]))       # 价格恒定，价格类型不拦
+
+    def test_undecidable_passes_through(self):
+        """判不出来（valid=False）必须放行：blocked=False、undecidable=True。"""
+        days = _days(6)
+        idx = pd.Series([np.nan] * 6, index=days)
+        close = pd.Series([100] * 3 + [130] * 3, index=days)
+        turn = pd.Series([0.01] * 6, index=days)
+        d = abnormal_detail(close, idx, turn, lag=1)
+        blocked, undecidable = abnormal_block(d, [FILTER_PRICE, FILTER_NEAR_PRICE])
+        self.assertFalse(bool(blocked[-1]))
+        self.assertTrue(bool(undecidable[-1]))
+
+    def test_near_price_and_near_severe_are_independent(self):
+        """「即将触发」两档必须独立：near_price 只认 20/30% 价格临界，
+        near_severe 只认 10/30 日严重异动临界，互不串台。"""
+        days = _days(8)
+        # 用最简 detail（valid 全 True），只置需要判定的列
+        d = pd.DataFrame({"valid": [True] * 8}, index=days)
+        for c in ("abnormal_price", "abnormal_turnover", "is_abnormal",
+                  "is_severe", "near_abnormal", "near_severe"):
+            d[c] = False
+        d.loc[days[3], "near_abnormal"] = True
+        d.loc[days[5], "near_severe"] = True
+
+        p, _ = abnormal_block(d, [FILTER_NEAR_PRICE])
+        s, _ = abnormal_block(d, [FILTER_NEAR_SEVERE])
+        self.assertTrue(bool(p[3]) and not bool(p[5]))   # 价格临界只拦 t=3
+        self.assertTrue(bool(s[5]) and not bool(s[3]))   # 严重临界只拦 t=5
+        both, _ = abnormal_block(d, [FILTER_NEAR_PRICE, FILTER_NEAR_SEVERE])
+        self.assertTrue(bool(both[3]) and bool(both[5]))
+
+    def test_no_filter_blocks_nothing(self):
+        days = _days(8)
+        d = abnormal_detail(pd.Series([100] * 3 + [130] * 5, index=days),
+                            pd.Series([100] * 8, index=days),
+                            pd.Series([0.01] * 8, index=days), lag=1)
+        blocked, _ = abnormal_block(d, [])
+        self.assertFalse(blocked.any())
+
+    def test_lag1_no_lookahead(self):
+        """lag=1：t=3 的异动在 t=4 才拦；t=3 买入不拦。"""
+        days = _days(10)
+        idx = pd.Series([100] * 10, index=days)
+        close = pd.Series([100, 110, 121, 133.1] + [133.1] * 6, index=days)
+        turn = pd.Series([0.01] * 10, index=days)
+        d = abnormal_detail(close, idx, turn, lag=1)
+        blocked, _ = abnormal_block(d, [FILTER_PRICE])
+        self.assertFalse(bool(blocked[3]))
+        self.assertTrue(bool(blocked[4]))
+
+    def test_unknown_type_rejected(self):
+        days = _days(5)
+        d = abnormal_detail(pd.Series([100.] * 5, index=days),
+                            pd.Series([100.] * 5, index=days),
+                            pd.Series([0.01] * 5, index=days))
+        with self.assertRaises(ValueError):
+            abnormal_block(d, ["bogus"])
 
 
 if __name__ == "__main__":

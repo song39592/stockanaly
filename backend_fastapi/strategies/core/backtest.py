@@ -182,6 +182,7 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                  ruin_threshold=None,
                  position_cap: float | None = None,
                  limit_open_policy: str = POLICY_KEEP,
+                 abnormal_filter: tuple | list | None = None,
                  scope_extra: dict | None = None,
                  progress=None) -> dict:
     """执行回测，返回标准化结果字典。异常由路由层转成错误响应。
@@ -278,6 +279,16 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
         except Exception as exc:               # noqa: BLE001 - 明细不该拖垮回测
             errors.append(f"可行性判定取原始价失败：{type(exc).__name__}: {exc}")
 
+    # 买入时异动过滤：独立取数（含 31 根预热、lag=1），只对权重变动过的票取，
+    # 不挪动策略输入区间 —— 否则回测变化来自「信号 + 过滤」两处，无法归因。
+    abnormal_by_code: dict = {}
+    if abnormal_filter:
+        try:
+            abnormal_by_code = data.load_abnormal_for(changed, start, end, abnormal_filter)
+        except Exception as exc:               # noqa: BLE001 - 过滤失败不该拖垮回测
+            errors.append(f"异动过滤取数失败（本次按不过滤跑）：{type(exc).__name__}: {exc}")
+            abnormal_by_code = {}
+
     core = stats.compute(positions, close_by_code, initial_capital=initial_capital,
                          commission=commission, stamp_duty=stamp_duty,
                          slippage=slippage, min_commission=min_commission,
@@ -285,7 +296,9 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                          raw_by_code=raw_by_code, signal_meta=sig_index, tail=window,
                          ruin_threshold=ruin_threshold,
                          position_cap=position_cap,
-                         limit_open_policy=limit_open_policy)
+                         limit_open_policy=limit_open_policy,
+                         abnormal_by_code=abnormal_by_code,
+                         abnormal_filter=abnormal_filter)
 
     trades: list[dict] = core.pop("trades", []) or []
     flags: list[str] = core.pop("flags", []) or []
@@ -329,6 +342,13 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
     # 其余成本/整手/停牌约束见 feasibility 字段，不在此重复。
     warnings.append("成交模型：一字涨停买不进即空仓（该份额度当日为现金、不重分配），"
                     "一字跌停卖不出即延后清仓；整手/停牌仍只影响明细可行性")
+    if abnormal_filter:
+        ab = core.get("abnormal") or {}
+        act = ab.get("active_dates") or []
+        warnings.append(
+            f"买入时异动过滤（{','.join(abnormal_filter)}）：规则生效日 {act[0] if act else '区间内无命中'}；"
+            f"拦下 {ab.get('skipped_builds', 0)} 次建仓；"
+            f"判不出来默认放行 {ab.get('undecidable_passed', 0)} 次（valid=False≠没有异动）")
     # 幸存者偏差：任何模式都必须显式声明，**不允许静默**（偏差消不掉，但必须让人看见）
     warnings.append(data.survivorship_note(universe_mode, len(usable)))
     # 范围口径：每项剔除了多少只 + 哪些判定用的是「当前状态」（含前视偏差）。
@@ -422,6 +442,8 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
             "position_cap": position_cap,   # 生效的单股仓位上限（None=不限）
             # 「涨停开盘应对」三档（全局生效）：口径与命中统计见 core/limit_price.py
             "limit_open_policy": limit_open_policy,
+            # 买入时异动过滤（默认空 = 关闭）：与静态池剔除分开，属执行层口径
+            "abnormal_filter": list(abnormal_filter or ()),
             "warnings": warnings,
         },
         "dates": core["dates"],
@@ -442,6 +464,10 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
         #   · 撤单是**策略主动放弃**，与「一字板买不进」（物理约束）分开归因
         #   · 「值多少钱」用**两个独立回测范围**对照得出（引擎不做影子账本）
         "limit_open": core.get("limit_open") or {},
+        # 买入时异动过滤命中统计（与一字板 / 撤单分开归因）：
+        # skipped_builds=拦下的建仓数；undecidable_passed=判不出来而默认放行次数；
+        # active_dates=规则真正生效的交易日（报告显式声明「从哪天开始」）。
+        "abnormal": core.get("abnormal") or {},
         "data_errors": errors[:_MAX_DATA_ERRORS],
     }
 
@@ -1306,6 +1332,7 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
                ruin_threshold=None,
                position_cap: float | None = None,
                limit_open_policy: str = POLICY_KEEP,
+               abnormal_filter: tuple | list | None = None,
                codes_resolver=None) -> dict:
     """启动一次后台回测并**立即返回**；已有任务在跑时返回 ok=false（不排队）。
 
@@ -1395,6 +1422,7 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
                                    ruin_threshold=ruin_threshold,
                                    position_cap=position_cap,
                                    limit_open_policy=limit_open_policy,
+                                   abnormal_filter=abnormal_filter,
                                    scope_extra=scope_extra,
                                    progress=_on_progress)
             except base.Cancelled:

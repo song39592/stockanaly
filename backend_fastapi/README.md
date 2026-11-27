@@ -129,6 +129,25 @@ POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / 
                                         一个是市场物理约束；逐条明细在
                                         scope.feasibility.build_failures 里，
                                         reason = limit_up（买不进）/ limit_open_cancel（撤单）
+                                       scope.abnormal_filter + **abnormal** =
+                                        请求体可选 `abnormal_filter` 数组（默认 `[]` =
+                                        全关，与旧回测结果完全一致）：price 已触发价格异动 /
+                                        turnover 换手率异动 / severe 严重异动 /
+                                        near_price 将触发价格异动 / near_severe 将触发严重异动。
+                                        后两者拆分自预测页口径：near_price = 3 日偏离达阈值的
+                                        80%（主板 20%、创业板/科创板/北交所 30%、ST 12%），
+                                        near_severe = 10/30 日严重阈值达 85% 或 10 日内已 3 次
+                                        同向异动事件；**只在买入建仓时判定**，用 lag=1 防前视，
+                                        无法判定（valid=false）默认放行并计数，不当作「无异动」。
+                                        abnormal.filters / scope.abnormal_filter =
+                                        本次生效的类型；abnormal.skipped_builds / skipped_weight =
+                                        被拦下的建仓次数与目标权重合计；
+                                        abnormal.undecidable_passed = 无法判定而放行的次数；
+                                        abnormal.active_dates = 实际生效过的日期。
+                                        被拦下的建仓不成交，逐条并进
+                                        scope.feasibility.build_failures，
+                                        reason = abnormal（与 limit_up / limit_open_cancel
+                                        分开归因）。
 ```
 
 测试：
