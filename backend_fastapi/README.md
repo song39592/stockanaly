@@ -130,10 +130,12 @@ POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / 
                                         scope.feasibility.build_failures 里，
                                         reason = limit_up（买不进）/ limit_open_cancel（撤单）
                                        scope.abnormal_filter + **abnormal** =
-                                        请求体可选 `abnormal_filter` 数组（默认 `[]` =
+                                        请求体可选 `abnormal_filter` 数组（API 默认 `[]` =
                                         全关，与旧回测结果完全一致）：price 已触发价格异动 /
                                         turnover 换手率异动 / severe 严重异动 /
                                         near_price 将触发价格异动 / near_severe 将触发严重异动。
+                                        ⚠️ 启动器回测范围页**默认勾选 near_severe**，
+                                        故页面发起的回测默认带该值；直接调 API 不传仍为空。
                                         后两者拆分自预测页口径：near_price = 3 日偏离达阈值的
                                         80%（主板 20%、创业板/科创板/北交所 30%、ST 12%），
                                         near_severe = 10/30 日严重阈值达 85% 或 10 日内已 3 次
