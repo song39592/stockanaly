@@ -147,6 +147,10 @@ class BacktestRequest(BaseModel):
     # keep=不撤单（现状）/ cancel=撤单（涨停开盘当日不建仓）/
     # reseal=涨停条件单（炸板后收盘仍封板才进，否则撤单）
     limit_open_policy: Optional[str] = None
+    # ---- 买入时滤除异动（默认全关 = 与旧回测结果完全一致）----
+    # price=已触发价格异动 / turnover=换手率异动 / severe=严重异动 /
+    # near_price=即将触发价格异动(20/30%的80%) / near_severe=即将触发严重异动(10/30日的85%)
+    abnormal_filter: list[str] = []
     # 单日策略的**目标执行日**（YYYY-MM-DD）。不给则按收盘前后自动选：
     # 收盘前=今天、收盘后=下一交易日。仅 /recommend 使用，回测忽略。
     target_date: Optional[str] = None
@@ -173,6 +177,18 @@ def _resolve_limit_open_policy(value: str | None) -> str:
     if v not in POLICIES:
         raise ValueError("涨停开盘应对只能取 " + "/".join(POLICIES))
     return v
+
+
+def _resolve_abnormal_filter(values: list[str] | None) -> tuple[str, ...]:
+    """买入时异动过滤的类型校验（合法值唯一来源 formulas.abnormal）。默认空 = 不过滤。"""
+    from formulas.abnormal import FILTER_TYPES
+    if not values:
+        return ()
+    out = tuple(dict.fromkeys(str(v).strip().lower() for v in values if str(v).strip()))
+    bad = set(out) - set(FILTER_TYPES)
+    if bad:
+        raise ValueError("异动过滤类型只能取 " + "/".join(FILTER_TYPES) + f"，收到 {sorted(bad)}")
+    return out
 
 
 def _resolve_position_cap(pct: float | None, amount: float | None,
@@ -218,6 +234,7 @@ def do_backtest(req: BacktestRequest):
                                            req.position_cap_amount,
                                            req.initial_capital),
         limit_open_policy=_resolve_limit_open_policy(req.limit_open_policy),
+        abnormal_filter=_resolve_abnormal_filter(req.abnormal_filter),
         scope_extra=scope_extra,
     )
     # 回测跑完**自动落盘一份报告**（策略 + 覆盖范围 + 指标 + 逐票汇总），
@@ -264,6 +281,7 @@ def do_backtest_start(req: BacktestRequest):
                                            req.position_cap_amount,
                                            req.initial_capital),
         limit_open_policy=_resolve_limit_open_policy(req.limit_open_policy),
+        abnormal_filter=_resolve_abnormal_filter(req.abnormal_filter),
         codes_resolver=_resolve_codes_lazy,
     )
     if not out.get("ok"):

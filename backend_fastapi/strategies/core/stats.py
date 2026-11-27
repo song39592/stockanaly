@@ -299,6 +299,8 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
             ruin_threshold: float | None = None,
             position_cap: float | None = None,
             limit_open_policy: str = _POLICY_KEEP,
+            abnormal_by_code: dict | None = None,
+            abnormal_filter: tuple | list | None = None,
             drop_warn_ratio: float = 0.5) -> dict:
     """按目标权重序列 + 收盘价序列，统计组合净值、指标与逐笔明细。
 
@@ -319,6 +321,11 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
                          reseal=涨停条件单（炸板后收盘仍封板才进，否则撤单）。
                          **全局生效**（所有策略同一套口径），撤单=该份额度当日为现金、
                          不重分配给其他票（与「一字涨停买不进」同一口径）。
+      abnormal_by_code  {code: abnormal_detail(..., lag=1) 的逐日 DataFrame}，
+                         已裁到回测区间；由 data.load_abnormal_for 独立取数（含预热）。
+      abnormal_filter   过滤类型集合（price/turnover/severe/near），空=不过滤。
+                         **买入时**判定：与一字板/撤单并列，拦下的建仓额度当日为现金、
+                         不重分配；`valid=False`（判不出来）一律放行并显式计数。
       tail               只统计**最后 N 个交易日**（短窗口）
       drop_warn_ratio    持仓数骤降超过此比例记 WARNING
 
@@ -420,6 +427,10 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
     n_sell_deferred = 0       # 因一字跌停卖不出、清零被延后的次数
     n_buy_canceled = 0       # 因「涨停开盘应对」策略撤单、**根本没发生**的建仓次数
     canceled_weight = 0.0    # 被撤单的建仓涉及的目标权重合计（Σw，可跨日累加）
+    n_abnormal_skipped = 0   # 因**买入时异动**放弃的建仓次数（与一字板/撤单分开归因）
+    abnormal_weight = 0.0    # 被异动放弃的建仓目标权重合计
+    n_abnormal_undecidable = 0  # 异动判不出来（valid=False）而默认放行的建仓次数
+    abnormal_active_dates: set[str] = set()   # 异动过滤真正生效的交易日（报告要显式声明）
     # 建仓失败事件（隔日一字涨停 → 买不进）：**逐笔**记下来。
     # 这些建仓根本没有成交，所以不会出现在 trades 明细里（那里一行 = 一次买卖），
     # 只有总数的话报告说不清"哪只票、哪天、为什么没买成" → 单独给明细。
@@ -444,6 +455,17 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
             thr = _limit_pct(code)
             target = W[:, j].copy()      # 策略目标权重
             actual = np.zeros(T, dtype=np.float32)   # 实际持仓权重（成交之后）
+
+            # 异动状态：data.load_abnormal_for 已裁到 [start,end] 且 lag=1，
+            # 这里只做「买入时」查表，不重新计算、不另写判据（唯一实现在 formulas）。
+            ab_blocked = None
+            ab_undecidable = None
+            ab_detail = (abnormal_by_code or {}).get(code)
+            if abnormal_filter and ab_detail is not None:
+                from formulas.abnormal import abnormal_block as _abnormal_block
+                # 对齐到回测的 common[t]（detail 索引与 common 同源），缺日按「判不出来」
+                aligned = ab_detail.reindex(common)
+                ab_blocked, ab_undecidable = _abnormal_block(aligned, abnormal_filter)
 
             def _blocked(t: int, up: bool) -> bool:
                 """t 日是否一字板（up=True 判涨停买不进 / False 判跌停卖不出）。"""
@@ -513,6 +535,26 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
                                 "weight": float(tgt),
                             })
                             continue           # actual[t] 保持 0（该份额度当日为现金）
+                        # 买入时异动过滤：与一字板（物理约束）/ 撤单（策略主动放弃）
+                        # 并列的第三道拦截 —— 策略主动放弃（异动风险），单独归因。
+                        # state 来自 lag=1：t 日判定只用 t-1 收盘及更早数据，无前视。
+                        if ab_blocked is not None and bool(ab_blocked[t]):
+                            n_abnormal_skipped += 1
+                            abnormal_weight += float(tgt)
+                            blocked_builds.append({
+                                "code": code,
+                                "date": common[t],
+                                "signal_date": common[t - 1] if t > 0 else "",
+                                "reason": "abnormal",
+                                "filter_types": list(abnormal_filter),
+                                "weight": float(tgt),
+                            })
+                            abnormal_active_dates.add(common[t])
+                            continue           # actual[t] 保持 0（该份额度当日为现金）
+                        if ab_undecidable is not None and bool(ab_undecidable[t]):
+                            # 判不出来 = 不知道，不等于「没有」——默认放行，但显式计数，
+                            # 报告里要写清「本次有多少次是判不出来而放行的」。
+                            n_abnormal_undecidable += 1
                     if pending_sell >= 0:
                         # 延后清仓期间策略又改主意（重新要这只票）→ 这次清仓**没发生**
                         sell_events.append({
@@ -849,6 +891,16 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
         "limit_open": {"policy": limit_open_policy,
                        "canceled_builds": n_buy_canceled,
                        "canceled_weight": round(float(canceled_weight), 6)},
+        # 买入时异动过滤：与一字板（物理约束）/ 撤单（主动放弃）**分开归因**。
+        # skipped = 拦下的建仓次数；undecidable = 判不出来（valid=False）而默认放行的次数；
+        # active_dates = 过滤真正生效的交易日（报告显式声明「规则从哪天开始」）。
+        "abnormal": {
+            "filters": list(abnormal_filter or ()),
+            "skipped_builds": n_abnormal_skipped,
+            "skipped_weight": round(float(abnormal_weight), 6),
+            "undecidable_passed": n_abnormal_undecidable,
+            "active_dates": sorted(abnormal_active_dates),
+        },
         # 建仓失败明细（隔日一字涨停 → 买不进）：**逐笔**事件，与上面的计数同源。
         # 已在净值里生效（该份额度当日就是现金、不重分配），这里只负责"说清楚"。
         "build_failures": blocked_builds,

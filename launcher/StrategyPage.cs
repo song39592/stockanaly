@@ -45,6 +45,9 @@ namespace StockPool
         // 「涨停开盘应对」三档（全局生效，只作用于回测）：下拉框项序 → 后端 policy key
         private ComboBox _stLimitOpen;
         private static readonly string[] StLimitOpenKeys = { "keep", "cancel", "reseal" };
+        // 买入时滤除异动：四个独立开关，默认全关（不勾 = 与旧回测结果完全一致）。
+        // 口径唯一来源在 formulas.abnormal（price/turnover/severe/near），前端只用 key。
+        private CheckBox _stAbPrice, _stAbTurnover, _stAbSevere, _stAbNearPrice, _stAbNearSevere;
         private Label _stScopeHint;
         private DateTimePicker _stStart, _stEnd;
         // 回测范围的「口径说明」气泡：判定基准日 + 前视偏差声明 + 数据限制
@@ -613,6 +616,25 @@ private void StRefreshCurStrategy()
             AddRow(b, Row(Lbl("隔夜单涨停开盘时"), _stLimitOpen,
                 Mute(Lbl("全局生效；撤单 = 该份额度当日为现金、不重分配"))));
             AddRow(stack, g5);
+
+            // ---- 买入时滤除异动（默认全关；与一字板/涨停撤单分开归因）----
+            // 判定在购买执行日做，用的是上一交易日收盘后的异动状态（无前视）。
+            // 拦下的份额当日为现金、不重分配；判不出来（数据不足）默认放行并计数。
+            var g6 = Group("买入时滤除异动", out b);
+            var abRow = new FlowLayoutPanel();
+            abRow.AutoSize = true;
+            abRow.WrapContents = true;
+            abRow.Margin = new Padding(0, 4, 0, 0);
+            _stAbPrice = ExChk("价格已触发(±20/30%)");
+            _stAbTurnover = ExChk("换手率异动");
+            _stAbSevere = ExChk("严重异动(10/30日)");
+            _stAbNearPrice = ExChk("将触发价格(20/30%)");
+            _stAbNearSevere = ExChk("将触发严重(10/30日)");
+            abRow.Controls.AddRange(new Control[] { _stAbPrice, _stAbTurnover, _stAbSevere,
+                _stAbNearPrice, _stAbNearSevere });
+            AddRow(b, Row(abRow));
+            AddRow(b, Row(Mute(Lbl("默认全关；用上一交易日收盘判定，判不出来时放行并在报告里计数"))));
+            AddRow(stack, g6);
 
             StLoadScopePrefs();      // 恢复上次的股票池筛选
         }
@@ -1657,6 +1679,25 @@ private void StRefreshCurStrategy()
             return StLimitOpenKeys[i];
         }
 
+        /// <summary>买入时异动过滤的四个开关 → 后端 key 列表（空 = 默认关，不改旧结果）。</summary>
+        private List<string> StAbnormalFilter()
+        {
+            var list = new List<string>();
+            if (_stAbPrice != null && _stAbPrice.Checked) list.Add("price");
+            if (_stAbTurnover != null && _stAbTurnover.Checked) list.Add("turnover");
+            if (_stAbSevere != null && _stAbSevere.Checked) list.Add("severe");
+            if (_stAbNearPrice != null && _stAbNearPrice.Checked) list.Add("near_price");
+            if (_stAbNearSevere != null && _stAbNearSevere.Checked) list.Add("near_severe");
+            return list;
+        }
+
+        /// <summary>结果头部的「买入时异动过滤」标注；没勾就不显示。</summary>
+        private string StAbnormalText()
+        {
+            var f = StAbnormalFilter();
+            return f.Count == 0 ? "" : " · 买入滤除异动[" + string.Join(",", f.ToArray()) + "]";
+        }
+
         /// <summary>结果头部的「涨停开盘应对」标注；默认档（不撤单）不显示
         /// （别让默认状态看起来像被限制过）。</summary>
         private string StLimitOpenText()
@@ -2012,6 +2053,7 @@ private void StRefreshCurStrategy()
                 { "position_cap_pct", StCapPct() },
                 { "position_cap_amount", StCapAmt() },
                 { "limit_open_policy", StLimitOpenPolicy() },
+                { "abnormal_filter", StAbnormalFilter() },
             };
 
             string start = StDate(_stStart) ?? "起点";
@@ -2024,7 +2066,7 @@ private void StRefreshCurStrategy()
             _stResultHeader.Text = "策略：" + J.StrOr(meta["name"], sid) + " · 范围：" + scope + " "
                 + start + "~" + end + " · 初始 " + (cap / 10000).ToString("F1") + "万 · 佣金 "
                 + J.NumOr(_stComm.Text, 0.0003).ToString("P4").Replace(" ", "")
-                + StCapText() + StLimitOpenText();
+                + StCapText() + StLimitOpenText() + StAbnormalText();
 
             _stResultStatus.Text = "回测中：" + J.StrOr(meta["name"], sid) + "…（进度见顶部任务区）";
             _stResultStatus.ForeColor = _cSub;
@@ -2609,7 +2651,8 @@ private void StRefreshCurStrategy()
         }
 
         /// <summary>取「没成交的建仓」明细（后端已按执行日倒序、最多 2000 条）。
-        /// 含两种 reason：limit_up（物理买不进）/ limit_open_cancel（策略主动撤单）。</summary>
+        /// 三种 reason：limit_up（物理买不进）/ limit_open_cancel（涨停开盘撤单）/
+        /// abnormal（买入时异动过滤主动放弃）。</summary>
         private static List<Dictionary<string, object>> StBuildFailItems(
             Dictionary<string, object> scope)
         {
@@ -2633,14 +2676,24 @@ private void StRefreshCurStrategy()
         /// 买不进的建仓 → 成交明细里的**零收益行**：收益 0、盈亏 0、无买卖价，
         /// 备注「买不进」。日期用**执行日**（本该买入的那天）。
         /// ⚠️ 备注按 reason 分：limit_up = 物理买不进（一字板）；
-        ///    limit_open_cancel = **策略主动撤单**（涨停开盘应对）。
-        ///    两者都是「没成交」，但归因不同 —— 混成同一句话就看不出是市场约束还是自己撤的。
+        ///    limit_open_cancel = **策略主动撤单**（涨停开盘应对）；
+        ///    abnormal = 买入时异动过滤主动放弃（与一字板/撤单分开归因）。
+        ///    三者都是「没成交」，但归因不同 —— 混成同一句话就看不出是市场约束还是自己放弃的。
         /// </summary>
         private static Dictionary<string, object> StBuildFailRow(
             Dictionary<string, object> it)
         {
             string reason = Convert.ToString(J.Get(it, "reason"));
-            string note = (reason == "limit_open_cancel") ? "涨停开盘撤单" : "买不进";
+            string note;
+            if (reason == "limit_open_cancel") note = "涨停开盘撤单";
+            else if (reason == "abnormal")
+            {
+                var f = J.Get(it, "filter_types") as System.Collections.IList;
+                var parts = new List<string>();
+                if (f != null) foreach (var x in f) parts.Add(Convert.ToString(x));
+                note = "买入时异动放弃(" + string.Join("/", parts.ToArray()) + ")";
+            }
+            else note = "买不进";
             return new Dictionary<string, object> {
                 {"code", Convert.ToString(J.Get(it, "code"))},
                 {"name", Convert.ToString(J.Get(it, "name"))},
