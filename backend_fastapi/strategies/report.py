@@ -61,7 +61,7 @@ import logutil
 
 logger = logutil.logger
 
-SCHEMA = "backtest-report/3"        # 2：组合权重口径 + 成本分层 + 新指标组；3：买入时异动过滤留痕
+SCHEMA = "backtest-report/4"        # 2：组合权重口径 + 成本分层 + 新指标组；3：买入时异动过滤留痕；4：买入价上限留痕
 INDEX_NAME = "index.json"
 MAX_PER_STOCK = 500          # 逐票汇总：降序头部 N + 尾部 N 各取 N 条（**双向**）
 MAX_TRADES = 20000           # 逐笔明细最多记多少笔（超出截断并标注 trades_truncated）
@@ -161,6 +161,13 @@ def _summarize(report: dict) -> dict:
             (report.get("abnormal") or {}).get("skipped_builds")),
         "abnormal_undecidable_passed": _num(
             (report.get("abnormal") or {}).get("undecidable_passed")),
+        # ---- 买入价上限（schema/4）----
+        # 与异动过滤同理：两份报告收益不同，先看是不是同一个价格上限。
+        "max_buy_price": scope.get("max_buy_price"),
+        "price_skipped_builds": _num(
+            (report.get("max_buy_price") or {}).get("skipped_builds")),
+        "price_undecidable_passed": _num(
+            (report.get("max_buy_price") or {}).get("undecidable_passed")),
         # ---- 范围口径（剔除明细 + 判定基准日）----
         # 不落这一组，报告就无法自证「这次到底剔了什么」——两份报告看起来
         # 同策略同区间，池子却不同，只能靠猜。
@@ -288,6 +295,9 @@ def build_report(payload: dict) -> dict:
         # 买入时异动过滤（schema/3 新增）：拦下几笔、判不出来放行几次、
         # 规则生效日是哪天。与「一字板买不进 / 涨停开盘撤单」分开归因。
         "abnormal": payload.get("abnormal") or {},
+        # 买入价上限（schema/4 新增）：与异动过滤分开归因，答案同样是
+        # 「这个上限拦掉了几笔、值多少目标权重」。
+        "max_buy_price": payload.get("max_buy_price") or {},
         # 净值序列：留着才能画图 / 算自定义指标，5000 只票的 equity 也就几万个点
         "dates": dates,
         "equity": payload.get("equity"),

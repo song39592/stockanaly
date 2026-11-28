@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -151,6 +152,9 @@ class BacktestRequest(BaseModel):
     # price=已触发价格异动 / turnover=换手率异动 / severe=严重异动 /
     # near_price=即将触发价格异动(20/30%的80%) / near_severe=即将触发严重异动(10/30日的85%)
     abnormal_filter: list[str] = []
+    # ---- 买入价上限（元，未复权）：信号日收盘价高于此值放弃建仓 ----
+    # None / <=0 = 不限制（与旧回测完全一致）；只管建仓，已持有不受影响。
+    max_buy_price: Optional[float] = None
     # 单日策略的**目标执行日**（YYYY-MM-DD）。不给则按收盘前后自动选：
     # 收盘前=今天、收盘后=下一交易日。仅 /recommend 使用，回测忽略。
     target_date: Optional[str] = None
@@ -189,6 +193,23 @@ def _resolve_abnormal_filter(values: list[str] | None) -> tuple[str, ...]:
     if bad:
         raise ValueError("异动过滤类型只能取 " + "/".join(FILTER_TYPES) + f"，收到 {sorted(bad)}")
     return out
+
+
+def _resolve_max_buy_price(value: float | None) -> float | None:
+    """买入价上限校验：None / <=0 = 不限；其余原值透传（元，未复权）。
+
+    上限用的是**信号日未复权收盘价**，与用户看到的股价同一量纲；
+    不做「按金额折算」之类的二次加工，避免口径在路由层分叉。
+    """
+    if value is None:
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("买入价上限必须是数字")
+    if not math.isfinite(v):
+        raise ValueError("买入价上限必须是有限数字")
+    return v if v > 0 else None
 
 
 def _resolve_position_cap(pct: float | None, amount: float | None,
@@ -235,6 +256,7 @@ def do_backtest(req: BacktestRequest):
                                            req.initial_capital),
         limit_open_policy=_resolve_limit_open_policy(req.limit_open_policy),
         abnormal_filter=_resolve_abnormal_filter(req.abnormal_filter),
+        max_buy_price=_resolve_max_buy_price(req.max_buy_price),
         scope_extra=scope_extra,
     )
     # 回测跑完**自动落盘一份报告**（策略 + 覆盖范围 + 指标 + 逐票汇总），
@@ -282,6 +304,7 @@ def do_backtest_start(req: BacktestRequest):
                                            req.initial_capital),
         limit_open_policy=_resolve_limit_open_policy(req.limit_open_policy),
         abnormal_filter=_resolve_abnormal_filter(req.abnormal_filter),
+        max_buy_price=_resolve_max_buy_price(req.max_buy_price),
         codes_resolver=_resolve_codes_lazy,
     )
     if not out.get("ok"):

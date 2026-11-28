@@ -301,6 +301,7 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
             limit_open_policy: str = _POLICY_KEEP,
             abnormal_by_code: dict | None = None,
             abnormal_filter: tuple | list | None = None,
+            max_buy_price: float | None = None,
             drop_warn_ratio: float = 0.5) -> dict:
     """按目标权重序列 + 收盘价序列，统计组合净值、指标与逐笔明细。
 
@@ -326,6 +327,10 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
       abnormal_filter   过滤类型集合（price/turnover/severe/near），空=不过滤。
                          **买入时**判定：与一字板/撤单并列，拦下的建仓额度当日为现金、
                          不重分配；`valid=False`（判不出来）一律放行并显式计数。
+      max_buy_price     买入价上限（元，未复权）。**信号日收盘价** > 此值即放弃建仓，
+                         与一字板/撤单/异动并列，份额度当日为现金、不重分配。
+                         None / <=0 = 不限制（与旧回测一致）。读数缺失 → 放行并显式计数。
+                         ⚠️ 只管**建仓**；已持有的不受影响（按原策略卖出）。
       tail               只统计**最后 N 个交易日**（短窗口）
       drop_warn_ratio    持仓数骤降超过此比例记 WARNING
 
@@ -431,6 +436,9 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
     abnormal_weight = 0.0    # 被异动放弃的建仓目标权重合计
     n_abnormal_undecidable = 0  # 异动判不出来（valid=False）而默认放行的建仓次数
     abnormal_active_dates: set[str] = set()   # 异动过滤真正生效的交易日（报告要显式声明）
+    n_price_skipped = 0       # 因信号日收盘价 > max_buy_price 放弃的建仓次数
+    price_skipped_weight = 0.0  # 被高价放弃的建仓目标权重合计
+    n_price_undecidable = 0   # 信号日收盘价缺失而默认放行的建仓次数
     # 建仓失败事件（隔日一字涨停 → 买不进）：**逐笔**记下来。
     # 这些建仓根本没有成交，所以不会出现在 trades 明细里（那里一行 = 一次买卖），
     # 只有总数的话报告说不清"哪只票、哪天、为什么没买成" → 单独给明细。
@@ -502,6 +510,20 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
                                          pc, thr, limit_open_policy)
                 return act == _ACT_CANCEL
 
+            def _signal_close(t: int) -> float:
+                """信号日（common[t-1]）**未复权**收盘价；缺失返回 NaN（判不出来）。
+
+                ⚠️ 必须用 raw_by_code 的原始价：绝对价格上限是用户看到的实际股价，
+                `close_by_code` 的 hfq 价经过复权缩放，与这个阈值不是一个量纲。
+                """
+                if t <= 0 or max_buy_price is None or float(max_buy_price) <= 0:
+                    return float("nan")
+                i = rcols.get(common[t - 1])
+                if i is None:
+                    return float("nan")
+                v = float(rclose.iloc[i])
+                return v if np.isfinite(v) and v > 0 else float("nan")
+
             pending_sell = -1        # 被一字跌停挡住、尚未卖掉的清仓日（-1 = 没有待处理清仓）
             sell_events: list[dict] = []      # 本票的清仓延后事件（价格在循环后统一补）
             for t in range(T):
@@ -555,6 +577,26 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
                             # 判不出来 = 不知道，不等于「没有」——默认放行，但显式计数，
                             # 报告里要写清「本次有多少次是判不出来而放行的」。
                             n_abnormal_undecidable += 1
+                        # 买入价上限：信号日收盘价（未复权）高于上限 → 主动放弃建仓。
+                        # 与异动并列（策略主动放弃，非物理约束），份额度当日为现金不重分配。
+                        sig_close = _signal_close(t)
+                        if np.isfinite(sig_close):
+                            if sig_close > float(max_buy_price):
+                                n_price_skipped += 1
+                                price_skipped_weight += float(tgt)
+                                blocked_builds.append({
+                                    "code": code,
+                                    "date": common[t],
+                                    "signal_date": common[t - 1] if t > 0 else "",
+                                    "reason": "price_above_max",
+                                    "signal_close": round(sig_close, 2),
+                                    "max_price": float(max_buy_price),
+                                    "weight": float(tgt),
+                                })
+                                continue           # actual[t] 保持 0
+                        elif max_buy_price is not None and float(max_buy_price) > 0:
+                            # 价格取不到 = 不知道，不等于「没超过」——默认放行、显式计数
+                            n_price_undecidable += 1
                     if pending_sell >= 0:
                         # 延后清仓期间策略又改主意（重新要这只票）→ 这次清仓**没发生**
                         sell_events.append({
@@ -900,6 +942,14 @@ def compute(positions_by_code: dict, close_by_code: dict, *,
             "skipped_weight": round(float(abnormal_weight), 6),
             "undecidable_passed": n_abnormal_undecidable,
             "active_dates": sorted(abnormal_active_dates),
+        },
+        # 买入价上限（信号日未复权收盘价 > 上限）：与异动过滤分开归因。
+        # None / <=0 = 未启用（此时三个计数恒为 0，与旧回测完全一致）。
+        "max_buy_price": {
+            "limit": float(max_buy_price) if max_buy_price is not None and float(max_buy_price) > 0 else None,
+            "skipped_builds": n_price_skipped,
+            "skipped_weight": round(float(price_skipped_weight), 6),
+            "undecidable_passed": n_price_undecidable,
         },
         # 建仓失败明细（隔日一字涨停 → 买不进）：**逐笔**事件，与上面的计数同源。
         # 已在净值里生效（该份额度当日就是现金、不重分配），这里只负责"说清楚"。

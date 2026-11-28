@@ -42,6 +42,9 @@ namespace StockPool
         private TextBox _stComm;
         // 单股仓位上限：两个入口取更严者（后端折算）；留空 = 不限 = 按策略自己给的仓位执行
         private TextBox _stCapPct, _stCapAmt;
+        // 买入价上限（元，未复权）：信号日收盘价高于此值放弃建仓；留空/0 = 不限。
+        // 只管建仓，已持有不受影响。属执行层约束，与范围口径无关。
+        private TextBox _stMaxBuyPrice;
         // 「涨停开盘应对」三档（全局生效，只作用于回测）：下拉框项序 → 后端 policy key
         private ComboBox _stLimitOpen;
         private static readonly string[] StLimitOpenKeys = { "keep", "cancel", "reseal" };
@@ -586,6 +589,11 @@ private void StRefreshCurStrategy()
             //    「留空 = 不限」只能靠旁边的说明文字表达。
             AddRow(b, Row(Lbl("单股仓位上限"), _stCapPct, Mute(Lbl("% 占组合净值")),
                           Lbl("或金额(元)"), _stCapAmt, Mute(Lbl("留空=不限；两者取更严者"))));
+            // 买入价上限：信号日收盘价（未复权）高于此值放弃建仓，不递补、已持有不受影响。
+            _stMaxBuyPrice = new TextBox();
+            _stMaxBuyPrice.Width = 100;
+            AddRow(b, Row(Lbl("买入价上限(元)"), _stMaxBuyPrice,
+                          Mute(Lbl("信号日收盘价 > 此值不买；留空=不限"))));
             AddRow(stack, g3);
 
             // 基准（指数）对比的输入框在「**回测结果**」页（基准是结果的对照物，
@@ -1671,6 +1679,15 @@ private void StRefreshCurStrategy()
             return v > 0 ? (double?)v : null;
         }
 
+        /// <summary>买入价上限（元，未复权）：留空 / 非正数 = 不限（送 null 给后端）。</summary>
+        private double? StMaxBuyPrice()
+        {
+            string t = (_stMaxBuyPrice == null ? "" : _stMaxBuyPrice.Text).Trim();
+            if (t.Length == 0) return null;
+            double v = J.NumOr(t, 0.0);
+            return v > 0 ? (double?)v : null;
+        }
+
         /// <summary>「涨停开盘应对」当前档位（keep / cancel / reseal）。
         /// 下拉框项序与 StLimitOpenKeys 一一对应；取不到就回落到「不撤单」。</summary>
         private string StLimitOpenPolicy()
@@ -1697,6 +1714,13 @@ private void StRefreshCurStrategy()
         {
             var f = StAbnormalFilter();
             return f.Count == 0 ? "" : " · 买入滤除异动[" + string.Join(",", f.ToArray()) + "]";
+        }
+
+        /// <summary>结果头部的「买入价上限」标注；留空/0 不显示。</summary>
+        private string StMaxBuyPriceText()
+        {
+            double? v = StMaxBuyPrice();
+            return v.HasValue ? " · 买入价≤" + v.Value.ToString("F2") + "元" : "";
         }
 
         /// <summary>结果头部的「涨停开盘应对」标注；默认档（不撤单）不显示
@@ -2055,6 +2079,7 @@ private void StRefreshCurStrategy()
                 { "position_cap_amount", StCapAmt() },
                 { "limit_open_policy", StLimitOpenPolicy() },
                 { "abnormal_filter", StAbnormalFilter() },
+                { "max_buy_price", StMaxBuyPrice() },
             };
 
             string start = StDate(_stStart) ?? "起点";
@@ -2067,7 +2092,7 @@ private void StRefreshCurStrategy()
             _stResultHeader.Text = "策略：" + J.StrOr(meta["name"], sid) + " · 范围：" + scope + " "
                 + start + "~" + end + " · 初始 " + (cap / 10000).ToString("F1") + "万 · 佣金 "
                 + J.NumOr(_stComm.Text, 0.0003).ToString("P4").Replace(" ", "")
-                + StCapText() + StLimitOpenText() + StAbnormalText();
+                + StCapText() + StLimitOpenText() + StAbnormalText() + StMaxBuyPriceText();
 
             _stResultStatus.Text = "回测中：" + J.StrOr(meta["name"], sid) + "…（进度见顶部任务区）";
             _stResultStatus.ForeColor = _cSub;
