@@ -67,6 +67,8 @@ enabled: true
 ## 五、指针
 
 - 展开与全部佐例 → `docs/backtest-credibility.md`
+- **读已落盘报告做数据解析**（只读、不重跑；多维指标 / 阶段拆分 / 样本下限 /
+  结论落盘）→ `.codebuddy/rules/data-analysis.md` —— 本文管「怎么跑」，那份管「怎么读」
 - **JWZZ 系的结论与数字**（生产口径，唯一权威）→ `docs/jwzz-backtest-2026-11-16.md`
 - 对照实验脚本（**生产口径**，走编排层）→ `scripts/jwzz_prod_probe.py`
   （`--mode ab` / `shuffle` / `pool` / `period`）
