@@ -150,6 +150,20 @@ POST /api/strategies/backtest      → 回测结果（含 metrics / per_stock / 
                                         scope.feasibility.build_failures，
                                         reason = abnormal（与 limit_up / limit_open_cancel
                                         分开归因）。
+                                       scope.max_buy_price + **max_buy_price** =
+                                        请求体可选 `max_buy_price`（元，**未复权**）：
+                                        **信号日**(t-1)收盘价高于此值即放弃建仓；
+                                        None / <=0 = 不限（与旧回测一致）。
+                                        ⚠️ 只管建仓，已持有的不受影响（按原策略卖出）；
+                                        拦下的目标权重当日为现金、不重分配，
+                                        与 limit_up / limit_open_cancel / abnormal 分开归因。
+                                        读数缺失 = 判不出来 → 默认放行并显式计数，
+                                        不当作「没超过」。
+                                        max_buy_price.skipped_builds / skipped_weight =
+                                        被价格上限拦下的建仓次数与目标权重合计；
+                                        undecidable_passed = 价格缺失而放行的次数。
+                                        逐条明细在 scope.feasibility.build_failures，
+                                        reason = price_above_max。
 ```
 
 测试：

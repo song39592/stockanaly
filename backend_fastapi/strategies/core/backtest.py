@@ -183,6 +183,7 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                  position_cap: float | None = None,
                  limit_open_policy: str = POLICY_KEEP,
                  abnormal_filter: tuple | list | None = None,
+                 max_buy_price: float | None = None,
                  scope_extra: dict | None = None,
                  progress=None) -> dict:
     """执行回测，返回标准化结果字典。异常由路由层转成错误响应。
@@ -298,7 +299,8 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
                          position_cap=position_cap,
                          limit_open_policy=limit_open_policy,
                          abnormal_by_code=abnormal_by_code,
-                         abnormal_filter=abnormal_filter)
+                         abnormal_filter=abnormal_filter,
+                         max_buy_price=max_buy_price)
 
     trades: list[dict] = core.pop("trades", []) or []
     flags: list[str] = core.pop("flags", []) or []
@@ -444,6 +446,8 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
             "limit_open_policy": limit_open_policy,
             # 买入时异动过滤（默认空 = 关闭）：与静态池剔除分开，属执行层口径
             "abnormal_filter": list(abnormal_filter or ()),
+            # 买入价上限（信号日未复权收盘价）：None = 不限，属执行层口径
+            "max_buy_price": max_buy_price,
             "warnings": warnings,
         },
         "dates": core["dates"],
@@ -468,6 +472,8 @@ def run_backtest(strategy_id: str, params: dict | None, codes: list[str],
         # skipped_builds=拦下的建仓数；undecidable_passed=判不出来而默认放行次数；
         # active_dates=规则真正生效的交易日（报告显式声明「从哪天开始」）。
         "abnormal": core.get("abnormal") or {},
+        # 买入价上限命中统计（与异动/一字板分开归因）；未启用时 limit=None、计数全 0
+        "max_buy_price": core.get("max_buy_price") or {},
         "data_errors": errors[:_MAX_DATA_ERRORS],
     }
 
@@ -1333,6 +1339,7 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
                position_cap: float | None = None,
                limit_open_policy: str = POLICY_KEEP,
                abnormal_filter: tuple | list | None = None,
+               max_buy_price: float | None = None,
                codes_resolver=None) -> dict:
     """启动一次后台回测并**立即返回**；已有任务在跑时返回 ok=false（不排队）。
 
@@ -1423,6 +1430,7 @@ def start_task(strategy_id: str, params: dict | None, codes: list[str],
                                    position_cap=position_cap,
                                    limit_open_policy=limit_open_policy,
                                    abnormal_filter=abnormal_filter,
+                                   max_buy_price=max_buy_price,
                                    scope_extra=scope_extra,
                                    progress=_on_progress)
             except base.Cancelled:
